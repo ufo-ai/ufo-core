@@ -120,7 +120,7 @@ from evals.wandr.runner import (
     load_boundary as load_wandr_boundary,
 )
 from ufo.agent_scope import agent
-from ufo.blob import blob_store_for
+from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.db import dispose_db, init_db
@@ -622,7 +622,7 @@ async def _run(
                 agent_model,
                 agent_reasoning,
             ) = await resolve_workspace_and_agent(agent_name, workspace_id)
-            blob = blob_store_for(config.blob)
+            blob = WorkspaceBlobStore(backend=blob_store_for(config.blob))
             dbos = replay_safe_client(config.database.system_url)
             driver = WorkspaceDriver(
                 workspace_id,
@@ -786,7 +786,7 @@ async def _reconstruct(config: Config, run: EvalRun, workspace_id: UUID) -> Eval
         with ws(workspace_id):
             return await RunReconstruction(
                 workspace_id=workspace_id,
-                blob=blob_store_for(config.blob),
+                blob=WorkspaceBlobStore(backend=blob_store_for(config.blob)),
                 run=run,
             ).reconstruct()
     finally:
@@ -863,7 +863,7 @@ def _handbook_ingest(config: Config, staging_root: Path | None) -> IngestDeps | 
     credentials = _credential_store(config)
     return IngestDeps(
         staging_root=staging_root,
-        blob=blob_store_for(config.blob),
+        blob=WorkspaceBlobStore(backend=blob_store_for(config.blob)),
         index=index_backend(manifests, config.memory.index_backend, credentials),
         embed=embed_backend(manifests, config.memory.embed_backend, credentials),
         manifests=manifests,

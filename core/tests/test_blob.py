@@ -5,6 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
@@ -14,11 +15,14 @@ from ufo.blob import (
     BLOB_ROOT_SETTING,
     BlobNotFound,
     FilesystemBlobStore,
+    FleetBlobStore,
     S3BlobStore,
+    WorkspaceBlobStore,
     blob_store_for,
 )
 from ufo.config import BlobConfig
 from ufo.sandbox.containment import NonDirectoryAncestor
+from ufo.workspace import WorkspaceUnbound, ws
 
 
 async def test_filesystem_round_trip(tmp_path: Path) -> None:
@@ -309,6 +313,123 @@ async def test_concurrent_first_calls_share_one_client_and_close_the_loser(
     assert len(made) == 2
     assert sum(1 for client in made if client.closed) == 1
     assert not first.closed
+
+
+async def test_workspace_store_prefixes_keys_under_the_bound_workspace(tmp_path: Path) -> None:
+    """The workspace is never an argument: the store reads the ambient `ws(...)` scope at call
+    time, so the same instance serves every workspace and no caller can name the prefix."""
+    backend = FilesystemBlobStore(root=tmp_path)
+    store = WorkspaceBlobStore(backend=backend)
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        await store.put("conversations/c1/messages.json", b"hello")
+        assert await store.get("conversations/c1/messages.json") == b"hello"
+    full_key = f"workspaces/{workspace_id}/conversations/c1/messages.json"
+    assert await backend.get(full_key) == b"hello"
+
+
+async def test_workspace_store_isolates_workspaces(tmp_path: Path) -> None:
+    store = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    with ws(uuid4()):
+        await store.put("artifacts/x/report.txt", b"bytes")
+    with ws(uuid4()):
+        assert not await store.exists("artifacts/x/report.txt")
+        with pytest.raises(BlobNotFound):
+            await store.get("artifacts/x/report.txt")
+
+
+async def test_workspace_store_unbound_fails_loud(tmp_path: Path) -> None:
+    store = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    with pytest.raises(WorkspaceUnbound):
+        await store.put("artifacts/x/report.txt", b"bytes")
+    with pytest.raises(WorkspaceUnbound):
+        await store.list("artifacts/")
+
+
+async def test_workspace_store_list_returns_workspace_relative_keys(tmp_path: Path) -> None:
+    store = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    with ws(uuid4()):
+        await store.put("conversations/c1/compactions/0/before.json.lz4", b"bb")
+        await store.put("conversations/c1/compactions/1/before.json.lz4", b"b")
+        await store.put("conversations/c2/compactions/0/before.json.lz4", b"other")
+        entries = await store.list("conversations/c1/compactions/")
+        assert [entry.key for entry in entries] == [
+            "conversations/c1/compactions/0/before.json.lz4",
+            "conversations/c1/compactions/1/before.json.lz4",
+        ]
+        assert entries[0].size_bytes == 2
+    with ws(uuid4()):
+        assert await store.list("conversations/c1/compactions/") == ()
+
+
+async def test_workspace_store_refuses_an_already_prefixed_key(tmp_path: Path) -> None:
+    """A full key reaching the scoped store is an un-migrated call site — refused loudly, never
+    stored twice-prefixed."""
+    store = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    with ws(uuid4()):
+        with pytest.raises(ValueError):
+            await store.put(f"workspaces/{uuid4()}/artifacts/x/report.txt", b"bytes")
+
+
+async def test_workspace_store_list_requires_a_prefix(tmp_path: Path) -> None:
+    store = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    with ws(uuid4()):
+        with pytest.raises(ValueError):
+            await store.list("")
+
+
+async def test_workspace_store_streams_round_trip(tmp_path: Path) -> None:
+    backend = FilesystemBlobStore(root=tmp_path)
+    store = WorkspaceBlobStore(backend=backend)
+    payload = bytes(range(256)) * 8
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield payload[:100]
+        yield payload[100:]
+
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        await store.put_stream("artifacts/s/stream.bin", chunks())
+        stream = store.get_stream("artifacts/s/stream.bin")
+    collected = bytearray()
+    async for chunk in stream:
+        collected += chunk
+    assert bytes(collected) == payload
+    assert await backend.exists(f"workspaces/{workspace_id}/artifacts/s/stream.bin")
+
+
+async def test_workspace_store_delete_removes(tmp_path: Path) -> None:
+    backend = FilesystemBlobStore(root=tmp_path)
+    store = WorkspaceBlobStore(backend=backend)
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        await store.put("artifacts/x/report.txt", b"bytes")
+        await store.delete("artifacts/x/report.txt")
+        assert not await store.exists("artifacts/x/report.txt")
+    assert not await backend.exists(f"workspaces/{workspace_id}/artifacts/x/report.txt")
+
+
+async def test_fleet_store_admits_only_fleet_namespaces(tmp_path: Path) -> None:
+    """The fleet store is the one unprefixed handle, so its namespace is closed: keys outside the
+    declared fleet families are refused, and workspace data cannot flow through it."""
+    backend = FilesystemBlobStore(root=tmp_path)
+    store = FleetBlobStore(backend=backend)
+    await store.put("static/web/assets/index-abc123.js", b"js")
+    await store.put("term/op/o1", b"payload")
+    assert await store.get("static/web/assets/index-abc123.js") == b"js"
+    assert await backend.get("static/web/assets/index-abc123.js") == b"js"
+    with pytest.raises(ValueError):
+        await store.put("conversations/c1/messages.json", b"hello")
+    with pytest.raises(ValueError):
+        await store.get(f"workspaces/{uuid4()}/artifacts/x/report.txt")
+
+
+async def test_workspace_store_presigns_the_full_key(s3_store: S3BlobStore) -> None:
+    store = WorkspaceBlobStore(backend=s3_store)
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        url = await store.presigned_put("artifacts/abc/report.bin", 1, "x" * 44, 60)
+    assert f"workspaces/{workspace_id}/artifacts/abc/report.bin" in urlsplit(url).path
 
 
 async def test_losers_failing_close_does_not_mask_the_won_client(

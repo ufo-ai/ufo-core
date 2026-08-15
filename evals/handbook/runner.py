@@ -23,7 +23,7 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import Json, JsonObject
 from evals.harness.registry import EvalTask, capability_task
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.credentials import CredentialStore
 from ufo.ext.manifest import Manifest
 from ufo.indexing import EmbedClient, IndexBackend
@@ -45,7 +45,7 @@ class IngestDeps:
     default arm leaves the documents in the workspace for the agent to read, as upstream does."""
 
     staging_root: Path
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     index: IndexBackend
     embed: EmbedClient
     manifests: tuple[Manifest, ...]

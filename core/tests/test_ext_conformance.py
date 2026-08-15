@@ -35,7 +35,7 @@ from ufo_testsupport.surfaces import (
 from ufo.agent_scope import agent
 from ufo.audience import audience_subjects, conversation_audience
 from ufo.bearer import mint_token
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import (
     BlobConfig,
     BrowserConfig,
@@ -1406,7 +1406,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     workspace_id, member_id, email = await _surface_workspace()
     manifest = _sample_manifest()
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     workspace_root = tmp_path / "workspaces"
     dbos = _StubDbos()
     app = FastAPI()
@@ -1478,7 +1478,8 @@ async def test_sample_surface_admits_links_streams_and_delivers(
     inbound = workspace_root / str(conversation_id) / sample.SURFACE_INBOX_REL
     assert inbound.read_bytes() == b"note!"
 
-    await blob.put("artifacts/z/out.txt", b"shared-bytes")
+    with ws(workspace_id):
+        await blob.put("artifacts/z/out.txt", b"shared-bytes")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
@@ -1509,7 +1510,8 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         ).one()
     assert delivered.status == WRITEBACK_DELIVERED
     assert delivered.reply_ref == sample.SURFACE_POST_REF
-    round_tripped = await blob.get(f"{sample.SURFACE_DELIVERED_PREFIX}/{turn_id}/out.txt")
+    with ws(workspace_id):
+        round_tripped = await blob.get(f"{sample.SURFACE_DELIVERED_PREFIX}/{turn_id}/out.txt")
     assert round_tripped == b"shared-bytes"
 
 
@@ -1536,7 +1538,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
             )
         )
     manifest = _sample_manifest()
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     dbos = _StubDbos()
     app = FastAPI()
     _mount_shared_surfaces(

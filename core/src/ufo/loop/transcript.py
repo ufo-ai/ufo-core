@@ -5,13 +5,13 @@ committed terminal — writes at that turn's seq, so the first write at a seq is
 from dataclasses import dataclass
 from uuid import UUID
 
-from ufo.blob import BlobNotFound, BlobStore
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.transcript import Conversation, decode, encode, transcript_key
 
 
 @dataclass(frozen=True)
 class Transcript:
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     conversation_id: UUID
 
     async def read(self) -> Conversation | None:

@@ -14,15 +14,15 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_slack.surface import (
+    IDENTITY_BLOB_KEY,
     SLACK_BOT_TOKEN_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
+    URL_VERIFIED_BLOB_KEY,
     SlackIdentity,
     bot_token_fingerprint,
-    identity_blob_key,
     signing_secret_fingerprint,
     slack_installation_id,
-    url_verified_blob_key,
 )
 from ufo_ext_slack.tools import SlackConnectInput, slack_connect_handler
 
@@ -47,7 +47,7 @@ from evals.onboarding_help import (
     slack_setup_scorer,
 )
 from ufo.activity import SKILL_LOAD_TOOL
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import load_manifests, skill_registry
@@ -279,7 +279,7 @@ async def test_rotated_secret_recovery_rejects_a_wrong_private_request() -> None
 async def test_rotated_secret_seed_lands_pending_slack_state(db: None, tmp_path) -> None:
     workspace_id, agent_id = await _slack_workspace()
     store = CredentialStore(Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     init_workspace_credentials(store)
     try:
         with ws(workspace_id):
@@ -293,8 +293,9 @@ async def test_rotated_secret_seed_lands_pending_slack_state(db: None, tmp_path)
     finally:
         init_workspace_credentials(None)
 
-    identity = SlackIdentity.model_validate_json(await blob.get(identity_blob_key(workspace_id)))
-    marker = loads(await blob.get(url_verified_blob_key(workspace_id)))
+    with ws(workspace_id):
+        identity = SlackIdentity.model_validate_json(await blob.get(IDENTITY_BLOB_KEY))
+        marker = loads(await blob.get(URL_VERIFIED_BLOB_KEY))
 
     assert identity.bot_token_fingerprint == bot_token_fingerprint(SLACK_EVAL_BOT_TOKEN)
     assert marker["fingerprint"] == SLACK_EVAL_STALE_FINGERPRINT
@@ -304,7 +305,7 @@ async def test_rotated_secret_seed_lands_pending_slack_state(db: None, tmp_path)
 async def test_rotated_secret_seed_makes_slack_connect_pending(db: None, tmp_path) -> None:
     workspace_id, agent_id = await _slack_workspace()
     store = CredentialStore(Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     init_workspace_credentials(store)
     try:
         with ws(workspace_id):
@@ -340,7 +341,7 @@ async def test_rotated_secret_seed_makes_slack_connect_pending(db: None, tmp_pat
 
 async def test_rotated_secret_seed_refuses_every_foreign_slack_state(db: None, tmp_path) -> None:
     store = CredentialStore(Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
 
     async def slack_state(workspace_id: UUID):
         async with workspace_tx() as connection:
@@ -362,8 +363,8 @@ async def test_rotated_secret_seed_refuses_every_foreign_slack_state(db: None, t
                     )
                 )
             ).all()
-        identity_key = identity_blob_key(workspace_id)
-        verified_key = url_verified_blob_key(workspace_id)
+        identity_key = IDENTITY_BLOB_KEY
+        verified_key = URL_VERIFIED_BLOB_KEY
         identity = await blob.get(identity_key) if await blob.exists(identity_key) else None
         verified = await blob.get(verified_key) if await blob.exists(verified_key) else None
         return credentials, installations, identity, verified
@@ -407,9 +408,9 @@ async def test_rotated_secret_seed_refuses_every_foreign_slack_state(db: None, t
                                 )
                             )
                     case "identity_missing":
-                        await blob.delete(identity_blob_key(workspace_id))
+                        await blob.delete(IDENTITY_BLOB_KEY)
                     case "verified_missing":
-                        await blob.delete(url_verified_blob_key(workspace_id))
+                        await blob.delete(URL_VERIFIED_BLOB_KEY)
                     case "bot_token":
                         await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-existing")
                     case "signing_secret":
@@ -419,12 +420,12 @@ async def test_rotated_secret_seed_refuses_every_foreign_slack_state(db: None, t
                             update={"bot_user_id": f"{SLACK_EVAL_BOT_USER_ID}OTHER"}
                         )
                         await blob.put(
-                            identity_blob_key(workspace_id),
+                            IDENTITY_BLOB_KEY,
                             identity.model_dump_json().encode(),
                         )
                     case "fingerprint":
                         await blob.put(
-                            url_verified_blob_key(workspace_id),
+                            URL_VERIFIED_BLOB_KEY,
                             dumps({"fingerprint": "existing", "at": 1.0}).encode(),
                         )
                 before = await slack_state(workspace_id)

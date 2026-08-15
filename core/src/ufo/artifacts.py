@@ -183,7 +183,12 @@ class ArtifactObjects:
         url: str | None = None
         if ctx.artifact_token_secret:
             expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
-            url = mint_artifact_url(ctx.artifact_token_secret, latest.blob_key, expires_at)
+            url = mint_artifact_url(
+                ctx.artifact_token_secret,
+                latest.blob_key,
+                expires_at,
+                workspace_id=ws_current().workspace_id,
+            )
         return {
             "size_bytes": latest.size_bytes,
             "shared_at": latest.created_at.isoformat(),

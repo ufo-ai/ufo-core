@@ -32,6 +32,7 @@ from ufo_ext_slack.surface import (
     SLACK_INSTALL_PAYLOAD,
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
+    URL_VERIFIED_BLOB_KEY,
     SlackConversationSearch,
     SlackIdentity,
     SlackIdentityError,
@@ -42,7 +43,6 @@ from ufo_ext_slack.surface import (
     slack_client_id,
     slack_installation_id,
     slack_oauth_redirect_uri,
-    url_verified_blob_key,
 )
 
 SLACK_SECRET_SLOTS = (SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT)
@@ -157,11 +157,7 @@ async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> To
         bot_token = await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT)
     except CredentialSlotUnset:
         bot_token = None
-    identity = (
-        await read_identity(ctx.blob, ctx.turn.workspace_id, bot_token)
-        if bot_token is not None
-        else None
-    )
+    identity = await read_identity(ctx.blob, bot_token) if bot_token is not None else None
     if identity is None:
         if args.method == "oauth":
             return await _oauth_link(ctx, events_url)
@@ -251,7 +247,7 @@ async def _derive_manifest_identity(
     if not await ctx.speaker_is_admin():
         raise ValueError("only a workspace admin can connect Slack")
     try:
-        return await SlackIdentityResolver(ctx.blob, ctx.turn.workspace_id, bot_token).resolve()
+        return await SlackIdentityResolver(ctx.blob, bot_token).resolve()
     except SlackIdentityError as error:
         if error.error == MALFORMED_IDENTITY_ERROR:
             return _state(
@@ -269,7 +265,7 @@ async def _verified(ctx: ToolContext) -> bool:
     fingerprint matches the workspace's verifying secret (its own slot, else the deploy env), so a
     rotation reads as pending again."""
     assert ctx.ext is not None
-    key = url_verified_blob_key(ctx.turn.workspace_id)
+    key = URL_VERIFIED_BLOB_KEY
     if not await ctx.blob.exists(key):
         return False
     try:
@@ -316,7 +312,7 @@ async def slack_channels_handler(ctx: ToolContext, args: SlackChannelsInput) -> 
         raise ValueError(
             "Slack is not connected — set the bot token with slack_connect first."
         ) from unset
-    identity = await read_identity(ctx.blob, ctx.turn.workspace_id, bot_token)
+    identity = await read_identity(ctx.blob, bot_token)
     if identity is None:
         raise ValueError("Slack identity is not resolved yet — run slack_connect first.")
     found = await SlackConversationSearch(

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.loop.compaction import (
     AUTOCOMPACT_BUFFER_TOKENS,
     COMPACTION_SUMMARY_MAX_TOKENS,
@@ -29,7 +29,7 @@ class CompactionTarget:
 
     client: ModelClient
     model: str
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     workspace_root: Path
     context_window: int = DEFAULT_CONTEXT_WINDOW_TOKENS
 

@@ -22,7 +22,14 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from ufo.activity import SKILL_LOAD_TOOL
 from ufo.ambient_reply import AmbientReplyClassifier
 from ufo.bearer import LOGIN_PATH
-from ufo.blob import BlobStore, blob_store_for
+from ufo.blob import (
+    BlobStore,
+    FilesystemBlobStore,
+    FleetBlobStore,
+    S3BlobStore,
+    WorkspaceBlobStore,
+    blob_store_for,
+)
 from ufo.browser import CdpProvider
 from ufo.config import (
     IN_PROCESS_BACKEND,
@@ -195,7 +202,9 @@ def run() -> None:
     validate_ext_tools(manifests, credentials)
     _validate_requires(config, manifests, credentials)
     init_workspace_credentials(credentials)
-    blob = blob_store_for(config.blob)
+    blob_backend = blob_store_for(config.blob)
+    blob = WorkspaceBlobStore(backend=blob_backend)
+    fleet_blob = FleetBlobStore(backend=blob_backend)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     hub = _select_hub(config, manifests)
     dbos_client = replay_safe_client(config.database.system_url)
@@ -224,10 +233,10 @@ def run() -> None:
             off_cluster=carrier_spec.off_cluster,
             image_ref=SANDBOX_IMAGE_REF,
             proxy=_proxy_endpoint(
-                config, manifests, credentials, registry.pricing, run_tokens, blob
+                config, manifests, credentials, registry.pricing, run_tokens, blob_backend
             ),
             workspace_root=config.sandbox.workspace_root,
-            terminals=_select_terminal_transport(config, manifests, blob),
+            terminals=_select_terminal_transport(config, manifests, fleet_blob),
         ),
         hub=hub,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
@@ -466,7 +475,7 @@ def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend
 def _source_identity_resolvers(
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
-    blob: BlobStore,
+    blob: WorkspaceBlobStore,
 ) -> dict[str, SourceIdentityResolver]:
     resolvers: dict[str, SourceIdentityResolver] = {}
     for manifest in manifests:
@@ -494,13 +503,14 @@ def _source_identity_resolvers(
                         )
                     return await store.get(workspace_id, credential_slot)
 
-                return await handler(
-                    SurfaceIdentityContext(
-                        workspace_id=workspace_id,
-                        blob=blob,
-                        credential=credential,
+                with ws(workspace_id):
+                    return await handler(
+                        SurfaceIdentityContext(
+                            workspace_id=workspace_id,
+                            blob=blob,
+                            credential=credential,
+                        )
                     )
-                )
 
             resolvers[surface.name] = resolve
     return resolvers
@@ -528,7 +538,7 @@ def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:
 
 
 def _select_terminal_transport(
-    config: Config, manifests: tuple[Manifest, ...], blob: BlobStore
+    config: Config, manifests: tuple[Manifest, ...], blob: FleetBlobStore
 ) -> TerminalTransport:
     """The process-wide terminal rendezvous the deploy selects, mirroring `_select_hub`: core's
     in-process default, or a backend an extension registers through its Manifest
@@ -853,7 +863,7 @@ def _mount_shared_surfaces(
     app: FastAPI,
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
-    blob: BlobStore,
+    blob: WorkspaceBlobStore,
     sandboxes: ConversationSandbox,
     hub: Hub,
     dbos_client: DBOSClient,
@@ -1066,7 +1076,7 @@ def _proxy_endpoint(
     credentials: CredentialStore | None,
     pricing: Pricing,
     run_tokens: RunTokenCodec,
-    blob: BlobStore,
+    blob: FilesystemBlobStore | S3BlobStore,
 ) -> ProxyEndpoint:
     """The egress proxy endpoint the carrier threads into every sandbox, in the shape this deploy
     takes. With `[sandbox] proxy_public_url` set (hosted, multi-node) the proxy runs as a standalone
@@ -1097,7 +1107,7 @@ def _local_egress_proxy(
     credentials: CredentialStore | None,
     pricing: Pricing,
     run_tokens: RunTokenCodec,
-    blob: BlobStore,
+    blob: FilesystemBlobStore | S3BlobStore,
 ) -> ProxyEndpoint:
     """The single-node sandbox's sole route out, run in-process on its own event loop — a
     standalone network service, not part of the turn loop, that outlives every turn for the

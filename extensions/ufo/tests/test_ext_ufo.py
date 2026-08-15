@@ -1491,6 +1491,7 @@ async def test_a_shared_file_reaches_the_terminal_as_an_openable_link(
         query["exp"][0],
         query["sig"][0],
         "",
+        query["ws"][0],
         datetime.now(UTC),
     )
     assert claims.blob_key == f"artifacts/{turn_id}/report.pdf"

@@ -341,7 +341,7 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     and no page is ever stale while looking current."""
     if PORTAL_HTML is None:
         raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
-    await _assets_published(ctx.blob)
+    await _assets_published(ctx.fleet_blob)
     return HTMLResponse(PORTAL_HTML, headers={"cache-control": "no-store"})
 
 
@@ -372,7 +372,7 @@ async def static_asset(ctx: SurfaceContext, request: Request) -> Response:
     a transfer. The assets carry no workspace data. A name this build does not hold is answered
     from the shared store, where every pod published its own build before serving pages — so a
     page from one build resolves on a pod running another."""
-    return _static_response(request) or await _stored_asset(ctx.blob, request)
+    return _static_response(request) or await _stored_asset(ctx.fleet_blob, request)
 
 
 async def open_session(ctx: SurfaceContext, request: Request) -> Response:

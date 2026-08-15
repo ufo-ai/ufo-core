@@ -38,7 +38,7 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from evals.handbook.corpus import HandbookTask
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
@@ -112,7 +112,7 @@ class DocumentIngest:
 
     task: HandbookTask
     staging_root: Path
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     index: IndexBackend
     embed: EmbedClient
     manifests: tuple[Manifest, ...]

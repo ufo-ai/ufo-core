@@ -62,7 +62,7 @@ from ufo.audience import (
     parse_audience,
     readable_audiences,
 )
-from ufo.blob import BlobNotFound, BlobStore
+from ufo.blob import BlobNotFound, FleetBlobStore, WorkspaceBlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.connectors import DIRECT_ACCOUNT
 from ufo.credentials import (
@@ -940,12 +940,12 @@ class SpokenArrival(BaseModel):
     speaker_member_id: UUID | None
 
 
-def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
+def _fulfilled_marker_key(sealed: str, slot: str) -> str:
     """The blob marker one fulfilled prompt leaves, keyed by the seal's digest and the slot — the
     render gate reads it per prompt, so a stored slot stops prompting while its siblings keep
     asking, and a fresh request (a rotation) seals differently and prompts anew."""
     digest = hashlib.sha256(sealed.encode()).hexdigest()[:32]
-    return f"workspaces/{workspace_id}/credential_requests/{digest}/{slot}"
+    return f"credential_requests/{digest}/{slot}"
 
 
 async def _main_agent(workspace_id: UUID) -> UUID:
@@ -1020,7 +1020,7 @@ class SurfaceContext:
 
     workspace_id: UUID
     surface: str
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     _sandboxes: ConversationSandbox
     _admitter: MemberAdmitter
     _tailer: TurnTailer
@@ -1043,6 +1043,12 @@ class SurfaceContext:
     _memory: "MemorySearch | None" = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
     _conversation_slots: tuple["BoundConversationSlot", ...] = ()
+
+    @property
+    def fleet_blob(self) -> FleetBlobStore:
+        """The deploy-owned view of the same store `blob` scopes: closed to the fleet namespaces
+        (static assets), for data every workspace shares."""
+        return FleetBlobStore(backend=self.blob.backend)
 
     @property
     def conversation_slots(self) -> tuple["BoundConversationSlot", ...]:
@@ -1127,7 +1133,7 @@ class SurfaceContext:
             return False
         if state.workspace_id != self.workspace_id or slot not in state.slots:
             return False
-        return not await self.blob.exists(_fulfilled_marker_key(self.workspace_id, sealed, slot))
+        return not await self.blob.exists(_fulfilled_marker_key(sealed, slot))
 
     def open_credential_authorization(self, sealed: str) -> CredentialRequestState:
         """Open a sealed credential-authorization handoff, returning its claims (workspace, member,
@@ -1164,7 +1170,7 @@ class SurfaceContext:
             raise CredentialRequestInvalid(f"credential request does not name slot {slot!r}")
         await self._credentials.put(self.workspace_id, slot, value)
         await self.blob.put(
-            _fulfilled_marker_key(self.workspace_id, sealed, slot),
+            _fulfilled_marker_key(sealed, slot),
             json.dumps({"at": datetime.now(UTC).timestamp()}).encode(),
         )
 
@@ -1237,7 +1243,12 @@ class SurfaceContext:
         if not self._artifact_token_secret or not self._public_base_url:
             return None
         expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
-        path = mint_artifact_url(self._artifact_token_secret, artifact.blob_key, expires_at)
+        path = mint_artifact_url(
+            self._artifact_token_secret,
+            artifact.blob_key,
+            expires_at,
+            workspace_id=self.workspace_id,
+        )
         return f"{self._public_base_url.rstrip('/')}{path}"
 
     def artifact_preview_link(self, artifact: SharedArtifact) -> str | None:
@@ -1270,6 +1281,7 @@ class SurfaceContext:
             self._artifact_token_secret,
             blob_key,
             expires_at,
+            workspace_id=self.workspace_id,
             preview=ImagePreviewGrant(media_type=media_type, size_bytes=size_bytes),
         )
         return f"{self._public_base_url.rstrip('/')}{path}"
@@ -3745,7 +3757,7 @@ class SurfaceIdentityContext:
     """The live workspace dependencies a surface uses to resolve the external user it speaks as."""
 
     workspace_id: UUID
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     credential: Callable[[str], Awaitable[str]]
 
 

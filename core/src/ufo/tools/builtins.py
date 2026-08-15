@@ -803,7 +803,7 @@ async def _store_artifact(
 
     Filesystem: there is no URL to sign, so the bytes stream out of the container through the
     carrier and into the store in bounded chunks."""
-    match ctx.blob:
+    match ctx.blob.backend:
         case S3BlobStore():
             if size_bytes > ARTIFACT_PUT_MAX_BYTES:
                 raise ValueError(
@@ -823,8 +823,6 @@ async def _store_artifact(
                 raise RuntimeError(detail or f"uploading {scoped} to the artifact store failed")
         case FilesystemBlobStore():
             await ctx.blob.put_stream(key, ctx.sandbox.read_file(scoped))
-        case _:
-            raise RuntimeError(f"unsupported artifact store: {type(ctx.blob).__name__}")
 
 
 @dataclass(frozen=True)
@@ -952,7 +950,9 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
             )
         ).all()
     expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
-    url = mint_artifact_url(ctx.artifact_token_secret, key, expires_at)
+    url = mint_artifact_url(
+        ctx.artifact_token_secret, key, expires_at, workspace_id=ctx.turn.workspace_id
+    )
     return ToolResult(
         content=(
             TextContent(

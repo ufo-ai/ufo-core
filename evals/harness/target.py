@@ -36,7 +36,7 @@ from evals.harness.handoff import handoff_record
 from evals.harness.harness import Json
 from evals.harness.judge import JudgeLeg
 from evals.harness.timing import CaseTiming, TurnSteps, TurnTiming, case_timing, turn_timing
-from ufo.blob import BlobNotFound, BlobStore
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
 from ufo.schema.records import CredentialRequest, TerminalFrame, TurnStatus
@@ -184,7 +184,7 @@ class InProcessTarget:
     outcome: TurnOutcome
     judge: JudgeLeg | None = None
     simulator: JudgeLeg | None = None
-    blob: BlobStore | None = None
+    blob: WorkspaceBlobStore | None = None
     logs: TurnLogReader | None = None
     turn_steps: TurnSteps | None = None
     mcp_atlas: McpAtlasTarget | None = None

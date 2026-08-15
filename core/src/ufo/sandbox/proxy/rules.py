@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
-from ufo.blob import BlobStore, S3BlobStore
+from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import CliCredential, RequestForwarder
 from ufo.credentials import (
     CredentialStore,
@@ -118,7 +118,7 @@ def derive_manifest_rules(manifests: tuple[Manifest, ...]) -> tuple[InternetRule
     return (InternetRule(),) if any(manifest.sandbox_internet for manifest in manifests) else ()
 
 
-async def derive_artifact_store_rules(blob: BlobStore) -> tuple[Rule, ...]:
+async def derive_artifact_store_rules(blob: FilesystemBlobStore | S3BlobStore) -> tuple[Rule, ...]:
     """A deploy whose artifact store is S3 admits that store's own host and meters every request to
     it: sharing a file is the sandbox PUTting it to a presigned URL serve minted, so without this
     the only path a produced file leaves the sandbox is refused at CONNECT. Exact scope, not the

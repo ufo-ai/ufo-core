@@ -31,7 +31,7 @@ from ufo.accounting import (
 )
 from ufo.agent_scope import agent, agent_current
 from ufo.audience import SHARED_AUDIENCE, Audience, parse_audience
-from ufo.blob import BlobNotFound, BlobStore
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
     CredentialSource,
@@ -321,7 +321,7 @@ class TrajectoryCorpus:
     produced. A conversation whose transcript is missing or corrupt is skipped-with-log, never
     aborting the whole corpus."""
 
-    _blob: BlobStore
+    _blob: WorkspaceBlobStore
     limit: int = TRAJECTORY_CORPUS_CONVERSATIONS
 
     @property
@@ -1695,7 +1695,7 @@ def context_for(
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
     pages: PageFeed | None = None,
-    blob: BlobStore | None = None,
+    blob: WorkspaceBlobStore | None = None,
     sandboxes: ConversationSandbox | None = None,
     invoker: TurnInvoker | None = None,
     model_resolver: ModelResolver | None = None,

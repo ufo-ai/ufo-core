@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.surface import retitle_conversation
@@ -97,7 +97,7 @@ class KitchenSink:
     only ever destroys rows it wrote.
     """
 
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     workspace_id: UUID
     agent_id: UUID
     member_id: UUID

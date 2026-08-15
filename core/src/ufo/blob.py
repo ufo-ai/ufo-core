@@ -3,7 +3,7 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -18,12 +18,15 @@ from botocore.exceptions import ClientError
 from ufo.config import BlobConfig
 from ufo.o11y import log
 from ufo.sandbox.containment import PathNotFound, configured_root
+from ufo.workspace import ws_current
 
 MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 BLOB_STREAM_CHUNK_BYTES = 1024 * 1024
 S3_MULTIPART_PART_BYTES = 8 * 1024 * 1024
 BLOB_LIST_MAX_KEYS = 10_000
 BLOB_ROOT_SETTING = "blob.root"
+WORKSPACE_KEY_PREFIX = "workspaces/"
+FLEET_KEY_PREFIXES = ("static/", "term/")
 S3_VIRTUAL_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
 S3_PATH_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "path"})
 
@@ -373,6 +376,98 @@ class S3BlobStore:
             except Exception:
                 log("blob.redundant_client_close_failed", bucket=self.bucket)
         return client
+
+
+@dataclass(frozen=True)
+class WorkspaceBlobStore:
+    """Blob storage under the bound workspace's prefix. Keys are workspace-relative; the ambient
+    `ws(...)` scope supplies the `workspaces/<id>/` prefix at call time — the workspace is never an
+    argument, so a key cannot land under another workspace and an unscoped call raises
+    `WorkspaceUnbound` rather than reading or writing across one. A key never names the prefix —
+    the scope supplies it — so one that does is refused."""
+
+    backend: FilesystemBlobStore | S3BlobStore
+
+    async def put(self, key: str, data: bytes) -> None:
+        await self.backend.put(self._full(key), data)
+
+    async def get(self, key: str) -> bytes:
+        return await self.backend.get(self._full(key))
+
+    async def exists(self, key: str) -> bool:
+        return await self.backend.exists(self._full(key))
+
+    async def delete(self, key: str) -> None:
+        await self.backend.delete(self._full(key))
+
+    def get_stream(self, key: str) -> AsyncIterator[bytes]:
+        """The key resolves against the bound workspace here, at the call — not lazily at the
+        first chunk — so a stream opened inside the scope (a download response body) keeps working
+        after the block exits."""
+        return self.backend.get_stream(self._full(key))
+
+    async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None:
+        await self.backend.put_stream(self._full(key), chunks)
+
+    async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
+        if not prefix:
+            raise ValueError("blob list requires a key prefix")
+        root = self._full("")
+        entries = await self.backend.list(root + prefix)
+        return tuple(replace(entry, key=entry.key.removeprefix(root)) for entry in entries)
+
+    async def presigned_put(
+        self, key: str, size_bytes: int, checksum_sha256: str, ttl_seconds: int
+    ) -> str:
+        """The backend's presigned PUT for the full workspace key — S3 only, and the caller's
+        backend match already established that."""
+        match self.backend:
+            case S3BlobStore() as s3:
+                return await s3.presigned_put(
+                    self._full(key), size_bytes, checksum_sha256, ttl_seconds
+                )
+            case _:
+                raise TypeError("presigned_put requires the s3 backend")
+
+    def _full(self, key: str) -> str:
+        if key.startswith(WORKSPACE_KEY_PREFIX):
+            raise ValueError(f"key is already workspace-prefixed: {key!r}")
+        return f"{WORKSPACE_KEY_PREFIX}{ws_current().workspace_id}/{key}"
+
+
+@dataclass(frozen=True)
+class FleetBlobStore:
+    """The one unprefixed handle, for data owned by the deploy rather than any workspace: portal
+    static assets and terminal payload spill. Its namespace is closed — a key outside
+    `FLEET_KEY_PREFIXES` is refused, so workspace data cannot flow around the workspace store."""
+
+    backend: FilesystemBlobStore | S3BlobStore
+
+    async def put(self, key: str, data: bytes) -> None:
+        await self.backend.put(self._checked(key), data)
+
+    async def get(self, key: str) -> bytes:
+        return await self.backend.get(self._checked(key))
+
+    async def exists(self, key: str) -> bool:
+        return await self.backend.exists(self._checked(key))
+
+    async def delete(self, key: str) -> None:
+        await self.backend.delete(self._checked(key))
+
+    def get_stream(self, key: str) -> AsyncIterator[bytes]:
+        return self.backend.get_stream(self._checked(key))
+
+    async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None:
+        await self.backend.put_stream(self._checked(key), chunks)
+
+    async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
+        return await self.backend.list(self._checked(prefix))
+
+    def _checked(self, key: str) -> str:
+        if not key.startswith(FLEET_KEY_PREFIXES):
+            raise ValueError(f"key is outside the fleet namespaces {FLEET_KEY_PREFIXES}: {key!r}")
+        return key
 
 
 def blob_store_for(config: BlobConfig) -> FilesystemBlobStore | S3BlobStore:

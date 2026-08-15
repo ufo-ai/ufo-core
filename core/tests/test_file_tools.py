@@ -26,7 +26,7 @@ from ufo_ext_docker import DockerCarrier
 
 from ufo.artifact_url import ARTIFACT_KEY_PREFIX, ArtifactClaims, verify_artifact_url
 from ufo.audience import conversation_audience
-from ufo.blob import FilesystemBlobStore, S3BlobStore
+from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
@@ -60,6 +60,7 @@ from ufo.tools.context import (
     ToolResult,
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.workspace import ws
 
 TOOL_NARRATION = "working through their files"
 
@@ -80,6 +81,7 @@ def _download_claims(url: str) -> ArtifactClaims:
         query["exp"][0],
         query["sig"][0],
         "",
+        query["ws"][0],
         datetime.now(UTC),
     )
 
@@ -166,7 +168,7 @@ def file_ctx(
     )
     ctx = ToolContext(
         sandbox=SandboxSession(carrier=DockerCarrier(), handle=handle),
-        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blobs")),
         turn=turn,
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
@@ -278,9 +280,10 @@ async def _seed_turn_rows(turn: Turn) -> None:
 
 async def _run(tool_name: str, ctx: ToolContext, **args: object):
     tool = REGISTRY.get(tool_name)
-    return await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    with ws(ctx.turn.workspace_id):
+        return await tool.handler(
+            ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+        )
 
 
 async def test_read_numbers_lines_and_appends_truncation_footer(
@@ -534,7 +537,8 @@ async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
     assert shared["is_text"] is False
     assert shared["url"].startswith(f"/{ARTIFACT_KEY_PREFIX}")
     claims = _download_claims(shared["url"])
-    assert await ctx.blob.get(claims.blob_key) == payload
+    with ws(ctx.turn.workspace_id):
+        assert await ctx.blob.get(claims.blob_key) == payload
 
 
 async def test_share_file_text_preflight_and_download_url(
@@ -552,7 +556,8 @@ async def test_share_file_text_preflight_and_download_url(
     claims = _download_claims(shared["url"])
     parts = claims.blob_key.split("/")
     assert parts[0] == "artifacts" and len(parts) == 3 and parts[-1] == "report.txt"
-    assert await ctx.blob.get(claims.blob_key) == body
+    with ws(ctx.turn.workspace_id):
+        assert await ctx.blob.get(claims.blob_key) == body
 
 
 async def _shared_row(blob_key: str) -> sa.Row:
@@ -635,7 +640,8 @@ async def test_share_file_renders_a_document_first_page_beside_its_bytes(
     row = await _shared_row(claims.blob_key)
     assert row.preview_blob_key is not None and row.preview_blob_key != claims.blob_key
     assert row.preview_media_type == "image/png"
-    rendered = await ctx.blob.get(row.preview_blob_key)
+    with ws(ctx.turn.workspace_id):
+        rendered = await ctx.blob.get(row.preview_blob_key)
     assert rendered.startswith(b"\x89PNG")
     assert row.preview_size_bytes == len(rendered)
 
@@ -668,7 +674,8 @@ async def test_share_file_shares_a_document_whose_render_fails(
     await ctx.sandbox.write_file("broken.pdf", b"not a pdf at all\n")
     result = await _run("share_file", ctx, file_path="broken.pdf")
     claims = _download_claims(json.loads(result.content[0].text)["url"])
-    assert await ctx.blob.get(claims.blob_key) == b"not a pdf at all\n"
+    with ws(ctx.turn.workspace_id):
+        assert await ctx.blob.get(claims.blob_key) == b"not a pdf at all\n"
     assert (await _shared_row(claims.blob_key)).preview_blob_key is None
 
 
@@ -693,12 +700,17 @@ async def test_share_file_uploads_from_inside_the_sandbox_on_the_s3_backend(
     payload = bytes(range(256)) * 8192
     await ctx.sandbox.write_file("figures.bin", payload)
 
-    result = await _run("share_file", replace(ctx, blob=sandbox_store), file_path="figures.bin")
+    result = await _run(
+        "share_file",
+        replace(ctx, blob=WorkspaceBlobStore(backend=sandbox_store)),
+        file_path="figures.bin",
+    )
 
     shared = json.loads(result.content[0].text)
     assert shared["size_bytes"] == len(payload)
     claims = _download_claims(shared["url"])
-    assert await s3_store.get(claims.blob_key) == payload
+    with ws(ctx.turn.workspace_id):
+        assert await WorkspaceBlobStore(backend=s3_store).get(claims.blob_key) == payload
 
 
 async def test_share_file_refuses_a_file_over_the_artifact_cap(
@@ -716,7 +728,11 @@ async def test_share_file_refuses_a_file_over_the_artifact_cap(
     await ctx.sandbox.write_file("oversize.bin", b"nine byte")
 
     with pytest.raises(ValueError, match="capped at 8 bytes"):
-        await _run("share_file", replace(ctx, blob=s3_store), file_path="oversize.bin")
+        await _run(
+            "share_file",
+            replace(ctx, blob=WorkspaceBlobStore(backend=s3_store)),
+            file_path="oversize.bin",
+        )
 
     async with workspace_tx() as connection:
         rows = (
@@ -815,8 +831,9 @@ def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
 async def _dispatch(
     engine: TurnEngine, context: ToolContext, call: ToolUseBlock
 ) -> ToolResultBlock:
-    bound = await engine._bind_or_error(context, call, {})
-    return await engine._dispatch(bound)
+    with ws(context.turn.workspace_id):
+        bound = await engine._bind_or_error(context, call, {})
+        return await engine._dispatch(bound)
 
 
 GITHUB_REPO_URL_KEYS = (

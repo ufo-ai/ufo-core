@@ -278,20 +278,17 @@ class SlackIdentity(BaseModel):
     bot_user_id: str
 
 
-def identity_blob_key(workspace_id: UUID) -> str:
-    return f"workspaces/{workspace_id}/surfaces/slack/identity"
+IDENTITY_BLOB_KEY = "surfaces/slack/identity"
 
 
 def bot_token_fingerprint(bot_token: str) -> str:
     return hashlib.sha256(bot_token.encode()).hexdigest()
 
 
-async def read_identity(
-    blob: BlobStore, workspace_id: UUID, bot_token: str
-) -> SlackIdentity | None:
+async def read_identity(blob: BlobStore, bot_token: str) -> SlackIdentity | None:
     """The stored identity record, or None when absent, unreadable, or derived from a since-replaced
     token — never a stale team/bot id gating events for the wrong app."""
-    key = identity_blob_key(workspace_id)
+    key = IDENTITY_BLOB_KEY
     if not await blob.exists(key):
         return None
     try:
@@ -308,7 +305,7 @@ async def resolve_self_user_id(ctx: SurfaceIdentityContext) -> str | None:
         bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     except CredentialSlotUnset:
         return None
-    identity = await read_identity(ctx.blob, ctx.workspace_id, bot_token)
+    identity = await read_identity(ctx.blob, bot_token)
     return None if identity is None else identity.bot_user_id
 
 
@@ -317,7 +314,7 @@ async def _identity(ctx: SurfaceContext) -> SlackIdentity | None:
         bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     except CredentialSlotUnset:
         return None
-    identity = await read_identity(ctx.blob, ctx.workspace_id, bot_token)
+    identity = await read_identity(ctx.blob, bot_token)
     if identity is not None:
         await _mirror_self_user_id(ctx.workspace_id, identity.bot_user_id)
     return identity
@@ -353,17 +350,14 @@ class SlackIdentityResolver:
     from the `oauth.v2.access` response."""
 
     blob: BlobStore
-    workspace_id: UUID
     bot_token: str
 
     async def resolve(self) -> SlackIdentity:
-        identity = await read_identity(self.blob, self.workspace_id, self.bot_token)
+        identity = await read_identity(self.blob, self.bot_token)
         if identity is not None:
             return identity
         identity = await self._prove()
-        await self.blob.put(
-            identity_blob_key(self.workspace_id), identity.model_dump_json().encode()
-        )
+        await self.blob.put(IDENTITY_BLOB_KEY, identity.model_dump_json().encode())
         return identity
 
     async def _prove(self) -> SlackIdentity:
@@ -416,20 +410,14 @@ def _prove_identity_in_background(ctx: SurfaceContext) -> None:
 async def _run_identity_proof(ctx: SurfaceContext) -> None:
     try:
         bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-        await SlackIdentityResolver(ctx.blob, ctx.workspace_id, bot_token).resolve()
+        await SlackIdentityResolver(ctx.blob, bot_token).resolve()
     except SlackIdentityError as error:
         _LOG.error("slack identity proof failed: %s", error)
     except Exception:
         _LOG.error("slack identity proof failed", exc_info=True)
 
 
-def url_verified_blob_key(workspace_id: UUID) -> str:
-    """The marker written on a signature-verified inbound request — proof Slack reached this deploy
-    with the signing secret currently in force, whether the `url_verification` handshake or a real
-    event. Keyed by workspace because tenants share one blob bucket. The body records a fingerprint
-    of the verifying secret, so `slack_connect` reads a manifest workspace as pending until Slack's
-    next signed request after a rotation — never a stale "connected"."""
-    return f"workspaces/{workspace_id}/surfaces/slack/url_verified"
+URL_VERIFIED_BLOB_KEY = "surfaces/slack/url_verified"
 
 
 def signing_secret_fingerprint(signing_secret: str) -> str:
@@ -1339,7 +1327,7 @@ async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
     await ctx.fulfill_credential_request(
         state, SLACK_BOT_TOKEN_SLOT, install.bot_token, member_id=claims.member_id
     )
-    await ctx.blob.put(identity_blob_key(ctx.workspace_id), identity.model_dump_json().encode())
+    await ctx.blob.put(IDENTITY_BLOB_KEY, identity.model_dump_json().encode())
     await _mirror_self_user_id(ctx.workspace_id, identity.bot_user_id)
     return _install_page("ufo is installed — return to chat and talk to it.", 200)
 
@@ -1367,7 +1355,7 @@ async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
         return
     marker = json.dumps({"fingerprint": fingerprint, "at": time.time()}).encode()
     try:
-        await ctx.blob.put(url_verified_blob_key(ctx.workspace_id), marker)
+        await ctx.blob.put(URL_VERIFIED_BLOB_KEY, marker)
     except Exception:
         _LOG.warning("slack url_verified marker write failed", exc_info=True)
         return

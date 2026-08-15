@@ -29,7 +29,7 @@ from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput, SetEnqu
 from dbos import error as dbos_error
 
 from ufo.accounting import ALLOW, SpendEvaluator
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.candidates import WorkspaceCandidates
 from ufo.db import owner_tx, workspace_tx
 from ufo.ext.context import ConversationProbes, ExtensionContext, TurnInvoker, context_for
@@ -336,7 +336,7 @@ class PageChangeRunner:
     invoker_factory: InvokerFactory | None = None
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
-    blob: BlobStore | None = None
+    blob: WorkspaceBlobStore | None = None
     sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
     probes: ConversationProbes | None = None
@@ -606,7 +606,7 @@ class JobRunner:
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
     pages: PageFeed | None = None
-    blob: BlobStore | None = None
+    blob: WorkspaceBlobStore | None = None
     sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
     probes: ConversationProbes | None = None

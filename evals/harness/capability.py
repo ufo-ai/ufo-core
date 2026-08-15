@@ -35,7 +35,7 @@ from evals.harness.judge import (
     visual_rubric_pass,
 )
 from evals.harness.timing import CaseTiming
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import ImageBlock, ImageSource, Message
 from ufo.transcript import CompactionSummary
@@ -192,7 +192,7 @@ class CapabilityOutput:
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 type CapabilityFollowup = Callable[[CapabilityOutput], Awaitable[str | None]]
 type EvalSeed = Callable[[UUID, UUID], Awaitable[None]]
-type CapabilitySeed = Callable[[UUID, UUID, BlobStore], Awaitable[None]]
+type CapabilitySeed = Callable[[UUID, UUID, WorkspaceBlobStore], Awaitable[None]]
 type WorkspacePrepare = Callable[[UUID, Path], Awaitable[None]]
 
 

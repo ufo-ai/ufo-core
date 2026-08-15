@@ -11,11 +11,12 @@ Slack links to it for an oversize attachment, and it verifies with the one deplo
 off `app.state`."""
 
 from datetime import UTC, datetime
+from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
 
 import sqlalchemy as sa
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 
 from ufo.artifact_url import (
@@ -29,7 +30,7 @@ from ufo.artifact_url import (
     verify_artifact_url,
 )
 from ufo.bearer import LOGIN_PATH, SESSION_COOKIE, verified_claims
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.image_previews import InvalidImagePreview, validated_image_preview
 from ufo.schema import tables
@@ -50,31 +51,40 @@ async def download(
     exp: str = "",
     sig: str = "",
     preview: str = "",
+    workspace: Annotated[str, Query(alias="ws")] = "",
 ) -> Response:
-    """Serve the URL's blob as a streamed download or a bounded validated raster preview. A
-    download streams out in bounded chunks — the bytes never buffer whole, so a large or
-    concurrent fetch can't spike memory — under the real media type its filename names, always as
-    an attachment; only a signed preview claim renders inline, after the bytes prove to be the
-    raster type and size it declares. `nosniff` holds the browser to the declared type and
-    `no-store` keeps any cache from answering with the grant unchecked."""
-    blob: BlobStore = request.app.state.blob
+    """Serve the URL's blob as a streamed download or a bounded validated raster preview. The
+    signed `ws` claim names the workspace whose store holds the bytes; the read binds it, and the
+    stream's key resolves inside the binding so the body serves after it releases. A download
+    streams out in bounded chunks — the bytes never buffer whole, so a large or concurrent fetch
+    can't spike memory — under the real media type its filename names, always as an attachment;
+    only a signed preview claim renders inline, after the bytes prove to be the raster type and
+    size it declares. `nosniff` holds the browser to the declared type and `no-store` keeps any
+    cache from answering with the grant unchecked."""
+    blob: WorkspaceBlobStore = request.app.state.blob
     secret: str = request.app.state.artifact_token_secret
     try:
         claims = verify_artifact_url(
-            secret, artifact_id, filename, exp, sig, preview, datetime.now(UTC)
+            secret, artifact_id, filename, exp, sig, preview, workspace, datetime.now(UTC)
         )
     except ArtifactUrlExpired as expired:
         return await _refreshed_for_member(request, expired.claims, secret)
     except ArtifactUrlError as error:
         raise HTTPException(403, str(error)) from error
-    if not await blob.exists(claims.blob_key):
-        raise HTTPException(404, "artifact not found")
-    if claims.preview is not None:
-        try:
-            data = await validated_image_preview(blob.get_stream(claims.blob_key), claims.preview)
-        except InvalidImagePreview as error:
-            raise HTTPException(415, str(error)) from error
-        return Response(content=data, media_type=claims.preview.media_type, headers=UNCACHED)
+    if claims.workspace_id is None:
+        raise HTTPException(403, "artifact url grants no workspace scope")
+    with ws(claims.workspace_id):
+        if not await blob.exists(claims.blob_key):
+            raise HTTPException(404, "artifact not found")
+        if claims.preview is not None:
+            try:
+                data = await validated_image_preview(
+                    blob.get_stream(claims.blob_key), claims.preview
+                )
+            except InvalidImagePreview as error:
+                raise HTTPException(415, str(error)) from error
+            return Response(content=data, media_type=claims.preview.media_type, headers=UNCACHED)
+        body = blob.get_stream(claims.blob_key)
     encoded = quote(claims.filename, safe="")
     headers = {
         "content-disposition": (
@@ -85,7 +95,7 @@ async def download(
         **UNCACHED,
     }
     return StreamingResponse(
-        blob.get_stream(claims.blob_key),
+        body,
         media_type=artifact_media_type(claims.filename),
         headers=headers,
     )
@@ -137,7 +147,9 @@ async def _refreshed_for_member(
         raise _refusal(request)
     expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
     return RedirectResponse(
-        mint_artifact_url(secret, claims.blob_key, expires_at, preview=claims.preview),
+        mint_artifact_url(
+            secret, claims.blob_key, expires_at, workspace_id=workspace, preview=claims.preview
+        ),
         status_code=303,
     )
 

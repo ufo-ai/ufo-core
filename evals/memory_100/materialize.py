@@ -17,7 +17,7 @@ from cryptography.fernet import Fernet
 from evals.memory_100.models import Snapshot
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import AudienceBinding, CorpusAttestor, CorpusReadiness
-from ufo.blob import BlobStore, blob_store_for
+from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -62,7 +62,7 @@ the turn, ownership rides the conversation, and the two are not the same column.
 class Memory100Materializer:
     snapshot: Snapshot
     pages_root: Path
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     index: IndexBackend
     embed: EmbedClient
     manifests: tuple[Manifest, ...]
@@ -74,7 +74,7 @@ class Memory100Materializer:
         root: Path,
         state_root: Path,
         *,
-        blob: BlobStore,
+        blob: WorkspaceBlobStore,
         index: IndexBackend,
         embed: EmbedClient,
         manifests: tuple[Manifest, ...] | None = None,
@@ -353,7 +353,7 @@ async def _run(config: Config, snapshot: Path, state_root: Path) -> CorpusReadin
         return await Memory100Materializer.from_snapshot(
             snapshot,
             state_root,
-            blob=blob_store_for(config.blob),
+            blob=WorkspaceBlobStore(backend=blob_store_for(config.blob)),
             index=index,
             embed=embed,
             manifests=manifests,

@@ -24,7 +24,7 @@ from ufo_ext_slack.attribution import addressing_mention, mention_attributed
 from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
 from ufo_ext_slack.manifest import manifest as slack_manifest
 
-from ufo.blob import BlobStore, FilesystemBlobStore
+from ufo.blob import BlobStore, FilesystemBlobStore, WorkspaceBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
@@ -135,17 +135,18 @@ async def test_the_surfaces_own_identity_read_mirrors_the_id_into_the_store(
     installed before the mirror existed is covered by its next Slack event, not by a reinstall."""
     workspace_id = await _seed_workspace()
     bot_token = "xoxb-mirrored"
-    blob = FilesystemBlobStore(root=tmp_path)
-    await blob.put(
-        slack.identity_blob_key(workspace_id),
-        slack.SlackIdentity(
-            bot_token_fingerprint=slack.bot_token_fingerprint(bot_token),
-            team_id="T01234567",
-            bot_user_id=BOT_USER_ID,
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    with ws(workspace_id):
+        await blob.put(
+            slack.IDENTITY_BLOB_KEY,
+            slack.SlackIdentity(
+                bot_token_fingerprint=slack.bot_token_fingerprint(bot_token),
+                team_id="T01234567",
+                bot_user_id=BOT_USER_ID,
+            )
+            .model_dump_json()
+            .encode(),
         )
-        .model_dump_json()
-        .encode(),
-    )
     ctx = _IdentityReadContext(workspace_id=workspace_id, blob=blob, bot_token=bot_token)
 
     with ws(workspace_id):

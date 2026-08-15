@@ -20,19 +20,19 @@ import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_slack.surface import (
+    IDENTITY_BLOB_KEY,
     MARKDOWN_LINK_PATTERN,
     SLACK_BOT_TOKEN_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
+    URL_VERIFIED_BLOB_KEY,
     _reply_text,
     _reply_with_oversize_links,
     bot_token_fingerprint,
-    identity_blob_key,
     signing_secret_fingerprint,
-    url_verified_blob_key,
 )
 from ufo_ext_slack.tools import SLACK_SECRET_SLOTS
 
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequests,
@@ -160,7 +160,7 @@ def _context(
             carrier=_UntouchedCarrier(),
             handle=SandboxHandle(conversation_id=uuid4(), container_id="test"),
         ),
-        blob=blob,
+        blob=WorkspaceBlobStore(backend=blob),
         turn=Turn(
             id=uuid4(),
             workspace_id=workspace_id,
@@ -196,9 +196,10 @@ async def _run(
     registry: dict[str, object], tool_name: str, ctx: ToolContext, **args: object
 ) -> str:
     tool = registry[tool_name]
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    with ws(ctx.turn.workspace_id):
+        result = await tool.handler(
+            ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+        )
     return result.content[0].text
 
 
@@ -208,7 +209,10 @@ async def _write_identity(blob: FilesystemBlobStore, workspace_id: UUID, bot_tok
         team_id=TEAM_ID,
         bot_user_id=BOT_USER_ID,
     )
-    await blob.put(identity_blob_key(workspace_id), identity.model_dump_json().encode())
+    with ws(workspace_id):
+        await WorkspaceBlobStore(backend=blob).put(
+            IDENTITY_BLOB_KEY, identity.model_dump_json().encode()
+        )
 
 
 async def _mark_verified(
@@ -216,10 +220,11 @@ async def _mark_verified(
 ) -> None:
     """Stamp the url-verified marker with the fingerprint of the verifying secret, as a
     signature-verified inbound request would — the signal `slack_connect` reads as `connected`."""
-    await blob.put(
-        url_verified_blob_key(workspace_id),
-        json.dumps({"fingerprint": signing_secret_fingerprint(secret), "at": 1.0}).encode(),
-    )
+    with ws(workspace_id):
+        await WorkspaceBlobStore(backend=blob).put(
+            URL_VERIFIED_BLOB_KEY,
+            json.dumps({"fingerprint": signing_secret_fingerprint(secret), "at": 1.0}).encode(),
+        )
 
 
 def _auth_test_transport(
@@ -392,7 +397,7 @@ async def test_manifest_path_walks_not_configured_to_pending_to_connected(
         assert derived["state"] == "pending"
         assert derived["team_id"] == TEAM_ID
         assert len(recorder) == 1
-        assert await slack.read_identity(blob, workspace_id, "xoxb-byo") is not None
+        assert await slack.read_identity(WorkspaceBlobStore(backend=blob), "xoxb-byo") is not None
         await _mark_verified(blob, workspace_id, "byo-secret")
         connected = json.loads(await _run(registry, "slack_connect", owner, method="manifest"))
         assert connected["state"] == "connected"
@@ -417,7 +422,8 @@ async def test_manifest_path_reports_a_rejected_token(
         rejected = json.loads(await _run(registry, "slack_connect", ctx, method="manifest"))
     assert rejected["state"] == "not_configured"
     assert "rejected the bot token" in rejected["hint"]
-    assert await slack.read_identity(blob, workspace_id, "xoxb-revoked") is None
+    with ws(workspace_id):
+        assert await slack.read_identity(WorkspaceBlobStore(backend=blob), "xoxb-revoked") is None
 
 
 async def test_manifest_tool_matches_the_skill_and_validates_the_name(
@@ -498,7 +504,10 @@ async def _seed_identity(blob: FilesystemBlobStore, workspace_id: UUID, bot_toke
         team_id=TEAM_ID,
         bot_user_id=BOT_USER_ID,
     )
-    await blob.put(slack.identity_blob_key(workspace_id), identity.model_dump_json().encode())
+    with ws(workspace_id):
+        await WorkspaceBlobStore(backend=blob).put(
+            slack.IDENTITY_BLOB_KEY, identity.model_dump_json().encode()
+        )
 
 
 def _directory_transport(

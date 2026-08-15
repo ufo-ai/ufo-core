@@ -33,7 +33,7 @@ from ufo.audience import (
     room_audience,
 )
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.connectors import DIRECT_ACCOUNT
 from ufo.credentials import (
     CredentialRequestInvalid,
@@ -247,7 +247,7 @@ def _context(
     return SurfaceContext(
         workspace_id=workspace_id,
         surface=SURFACE,
-        blob=blob,
+        blob=WorkspaceBlobStore(backend=blob),
         _sandboxes=sandboxes if sandboxes is not None else _sandboxes(blob.root / "workspaces"),
         _admitter=MemberAdmission(
             workspace_id=workspace_id,
@@ -2259,29 +2259,32 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
         context._credentials.fernet,
         CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=("a", "b")),
     )
-    assert await context.credential_prompt_pending(sealed, "a") is True
-    assert await context.credential_prompt_pending(sealed, "b") is True
-    assert await context.credential_prompt_pending(sealed, "unnamed") is False
-    assert await context.credential_prompt_pending("garbage", "a") is False
-    foreign = seal_credential_request(
-        context._credentials.fernet,
-        CredentialRequestState(workspace_id=uuid4(), member_id=member_id, slots=("a",)),
-    )
-    assert await context.credential_prompt_pending(foreign, "a") is False
-    await context.fulfill_credential_request(sealed, "a", "one", member_id)
-    assert await context.credential_prompt_pending(sealed, "a") is False
-    assert await context.credential_prompt_pending(sealed, "b") is True
-    await context.fulfill_credential_request(sealed, "b", "two", member_id)
-    assert await context.credential_prompt_pending(sealed, "b") is False
-    rotation = seal_credential_request(
-        context._credentials.fernet,
-        CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=("a", "b")),
-    )
-    assert await context.credential_prompt_pending(rotation, "a") is True
-    with pytest.raises(CredentialRequestInvalid, match="member"):
-        await context.fulfill_credential_request(sealed, "a", "hijack", uuid4())
-    with pytest.raises(CredentialRequestInvalid, match="slot"):
-        await context.fulfill_credential_request(sealed, "c", "off-seal", member_id)
+    with ws(workspace_id):
+        assert await context.credential_prompt_pending(sealed, "a") is True
+        assert await context.credential_prompt_pending(sealed, "b") is True
+        assert await context.credential_prompt_pending(sealed, "unnamed") is False
+        assert await context.credential_prompt_pending("garbage", "a") is False
+        foreign = seal_credential_request(
+            context._credentials.fernet,
+            CredentialRequestState(workspace_id=uuid4(), member_id=member_id, slots=("a",)),
+        )
+        assert await context.credential_prompt_pending(foreign, "a") is False
+        await context.fulfill_credential_request(sealed, "a", "one", member_id)
+        assert await context.credential_prompt_pending(sealed, "a") is False
+        assert await context.credential_prompt_pending(sealed, "b") is True
+        await context.fulfill_credential_request(sealed, "b", "two", member_id)
+        assert await context.credential_prompt_pending(sealed, "b") is False
+        rotation = seal_credential_request(
+            context._credentials.fernet,
+            CredentialRequestState(
+                workspace_id=workspace_id, member_id=member_id, slots=("a", "b")
+            ),
+        )
+        assert await context.credential_prompt_pending(rotation, "a") is True
+        with pytest.raises(CredentialRequestInvalid, match="member"):
+            await context.fulfill_credential_request(sealed, "a", "hijack", uuid4())
+        with pytest.raises(CredentialRequestInvalid, match="slot"):
+            await context.fulfill_credential_request(sealed, "c", "off-seal", member_id)
 
 
 async def test_join_member_seats_every_teammate_it_creates(db: None, tmp_path) -> None:
@@ -2497,14 +2500,15 @@ async def test_read_transcript_gates_ownership_before_the_blob(db: None, tmp_pat
             ),
         ),
     )
-    await blob.put(transcript_key(conversation_id), encode(stored))
-
-    read = await context.read_transcript(conversation_id)
-    assert read == stored
-    empty = await _conversation_row(workspace_id, queue_key="empty")
-    assert await context.read_transcript(empty) is None
+    with ws(workspace_id):
+        await context.blob.put(transcript_key(conversation_id), encode(stored))
+        read = await context.read_transcript(conversation_id)
+        assert read == stored
+        empty = await _conversation_row(workspace_id, queue_key="empty")
+        assert await context.read_transcript(empty) is None
     foreign_context = _context(foreign_workspace, StubDbos(), blob)
-    assert await foreign_context.read_transcript(conversation_id) is None
+    with ws(foreign_workspace):
+        assert await foreign_context.read_transcript(conversation_id) is None
 
 
 async def test_compaction_records_list_and_read_back(db: None, tmp_path) -> None:
@@ -2514,27 +2518,29 @@ async def test_compaction_records_list_and_read_back(db: None, tmp_path) -> None
     conversation_id = await _conversation_row(workspace_id, queue_key="busy")
     summary = CompactionSummary(intent="ship", current_work="reading", next_step="write")
     window = (Message(role="user", content="hi"),)
-    for index in (1, 2):
-        for half, payload in (
-            ("before", CompactionWindow(messages=window)),
-            ("after", CompactionWindow(messages=window)),
-            ("summary", summary),
-        ):
-            await blob.put(
-                compaction_key(conversation_id, index, half),
-                lz4.frame.compress(payload.model_dump_json().encode()),
-            )
+    with ws(workspace_id):
+        for index in (1, 2):
+            for half, payload in (
+                ("before", CompactionWindow(messages=window)),
+                ("after", CompactionWindow(messages=window)),
+                ("summary", summary),
+            ):
+                await context.blob.put(
+                    compaction_key(conversation_id, index, half),
+                    lz4.frame.compress(payload.model_dump_json().encode()),
+                )
 
-    assert await context.list_compactions(conversation_id) == (1, 2)
-    record = await context.read_compaction(conversation_id, 1)
-    assert record is not None
-    assert record.summary == summary
-    assert record.before == window
-    assert await context.read_compaction(conversation_id, 3) is None
+        assert await context.list_compactions(conversation_id) == (1, 2)
+        record = await context.read_compaction(conversation_id, 1)
+        assert record is not None
+        assert record.summary == summary
+        assert record.before == window
+        assert await context.read_compaction(conversation_id, 3) is None
     foreign_workspace, _, _ = await _seed()
     foreign_context = _context(foreign_workspace, StubDbos(), blob)
-    assert await foreign_context.list_compactions(conversation_id) == ()
-    assert await foreign_context.read_compaction(conversation_id, 1) is None
+    with ws(foreign_workspace):
+        assert await foreign_context.list_compactions(conversation_id) == ()
+        assert await foreign_context.read_compaction(conversation_id, 1) is None
 
 
 async def test_workspace_files_list_and_stream_scoped_to_the_conversation(

@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 from ufo.accounting import record_image_usage, record_video_usage
 from ufo.audience import SHARED_AUDIENCE, Audience, audience_subjects, conversation_audience
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialRequests
@@ -193,7 +193,7 @@ class ConnectorConnection:
 @dataclass(frozen=True)
 class ToolContext:
     sandbox: SandboxSession
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     turn: Turn
     agent: Agent
     spawn: Spawn

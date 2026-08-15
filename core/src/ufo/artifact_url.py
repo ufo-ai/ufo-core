@@ -1,16 +1,20 @@
 """A signed, expiring download URL for artifact delivery: no signature, no bytes.
 
-An artifact's URL path is its blob key — `/artifacts/<artifact-id>/<filename>` names exactly the
-bytes `artifacts/<artifact-id>/<filename>` stores — and the query string carries the grant that
-opens it anonymously: `exp`, an expiry, `sig`, an HMAC over the artifact id, that expiry, and the
-optional `preview` claim, all signed with the deploy's secret. A preview claim opts a raster image
-into inline rendering, declaring the type and exact size the route validates the bytes against
-before serving. A tampered grant yields nothing, an expired one only what a signed-in member of
-the owning workspace can reclaim, and only the artifact namespace is addressable by construction.
-The filename rides outside the signature: it re-joins the signed artifact id to address the one
-blob stored under it, so a renamed segment addresses nothing and 404s. `mint_artifact_url` signs
-and `verify_artifact_url` checks the same values, so a round-trip agrees by construction: the
-`share_file` builtin mints, core's artifact route verifies, and both read the one deploy secret."""
+An artifact's URL path is its workspace-relative blob key — `/artifacts/<artifact-id>/<filename>`
+names exactly the bytes `artifacts/<artifact-id>/<filename>` stores under the owning workspace's
+prefix — and the query string carries the grant that opens it anonymously: `exp`, an expiry, `ws`,
+the workspace whose store holds the bytes, `sig`, an HMAC over all of it, and the optional
+`preview` claim, all signed with the deploy's secret. A preview claim opts a raster image into
+inline rendering, declaring the type and exact size the route validates the bytes against before
+serving. A tampered grant yields nothing, an expired one only what a signed-in member of the
+owning workspace can reclaim, and only the artifact namespace is addressable by construction. A
+URL carrying no `ws` claim — the address form living in messages minted before the claim — is
+authenticated against its own signed message and never served directly: it always takes the
+member-refresh path, which re-scopes it to the owning workspace. The filename rides outside the
+signature: it re-joins the signed artifact id to address the one blob stored under it, so a
+renamed segment addresses nothing and 404s. `mint_artifact_url` signs and `verify_artifact_url`
+checks the same values, so a round-trip agrees by construction: the `share_file` builtin mints,
+core's artifact route verifies, and both read the one deploy secret."""
 
 import mimetypes
 from dataclasses import dataclass
@@ -46,9 +50,12 @@ class ArtifactUrlError(ValueError):
 
 @dataclass(frozen=True)
 class ArtifactClaims:
-    """What a verified URL grants: the blob key to serve, the download filename it ends in, and
-    the raster preview claim when the minter opted the file into inline rendering."""
+    """What a verified URL grants: the workspace whose store holds the bytes (None for an address
+    minted without the claim, which only the member refresh can re-scope), the workspace-relative
+    blob key to serve, the download filename it ends in, and the raster preview claim when the
+    minter opted the file into inline rendering."""
 
+    workspace_id: UUID | None
     blob_key: str
     filename: str
     expires_at: int
@@ -81,10 +88,16 @@ def artifact_media_type(filename: str) -> str:
 
 
 def mint_artifact_url(
-    secret: str, blob_key: str, expires_at: int, *, preview: ImagePreviewGrant | None = None
+    secret: str,
+    blob_key: str,
+    expires_at: int,
+    *,
+    workspace_id: UUID,
+    preview: ImagePreviewGrant | None = None,
 ) -> str:
-    """The signed download path for `blob_key`: the blob key as the path, the grant as the query.
-    Callers needing an absolute URL prepend their public base."""
+    """The signed download path for `blob_key` in `workspace_id`'s store: the workspace-relative
+    blob key as the path, the grant as the query. Callers needing an absolute URL prepend their
+    public base."""
     if not secret:
         raise ArtifactUrlError("artifact url secret is not configured")
     artifact_id, filename = _split_key(blob_key)
@@ -92,10 +105,11 @@ def mint_artifact_url(
     if preview is not None and _parsed_preview(preview_value) is None:
         raise ArtifactUrlError("artifact preview claim is invalid")
     signature = sign_detached(
-        secret.encode(), _signed_message(artifact_id, str(expires_at), preview_value)
+        secret.encode(),
+        _signed_message(str(workspace_id), artifact_id, str(expires_at), preview_value),
     )
     url = f"/{ARTIFACT_KEY_PREFIX}{artifact_id}/{quote(filename, safe='')}"
-    url += f"?exp={expires_at}&sig={signature}"
+    url += f"?exp={expires_at}&ws={workspace_id}&sig={signature}"
     return url if not preview_value else f"{url}&preview={quote(preview_value, safe='')}"
 
 
@@ -106,34 +120,46 @@ def verify_artifact_url(
     expires_at: str,
     signature: str,
     preview: str,
+    workspace: str,
     now: datetime,
 ) -> ArtifactClaims:
     """The claims a URL proves, or `ArtifactUrlError`. The filename joins the signed artifact id
-    into the blob key it addresses; nothing outside `artifacts/<uuid>/` is constructible."""
+    into the blob key it addresses; nothing outside `artifacts/<uuid>/` is constructible. An empty
+    `workspace` is the claim-less address form: its signature covers only the artifact id, expiry,
+    and preview, and a valid one always raises `ArtifactUrlExpired` — unscoped bytes never serve
+    directly, the member refresh re-scopes them."""
     if not secret:
         raise ArtifactUrlError("artifact url secret is not configured")
-    if not _is_artifact_id(artifact_id) or not _is_filename(filename) or not expires_at.isdigit():
+    if (
+        not _is_canonical_uuid(artifact_id)
+        or not _is_filename(filename)
+        or not expires_at.isdigit()
+    ):
+        raise ArtifactUrlError("artifact url is malformed")
+    if workspace and not _is_canonical_uuid(workspace):
         raise ArtifactUrlError("artifact url is malformed")
     grant = _parsed_preview(preview) if preview else None
     if preview and grant is None:
         raise ArtifactUrlError("artifact preview claim is invalid")
     if not verify_detached(
-        secret.encode(), _signed_message(artifact_id, expires_at, preview), signature
+        secret.encode(), _signed_message(workspace, artifact_id, expires_at, preview), signature
     ):
         raise ArtifactUrlError("artifact url signature does not match")
     claims = ArtifactClaims(
+        workspace_id=UUID(workspace) if workspace else None,
         blob_key=f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{filename}",
         filename=filename,
         expires_at=int(expires_at),
         preview=grant,
     )
-    if claims.expires_at <= int(now.timestamp()):
+    if claims.workspace_id is None or claims.expires_at <= int(now.timestamp()):
         raise ArtifactUrlExpired(claims)
     return claims
 
 
-def _signed_message(artifact_id: str, expires_at: str, preview_value: str) -> bytes:
-    return f"{artifact_id}:{expires_at}:{preview_value}".encode()
+def _signed_message(workspace: str, artifact_id: str, expires_at: str, preview_value: str) -> bytes:
+    head = f"{workspace}:" if workspace else ""
+    return f"{head}{artifact_id}:{expires_at}:{preview_value}".encode()
 
 
 def _parsed_preview(value: str) -> ImagePreviewGrant | None:
@@ -155,14 +181,14 @@ def _split_key(blob_key: str) -> tuple[str, str]:
     if (
         not blob_key.startswith(ARTIFACT_KEY_PREFIX)
         or not separator
-        or not _is_artifact_id(artifact_id)
+        or not _is_canonical_uuid(artifact_id)
         or not _is_filename(filename)
     ):
         raise ArtifactUrlError(f"{blob_key!r} is not an artifact address")
     return artifact_id, filename
 
 
-def _is_artifact_id(value: str) -> bool:
+def _is_canonical_uuid(value: str) -> bool:
     try:
         return str(UUID(value)) == value
     except ValueError:

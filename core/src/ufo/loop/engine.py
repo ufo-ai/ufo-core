@@ -39,7 +39,7 @@ from ufo.accounting import (
 )
 from ufo.activity import SKILL_LOAD_TOOL, tool_activity
 from ufo.audience import Audience, audience_member, audience_subjects
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialRequests
@@ -879,7 +879,7 @@ class TurnEngine:
     tools: ToolRegistry
     tool_ext: dict[str, ExtensionContext]
     hooks: HookChain
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     spawn: Spawn
     audience: Audience
     artifact_token_secret: str

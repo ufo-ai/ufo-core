@@ -76,15 +76,15 @@ from uuid import UUID
 
 import sqlalchemy as sa
 from ufo_ext_slack.surface import (
+    IDENTITY_BLOB_KEY,
     SLACK_BOT_TOKEN_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
+    URL_VERIFIED_BLOB_KEY,
     SlackIdentity,
     bot_token_fingerprint,
-    identity_blob_key,
     signing_secret_fingerprint,
     slack_installation_id,
-    url_verified_blob_key,
 )
 
 from evals.harness.capability import (
@@ -97,7 +97,7 @@ from evals.harness.capability import (
 )
 from evals.harness.scorers import combine
 from ufo.activity import SKILL_LOAD_TOOL
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL
 from ufo.schema import tables
@@ -256,10 +256,12 @@ def slack_rotated_secret_scorer() -> Grader:
     )
 
 
-async def seed_slack_rotated_secret(workspace_id: UUID, _agent_id: UUID, blob: BlobStore) -> None:
+async def seed_slack_rotated_secret(
+    workspace_id: UUID, _agent_id: UUID, blob: WorkspaceBlobStore
+) -> None:
     workspace = ws_current()
-    identity_key = identity_blob_key(workspace_id)
-    verified_key = url_verified_blob_key(workspace_id)
+    identity_key = IDENTITY_BLOB_KEY
+    verified_key = URL_VERIFIED_BLOB_KEY
     async with workspace_tx() as connection:
         slots = frozenset(
             (

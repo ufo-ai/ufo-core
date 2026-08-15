@@ -22,6 +22,18 @@ SDK_EXEMPT_PART = "sdk"
 SESSION_COOKIE_FACTORY = CORE_SRC / "sdk" / "http.py"
 COMPOSITION_ROOTS = (CORE_SRC / "serve.py", CORE_SRC / "proxy_serve.py")
 ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.jobs", "ufo.sandbox.proxy")
+BLOB_MODULE = CORE_SRC / "blob.py"
+RAW_BLOB_CONSTRUCTORS = frozenset({"FilesystemBlobStore", "S3BlobStore"})
+RAW_BLOB_BOOT_MODULES = frozenset(
+    {
+        CORE_SRC / "serve.py",
+        CORE_SRC / "cli.py",
+        CORE_SRC / "proxy_serve.py",
+        Path("evals/__main__.py"),
+        Path("evals/issue_recall/materialize.py"),
+        Path("evals/memory_100/materialize.py"),
+    }
+)
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
@@ -362,6 +374,36 @@ def _boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
                 failures.append(
                     f"{rel}: imports {imported} across the role boundary "
                     f"(roles talk through queues/blob/hub/HTTP)"
+                )
+    return failures
+
+
+def _raw_blob_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """A raw blob backend reads and writes every key in the bucket, so shipped code holds one only
+    at a boot boundary that immediately decides its scope — everywhere else the store arrives
+    already wrapped as `WorkspaceBlobStore`/`FleetBlobStore`, and the prefix cannot be misspelled.
+    Tests construct backends freely: they are the fixture under the wrappers."""
+    failures = []
+    for rel, tree in trees.items():
+        if rel == BLOB_MODULE or "tests" in rel.parts:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            match node.func:
+                case ast.Name(id=name) | ast.Attribute(attr=name):
+                    pass
+                case _:
+                    continue
+            if name in RAW_BLOB_CONSTRUCTORS:
+                failures.append(
+                    f"{rel}: constructs {name} directly — a raw backend lives only inside "
+                    f"{BLOB_MODULE}; take a WorkspaceBlobStore or FleetBlobStore"
+                )
+            if name == "blob_store_for" and rel not in RAW_BLOB_BOOT_MODULES:
+                failures.append(
+                    f"{rel}: calls blob_store_for outside a boot boundary "
+                    f"({', '.join(sorted(str(m) for m in RAW_BLOB_BOOT_MODULES))})"
                 )
     return failures
 
@@ -1561,6 +1603,7 @@ def main() -> int:
         if calls.count(name) == 1
     )
     failures.extend(_init_code_failures(trees))
+    failures.extend(_raw_blob_failures(trees))
     failures.extend(_boundary_failures(trees))
     failures.extend(_sdk_import_failures(trees))
     failures.extend(_conformance_failures(trees))

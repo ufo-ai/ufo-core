@@ -31,7 +31,7 @@ from evals.issue_recall.corpus import (
     rendered_pages,
 )
 from evals.issue_recall.state import CorpusAttestor, CorpusReadiness
-from ufo.blob import BlobStore, blob_store_for
+from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -64,7 +64,7 @@ class Materializer:
     pages: tuple[RenderedPage, ...]
     ambient: tuple[Ambient, ...]
     pages_root: Path
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     index: IndexBackend
     embed: EmbedClient
     manifests: tuple[Manifest, ...]
@@ -289,7 +289,7 @@ async def _run(config: Config, state_root: Path) -> CorpusReadiness:
             pages=rendered_pages(),
             ambient=ambient_memories(),
             pages_root=(state_root / corpus_digest().removeprefix("sha256:") / "pages").resolve(),
-            blob=blob_store_for(config.blob),
+            blob=WorkspaceBlobStore(backend=blob_store_for(config.blob)),
             index=index_backend(manifests, config.memory.index_backend, credentials),
             embed=embed_backend(manifests, config.memory.embed_backend, credentials),
             manifests=manifests,

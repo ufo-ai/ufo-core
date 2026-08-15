@@ -23,7 +23,7 @@ import lz4.frame
 from dbos import DBOS
 from pydantic import ValidationError
 
-from ufo.blob import BlobNotFound, BlobStore
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.ext.loader import HookChain
 from ufo.ext.manifest import PostCompact, PreCompact
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT
@@ -201,7 +201,7 @@ class Compaction:
 
     client: ModelClient
     model: str
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     conversation_id: UUID
     summary_max_tokens: int = COMPACTION_SUMMARY_MAX_TOKENS
     context_window: int = DEFAULT_CONTEXT_WINDOW_TOKENS

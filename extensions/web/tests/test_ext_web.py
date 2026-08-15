@@ -74,7 +74,7 @@ from ufo_testsupport.surfaces import (
 from ufo.accounting import record_egress_request, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
 from ufo.bearer import mint_token
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import (
@@ -721,13 +721,28 @@ async def _grant_web_access(workspace_id: UUID, agent_id: UUID, email: str) -> N
         )
 
 
+async def _write_transcript(
+    blob: WorkspaceBlobStore, conversation_id: UUID, conversation: Conversation
+) -> None:
+    async with workspace_tx() as connection:
+        workspace_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.workspace_id).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        await Transcript(blob=blob, conversation_id=conversation_id).write(conversation)
+
+
 @pytest.fixture(scope="session")
 def dbos_runtime(
     dbos_launched: Config,
-) -> Iterator[tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox]]:
+) -> Iterator[tuple[Config, GatingHub, WorkspaceBlobStore, ConversationSandbox]]:
     config = dbos_launched
     hub = GatingHub(InProcessHub(), STREAM_GATE)
-    blob = FilesystemBlobStore(root=config.blob.root)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=config.blob.root))
     sandboxes = ConversationSandbox(
         carrier=LocalCarrier(),
         backend="local",
@@ -1084,7 +1099,9 @@ async def test_transcript_route_returns_durable_tool_activity(
         "owner@example.com",
         TerminalFrame(status="done", text="Done."),
     )
-    await Transcript(blob=blob, conversation_id=conversation_id).write(
+    await _write_transcript(
+        blob,
+        conversation_id,
         Conversation(
             seq=1,
             messages=(
@@ -1104,7 +1121,7 @@ async def test_transcript_route_returns_durable_tool_activity(
                 ),
                 Message(role="assistant", content="Done."),
             ),
-        )
+        ),
     )
     child_conversation, child_turn = await _seed_subagent(
         workspace_id,
@@ -1114,7 +1131,9 @@ async def test_transcript_route_returns_durable_tool_activity(
         terminal_text='{"result": "Nothing is stale."}',
         name="Lockfile check",
     )
-    await Transcript(blob=blob, conversation_id=child_conversation).write(
+    await _write_transcript(
+        blob,
+        child_conversation,
         Conversation(
             seq=1,
             messages=(
@@ -1131,7 +1150,7 @@ async def test_transcript_route_returns_durable_tool_activity(
                     content=(ToolResultBlock(tool_use_id="call-2", content="…", activity=True),),
                 ),
             ),
-        )
+        ),
     )
     grandchild_conversation, _grandchild_turn = await _seed_subagent(
         workspace_id,
@@ -1211,14 +1230,16 @@ async def test_transcript_carries_a_running_turns_prompt_and_names_the_turn(
         "owner@example.com",
         TerminalFrame(status="done", text="Looked."),
     )
-    await Transcript(blob=blob, conversation_id=conversation_id).write(
+    await _write_transcript(
+        blob,
+        conversation_id,
         Conversation(
             seq=1,
             messages=(
                 Message(role="user", content="<context>source: web</context>\nFirst ask."),
                 Message(role="assistant", content="Looked."),
             ),
-        )
+        ),
     )
     settled = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
@@ -4718,13 +4739,14 @@ async def test_static_assets_publish_on_the_first_page_and_serve_from_the_store(
     token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
 
+    fleet = FleetBlobStore(backend=blob.backend)
     page = await client.get("/surface/web", headers=headers)
     assert page.status_code == 200
     assert web_surface.STATIC_ASSETS
     for name in web_surface.STATIC_ASSETS:
-        assert await blob.exists("static/web/" + name)
+        assert await fleet.exists("static/web/" + name)
 
-    await blob.put("static/web/assets/peer-AbC123.js", b"export const peer = 1;\n")
+    await fleet.put("static/web/assets/peer-AbC123.js", b"export const peer = 1;\n")
     path = "/surface/web/static/assets/peer-AbC123.js"
     served = await client.get(path, headers=headers)
     assert served.status_code == 200
@@ -4774,7 +4796,7 @@ async def test_a_failed_asset_publish_fails_the_page_and_the_next_page_retries(
     page = await client.get("/surface/web", headers=headers)
     assert page.status_code == 200
     for name in web_surface.STATIC_ASSETS:
-        assert await blob.exists("static/web/" + name)
+        assert await FleetBlobStore(backend=blob.backend).exists("static/web/" + name)
 
 
 async def test_a_clicked_conversation_survives_the_sign_in_it_lands_in(
@@ -5090,7 +5112,9 @@ async def test_transcript_reply_carries_the_question_it_asked(
         "owner@example.com",
         TerminalFrame(status="done", text="one question", question=QUESTION),
     )
-    await Transcript(blob=blob, conversation_id=conversation_id).write(
+    await _write_transcript(
+        blob,
+        conversation_id,
         Conversation(
             seq=1,
             messages=(
@@ -5100,7 +5124,7 @@ async def test_transcript_reply_carries_the_question_it_asked(
                 ),
                 Message(role="assistant", content="one question"),
             ),
-        )
+        ),
     )
     loaded = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
@@ -5205,7 +5229,9 @@ async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children
         turn_id,
         terminal_text='{"result": "It shipped Tuesday."}',
     )
-    await Transcript(blob=blob, conversation_id=child_conversation).write(
+    await _write_transcript(
+        blob,
+        child_conversation,
         Conversation(
             seq=1,
             messages=(
@@ -5221,7 +5247,7 @@ async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children
                     content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
                 ),
             ),
-        )
+        ),
     )
     grandchild_conversation, _grandchild_turn = await _seed_subagent(
         workspace_id, agent_id, member_id, child_turn, profile="deep_research"
@@ -6100,6 +6126,7 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
                     tables.turn.c.inbound,
                     tables.turn.c.status,
                     tables.turn.c.conversation_id,
+                    tables.turn.c.workspace_id,
                     tables.conversation.c.agent_id,
                     tables.conversation.c.queue_key,
                 )
@@ -6121,7 +6148,8 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
             await handle.get_result(polling_interval_sec=0.05)
     finally:
         dbos_client.destroy()
-    recorded = await Transcript(blob=blob, conversation_id=turn.conversation_id).read()
+    with ws(turn.workspace_id):
+        recorded = await Transcript(blob=blob, conversation_id=turn.conversation_id).read()
     assert recorded is not None
     assert len(recorded.messages) == 2
     assert recorded.messages[-1].role == "assistant"
@@ -8200,7 +8228,9 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
         parent_turn_id=parent,
         subagent_profile="deep_research",
     )
-    await Transcript(blob=blob, conversation_id=mine).write(
+    await _write_transcript(
+        blob,
+        mine,
         Conversation(
             seq=1,
             messages=(
@@ -8210,7 +8240,7 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
                 ),
                 Message(role="assistant", content="found it"),
             ),
-        )
+        ),
     )
 
     read = await client.get(
@@ -8323,7 +8353,9 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
         parent_turn_id=parent_turn,
         subagent_profile="deep_research",
     )
-    await Transcript(blob=blob, conversation_id=theirs).write(
+    await _write_transcript(
+        blob,
+        theirs,
         Conversation(
             seq=1,
             messages=(
@@ -8333,9 +8365,11 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
                 ),
                 Message(role="assistant", content="private answer"),
             ),
-        )
+        ),
     )
-    await Transcript(blob=blob, conversation_id=child_conversation).write(
+    await _write_transcript(
+        blob,
+        child_conversation,
         Conversation(
             seq=1,
             messages=(
@@ -8354,7 +8388,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
                     ),
                 ),
             ),
-        )
+        ),
     )
     unrelated = await _seed_agent_conversation(
         workspace_id,
@@ -8633,7 +8667,8 @@ async def test_durable_shared_files_fill_the_typed_artifacts_slot(
     shared_at = datetime(2026, 8, 6, 12, tzinfo=UTC)
     chart_png = _png()
     chart_key = f"artifacts/{uuid4()}/chart.png"
-    await blob.put(chart_key, chart_png)
+    with ws(workspace_id):
+        await blob.put(chart_key, chart_png)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.shared_artifact).values(
@@ -9396,8 +9431,8 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
         inbound="general work",
         subagent_profile="general_purpose",
     )
-    await Transcript(blob=blob, conversation_id=mine).write(
-        Conversation(seq=1, messages=(Message(role="assistant", content="found it"),))
+    await _write_transcript(
+        blob, mine, Conversation(seq=1, messages=(Message(role="assistant", content="found it"),))
     )
     path = "/surface/web/subagents/deep_research/conversations"
 
@@ -9473,7 +9508,9 @@ async def test_a_run_page_states_the_prose_a_run_wrote_not_the_payload_it_rode_i
     await _seed_listed_turn(
         workspace_id, run, agent_id, seq=1, inbound="find it", subagent_profile="deep_research"
     )
-    await Transcript(blob=blob, conversation_id=run).write(
+    await _write_transcript(
+        blob,
+        run,
         Conversation(
             seq=1,
             messages=(
@@ -9490,7 +9527,7 @@ async def test_a_run_page_states_the_prose_a_run_wrote_not_the_payload_it_rode_i
                 ),
                 Message(role="assistant", content='{"result": "The deadline is March 31."}'),
             ),
-        )
+        ),
     )
 
     read = await client.get(
@@ -9546,7 +9583,9 @@ async def test_a_run_page_states_an_answer_that_wrote_no_prose(
     await _seed_listed_turn(
         workspace_id, run, agent_id, seq=1, inbound="review it", subagent_profile="deep_research"
     )
-    await Transcript(blob=blob, conversation_id=run).write(
+    await _write_transcript(
+        blob,
+        run,
         Conversation(
             seq=1,
             messages=(
@@ -9556,7 +9595,7 @@ async def test_a_run_page_states_an_answer_that_wrote_no_prose(
                     content=json.dumps({"findings": [RUN_FINDING]}),
                 ),
             ),
-        )
+        ),
     )
 
     read = await client.get(
@@ -9683,7 +9722,9 @@ async def test_an_agents_own_reply_is_never_read_as_a_payload(
         "m@example.com",
         TerminalFrame(status="done", text=reply),
     )
-    await Transcript(blob=blob, conversation_id=conversation_id).write(
+    await _write_transcript(
+        blob,
+        conversation_id,
         Conversation(
             seq=1,
             messages=(
@@ -9693,7 +9734,7 @@ async def test_an_agents_own_reply_is_never_read_as_a_payload(
                 ),
                 Message(role="assistant", content=reply),
             ),
-        )
+        ),
     )
 
     read = await client.get(
@@ -9983,7 +10024,9 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
         speaker_member_id=member_id,
         context=TurnContext(sender="Mel Okafor (m@example.com)"),
     )
-    await Transcript(blob=blob, conversation_id=conversation_id).write(
+    await _write_transcript(
+        blob,
+        conversation_id,
         Conversation(
             seq=2,
             messages=(
@@ -9998,7 +10041,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
                 ),
                 Message(role="assistant", content="Any time."),
             ),
-        )
+        ),
     )
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
 
@@ -10085,7 +10128,9 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
             .where(tables.inbound_message.c.id == folded)
             .values(consumed_turn_id=running)
         )
-    await Transcript(blob=blob, conversation_id=conversation_id).write(
+    await _write_transcript(
+        blob,
+        conversation_id,
         Conversation(
             seq=3,
             messages=(
@@ -10101,7 +10146,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
                 ),
                 Message(role="assistant", content="Sent."),
             ),
-        )
+        ),
     )
 
     written = await client.get(

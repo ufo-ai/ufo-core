@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.accounting import SpendReport, SpendRollup
 from ufo.balance import Balance, credit, read_balance, set_reserve
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.blob import BlobStore, blob_store_for
+from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.bundle import Bundle, wheel_name
 from ufo.cancellation import cancel_one_turn
 from ufo.config import Config, config_path, load_config
@@ -1030,12 +1030,12 @@ async def _seed_kitchen_sink(config: Config, named: str) -> UUID:
     if owner_dsn:
         init_owner_db(owner_dsn)
     try:
-        return await _seed_target(blob_store_for(config.blob), named)
+        return await _seed_target(WorkspaceBlobStore(backend=blob_store_for(config.blob)), named)
     finally:
         await dispose_db()
 
 
-async def _seed_target(blob: BlobStore, named: str) -> UUID:
+async def _seed_target(blob: WorkspaceBlobStore, named: str) -> UUID:
     workspace_id = await _target_workspace(named)
     with ws(workspace_id):
         async with workspace_tx() as connection:

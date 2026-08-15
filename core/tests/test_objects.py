@@ -61,7 +61,7 @@ from ufo.audience import (
     foreign_room_audience,
     room_audience,
 )
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.credential_kind import CredentialObjects
 from ufo.credentials import CredentialStore
@@ -179,7 +179,7 @@ def _tool_context(
             carrier=_UntouchedCarrier(),
             handle=SandboxHandle(conversation_id=uuid4(), container_id="test"),
         ),
-        blob=FilesystemBlobStore(root=Path()),
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=Path())),
         turn=Turn(
             id=uuid4(),
             workspace_id=workspace_id,
@@ -1485,7 +1485,7 @@ async def _workspace_context(
     )
     ctx = ToolContext(
         sandbox=SandboxSession(carrier=carrier, handle=handle),
-        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blobs")),
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
@@ -1717,6 +1717,7 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
             query["exp"][0],
             query["sig"][0],
             "",
+            query["ws"][0],
             datetime.now(UTC),
         )
         assert claims.filename == "report.txt"
@@ -1842,7 +1843,10 @@ async def test_artifact_with_missing_bytes_fails_loud_on_get(db: None, tmp_path:
     with ws(workspace_id):
         turn = await _turn_row(workspace_id)
         await _shared_artifact_row(turn, f"artifacts/{uuid4()}/gone.txt", "gone.txt", 5)
-        ctx = replace(_tool_context(workspace_id), blob=FilesystemBlobStore(root=tmp_path))
+        ctx = replace(
+            _tool_context(workspace_id),
+            blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
+        )
 
         get_tool = tools["object_get"]
         with pytest.raises(ValueError, match="no stored bytes"):
@@ -1935,7 +1939,8 @@ async def test_artifact_delete_refuses_audience_narrowing_after_authorization(
             ).scalar_one()
 
     assert row_exists
-    assert await ctx.blob.exists(blob_key)
+    with ws(workspace_id):
+        assert await ctx.blob.exists(blob_key)
 
 
 ROW_LOCK_HELD = 'could not obtain lock on row in relation "conversation"'
@@ -2043,7 +2048,8 @@ async def test_artifact_delete_holds_the_conversation_row_against_a_concurrent_n
 
     assert audience == str(SHARED_AUDIENCE)
     assert list(remaining) == []
-    assert not await ctx.blob.exists(blob_key)
+    with ws(workspace_id):
+        assert not await ctx.blob.exists(blob_key)
 
 
 async def test_artifact_delete_refuses_when_a_version_is_taken_out_from_under_it(
@@ -2098,8 +2104,9 @@ async def test_artifact_delete_refuses_when_a_version_is_taken_out_from_under_it
             )
 
     assert list(remaining) == [second_key]
-    assert await ctx.blob.exists(first_key)
-    assert await ctx.blob.exists(second_key)
+    with ws(workspace_id):
+        assert await ctx.blob.exists(first_key)
+        assert await ctx.blob.exists(second_key)
 
 
 async def test_artifact_slug_collisions_list_under_distinct_names(db: None) -> None:

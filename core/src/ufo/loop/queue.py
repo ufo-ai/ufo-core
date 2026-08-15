@@ -12,7 +12,7 @@ from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
 from ufo.agent_scope import agent
 from ufo.audience import Audience, parse_audience
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
 from ufo.connectors import CliCredential, ConnectorRegistry
@@ -170,7 +170,7 @@ TURN_QUEUE = Queue(
 @dataclass(frozen=True)
 class Runtime:
     config: Config
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     sandboxes: ConversationSandbox
     hub: Hub
     cdp_provider: CdpProvider | None

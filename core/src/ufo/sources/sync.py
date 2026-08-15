@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.blob import BlobStore
+from ufo.blob import WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.connectors import AuthProxy, SourceCredentialResolver
 from ufo.db import owner_tx, workspace_tx
@@ -420,7 +420,7 @@ class SyncDriver:
     per-tenant deploy `owner_tx` resolves to the single workspace, unchanged."""
 
     backends: Mapping[str, SourceBackend]
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     postgres: bool
     source_credentials: SourceCredentialResolver | None = None
     identity_resolvers: Mapping[str, SourceIdentityResolver] = field(default_factory=dict)
@@ -928,7 +928,7 @@ class CorePageFeed:
     PAGE_FEED_BATCH_MAX so the inlined bodies stay a small payload. A tombstoned page carries an
     empty body; its reader drops the page's chunks and mirror on that signal."""
 
-    blob: BlobStore
+    blob: WorkspaceBlobStore
 
     async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch:
         query = (

@@ -44,7 +44,7 @@ from ufo_testsupport.surfaces import (
 import ufo.surfaces.hub_tail as hub_tail
 from ufo.ambient_reply import AmbientReplyClassifier
 from ufo.artifact_url import verify_artifact_url
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
@@ -425,7 +425,15 @@ async def _write_identity(
         team_id=team_id,
         bot_user_id=bot_user_id,
     )
-    await blob.put(slack.identity_blob_key(workspace_id), identity.model_dump_json().encode())
+    with ws(workspace_id):
+        await blob.put(slack.IDENTITY_BLOB_KEY, identity.model_dump_json().encode())
+
+
+async def _read_identity(
+    blob: WorkspaceBlobStore, workspace_id: UUID
+) -> slack.SlackIdentity | None:
+    with ws(workspace_id):
+        return await slack.read_identity(blob, BOT_TOKEN)
 
 
 async def _seed(*, member_email: str | None = DEFAULT_MEMBER_EMAIL) -> tuple[UUID, UUID | None]:
@@ -494,7 +502,7 @@ async def _mount_transport(
     store = await _store(workspace_id)
     init_workspace_credentials(store)
     await _register_slack(store, workspace_id)
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     if identity:
         await _write_identity(blob, workspace_id)
     app = FastAPI()
@@ -545,7 +553,7 @@ async def test_first_signed_event_proves_identity_and_retry_admits(
             EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
-    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) == slack.SlackIdentity(
+    assert await _read_identity(blob, workspace_id) == slack.SlackIdentity(
         bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
         team_id=TEAM_ID,
         bot_user_id=BOT_USER_ID,
@@ -573,7 +581,7 @@ async def test_manifest_workspace_verifies_with_its_own_signing_slot(
     store = await _store(workspace_id)
     await store.put(workspace_id, slack.SLACK_SIGNING_SECRET_SLOT, own_secret)
     await _register_slack(store, workspace_id)
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     await _write_identity(blob, workspace_id)
     app = FastAPI()
     _mount_shared_surfaces(
@@ -1144,7 +1152,7 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
     await _seed()
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     app = FastAPI()
     _mount_shared_surfaces(
         app,
@@ -1213,7 +1221,7 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
     recorder: list[httpx.Request] = []
     _patch_httpx(monkeypatch, _mock_transport(recorder, {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     app = FastAPI()
     _mount_shared_surfaces(
         app,
@@ -1241,7 +1249,7 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
     assert response.status_code == 200
     assert "installed" in response.text
     assert await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT) == BOT_TOKEN
-    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) == slack.SlackIdentity(
+    assert await _read_identity(blob, workspace_id) == slack.SlackIdentity(
         bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
         team_id=TEAM_ID,
         bot_user_id=BOT_USER_ID,
@@ -1273,7 +1281,7 @@ async def test_oauth_callback_declined_carries_no_workspace_and_reflects_no_erro
     await _seed()
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     app = FastAPI()
     _mount_shared_surfaces(
         app,
@@ -1311,7 +1319,7 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await _register_slack(store, other_workspace, TEAM_ID)
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     app = FastAPI()
     _mount_shared_surfaces(
         app,
@@ -1347,7 +1355,7 @@ async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monke
     await _seed()
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     app = FastAPI()
     _mount_shared_surfaces(
         app,
@@ -1393,7 +1401,7 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
 
     _patch_httpx(monkeypatch, httpx.MockTransport(rejecting))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     app = FastAPI()
     _mount_shared_surfaces(
         app,
@@ -1431,7 +1439,7 @@ async def test_shared_oauth_callback_binds_the_sealed_workspace(
     workspace_id, member_id = await _seed(member_email="owner@acme.com")
     _patch_httpx(monkeypatch, _mock_transport([], {}))
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     app = FastAPI()
     _mount_shared_surfaces(
         app,
@@ -3556,7 +3564,7 @@ async def test_shared_slack_rejects_an_unknown_installation_without_binding(
 ) -> None:
     workspace_id, _ = await _seed(member_email="shared@example.com")
     store = await _store(workspace_id)
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     await _write_identity(blob, workspace_id)
     recorder: list[httpx.Request] = []
     _patch_httpx(monkeypatch, _shared_slack_transport(recorder, {f"Bearer {BOT_TOKEN}": "ONE"}))
@@ -3619,7 +3627,7 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     for workspace_id, bot_token in ((workspace_a, token_a), (workspace_b, token_b)):
         await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, bot_token)
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     await _write_identity(blob, workspace_a, token_a, team_a, bot_a)
     await _write_identity(blob, workspace_b, token_b, team_b, bot_b)
     await _register_slack(store, workspace_a, team_a)
@@ -3745,8 +3753,10 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         (workspace_b, slack.slack_installation_id(team_b)),
     }
 
-    await blob.put("artifacts/a/a.txt", b"A-FILE")
-    await blob.put("artifacts/b/b.txt", b"B-FILE")
+    with ws(workspace_a):
+        await blob.put("artifacts/a/a.txt", b"A-FILE")
+    with ws(workspace_b):
+        await blob.put("artifacts/b/b.txt", b"B-FILE")
     turn_a = await _seed_done_turn(
         workspace_a,
         "CDELIVER:10.0",
@@ -3835,7 +3845,8 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
     workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
-    await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
+    with ws(workspace_id):
+        await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
     turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "hi **there**", blob, artifact=True)
 
     await app.state.writeback_poller.drain()
@@ -4339,7 +4350,8 @@ async def test_writeback_streams_dm_attachment_without_threading_under_the_bot_r
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
-    await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
+    with ws(workspace_id):
+        await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
     await _seed_done_turn(workspace_id, "D5", "here", blob, artifact=True)
 
     await app.state.writeback_poller.drain()
@@ -4364,7 +4376,8 @@ async def test_large_media_within_the_upload_cap_is_streamed_not_linked(
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
-    await blob.put("artifacts/a/clip.mp4", b"MP4-CONTENT")
+    with ws(workspace_id):
+        await blob.put("artifacts/a/clip.mp4", b"MP4-CONTENT")
     await _seed_done_turn(
         workspace_id,
         "C5:200.0",
@@ -4392,7 +4405,8 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     big_key = f"artifacts/{uuid4()}/huge.bin"
-    await blob.put(big_key, b"OVERSIZE")
+    with ws(workspace_id):
+        await blob.put(big_key, b"OVERSIZE")
     turn_id = await _seed_done_turn(
         workspace_id,
         "C5:200.0",
@@ -4425,6 +4439,7 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
         query["exp"][0],
         query["sig"][0],
         "",
+        query["ws"][0],
         datetime.now(UTC),
     )
     assert claims.blob_key == big_key
@@ -6355,7 +6370,7 @@ async def test_an_unmentioned_reply_after_the_answer_opens_its_own_run(
     the bulk of a real conversation — so the reply that opens a run is driven here against the one
     that joins a live turn."""
     workspace_id, _ = await _seed()
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     await _seed_done_turn(workspace_id, "C1:100.5", "first", blob, artifact=False)
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
     reply = _event_body(
@@ -8081,7 +8096,7 @@ async def test_shared_interactive_routes_by_registered_team(
     _patch_httpx(monkeypatch, _mock_transport(recorder, {"U9": "bee@example.com"}))
     store = await _store(workspace_id)
     await _register_slack(store, workspace_id)
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     await _write_identity(blob, workspace_id)
     app = FastAPI()
     _mount_shared_surfaces(
@@ -8174,7 +8189,7 @@ async def test_interactive_before_install_is_refused(db: None, tmp_path, monkeyp
     async with client:
         response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
     assert response.status_code == 503
-    assert await slack.read_identity(blob, workspace_id, BOT_TOKEN) is None
+    assert await _read_identity(blob, workspace_id) is None
     async with workspace_tx() as connection:
         assert (
             await connection.execute(
