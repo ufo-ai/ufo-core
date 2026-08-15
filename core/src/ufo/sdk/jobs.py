@@ -8,6 +8,9 @@ workspaces the dispatcher binds. Building per tick lets dueness be time-relative
 inside the builder and embed the cutoff."""
 
 from ufo.candidates import (
+    WorkspaceCandidates as WorkspaceCandidates,
+)
+from ufo.candidates import (
     owner_candidates as owner_candidates,
 )
 from ufo.ext.context import (
