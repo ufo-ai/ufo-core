@@ -1,14 +1,15 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { rowControl } from "@/kernel/row";
 import { cn } from "@/lib/cn";
 
 /** The mark a card leads with: a square placeholder for a per-row logo, or a full-width band that
- *  carries the row's own image once it has one. Either way the placeholder holds the space. A
- *  record that will never earn a picture takes none, and its status rides the name's line. */
+ *  carries the row's own image once it has one — or, with no image, whatever `body` renders for
+ *  the row. Either way the placeholder holds the space. A record that will never earn a picture
+ *  takes none, and its status rides the name's line. */
 export type CardMark<Row> =
   | { shape: "square" }
-  | { shape: "band"; image?: (row: Row) => string | null };
+  | { shape: "band"; image?: (row: Row) => string | null; body?: (row: Row) => ReactNode };
 
 /** A grid of cards holds its rhythm only while every card is the same height, so the text a row
  *  supplies is cut to a fixed number of lines: one for the name, two for the description. A card
@@ -60,7 +61,9 @@ export function CardGrid<Row>({
               press && "hover:bg-fill",
             )}
           >
-            {mark?.shape === "band" ? <Band src={mark.image?.(row) ?? null} /> : null}
+            {mark?.shape === "band" ? (
+              <Band src={mark.image?.(row) ?? null} body={mark.body?.(row)} />
+            ) : null}
             <div className="flex flex-1 flex-col p-xl">
               {mark?.shape === "square" ? (
                 <div className="mb-lg flex items-start justify-between gap-md">
@@ -118,10 +121,31 @@ export function codeSpans(text: string): ReactNode {
   );
 }
 
-function Band({ src }: { src: string | null }) {
+/** The band mounts its `body` fallback only once it nears the viewport — the text counterpart of
+ *  the image's `loading="lazy"`, so a long listing reads only the excerpts the member scrolls to. */
+function Band({ src, body }: { src: string | null; body?: ReactNode }) {
   const [failed, setFailed] = useState(false);
+  const [neared, setNeared] = useState(false);
+  const mark = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = mark.current;
+    if (!node) return;
+    const watcher = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setNeared(true);
+        watcher.disconnect();
+      }
+    });
+    watcher.observe(node);
+    return () => watcher.disconnect();
+  }, []);
   return (
-    <div data-part="mark" aria-hidden className="h-(--size-band) w-full border-b border-edge bg-fill">
+    <div
+      ref={mark}
+      data-part="mark"
+      aria-hidden
+      className="h-(--size-band) w-full overflow-hidden border-b border-edge bg-fill"
+    >
       {src && !failed ? (
         <img
           loading="lazy"
@@ -130,6 +154,8 @@ function Band({ src }: { src: string | null }) {
           onError={() => setFailed(true)}
           className="size-full object-cover"
         />
+      ) : neared ? (
+        (body ?? null)
       ) : null}
     </div>
   );

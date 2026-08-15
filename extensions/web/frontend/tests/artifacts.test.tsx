@@ -457,6 +457,51 @@ test("an image artifact fills its band, and a dead link leaves the placeholder",
   await waitFor(() => expect(band.querySelector("img")).toBeNull());
 });
 
+test("a markdown artifact's band reads its first lines", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
+      if (url.includes("/workspace/artifacts"))
+        return json({
+          artifacts: [
+            artifact({ media_type: "text/markdown", filename: "notes.md", url: "/dl/notes.md" }),
+          ],
+        });
+      return new Response("# Verdict\n\nblocked, 2 defects");
+    }),
+  );
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("notes.md"),
+  );
+  const band = item?.querySelector('[data-part="mark"]') as HTMLElement;
+  await waitFor(() => expect(band.textContent).toContain("Verdict"));
+  expect(band.querySelector("[data-artifact-document]")).not.toBeNull();
+  expect(band.querySelector("img")).toBeNull();
+});
+
+test("a plain text artifact's band stays the placeholder", async () => {
+  only([artifact()]);
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("notes.txt"),
+  );
+  const band = item?.querySelector('[data-part="mark"]') as HTMLElement;
+  expect(band.querySelector("img")).toBeNull();
+  expect(band.textContent).toBe("");
+});
+
 test("a document's rendered page fills its band and its viewer", async () => {
   only([
     artifact({

@@ -27,6 +27,17 @@ function installWhatJsdomLacks() {
     unobserve() {}
     disconnect() {}
   };
+  globalThis.IntersectionObserver = class {
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) {
+      this.callback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        this as unknown as IntersectionObserver,
+      );
+    }
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof IntersectionObserver;
   globalThis.matchMedia = (media: string) => ({
     media,
     matches: false,

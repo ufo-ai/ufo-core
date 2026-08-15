@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Filter } from "@/components/ui/filter";
@@ -120,6 +120,24 @@ function siteCard(row: ObjectRow, viewer: string | null): Card {
     link: typeof row.site_url === "string" ? row.site_url : null,
     file: null,
   };
+}
+
+/** A markdown file's band reads its first lines as the document they render to, off the same link
+ *  the viewer reads whole — the one preview an already-shared file can grow without a re-render.
+ *  Other text stays pictureless: its characters render as themselves, which the viewer shows. The
+ *  excerpt is `inert`: the band is decoration, so nothing in it takes a press or the keyboard. */
+function bandExcerpt(file: Artifact | null): ReactNode {
+  if (!file?.url || file.media_type !== "text/markdown") return null;
+  return (
+    <div inert className="p-md">
+      <ArtifactText
+        url={file.url}
+        name={file.filename}
+        mediaType={file.media_type}
+        display="excerpt"
+      />
+    </div>
+  );
 }
 
 function fileCard(entry: Artifact, viewer: string | null): Card {
@@ -293,7 +311,11 @@ export function Artifacts({
               <CardGrid
                 rows={payload.cards}
                 rowKey={(card) => card.key}
-                mark={{ shape: "band", image: (card) => card.image }}
+                mark={{
+                  shape: "band",
+                  image: (card) => card.image,
+                  body: (card) => bandExcerpt(card.file),
+                }}
                 primary={(card) => card.name}
                 status={(card) => card.status}
                 body={(card) => card.body}
