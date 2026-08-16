@@ -3236,6 +3236,7 @@ async def test_the_cache_service_prefixes_a_package_host_to_its_daemon_route(db:
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
