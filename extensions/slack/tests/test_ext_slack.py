@@ -5414,13 +5414,16 @@ async def test_a_revoked_bot_token_kills_the_status_follower(
         ).scalar_one()
 
     deadline = time.monotonic() + 10
-    while not [r for r in caplog.records if r.message == "slack.thread_status.dead"]:
+    while turn_id in slack._STATUS_TASKS or not [
+        r for r in caplog.records if r.message == "slack.thread_status.dead"
+    ]:
         assert time.monotonic() < deadline, "a revoked token never reached the event log"
         await asyncio.sleep(0.01)
 
     dead = [r for r in caplog.records if r.message == "slack.thread_status.dead"]
     assert slack.SLACK_BOT_TOKEN_SLOT in dead[0].ufo["error"]
     assert dead[0].ufo["turn"] == str(turn_id)
+    assert turn_id not in slack._STATUS_TASKS
     assert not _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
     assert not any(record.message == "slack.thread_status.failed" for record in caplog.records)
 
@@ -6128,9 +6131,27 @@ async def test_a_progress_post_re_stamps_the_status_it_blanked(
     monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
     monkeypatch.setattr(slack, "PROGRESS_CAP_SECONDS", 30.0)
     assert slack.STATUS_REFRESH_SECONDS == 90.0
+    applying = slack.STATUS_DESCRIBED_TEXT.format(description="applying the migration")
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
-    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    base = _mock_transport(recorder, {})
+    applied = asyncio.Event()
+
+    async def after_status(request: httpx.Request) -> httpx.Response:
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
+            await asyncio.wait_for(applied.wait(), timeout=10)
+        response = base.handler(request)
+        if (
+            url == slack.SLACK_ASSISTANT_STATUS_URL
+            and json.loads(request.content)["status"] == applying
+        ):
+            applied.set()
+        return response
+
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(after_status), hub=hub
+    )
     mention = _event_body(
         type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> migrate"
     )
@@ -6148,7 +6169,6 @@ async def test_a_progress_post_re_stamps_the_status_it_blanked(
     status_task = slack._STATUS_TASKS[turn_id]
     await _arm_followers(workspace_id, turn_id, hub)
     progress_task = slack._PROGRESS_TASKS[turn_id]
-    applying = slack.STATUS_DESCRIBED_TEXT.format(description="applying the migration")
 
     await hub.publish(
         turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
@@ -6980,7 +7000,9 @@ async def test_a_dead_tail_abandons_the_progress_task_and_says_which(
     await _arm_followers(workspace_id, turn_id, hub)
 
     deadline = time.monotonic() + 10
-    while not [r for r in caplog.records if r.message == "slack.thread_progress.abandoned"]:
+    while turn_id in slack._PROGRESS_TASKS or not [
+        r for r in caplog.records if r.message == "slack.thread_progress.abandoned"
+    ]:
         assert time.monotonic() < deadline, "a dead tail never reached the event log"
         await asyncio.sleep(0.01)
 
@@ -7039,7 +7061,9 @@ async def test_a_revoked_bot_token_abandons_the_progress_task(
     await _arm_followers(workspace_id, turn_id, hub)
 
     deadline = time.monotonic() + 10
-    while not [r for r in caplog.records if r.message == "slack.thread_progress.abandoned"]:
+    while turn_id in slack._PROGRESS_TASKS or not [
+        r for r in caplog.records if r.message == "slack.thread_progress.abandoned"
+    ]:
         assert time.monotonic() < deadline, "a revoked token never reached the event log"
         await asyncio.sleep(0.01)
 

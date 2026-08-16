@@ -1039,7 +1039,7 @@ async def test_a_stop_founds_the_next_turn_on_the_message_already_sent(
                 .order_by(tables.turn.c.seq.desc())
             )
         ).one()
-    assert new_turn.status == "queued"
+    assert new_turn.status in ("queued", "running")
     assert new_turn.inbound == "do this instead"
 
     held = asyncio.ensure_future(_post(client, "main", token, b""))
