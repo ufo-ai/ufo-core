@@ -51,8 +51,12 @@ MAX_CONTEXT_RECORDS = 200
 MAX_SCOUT_INPUT_CHARS = 40_000
 MAX_FINDINGS = 5
 MAX_REFERENCES = 3
+MAX_COVERAGE_CHARS = 300
 MAX_PUBLIC_SOURCES = 8
 MAX_EDITION_ATTEMPTS = 3
+REFERENCE_COVERAGE = (
+    "Some references or findings were omitted because they were outside the supplied input."
+)
 URL = re.compile(r"https?://[^\s<>\])}]+")
 
 _metadata = sa.MetaData()
@@ -112,7 +116,7 @@ class Finding(BaseModel):
 
 class ScoutOutput(BaseModel):
     findings: tuple[Finding, ...] = Field(default=(), max_length=MAX_FINDINGS)
-    coverage: str = Field(max_length=300)
+    coverage: str = Field(max_length=MAX_COVERAGE_CHARS)
 
 
 SCOUTS = ("work", "missed-items", "pages-artifacts", "public-context")
@@ -299,7 +303,7 @@ async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
     }
     bounded_groups = {name: _bounded(records) for name, records in groups.items()}
 
-    async def scout(name: str) -> ScoutOutput:
+    async def scout(name: str) -> tuple[ScoutOutput, bool]:
         scout_records = bounded_groups[name]
         result = await ctx.spawn(
             f"sweep-{name}",
@@ -310,19 +314,34 @@ async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
             raise RuntimeError(f"{name} scout returned no output")
         output = ScoutOutput.model_validate(result.output)
         allowed_references = {record.ref for record in scout_records}
-        if any(
+        references_removed = any(
             reference not in allowed_references
             for finding in output.findings
             for reference in finding.references
-        ):
-            raise ValueError(f"{name} scout returned an unknown reference")
-        return output
+        )
+        findings = tuple(
+            finding.model_copy(
+                update={
+                    "references": tuple(
+                        reference
+                        for reference in finding.references
+                        if reference in allowed_references
+                    )
+                }
+            )
+            for finding in output.findings
+        )
+        coverage = output.coverage
+        if references_removed:
+            prefix = coverage[: MAX_COVERAGE_CHARS - len(REFERENCE_COVERAGE) - 1]
+            coverage = f"{prefix} {REFERENCE_COVERAGE}".strip()
+        return ScoutOutput(findings=findings, coverage=coverage), not references_removed
 
     results = await asyncio.gather(*(scout(name) for name in SCOUTS), return_exceptions=True)
     completed = {
         name: result
         for name, result in zip(SCOUTS, results, strict=True)
-        if isinstance(result, ScoutOutput)
+        if isinstance(result, tuple)
     }
     missing = tuple(name for name in SCOUTS if name not in completed)
     if len(completed) < 3:
@@ -334,9 +353,10 @@ async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
     seen: set[str] = set()
     emitted: list[str] = []
     for name in SCOUTS:
-        output = completed.get(name)
-        if output is None:
+        result = completed.get(name)
+        if result is None:
             continue
+        output, _ledger_safe = result
         for finding in output.findings:
             if finding.stable_subject_key in seen:
                 continue
@@ -349,7 +369,8 @@ async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
             findings.append({"section": name, **finding.model_dump(mode="json")})
     completed_input_keys = {
         record.stable_subject_key
-        for name in completed
+        for name, (_output, ledger_safe) in completed.items()
+        if ledger_safe
         if name != "public-context"
         for record in bounded_groups[name]
     }
@@ -385,7 +406,10 @@ async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
                 text=json.dumps(
                     {
                         "findings": findings,
-                        "coverage": {name: output.coverage for name, output in completed.items()},
+                        "coverage": {
+                            name: output.coverage
+                            for name, (output, _ledger_safe) in completed.items()
+                        },
                         "missing": missing,
                     },
                     separators=(",", ":"),

@@ -11,7 +11,9 @@ from ufo_ext_sweep.manifest import (
     AGENT_NAME,
     AGENT_PROMPT,
     FINAL_MODEL,
+    MAX_COVERAGE_CHARS,
     MAX_EDITION_ATTEMPTS,
+    REFERENCE_COVERAGE,
     SCOUT_MODEL,
     Finding,
     MemberContextRecord,
@@ -151,7 +153,7 @@ async def test_public_collection_sends_only_literal_public_urls() -> None:
     assert result[0].text == "Public result."
 
 
-async def test_sweep_rejects_a_scout_reference_outside_its_input(db: None, tmp_path: Path) -> None:
+async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_path: Path) -> None:
     workspace_id, member_id, agent_id, turn_id = await _seed()
     now = datetime.now(UTC)
     memory_ids = tuple(uuid4() for _ in range(30))
@@ -174,18 +176,38 @@ async def test_sweep_rejects_a_scout_reference_outside_its_input(db: None, tmp_p
             ),
         )
     memory_refs = {f"memory/{memory_id}" for memory_id in memory_ids}
+    supplied_by_profile: dict[str, set[str]] = {}
 
     async def spawn(profile: str, payload: dict, **kwargs: object) -> SimpleNamespace:
         supplied = {record["ref"] for record in payload["records"]}
-        references = (next(iter(memory_refs - supplied)),) if profile == "sweep-work" else ()
-        finding = Finding(
-            title=profile,
-            why_it_matters="It needs attention.",
-            information_date=datetime.now(UTC).date(),
-            stable_subject_key=profile,
-            references=references,
+        supplied_by_profile[profile] = supplied
+        references = (
+            (next(iter(supplied)), next(iter(memory_refs - supplied)))
+            if profile == "sweep-work"
+            else ()
         )
-        return SimpleNamespace(output=ScoutOutput(findings=(finding,), coverage="complete"))
+        findings = (
+            Finding(
+                title=profile,
+                why_it_matters="It needs attention.",
+                information_date=datetime.now(UTC).date(),
+                stable_subject_key=profile,
+                references=references,
+            ),
+            Finding(
+                title="Unsupported",
+                why_it_matters="It needs attention.",
+                information_date=datetime.now(UTC).date(),
+                stable_subject_key="unsupported",
+                references=(next(iter(memory_refs - supplied)),),
+            ),
+        )
+        return SimpleNamespace(
+            output=ScoutOutput(
+                findings=findings if profile == "sweep-work" else findings[:1],
+                coverage="x" * MAX_COVERAGE_CHARS if profile == "sweep-work" else "complete",
+            )
+        )
 
     with ws(workspace_id), agent(agent_id):
         ext = context_for(
@@ -209,13 +231,86 @@ async def test_sweep_rejects_a_scout_reference_outside_its_input(db: None, tmp_p
                     sa.select(
                         edition.c.candidate_cursor,
                         edition.c.candidate_input_keys,
+                        edition.c.candidate_finding_keys,
                     ).where(edition.c.turn_id == turn_id)
                 )
             ).one()
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == turn_id)
+                .values(status="done", terminal={"status": "done", "text": "Brief."})
+            )
+        await _finalize(ext, now)
+        second_conversation_id, second_turn_id = uuid4(), uuid4()
+        async with ext.transaction() as connection:
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=second_conversation_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    surface="extension:sweep",
+                    queue_key=f"daily-brief:{member_id}:2026-08-15",
+                    member_id=member_id,
+                    audience=str(conversation_audience(member_id)),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=second_turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=second_conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="running",
+                    inbound="Prepare the brief.",
+                    admission_source="scheduled",
+                    on_behalf_of_member_id=member_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await connection.execute(
+                sa.insert(edition).values(
+                    workspace_id=workspace_id,
+                    member_id=member_id,
+                    local_date="2026-08-15",
+                    timezone="UTC",
+                    status="pending",
+                    attempt=1,
+                    conversation_id=second_conversation_id,
+                    turn_id=second_turn_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        repeated = await _sweep(
+            SimpleNamespace(
+                ext=ext,
+                acting_member_id=member_id,
+                turn=SimpleNamespace(id=second_turn_id),
+                search_provider=None,
+                spawn=spawn,
+            ),
+            SweepInput(user_description="Preparing the brief."),
+        )
+    payload = json.loads(result.content[0].text)
     assert not result.is_error
-    assert json.loads(result.content[0].text)["missing"] == ["work"]
+    assert payload["missing"] == []
+    work = next(finding for finding in payload["findings"] if finding["section"] == "work")
+    assert len(work["references"]) == 1
+    assert work["references"][0] in supplied_by_profile["sweep-work"]
+    unsupported = next(
+        finding for finding in payload["findings"] if finding["stable_subject_key"] == "unsupported"
+    )
+    assert unsupported["references"] == []
+    assert REFERENCE_COVERAGE in payload["coverage"]["work"]
+    assert len(payload["coverage"]["work"]) == MAX_COVERAGE_CHARS
     assert row.candidate_input_keys == []
+    assert {"sweep-work", "unsupported"} <= set(row.candidate_finding_keys)
     assert row.candidate_cursor.replace(tzinfo=UTC) < now - timedelta(days=6)
+    assert json.loads(repeated.content[0].text)["findings"] == []
 
 
 async def test_sweep_ledgers_only_bounded_scout_input_and_keeps_the_cursor_open(
