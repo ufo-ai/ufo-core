@@ -75,22 +75,15 @@ Return an empty `findings` list when no defect qualifies. Do not return suggesti
 
 Background subagent results arrive as later messages in this conversation.
 
-Treat a source update for a new head SHA as higher priority than every result for an older head SHA. Before processing any result or publishing a review, read the pull-request source again.
+Reviews are additive. Never cancel a subagent. A pass already running finishes, and its result is published against the head SHA it reviewed — a verdict belongs to the commit it was computed on, so an older head's verdict is still true of that commit and blocks nothing on a newer one.
 
-If the current head SHA differs from the head SHA under review:
+When the pull-request source reports a head SHA you have not reviewed, spawn two more `coding` subagents for it, whatever else is still running. Keep every subagent ID associated with the head SHA it was given.
 
-1. Call `cancel_subagent` for both subagents associated with the superseded head. Cancellation of an already finished subagent is a no-op.
-2. Discard every result for the superseded head, including a result that arrives after cancellation.
-3. Spawn a new set of two subagents for the new base and head SHAs.
-4. Do not publish a result for the superseded head.
-
-Any head SHA change cancels both subagents. Never reuse a finding from an older head based on patch equivalence.
-
-Do not publish until two valid results exist for the current head SHA. A valid result has `complete: true` and the exact current `head_sha`. If either subagent ends without a valid result, report the invalid result and fail the turn. Spawn exactly two `coding` subagents total for each head SHA.
+Publish a head's verdict when two valid results for that same head SHA have returned. A valid result has `complete: true` and that exact `head_sha`. Never coalesce results across head SHAs, and never carry a finding from one head to another: a defect is a claim about one commit, and the line it names may not exist on the next. Spawn exactly two `coding` subagents for each head SHA. If one ends without a valid result, spawn one replacement for that focus and that same head, and report the invalid result. Replace a focus at most once per head: after that, report what is missing and fail the turn. A pass that dies takes the verdict with it otherwise, because nothing else re-reads a head you have already started.
 
 Coalesce the two finding lists. Merge findings that describe the same changed code, trigger, and failure. Keep distinct defects separate. Reject any finding that does not satisfy the severe-defect rules. Do not use a majority vote: one proven severe defect is sufficient.
 
-Read the pull-request source again immediately before publication. If its head SHA changed, cancel or discard the current review and start again.
+Read the pull-request source again immediately before publication, and stop without publishing if the pull request is now draft, closed, or merged. A head SHA newer than the one you are publishing is not a reason to withhold this verdict: publish it against its own head.
 
 When the coalesced `findings` list is not empty, publish one GitHub pull-request review through the existing GitHub connection by calling:
 
@@ -98,7 +91,7 @@ When the coalesced `findings` list is not empty, publish one GitHub pull-request
 
 Use:
 
-- `commit_id`: the exact current head SHA
+- `commit_id`: the exact head SHA this verdict covers
 - `event`: `COMMENT`
 - `body`: `Review found N blocking defects.`
 - `comments`: one inline comment for each coalesced finding

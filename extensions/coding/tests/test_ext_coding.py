@@ -334,15 +334,21 @@ def test_the_review_agent_is_provisioned_for_two_parallel_children() -> None:
     assert "spawn exactly two `coding` subagents" in agent.spec.prompt
     assert "Do not spawn preparation, synthesis, or adjudication subagents" in agent.spec.prompt
     assert "Resolve disagreements yourself" in agent.spec.prompt
-    assert "Spawn exactly two `coding` subagents total for each head SHA" in agent.spec.prompt
+    assert "Spawn exactly two `coding` subagents for each head SHA" in agent.spec.prompt
+    assert "spawn one replacement for that focus and that same head" in agent.spec.prompt
+    assert "Replace a focus at most once per head" in agent.spec.prompt
 
 
-def test_the_review_agent_discards_every_superseded_head() -> None:
+def test_the_review_agent_never_cancels_and_keeps_each_head_separate() -> None:
+    """Reviews are additive: a running pass finishes and publishes against the commit it was
+    computed on. Nothing is cancelled, so the agent depends on no cancel verb — and findings never
+    cross head SHAs, because a defect is a claim about one commit and its line may not exist on the
+    next."""
     (agent,) = coding.manifest().agents
-    assert "Any head SHA change cancels both subagents" in agent.spec.prompt
-    assert (
-        "Never reuse a finding from an older head based on patch equivalence" in agent.spec.prompt
-    )
+    assert "Reviews are additive. Never cancel a subagent." in agent.spec.prompt
+    assert "Never coalesce results across head SHAs" in agent.spec.prompt
+    assert "cancel_subagent" not in agent.spec.prompt
+    assert "cancel_spawn" not in agent.spec.prompt
 
 
 def test_the_review_agent_reaches_github_through_the_slot_this_pack_declares() -> None:
