@@ -278,7 +278,13 @@ class ScheduleStore:
         paused: bool,
     ) -> ScheduledTask:
         """Update one exact recurring task without changing its immutable identity — `paused` has
-        no preserving default, so every caller states whether the task keeps firing."""
+        no preserving default, so every caller states whether the task keeps firing.
+
+        What the task ran is not what the task says: `last_run_at` and `last_turn_id` record the
+        fires that happened and are never rewritten here, so a member editing the prompt or the
+        cadence keeps the run history and the latest response the status read renders. Only the
+        claim is released — the leased version no longer exists, so the tick holding it fires
+        nothing and the edited row waits for its own next occurrence."""
         agent_id = object_agent_id()
         if expected.agent_id != agent_id:
             raise ValueError("scheduled task executor changed while editing")
@@ -300,8 +306,6 @@ class ScheduleStore:
                             prompt=prompt,
                             description=description,
                             next_run_at=next_run_at,
-                            last_run_at=None,
-                            last_turn_id=None,
                             expires_at=expires_at,
                             claimed_by=None,
                             claim_expires_at=None,

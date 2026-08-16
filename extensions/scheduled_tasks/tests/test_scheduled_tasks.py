@@ -829,6 +829,74 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         assert status["last_run"]["response"] == "found 3 new replies"
 
 
+async def test_re_applying_a_manifest_keeps_the_recorded_run(db: None) -> None:
+    """Re-applying an existing task's manifest changes what the task says, never what it did: the
+    last fire's time, its turn, and that turn's response all read back after the update."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    store = _store()
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id), agent(agent_id):
+        await store.create(
+            conversation_id,
+            "competitive-intel-daily",
+            DAILY_9AM,
+            "summarize what competitors shipped",
+            "competitive intel",
+            due_at,
+            created_by_member_id=creator,
+        )
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        [turn] = await _turns(conversation_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="done",
+                    terminal={"status": "done", "text": "three competitors moved"},
+                )
+                .where(tables.turn.c.id == turn["id"])
+            )
+        fired = (await store.list())[0]
+        applied = json.loads(
+            await _dispatch(
+                _object_tool("object_apply"),
+                ctx,
+                manifest=_task_manifest(
+                    "competitive-intel-daily",
+                    DAILY_9AM,
+                    "summarize what competitors shipped and price",
+                    "competitive intel",
+                ),
+            )
+        )
+        fetched = yaml.safe_load(
+            await _dispatch(
+                _object_tool("object_get"),
+                ctx,
+                kind=SCHEDULED_TASK_KIND,
+                name="competitive-intel-daily",
+            )
+        )
+        edited = (await store.list())[0]
+
+    assert applied["result"] == "updated"
+    assert fired.last_run_at is not None
+    assert edited.prompt == "summarize what competitors shipped and price"
+    assert edited.last_run_at == fired.last_run_at
+    assert fetched["status"]["last_run_at"] == fired.last_run_at.isoformat()
+    assert fetched["status"]["last_run"] == {
+        "turn_id": str(turn["id"]),
+        "turn_status": "done",
+        "response": "three competitors moved",
+    }
+
+
 async def test_runner_replaces_final_permitted_fire_with_check_in(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     tick_at = datetime.now(UTC)
@@ -1860,6 +1928,46 @@ async def test_update_preserves_the_original_creator(db: None) -> None:
     assert second.created_by_member_id == creator
     assert tasks[0].created_by_member_id == creator
     assert tasks[0].schedule == "0 17 * * 1"
+
+
+async def test_update_preserves_the_marks_of_the_last_fire(db: None) -> None:
+    """An edit states the definition, so `update` takes no run marks at all: the fire time and the
+    turn a fire recorded survive it, and only the claim is released."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    store = _store()
+    ran_at = datetime(2026, 8, 15, 9, tzinfo=UTC)
+    fired_turn = uuid4()
+    with ws(workspace_id), agent(agent_id):
+        await store.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "v1",
+            "v1",
+            datetime.now(UTC) - timedelta(minutes=1),
+            created_by_member_id=creator,
+        )
+        [claimed] = await store.claim_due(datetime.now(UTC), 300)
+        assert await store.reschedule(claimed, next_fire(DAILY_9AM, ran_at), ran_at, fired_turn)
+        ran = (await store.list())[0]
+        edited = await store.update(
+            ran,
+            "0 17 * * 1",
+            "v2",
+            "v2",
+            next_fire("0 17 * * 1", ran_at),
+            paused=False,
+        )
+        inspection = await store.inspect(edited)
+
+    assert ran.last_run_at == ran_at
+    assert edited.prompt == "v2"
+    assert edited.last_run_at == ran_at
+    assert edited.claim_id is None
+    assert inspection is not None
+    assert inspection.last_run_at == ran_at
+    assert inspection.last_turn_id == fired_turn
 
 
 async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
