@@ -130,7 +130,8 @@ signed by the one deploy secret and name their own domain, so the wire cannot pa
 other."""
 
 RuleResolver = Callable[["EgressPrincipal | None"], Awaitable[tuple[Rule, ...]]]
-TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
+TurnAuthorizer = Callable[["RunToken"], Awaitable[int | None]]
+RulesGenerationReader = Callable[[UUID], Awaitable[int]]
 PublicAddressResolver = Callable[[str, int], Awaitable[str]]
 
 
@@ -156,6 +157,7 @@ exactly what its rules derive from."""
 class _CachedRules:
     expires_at: float
     rules: tuple[Rule, ...]
+    generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,24 +380,51 @@ class PerAgentRules:
             if not (isinstance(rule, InjectionRule) and SENTINEL_MODEL_KEY in rule.sentinel)
         )
 
-    async def turn_live(self, run: RunToken) -> bool:
-        """The egress-authorization gate: True only while the run token names a turn the DB still
-        reports running. A keyed host's real-key injection is applied only for a live turn, so a
-        token for a turn that has ended, a turn that never existed, or (checked before this) no
-        token at all is denied at CONNECT and the key never reaches the wire. Read fresh per request
-        — never the per-turn rule cache — so a turn that ends between requests can no longer draw
-        the key, and it costs one indexed lookup on the turn's primary key."""
+    async def turn_live(self, run: RunToken) -> int | None:
+        """The egress-authorization gate: the workspace's egress-rules generation while the run
+        token names a turn the DB still reports running, None otherwise. A keyed host's real-key
+        injection is applied only for a live turn, so a token for a turn that has ended, a turn
+        that never existed, or (checked before this) no token at all is denied at CONNECT and the
+        key never reaches the wire. Read fresh per request — never the per-turn rule cache — so a
+        turn that ends between requests can no longer draw the key; the generation rides the same
+        one indexed read, so the rule cache pins what it derived from without a second
+        round-trip."""
         with ws(run.workspace_id):
             async with workspace_tx() as connection:
-                status = (
+                row = (
                     await connection.execute(
-                        sa.select(tables.turn.c.status).where(
+                        sa.select(
+                            tables.turn.c.status,
+                            tables.workspace.c.egress_rules_generation,
+                        )
+                        .select_from(
+                            tables.turn.join(
+                                tables.workspace,
+                                tables.workspace.c.id == tables.turn.c.workspace_id,
+                            )
+                        )
+                        .where(
                             tables.turn.c.id == run.turn_id,
                             tables.turn.c.workspace_id == run.workspace_id,
                         )
                     )
-                ).scalar_one_or_none()
-        return status == RUNNING
+                ).one_or_none()
+        if row is None or row.status != RUNNING:
+            return None
+        return row.egress_rules_generation
+
+    async def rules_generation(self, workspace_id: UUID) -> int:
+        """The workspace's egress-rules counter, read fresh — the probe path's per-CONNECT read;
+        a run token's rides `turn_live`."""
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                return (
+                    await connection.execute(
+                        sa.select(tables.workspace.c.egress_rules_generation).where(
+                            tables.workspace.c.id == workspace_id
+                        )
+                    )
+                ).scalar_one()
 
 
 @dataclass
@@ -405,6 +434,7 @@ class EgressProxy:
     ca_cert: str
     ca_key: str
     run_tokens: RunTokenCodec
+    generation: RulesGenerationReader
     resolve_public: PublicAddressResolver | None = None
     pricing: Pricing = CORE_PRICING
     cache_daemon: tuple[str, int] | None = None
@@ -420,7 +450,7 @@ class EgressProxy:
     )
     _meter_worker: asyncio.Task[None] | None = field(default=None, init=False)
     _rule_cache: dict[_RuleKey, _CachedRules] = field(default_factory=dict, init=False)
-    _rule_tasks: dict[_RuleKey, asyncio.Task[tuple[Rule, ...]]] = field(
+    _rule_tasks: dict[tuple[_RuleKey, int], asyncio.Task[tuple[Rule, ...]]] = field(
         default_factory=dict, init=False
     )
 
@@ -541,11 +571,11 @@ class EgressProxy:
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
             try:
-                authorized = await self._authorized(principal)
+                generation = await self._authorized(principal)
             except Exception:
                 await _respond(writer, 503, EGRESS_AUTHORIZATION_UNAVAILABLE)
                 return
-            if not authorized:
+            if generation is None:
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
             workspace_connections = self._workspace_connections.get(principal.workspace_id, 0)
@@ -555,7 +585,7 @@ class EgressProxy:
             self._workspace_connections[principal.workspace_id] = workspace_connections + 1
             workspace_connection = principal.workspace_id
             try:
-                rules = await self._rules_for(principal)
+                rules = await self._rules_for(principal, generation)
             except Exception:
                 await _respond(writer, 503, EGRESS_AUTHORIZATION_UNAVAILABLE)
                 return
@@ -607,19 +637,24 @@ class EgressProxy:
             self._active_connections -= 1
             self._connection_tasks.discard(task)
 
-    async def _authorized(self, principal: EgressPrincipal) -> bool:
-        """The egress-authorization gate, decided fresh per CONNECT. A run token is authorized
+    async def _authorized(self, principal: EgressPrincipal) -> int | None:
+        """The egress-authorization gate, decided fresh per CONNECT: the workspace's egress-rules
+        generation when the principal is authorized, None when it is not. A run token is authorized
         while the DB still reports its turn running, so a key injected for a turn cannot be drawn
-        once that turn ends. A probe token names no turn to read: it carries its own deadline, is
-        authorized until that deadline passes, and nothing renews it — so a probe's egress can never
-        outlive the one exec it was minted for, and the check costs a comparison, not a query."""
+        once that turn ends; its generation rides the same indexed read. A probe token names no
+        turn to read: it carries its own deadline, is authorized until that deadline passes, and
+        nothing renews it — so a probe's egress can never outlive the one exec it was minted for —
+        and its generation is one fresh workspace read, so a revoked grant leaves a probe's cached
+        rules exactly as it leaves a turn's."""
         match principal:
             case ProbeToken():
-                return principal.expires_at > int(datetime.now(UTC).timestamp())
+                if principal.expires_at <= int(datetime.now(UTC).timestamp()):
+                    return None
+                return await self.generation(principal.workspace_id)
             case RunToken():
                 return await self._turn_authorized(principal)
 
-    async def _turn_authorized(self, run: RunToken) -> bool:
+    async def _turn_authorized(self, run: RunToken) -> int | None:
         """The turn-liveness gate, whose fault is recorded here and raised on. Both authorization
         faults — this and rule resolution — log once where they are raised, so `_handle` answers
         each the same way and never writes a second record for one fault."""
@@ -634,28 +669,37 @@ class EgressProxy:
             )
             raise
 
-    async def _rules_for(self, principal: EgressPrincipal | None) -> tuple[Rule, ...]:
+    async def _rules_for(
+        self, principal: EgressPrincipal | None, generation: int | None = None
+    ) -> tuple[Rule, ...]:
         """The resolved rule set for this principal's agent, bounded and refreshed before an
-        injected short-lived credential can expire. Concurrent misses for one principal share one
-        resolution. A
-        resolution error fails closed with a service error, is not cached, and is recorded once by
-        that shared resolution rather than once per connection waiting on it."""
+        injected short-lived credential can expire. `generation` is the CONNECT's fresh read of
+        the workspace's egress-rules counter: a cached entry answers only while it matches, so a
+        revoked grant, a share flip, or a rotated key re-derives at the next CONNECT instead of
+        waiting out the TTL. Concurrent misses for one principal and generation share one
+        resolution — a mutation mid-resolution starts its own, since its CONNECT read a newer
+        counter after the mutation committed. A resolution error fails closed with a service
+        error, is not cached, and is recorded once by that shared resolution rather than once per
+        connection waiting on it."""
         if principal is None:
             return await self.resolve(None)
+        pinned = 0 if generation is None else generation
         key = _rule_key(principal)
         hit = self._rule_cache.get(key)
-        if hit is not None and hit.expires_at > time.monotonic():
+        if hit is not None and hit.expires_at > time.monotonic() and hit.generation == pinned:
             return hit.rules
         if hit is not None:
             del self._rule_cache[key]
-        task = self._rule_tasks.get(key)
+        task = self._rule_tasks.get((key, pinned))
         if task is None:
-            task = asyncio.create_task(self._resolve_rules(key, principal))
+            task = asyncio.create_task(self._resolve_rules(key, principal, pinned))
             task.add_done_callback(_read_fault)
-            self._rule_tasks[key] = task
+            self._rule_tasks[(key, pinned)] = task
         return await asyncio.shield(task)
 
-    async def _resolve_rules(self, key: _RuleKey, principal: EgressPrincipal) -> tuple[Rule, ...]:
+    async def _resolve_rules(
+        self, key: _RuleKey, principal: EgressPrincipal, generation: int
+    ) -> tuple[Rule, ...]:
         task = asyncio.current_task()
         try:
             try:
@@ -671,12 +715,14 @@ class EgressProxy:
             if len(self._rule_cache) >= RULE_CACHE_MAX:
                 del self._rule_cache[next(iter(self._rule_cache))]
             self._rule_cache[key] = _CachedRules(
-                expires_at=time.monotonic() + RULE_CACHE_TTL_SECONDS, rules=rules
+                expires_at=time.monotonic() + RULE_CACHE_TTL_SECONDS,
+                rules=rules,
+                generation=generation,
             )
             return rules
         finally:
-            if self._rule_tasks.get(key) is task:
-                del self._rule_tasks[key]
+            if self._rule_tasks.get((key, generation)) is task:
+                del self._rule_tasks[(key, generation)]
 
     def _principal(self, proxy_auth: str) -> EgressPrincipal | None:
         """The signed identity this CONNECT carries, or None when it carries none this deployment

@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo import o11y
 from ufo.accounting import record_turn_usage
 from ufo.audience import Audience, audience_subjects, conversation_audience
+from ufo.balance import credit, set_reserve
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import (
@@ -833,6 +834,7 @@ async def _seed_turn(
     terminal: TerminalFrame | None,
     seq: int = 1,
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION,
+    acts_on_behalf: bool = False,
 ) -> Turn:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
@@ -884,7 +886,7 @@ async def _seed_turn(
                 inbound="hi",
                 admission_source=admission_source,
                 on_behalf_of_member_id=(
-                    member_id if admission_source == SCHEDULED_ADMISSION else None
+                    member_id if acts_on_behalf or admission_source == SCHEDULED_ADMISSION else None
                 ),
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 created_at=ADMITTED_AT,
@@ -900,7 +902,9 @@ async def _seed_turn(
         status=status,
         inbound="hi",
         admission_source=admission_source,
-        on_behalf_of_member_id=(member_id if admission_source == SCHEDULED_ADMISSION else None),
+        on_behalf_of_member_id=(
+            member_id if acts_on_behalf or admission_source == SCHEDULED_ADMISSION else None
+        ),
         created_at=ADMITTED_AT,
         terminal=terminal,
     )
@@ -4740,6 +4744,54 @@ async def test_per_round_seat_gate_parks_a_scheduled_turn_for_an_unseated_member
     engine = _engine(turn, EchoModel(), tmp_path, memory=MemorySearch(StaticMemorySearch()))
     with pytest.raises(TurnParked, match="seat was revoked"):
         await engine.run()
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert status == "parked"
+
+
+async def test_per_round_seat_gate_parks_an_internal_turn_acting_for_an_unseated_member(
+    db: None, tmp_path: Path
+) -> None:
+    """A subagent turn and a monitor fire carry an on-behalf member without the scheduled stamp;
+    the gate is the authority, not the stamp, so a revoke reaches them mid-run all the same."""
+    turn = await _seed_turn("queued", None, acts_on_behalf=True)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .values(seated_at=None, updated_at=sa.func.now())
+            .where(tables.member.c.workspace_id == turn.workspace_id)
+        )
+    engine = _engine(turn, EchoModel(), tmp_path, memory=MemorySearch(StaticMemorySearch()))
+    with pytest.raises(TurnParked, match="seat was revoked"):
+        await engine.run()
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert status == "parked"
+
+
+async def test_per_round_balance_hold_parks_a_running_turn(db: None, tmp_path: Path) -> None:
+    """No cap applies, so the caps fast-path alone would skip the mid-run decision; the balance
+    gate must still hold the next round when the balance falls under its reserve mid-turn."""
+    turn = await _seed_turn("queued", None)
+
+    class _DrainingModel(ToolCallingModel):
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            async with workspace_tx() as connection:
+                await credit(connection, turn.workspace_id, 1_000_000, 1_000_000, "first")
+                await set_reserve(connection, turn.workspace_id, 2_000_000)
+            async for event in super().complete(request):
+                yield event
+
+    with pytest.raises(TurnParked, match="balance"):
+        await _engine(turn, _DrainingModel(), tmp_path).run()
     async with workspace_tx() as connection:
         status = (
             await connection.execute(

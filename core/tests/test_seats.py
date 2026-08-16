@@ -330,13 +330,12 @@ def test_migration_seats_every_member_and_drops_the_seat_bounds(tmp_path: Path) 
     assert "included_seats" not in columns
 
 
-def test_gate_member_is_the_speaker_else_the_scheduled_acting_member() -> None:
+def test_gate_member_is_the_speaker_else_the_acting_member() -> None:
     speaker, acting = uuid4(), uuid4()
-    assert gate_member(speaker, MEMBER_ADMISSION, acting) == speaker
-    assert gate_member(speaker, SCHEDULED_ADMISSION, acting) == speaker
-    assert gate_member(None, SCHEDULED_ADMISSION, acting) == acting
-    assert gate_member(None, SCHEDULED_ADMISSION, None) is None
-    assert gate_member(None, INTERNAL_ADMISSION, acting) is None
+    assert gate_member(speaker, acting) == speaker
+    assert gate_member(speaker, None) == speaker
+    assert gate_member(None, acting) == acting
+    assert gate_member(None, None) is None
 
 
 async def test_sweep_holds_a_scheduled_turn_for_an_unseated_creator(db: None) -> None:

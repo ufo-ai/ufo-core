@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ufo.balance import BALANCE_HELD_MESSAGE, held_below_reserve
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
@@ -636,18 +637,21 @@ class SpendDecision:
 
 @dataclass(frozen=True)
 class SpendEvaluator:
-    """Decide whether a turn may run under the workspace's caps: read every cap that applies to this
-    turn's workspace, member, and agent, sum the priced ledger over each cap's rolling window, and
-    return allow / park / reject. Every applicable cap must have headroom (the tightest binds); a
-    breach parks unless any breached cap rejects, in which case reject wins. `decide` is the whole
-    workflow, its `_` steps beneath it in execution order; the caller supplies the connection so the
-    same decision runs inside an admission transaction or a fresh read at a mid-turn step."""
+    """Decide whether a turn may run under the workspace's balance and caps: a balance under its
+    reserve parks outright, then every cap that applies to this turn's workspace, member, and
+    agent is read, the priced ledger summed over each cap's rolling window, and the answer is
+    allow / park / reject. Every applicable cap must have headroom (the tightest binds); a breach
+    parks unless any breached cap rejects, in which case reject wins. `decide` is the whole
+    workflow, its `_` steps beneath it in execution order; the caller supplies the connection so
+    the same decision runs inside an admission transaction or a fresh read at a mid-turn step."""
 
     workspace_id: UUID
     member_id: UUID | None
     agent_id: UUID
 
     async def decide(self, connection: AsyncConnection, pending_micro_usd: int) -> SpendDecision:
+        if await held_below_reserve(connection, self.workspace_id):
+            return SpendDecision(outcome=PARK, message=BALANCE_HELD_MESSAGE)
         caps = await self._applicable_caps(connection)
         key = (self.workspace_id, self.member_id, self.agent_id)
         if not caps:

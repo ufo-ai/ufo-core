@@ -431,7 +431,6 @@ class Admission:
                     if live_turn is None or live_turn.status != PARKED
                     else gate_member(
                         live_turn.speaker_member_id,
-                        live_turn.admission_source,
                         live_turn.on_behalf_of_member_id,
                     )
                 )
@@ -544,7 +543,7 @@ class Admission:
                     if as_scheduled
                     else INTERNAL_ADMISSION
                 )
-                gate = gate_member(speaker_member_id, admission_source, on_behalf_of_member_id)
+                gate = gate_member(speaker_member_id, on_behalf_of_member_id)
                 terminal: TerminalFrame | None
                 if gate is None and member_admission:
                     status, terminal = (

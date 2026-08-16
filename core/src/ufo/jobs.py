@@ -133,11 +133,7 @@ class TurnDispatcher:
         for turn in await self._dispatchable_turns():
             if turn.status == PARKED:
                 async with workspace_tx() as connection:
-                    gate = gate_member(
-                        turn.speaker_member_id,
-                        turn.admission_source,
-                        turn.on_behalf_of_member_id,
-                    )
+                    gate = gate_member(turn.speaker_member_id, turn.on_behalf_of_member_id)
                     members = {gate} if gate is not None else set()
                     members.update(
                         (

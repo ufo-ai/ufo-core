@@ -868,6 +868,41 @@ async def test_an_as_scheduled_fire_is_seat_gated_on_the_member_it_acts_for(db: 
     assert dbos.enqueued == []
 
 
+async def test_an_internal_fire_is_seat_gated_on_the_member_it_acts_for(db: None) -> None:
+    """A monitor fire and a delivered subagent result carry an on-behalf member without the
+    scheduled stamp; the gate is the authority, not the stamp — an admin's revoke stops that
+    member's work whatever admitted it, and work the ledger already booked is held, not
+    discarded."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    await _unseat(member_id)
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+
+    refused = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "run the errand",
+        "errand:1",
+        on_behalf_of_member_id=member_id,
+    )
+    held = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "<subagent_result …>",
+        "delivery:1",
+        on_behalf_of_member_id=member_id,
+        holds_work_already_done=True,
+    )
+
+    assert refused is not None
+    assert held is not None
+    assert await _turn_row(refused) == ("cancelled", SEAT_REFUSAL_MESSAGE)
+    assert await _turn_row(held) == ("parked", None)
+    assert dbos.enqueued == []
+
+
 async def test_a_member_turn_past_the_armed_seq_supersedes_a_fire(db: None) -> None:
     """The member got there first, so the fire is refused and writes nothing — no turn to answer
     and no arrival waiting for one."""

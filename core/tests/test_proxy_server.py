@@ -87,6 +87,12 @@ from ufo.workspace import ws, ws_current
 
 SEARCH_HOST = "api.search.test"
 MODEL_HOST = "api.anthropic.com"
+GRANTED_HOST = "api.granted.test"
+
+
+async def _zero_generation(_workspace_id: UUID) -> int:
+    return 0
+
 
 FULL_TOKEN_USAGE = Usage(
     input_tokens=1000,
@@ -183,6 +189,7 @@ def _egress(resolver: PerAgentRules, ca_cert: str = "x", ca_key: str = "x") -> E
     return EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=ca_cert,
         ca_key=ca_key,
         run_tokens=RUN_TOKENS,
@@ -314,6 +321,7 @@ async def test_a_resolution_error_is_not_cached_or_disguised_as_policy(
     proxy = EgressProxy(
         resolve=flaky,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -348,13 +356,14 @@ async def test_a_resolution_error_is_service_unavailable_not_egress_denied(
             return base
         raise RuntimeError("rules unavailable")
 
-    async def authorize(_run: RunToken) -> bool:
-        return True
+    async def authorize(_run: RunToken) -> int | None:
+        return 0
 
     cert, key = await generate_ca()
     proxy = EgressProxy(
         resolve=resolve,
         authorize=authorize,
+        generation=_zero_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -387,6 +396,7 @@ async def test_concurrent_rule_cache_misses_share_one_resolution() -> None:
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -418,6 +428,7 @@ async def test_concurrent_rule_cache_misses_share_one_failure(
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -462,6 +473,7 @@ async def test_cancelled_rule_waiter_leaves_shared_resolution_owned() -> None:
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -472,7 +484,7 @@ async def test_cancelled_rule_waiter_leaves_shared_resolution_owned() -> None:
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    shared = proxy._rule_tasks[run]
+    shared = proxy._rule_tasks[(run, 0)]
     release.set()
     await shared
     assert proxy._rule_tasks == {}
@@ -496,6 +508,7 @@ async def test_a_detached_failing_rule_resolution_is_never_reported_by_asyncio(
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -506,7 +519,7 @@ async def test_a_detached_failing_rule_resolution_is_never_reported_by_asyncio(
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    detached = proxy._rule_tasks[run]
+    detached = proxy._rule_tasks[(run, 0)]
     release.set()
     with caplog.at_level(logging.ERROR, logger="asyncio"):
         await asyncio.wait({detached})
@@ -531,6 +544,7 @@ async def test_stop_drains_a_detached_failing_rule_resolution() -> None:
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -541,7 +555,7 @@ async def test_stop_drains_a_detached_failing_rule_resolution() -> None:
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    shared = proxy._rule_tasks[run]
+    shared = proxy._rule_tasks[(run, 0)]
     try:
         await proxy.stop()
         assert finished.is_set()
@@ -569,6 +583,7 @@ async def test_a_cancelled_rule_resolution_reaches_no_loop_exception_handler(
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -579,7 +594,7 @@ async def test_a_cancelled_rule_resolution_reaches_no_loop_exception_handler(
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    orphan = proxy._rule_tasks[run]
+    orphan = proxy._rule_tasks[(run, 0)]
     loop = asyncio.get_running_loop()
     unhandled: list[dict] = []
     previous = loop.get_exception_handler()
@@ -619,6 +634,7 @@ async def test_stop_waits_out_the_grace_window_for_an_orphaned_rule_resolution()
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -629,7 +645,7 @@ async def test_stop_waits_out_the_grace_window_for_an_orphaned_rule_resolution()
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    orphan = proxy._rule_tasks[run]
+    orphan = proxy._rule_tasks[(run, 0)]
     releaser = asyncio.create_task(let_cleanup_finish())
     try:
         await proxy.stop(graceful_shutdown_seconds=STOP_DEADLINE_SECONDS)
@@ -657,6 +673,7 @@ async def test_stop_leaves_a_rule_resolution_that_outlives_its_cancel_pending() 
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -667,7 +684,7 @@ async def test_stop_leaves_a_rule_resolution_that_outlives_its_cancel_pending() 
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    orphan = proxy._rule_tasks[run]
+    orphan = proxy._rule_tasks[(run, 0)]
     try:
         await asyncio.wait_for(proxy.stop(), timeout=STOP_DEADLINE_SECONDS)
         assert not orphan.done()
@@ -694,15 +711,16 @@ async def test_stop_spends_one_grace_window_across_both_drains() -> None:
             await asyncio.sleep(ORPHAN_CLEANUP_SECONDS)
         return ()
 
-    async def authorize(_run: RunToken) -> bool:
+    async def authorize(_run: RunToken) -> int | None:
         connection_parked.set()
         await asyncio.Future()
-        return True
+        return 0
 
     cert, key = await generate_ca()
     proxy = EgressProxy(
         resolve=resolve,
         authorize=authorize,
+        generation=_zero_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -722,7 +740,7 @@ async def test_stop_spends_one_grace_window_across_both_drains() -> None:
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    orphan = proxy._rule_tasks[run]
+    orphan = proxy._rule_tasks[(run, 0)]
     try:
         await proxy.stop(graceful_shutdown_seconds=GRACE_WINDOW_SECONDS)
         assert cleanup_started.is_set()
@@ -748,6 +766,7 @@ async def test_rule_cache_refreshes_before_injected_tokens_expire(
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="",
         ca_key="",
         run_tokens=RUN_TOKENS,
@@ -1288,6 +1307,7 @@ async def test_proxy_connection_limit_preserves_capacity_between_workspaces(
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -1326,7 +1346,7 @@ async def test_a_db_fault_in_the_authorize_gate_returns_service_unavailable(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
 
-    async def refused(run: RunToken) -> bool:
+    async def refused(run: RunToken) -> int | None:
         raise ConnectionRefusedError("db connection refused")
 
     rules = (
@@ -1337,6 +1357,7 @@ async def test_a_db_fault_in_the_authorize_gate_returns_service_unavailable(
     proxy = EgressProxy(
         resolve=_fixed(rules).resolve,
         authorize=refused,
+        generation=_zero_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -1391,8 +1412,8 @@ async def test_keyed_host_connect_denied_without_a_live_turn(db: None) -> None:
         assert await _connect(endpoint.port, MODEL_HOST, ended) == 403
         unknown = RUN_TOKENS.encode(RunToken(workspace_id, uuid4()))
         assert await _connect(endpoint.port, MODEL_HOST, unknown) == 403
-        assert await proxy.authorize(RunToken(workspace_id, running_turn)) is True
-        assert await proxy.authorize(RunToken(workspace_id, ended_turn)) is False
+        assert await proxy.authorize(RunToken(workspace_id, running_turn)) is not None
+        assert await proxy.authorize(RunToken(workspace_id, ended_turn)) is None
     finally:
         await proxy.stop()
 
@@ -1400,8 +1421,8 @@ async def test_keyed_host_connect_denied_without_a_live_turn(db: None) -> None:
 async def test_exact_scope_tunnel_requires_a_live_turn() -> None:
     resolutions = 0
 
-    async def ended(_run: RunToken) -> bool:
-        return False
+    async def ended(_run: RunToken) -> int | None:
+        return None
 
     rules = (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
 
@@ -1414,6 +1435,7 @@ async def test_exact_scope_tunnel_requires_a_live_turn() -> None:
     proxy = EgressProxy(
         resolve=resolve,
         authorize=ended,
+        generation=_zero_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -1439,6 +1461,7 @@ async def test_forged_run_token_is_rejected_before_rule_resolution() -> None:
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -1515,6 +1538,43 @@ async def test_agent_internet_policy_is_cached_for_the_turn(db: None) -> None:
         await proxy.stop()
 
 
+async def test_a_revoked_grant_invalidates_the_cached_rules(db: None) -> None:
+    """The rule cache pins the workspace's egress-rules generation, so a revoke reaches the next
+    CONNECT instead of waiting out the cache TTL — the wire is where grant scoping is enforced,
+    and a wire that keeps honoring a revoked grant for minutes is not enforcing it."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    store = GrantStore()
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        await store.record(
+            provider="stub",
+            account_id="acct-1",
+            host=GRANTED_HOST,
+            grantor_member_id=seeded.member_id,
+            conversation_id=seeded.conversation_id,
+            shared=False,
+        )
+    resolver = PerAgentRules(base=(), grants=GrantStore())
+    proxy = _egress(resolver)
+    run = RunToken(seeded.workspace_id, seeded.turn_id)
+
+    def admits_granted_host(rules: tuple[object, ...]) -> bool:
+        return any(
+            isinstance(rule, ScopeRule) and GRANTED_HOST in rule.allowed_hosts for rule in rules
+        )
+
+    granted_generation = await resolver.turn_live(run)
+    assert granted_generation is not None
+    assert admits_granted_host(await proxy._rules_for(run, granted_generation))
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        (grant,) = await store.active_grants()
+        assert await store.revoke(grant.id, actor_member_id=seeded.member_id)
+    revoked_generation = await resolver.turn_live(run)
+    assert revoked_generation is not None
+    assert revoked_generation > granted_generation
+    assert not admits_granted_host(await proxy._rules_for(run, revoked_generation))
+
+
 async def test_public_internet_tunnels_and_meters_a_live_turn(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id, *_ = await _seed_turn(connection)
@@ -1529,6 +1589,7 @@ async def test_public_internet_tunnels_and_meters_a_live_turn(db: None) -> None:
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -1610,6 +1671,7 @@ async def test_real_git_reaches_the_public_internet_only_with_the_proxy_auth_con
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -1796,6 +1858,7 @@ async def test_an_expired_probe_token_is_refused_before_rule_resolution() -> Non
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_zero_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -1805,8 +1868,8 @@ async def test_an_expired_probe_token_is_refused_before_rule_resolution() -> Non
     try:
         expired = _probe(workspace_id, conversation_id, ttl_seconds=-1)
         assert await _connect(endpoint.port, MODEL_HOST, PROBE_TOKENS.encode(expired)) == 403
-        assert await proxy._authorized(expired) is False
-        assert await proxy._authorized(_probe(workspace_id, conversation_id)) is True
+        assert await proxy._authorized(expired) is None
+        assert await proxy._authorized(_probe(workspace_id, conversation_id)) is not None
     finally:
         await proxy.stop()
     assert resolutions == 0
@@ -1824,6 +1887,7 @@ async def test_a_forged_probe_token_is_rejected_before_rule_resolution() -> None
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -2886,6 +2950,7 @@ async def test_two_probes_of_one_watch_share_one_rule_resolution(db: None) -> No
     proxy = EgressProxy(
         resolve=resolve,
         authorize=_fixed().turn_live,
+        generation=_fixed().rules_generation,
         ca_cert="x",
         ca_key="x",
         run_tokens=RUN_TOKENS,
@@ -3061,6 +3126,7 @@ async def test_the_cache_service_relays_to_the_daemon_with_proxy_stamped_identit
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -3113,6 +3179,7 @@ async def test_the_cache_service_meters_the_egress_it_relays(db: None) -> None:
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -3254,6 +3321,7 @@ async def test_a_narrowed_agent_is_not_admitted_the_cache(db: None) -> None:
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,

@@ -417,7 +417,7 @@ def test_the_local_proxy_resolves_keyed_slots_per_workspace(
 
     def rules(**kwargs: object) -> object:
         captured.update(kwargs)
-        return SimpleNamespace(resolve=None, turn_live=None)
+        return SimpleNamespace(resolve=None, turn_live=None, rules_generation=None)
 
     monkeypatch.setattr(serve, "generate_ca", generate_ca)
     monkeypatch.setattr(serve, "EgressProxy", Proxy)
@@ -454,7 +454,7 @@ def test_the_local_proxy_base_admits_the_s3_artifact_store_host(
 
     def rules(**kwargs: object) -> object:
         captured.update(kwargs)
-        return SimpleNamespace(resolve=None, turn_live=None)
+        return SimpleNamespace(resolve=None, turn_live=None, rules_generation=None)
 
     monkeypatch.setattr(serve, "generate_ca", generate_ca)
     monkeypatch.setattr(serve, "EgressProxy", Proxy)

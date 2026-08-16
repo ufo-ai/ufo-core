@@ -12,7 +12,8 @@ runner — probes once instead of replaying a backlog.
 Each probe acts as the member who armed the watch, so a command reaching that member's own connected
 account off-turn reaches it exactly as it did in the arming turn — the same authority a scheduled
 fire carries for its creator. A monitor armed with no acting member reaches only the connections
-shared with the whole workspace.
+shared with the whole workspace. A fire carries the armer's authority only while they hold a seat:
+an unseated member's deadline arrival still lands, acting for nobody.
 
 A fire invokes first and retires second: a crash between the two re-posts under the same
 idempotency key, which admits nothing. A tick with failures raises their names."""
@@ -111,13 +112,14 @@ class MonitorRunner:
         await self._fire(store, row, CHANGED, output, spill, row.probes_run + 1)
 
     async def _acts_for_a_seated_member(self, row: Monitor) -> bool:
-        """Whether the watch may still act as the member who armed it. A probe is the one thing here
-        that acts rather than answers: it runs a command off-turn under that member's forwarded
-        connections and spends on every tick. An admin's revoke stops their access everywhere at
-        once, so an unseated member's watch stops probing and the tick counts as a skip — the row
-        stands, seating them again resumes it, and its deadline still ends the watch with the one
-        arrival the arming turn is owed. A watch armed for nobody reaches only what the whole
-        workspace shares, so there is no seat to ask about."""
+        """Whether the watch may still act as the member who armed it. A probe runs a command
+        off-turn under that member's forwarded connections and spends on every tick, so an admin's
+        revoke stops their access everywhere at once: an unseated member's watch stops probing and
+        the tick counts as a skip — the row stands, seating them again resumes it, and its deadline
+        still ends the watch with the one arrival the arming turn is owed. The fire asks the same
+        question, so that owed arrival lands acting for nobody rather than carrying an authority
+        the revoke ended. A watch armed for nobody reaches only what the whole workspace shares,
+        so there is no seat to ask about."""
         if row.created_by_member_id is None:
             return True
         async with self.ctx.transaction() as connection:
@@ -134,12 +136,13 @@ class MonitorRunner:
     ) -> None:
         if not await store.claim_holds(row):
             return
+        acts_for = row.created_by_member_id if await self._acts_for_a_seated_member(row) else None
         await self.ctx.invoke(
             row.conversation_id,
             row.agent_id,
             await self._body(row, cause, payload, spill, probes_run),
             f"{FIRE_KEY_PREFIX}{row.id}",
-            on_behalf_of_member_id=row.created_by_member_id,
+            on_behalf_of_member_id=acts_for,
             holds_work_already_done=True,
         )
         await store.retire(row)

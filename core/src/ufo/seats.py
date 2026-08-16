@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.schema import tables
-from ufo.schema.records import SCHEDULED_ADMISSION, TurnAdmissionSource
 
 SEAT_REFUSAL_MESSAGE = (
     "A workspace admin removed your seat, so I can't answer you. Ask them to restore it."
@@ -37,19 +36,16 @@ SEAT_REVOKED_MESSAGE = (
 
 def gate_member(
     speaker_member_id: UUID | None,
-    admission_source: TurnAdmissionSource,
     on_behalf_of_member_id: UUID | None,
 ) -> UUID | None:
-    """The member a turn is seat-gated on: its speaker; for a scheduled fire, the member it acts on
-    behalf of (its creator), so an unseated member's scheduled job is refused even when it fires
-    into a shared channel that has no conversation member; an internal turn none. The one
+    """The member a turn is seat-gated on: its speaker, else the member it acts on behalf of — a
+    scheduled fire's creator, a subagent's requester, a monitor's armer — so an unseated member's
+    work is refused however it was admitted; a turn acting for nobody gates on nobody. The one
     derivation admission, the fold resume, the dispatch sweep, and the per-round check all share —
     the gate cannot fork on who it means."""
     if speaker_member_id is not None:
         return speaker_member_id
-    if admission_source == SCHEDULED_ADMISSION:
-        return on_behalf_of_member_id
-    return None
+    return on_behalf_of_member_id
 
 
 class UnknownMember(LookupError):

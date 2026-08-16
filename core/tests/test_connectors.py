@@ -205,6 +205,7 @@ async def test_connect_binds_a_grant_and_the_proxy_admits_and_meters_the_host(
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,

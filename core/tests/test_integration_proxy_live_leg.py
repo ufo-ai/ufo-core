@@ -270,6 +270,7 @@ async def test_sandbox_egress_injects_the_real_key_and_meters_sandbox_tokens(
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=ca_cert,
         ca_key=ca_key,
         run_tokens=RUN_TOKENS,
@@ -355,6 +356,7 @@ async def test_a_terminal_turn_is_denied_before_any_upstream_dial(
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=ca_cert,
         ca_key=ca_key,
         run_tokens=RUN_TOKENS,
@@ -436,6 +438,7 @@ async def test_a_keyed_providers_two_stored_secrets_ride_one_live_request(
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=ca_cert,
         ca_key=ca_key,
         run_tokens=RUN_TOKENS,
@@ -538,6 +541,7 @@ async def test_a_real_sandbox_process_reaches_a_keyed_host_with_sentinels_only(
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=ca_cert,
         ca_key=ca_key,
         run_tokens=RUN_TOKENS,

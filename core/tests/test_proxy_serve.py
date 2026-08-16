@@ -251,7 +251,7 @@ async def test_proxy_serve_resolves_keyed_slots_per_workspace(
 
     def rules(**kwargs: object) -> object:
         captured.update(kwargs)
-        return SimpleNamespace(resolve=None, turn_live=None)
+        return SimpleNamespace(resolve=None, turn_live=None, rules_generation=None)
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -365,7 +365,7 @@ async def test_proxy_serve_base_admits_the_s3_artifact_store_host(
 
     def rules(**kwargs: object) -> object:
         captured.update(kwargs)
-        return SimpleNamespace(resolve=None, turn_live=None)
+        return SimpleNamespace(resolve=None, turn_live=None, rules_generation=None)
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

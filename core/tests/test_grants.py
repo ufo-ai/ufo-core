@@ -649,6 +649,7 @@ async def test_proxy_resolves_the_granted_host_but_blocks_tokenless_connect() ->
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -725,6 +726,7 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -754,6 +756,7 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
     proxy = EgressProxy(
         resolve=resolver.resolve,
         authorize=resolver.turn_live,
+        generation=resolver.rules_generation,
         ca_cert=cert,
         ca_key=key,
         run_tokens=RUN_TOKENS,
@@ -1212,6 +1215,60 @@ async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
     (kept,) = await _active(store, workspace_id, second_agent)
     assert kept.account_id == "acct-42"
     assert await _revoke(store, workspace_id, agent_id, member_id, initial.id) is False
+
+
+async def test_grant_mutations_bump_the_egress_rules_generation(db: None) -> None:
+    """The proxy's rule cache pins this counter, so every act that changes what the wire may do
+    reaches the next CONNECT instead of waiting out the cache TTL."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    second_agent = await _agent(workspace_id, "reviewer")
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+
+    async def generation() -> int:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.workspace.c.egress_rules_generation).where(
+                        tables.workspace.c.id == workspace_id
+                    )
+                )
+            ).scalar_one()
+
+    start = await generation()
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=True,
+    )
+    recorded = await generation()
+    with ws(workspace_id), agent(second_agent):
+        assert await store.attach(
+            provider="stub",
+            account_id="acct-42",
+            conversation_id=conversation_id,
+            actor_member_id=member_id,
+            shared=False,
+        )
+    attached = await generation()
+    (grant,) = await _active(store, workspace_id, agent_id)
+    assert await _set_shared(store, workspace_id, agent_id, member_id, grant.id, False)
+    unshared = await generation()
+    assert await _revoke(store, workspace_id, agent_id, member_id, grant.id)
+    revoked = await generation()
+    with ws(workspace_id), agent(second_agent):
+        assert await store.disconnect(grant.connection_id, actor_member_id=member_id)
+    disconnected = await generation()
+
+    assert start == 0
+    assert start < recorded < attached < unshared < revoked < disconnected
 
 
 async def test_same_owner_replacements_refuse_stale_generations(db: None) -> None:

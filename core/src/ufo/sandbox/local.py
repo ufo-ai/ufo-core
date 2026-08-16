@@ -16,7 +16,9 @@ it, forever.
 
 This is a development default, not an isolation boundary: a subprocess is confined to the workspace
 only through the `workspace_path` guard on tool arguments, not by the kernel. Docker and E2B are the
-carriers that add real isolation."""
+carriers that add real isolation. A command's environment is built for it — the scratch HOME and
+PATH, locale and tmp passthrough, the proxy exports, the spec's own env — never serve's own, whose
+environment is the deploy's secrets."""
 
 import asyncio
 import os
@@ -44,6 +46,7 @@ from ufo.sandbox.session import (
 
 LOCAL_CONTAINER_ID = "local"
 LOCAL_PROXY_HOST = "127.0.0.1"
+ENV_PASSTHROUGH = ("TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
 CA_FILENAME = "egress-ca.pem"
 EXEC_TIMEOUT_CODE = 124
 READ_CHUNK_BYTES = 1024 * 1024
@@ -52,25 +55,6 @@ SANDBOX_BINARIES = ("sbx", "sbxfs")
 # directory is `sys.path[0]`, so this is how `sbxfs` reaches the containment guard under a carrier
 # that has no installed `ufo` package inside the sandbox.
 SANDBOX_MODULES = ("containment.py",)
-
-
-def _git_without_host_config(scratch: Path) -> dict[str, str]:
-    """Every level a host credential helper could reach a command through, closed. The command
-    inherits the environment, so the two config files are not enough: `GIT_CONFIG_COUNT` and
-    `GIT_CONFIG_PARAMETERS` carry config of their own and outrank both, and `GIT_ASKPASS` and a
-    terminal prompt each ask a question no command can answer.
-
-    The global level points at the scratch home rather than `os.devnull`, which reads the same and
-    still writes: `git config --global` against `/dev/null` fails to lock it, taking `git lfs
-    install` and `gh auth setup-git` down with it."""
-    return {
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": str(scratch / "home" / ".gitconfig"),
-        "GIT_CONFIG_COUNT": "0",
-        "GIT_CONFIG_PARAMETERS": "",
-        "GIT_ASKPASS": "",
-        "GIT_TERMINAL_PROMPT": "0",
-    }
 
 
 def _provision_scratch() -> Path:
@@ -110,11 +94,7 @@ class LocalCarrier:
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
             egress_env={
-                **os.environ,
-                "HOME": str(self._scratch / "home"),
-                "PATH": (
-                    f"{self._scratch / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}"
-                ),
+                **self._base_env(),
                 "HTTP_PROXY": proxy_url,
                 "HTTPS_PROXY": proxy_url,
                 "http_proxy": proxy_url,
@@ -127,10 +107,33 @@ class LocalCarrier:
                 "REQUESTS_CA_BUNDLE": str(ca_path),
                 "CURL_CA_BUNDLE": str(ca_path),
                 "NODE_EXTRA_CA_CERTS": str(ca_path),
-                **_git_without_host_config(self._scratch),
                 **spec.env,
             },
         )
+
+    def _base_env(self) -> dict[str, str]:
+        """What every command gets and nothing more. Serve's own environment is the deploy's
+        secrets — the token-signing secret, DSNs, cloud keys — and a local-carrier command is a
+        shell on the same host, so the environment is built rather than inherited: the scratch HOME
+        and PATH, the locale and tmp names tools break without, and every level a host git
+        credential helper could reach a command through, closed — `GIT_CONFIG_COUNT` and
+        `GIT_CONFIG_PARAMETERS` carry config of their own and outrank the two config files, and
+        `GIT_ASKPASS` and a terminal prompt each ask a question no command can answer. The global
+        level points at the scratch home rather than `os.devnull`, which reads the same and still
+        writes: `git config --global` against `/dev/null` fails to lock it, taking `git lfs
+        install` and `gh auth setup-git` down with it."""
+        passed = {name: os.environ[name] for name in ENV_PASSTHROUGH if name in os.environ}
+        return {
+            **passed,
+            "HOME": str(self._scratch / "home"),
+            "PATH": f"{self._scratch / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(self._scratch / "home" / ".gitconfig"),
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_CONFIG_PARAMETERS": "",
+            "GIT_ASKPASS": "",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
 
     async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
         """The read-only shape of `create`: the same handle over the same host directory, minus the
@@ -144,14 +147,7 @@ class LocalCarrier:
             container_id=LOCAL_CONTAINER_ID,
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
-            egress_env={
-                **os.environ,
-                "HOME": str(self._scratch / "home"),
-                "PATH": (
-                    f"{self._scratch / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}"
-                ),
-                **_git_without_host_config(self._scratch),
-            },
+            egress_env=self._base_env(),
         )
 
     async def exec(

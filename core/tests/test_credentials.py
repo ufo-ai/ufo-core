@@ -159,6 +159,39 @@ async def test_rotate_updates_only_the_expected_existing_value(db: None) -> None
         await store.rotate(workspace_id, "oauth", "new", "")
 
 
+async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> None:
+    """The proxy's rule cache pins this counter, so a filled, rotated, or cleared key re-derives
+    its injection rules at the next CONNECT instead of waiting out the cache TTL."""
+    workspace_id = await _workspace()
+    store = _store()
+
+    async def generation() -> int:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.workspace.c.egress_rules_generation).where(
+                        tables.workspace.c.id == workspace_id
+                    )
+                )
+            ).scalar_one()
+
+    start = await generation()
+    await store.put(workspace_id, "sample_api", "one")
+    filled = await generation()
+    assert await store.rotate(workspace_id, "sample_api", "one", "two")
+    rotated = await generation()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.credential).where(
+                tables.credential.c.workspace_id == workspace_id,
+                tables.credential.c.slot == "sample_api",
+            )
+        )
+    cleared = await generation()
+    assert start == 0
+    assert start < filled < rotated < cleared
+
+
 async def test_put_rejects_an_empty_value(db: None) -> None:
     with pytest.raises(ValueError, match="empty"):
         await _store().put(await _workspace(), "sample_api", "")

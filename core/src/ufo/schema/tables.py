@@ -19,6 +19,7 @@ workspace = sa.Table(
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("page_revision", sa.BigInteger, nullable=False, server_default="0"),
+    sa.Column("egress_rules_generation", sa.BigInteger, nullable=False, server_default="0"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )

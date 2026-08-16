@@ -150,9 +150,16 @@ async def test_the_host_git_config_does_not_reach_a_command(
     lifted = {
         name: await carrier.exec(await carrier.create(replace(_spec(workspace), env=env)), argv, 30)
         for name, env in {
-            PROBE_SYSTEM_HELPER: {"GIT_CONFIG_NOSYSTEM": "0"},
+            PROBE_SYSTEM_HELPER: {
+                "GIT_CONFIG_NOSYSTEM": "0",
+                "GIT_CONFIG_SYSTEM": str(system_config),
+            },
             PROBE_GLOBAL_HELPER: {"GIT_CONFIG_GLOBAL": str(global_config)},
-            PROBE_ENV_HELPER: {"GIT_CONFIG_COUNT": "1"},
+            PROBE_ENV_HELPER: {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": PROBE_ENV_HELPER,
+            },
             PROBE_PARAMS_HELPER: {
                 "GIT_CONFIG_PARAMETERS": f"'credential.helper={PROBE_PARAMS_HELPER}'"
             },
@@ -257,6 +264,34 @@ async def test_exec_carries_the_egress_environment(tmp_path: Path) -> None:
     proxy, sentinel = result.stdout.split("|")
     assert proxy == f"http://{RUN_TOKEN}:@127.0.0.1:{PROXY_PORT}"
     assert sentinel == SENTINEL_MODEL_KEY
+
+
+async def test_the_serve_environment_does_not_reach_a_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local-carrier command is a shell on the serve host, and serve's own environment is the
+    deploy's secrets — the token-signing secret, DSNs, cloud keys. The handle carries only what
+    commands need, so a variable serve holds never reaches one. The control reads the same name
+    back through `spec.env`, so a passing guard is the allowlist working rather than a read that
+    found nothing; `attach` is read back too, because its handles run commands as well."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", "serve-only")
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    argv = ("bash", "-lc", 'printf "%s" "${UFO_TOKEN_SECRET-absent}"')
+
+    created = await carrier.exec(await carrier.create(_spec(workspace)), argv, 30)
+    attached_handle = await carrier.attach(_spec(workspace))
+    assert attached_handle is not None
+    attached = await carrier.exec(attached_handle, argv, 30)
+    lifted = await carrier.exec(
+        await carrier.create(replace(_spec(workspace), env={"UFO_TOKEN_SECRET": "spec-carried"})),
+        argv,
+        30,
+    )
+
+    assert created.stdout == "absent"
+    assert attached.stdout == "absent"
+    assert lifted.stdout == "spec-carried"
 
 
 async def test_exec_reaches_a_service_on_the_sandbox_loopback(tmp_path: Path) -> None:

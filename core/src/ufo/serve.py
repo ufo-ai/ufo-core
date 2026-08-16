@@ -1149,6 +1149,7 @@ def _local_egress_proxy(
             ca_cert=ca_cert,
             ca_key=ca_key,
             run_tokens=run_tokens,
+            generation=resolver.rules_generation,
             pricing=pricing,
             cache_daemon=cache_daemon,
         ).start(port=config.sandbox.proxy_port)

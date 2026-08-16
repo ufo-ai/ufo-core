@@ -103,7 +103,7 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
             return Terminal(frame=TerminalFrame.model_validate(row.terminal))
         if row.status != PARKED:
             return None
-        gate = gate_member(row.speaker_member_id, row.admission_source, row.on_behalf_of_member_id)
+        gate = gate_member(row.speaker_member_id, row.on_behalf_of_member_id)
         if gate is not None and not await Seats(row.workspace_id).admits(connection, gate):
             return Parked(message=SEAT_REVOKED_MESSAGE)
     return Parked(message=PARK_NOTICE)

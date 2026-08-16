@@ -21,6 +21,10 @@ from ufo.schema import tables
 
 BALANCE_PRESENCE_TTL_SECONDS = 5.0
 BALANCE_PRESENCE_CACHE_MAX = 4096
+BALANCE_HELD_MESSAGE = (
+    "This turn is parked: the workspace balance is below its reserve. It resumes when the "
+    "balance is credited."
+)
 _no_balance: dict[UUID, float] = {}
 
 
@@ -41,6 +45,28 @@ def _note_absent_balance(workspace_id: UUID) -> None:
         for expired in [key for key, expiry in _no_balance.items() if expiry <= now]:
             del _no_balance[expired]
     _no_balance[workspace_id] = now + BALANCE_PRESENCE_TTL_SECONDS
+
+
+async def held_below_reserve(connection: AsyncConnection, workspace_id: UUID) -> bool:
+    """The gate `reserve_micro_usd` exists for, read before every model round through the spend
+    decision: True when a balance row exists and the balance is under its reserve, so an operator
+    setting a reserve above the balance holds the workspace's work until a credit lands. A
+    workspace that was never credited answers False through the absence cache, so a self-host
+    deploy pays nothing here."""
+    if balance_absent(workspace_id):
+        return False
+    row = (
+        await connection.execute(
+            sa.select(
+                tables.workspace_balance.c.balance_micro_usd,
+                tables.workspace_balance.c.reserve_micro_usd,
+            ).where(tables.workspace_balance.c.workspace_id == workspace_id)
+        )
+    ).one_or_none()
+    if row is None:
+        _note_absent_balance(workspace_id)
+        return False
+    return row.balance_micro_usd < row.reserve_micro_usd
 
 
 @dataclass(frozen=True, slots=True)

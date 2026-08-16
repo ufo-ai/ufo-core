@@ -436,6 +436,36 @@ async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_pat
     assert body.endswith("</monitor_fired>")
 
 
+async def test_a_deadline_fire_for_an_unseated_member_carries_no_authority(
+    db: None, tmp_path: Path
+) -> None:
+    """The deadline still ends an unseated member's watch with the one arrival the arming turn is
+    owed, but an admin's revoke stopped that member's authority everywhere at once — so the fire
+    lands as common work, acting for nobody."""
+    workspace_id, agent_id, conversation_id, member_id = await _seed()
+    ctx = await _tool_ctx(
+        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
+    )
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id), agent(agent_id):
+        await monitor(ctx, _input("ci-run", ALPHA))
+        [row] = await _rows(workspace_id)
+        await _overdue(row["id"])
+        await _unseat(member_id)
+        await MonitorRunner(ctx=_runner_ctx(invoker, tmp_path)).run()
+        turns = await _turns(conversation_id)
+        remaining = await _rows(workspace_id)
+
+    [turn] = turns
+    assert remaining == []
+    assert turn["on_behalf_of_member_id"] is None
+    assert turn["speaker_member_id"] is None
+    assert dbos.enqueued == [str(turn["id"])]
+
+
 async def test_a_fire_that_crashed_before_retiring_admits_one_turn(
     db: None, tmp_path: Path
 ) -> None:

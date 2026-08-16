@@ -39,6 +39,7 @@ from ufo.accounting import (
 )
 from ufo.activity import SKILL_LOAD_TOOL, tool_activity
 from ufo.audience import Audience, audience_member, audience_subjects
+from ufo.balance import balance_absent
 from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
 from ufo.connectors import ConnectorRegistry
@@ -1748,29 +1749,30 @@ class TurnEngine:
         Any mid-run breach PARKS — the committed work is held and resumable, never discarded — even
         under a reject cap: reject is the inbound gate, applied before any tokens are spent, and a
         turn already running has real spend to preserve. A foreground subagent that parks under a
-        reject cap holds its awaiting parent until the cap is raised. The no-caps fast-path skips
-        the DB round-trip entirely once a recent decision confirmed no cap applies to this turn.
+        reject cap holds its awaiting parent until the cap is raised. The fast-path skips the DB
+        round-trip entirely once a recent decision confirmed no cap applies to this turn and the
+        workspace holds no balance row to gate on.
 
         The seat gate re-checks every member whose message the turn has absorbed, so revoking any
-        speaker's seat stops the aggregate before its next model call. A scheduled turn gates on
-        the member it acts on behalf of. It costs one indexed read per round whatever the turn
+        speaker's seat stops the aggregate before its next model call. A turn acting on behalf of
+        a member gates on them too, whatever admitted it — a scheduled fire, a subagent, a monitor
+        arrival. It costs one indexed read per round whatever the turn
         absorbed, deliberately and with no fast-path: a seat is what an admin revokes to cut someone
         off, so a cached answer would keep answering them for as long as it was held, and a
         running turn is the case the revoke most needs to reach."""
         members = {
             message.member_id for message in requesters.values() if message.member_id is not None
         }
-        if (
-            self.turn.admission_source == SCHEDULED_ADMISSION
-            and self.turn.on_behalf_of_member_id is not None
-        ):
+        if self.turn.on_behalf_of_member_id is not None:
             members.add(self.turn.on_behalf_of_member_id)
         if members:
             async with workspace_tx() as connection:
                 if not await Seats(self.turn.workspace_id).all_seated(connection, members):
                     raise TurnParked(SEAT_REVOKED_MESSAGE)
         member_id = audience_member(self.audience)
-        if applicable_caps_absent(self.turn.workspace_id, member_id, self.turn.agent_id):
+        if applicable_caps_absent(
+            self.turn.workspace_id, member_id, self.turn.agent_id
+        ) and balance_absent(self.turn.workspace_id):
             return
         pending = self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
         async with workspace_tx() as connection:

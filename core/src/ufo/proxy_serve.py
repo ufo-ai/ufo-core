@@ -182,6 +182,7 @@ class ProxyServe:
             ca_cert=self.ca_cert,
             ca_key=self.ca_key,
             run_tokens=RunTokenCodec.from_env(),
+            generation=resolver.rules_generation,
             pricing=self.pricing,
             cache_daemon=cache_daemon,
         )
