@@ -48,6 +48,9 @@ function installWhatJsdomLacks() {
     }
     unobserve() {}
     disconnect() {}
+    takeRecords() {
+      return [];
+    }
   } as unknown as typeof IntersectionObserver;
   globalThis.matchMedia = (media: string) => ({
     media,

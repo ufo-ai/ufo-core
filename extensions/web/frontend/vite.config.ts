@@ -13,9 +13,11 @@ export default defineConfig({
   build: {
     outDir: "../ufo_ext_web/static",
     emptyOutDir: true,
-    rollupOptions: { output: { inlineDynamicImports: true } },
   },
   server: {
+    // The boot suite imports the built entry from `../ufo_ext_web/static`, one directory above
+    // this root, which the default allow-list refuses.
+    fs: { allow: [".."] },
     proxy: {
       // `changeOrigin` stays off because `open_session` answers a 303 rebuilt from the forwarded
       // Host: rewritten, the sign-in lands on the backend, which serves the gitignored built tree

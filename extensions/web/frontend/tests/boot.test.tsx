@@ -1,5 +1,6 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -27,10 +28,10 @@ import {
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 const builtPage = () => readFileSync(join(STATIC, "index.html"), "utf8");
 
-const bundle = () => {
+const entryAsset = () => {
   const asset = /src="\/surface\/web\/static\/(assets\/[^"]+\.js)"/.exec(builtPage());
   if (!asset) throw new Error("the built page references no module");
-  return readFileSync(join(STATIC, asset[1]), "utf8");
+  return asset[1];
 };
 
 beforeEach(() => {
@@ -48,9 +49,18 @@ test("the built page names a hashed module and stylesheet under this surface", (
   expect(page).toContain("<!doctype html>");
 });
 
+/** The markdown chokepoint refuses a foreign image element, but a renderer can fetch without
+ *  minting an element — mermaid's image shape prefetches `node.img` from any host during layout.
+ *  The page's own policy is the boundary a library cannot go around: the browser refuses every
+ *  image load off this origin, however it was asked for. */
+test("the page tells the browser images load only from this origin", () => {
+  const meta = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(builtPage());
+  expect(meta?.[1]).toBe("img-src 'self' data:");
+});
+
 test("the page loads one script, which is the one this test runs", () => {
-  const scripts = readdirSync(join(STATIC, "assets")).filter((name) => name.endsWith(".js"));
-  expect(scripts).toHaveLength(1);
+  const scripts = Array.from(builtPage().matchAll(/<script[^>]*\bsrc="([^"]+)"/g));
+  expect(scripts.map((tag) => tag[1])).toEqual(["/surface/web/static/" + entryAsset()]);
 });
 
 const DIAGRAM_LIBRARIES = ["cytoscape", "roughjs", "d3-selection", "d3-scale", "elkjs"];
@@ -58,8 +68,7 @@ const DIAGRAM_LIBRARIES = ["cytoscape", "roughjs", "d3-selection", "d3-scale", "
 const BUNDLE_CEILING_BYTES = 1_400_000;
 
 test("the one script carries no diagram library, and stays under its ceiling", () => {
-  const script = readdirSync(join(STATIC, "assets")).find((name) => name.endsWith(".js"))!;
-  const bundle = readFileSync(join(STATIC, "assets", script), "utf8");
+  const bundle = readFileSync(join(STATIC, entryAsset()), "utf8");
   expect(DIAGRAM_LIBRARIES.filter((name) => bundle.includes(name))).toEqual([]);
   expect(bundle.length).toBeLessThan(BUNDLE_CEILING_BYTES);
 });
@@ -75,7 +84,7 @@ test("the built bundle mounts into the served page and asks for the session's ag
   );
   document.body.innerHTML = builtPage().replace(/<script[\s\S]*?<\/script>/g, "");
 
-  new Function(bundle())();
+  await import(pathToFileURL(join(STATIC, entryAsset())).href);
   await waitFor(() => expect(asked).toContain("/surface/web/api/agents"));
   await waitFor(() => expect(document.body.textContent).toContain("Session ended"));
 });

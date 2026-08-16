@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { expect, test } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { expect, test, vi } from "vitest";
 
 import { Markdown, StreamingBody } from "@/lib/markdown";
 
@@ -39,6 +39,40 @@ test("prose is drawn bare for the typeset; the code block and the table keep the
   expect(rich.container.querySelector("table")?.className).toBeTruthy();
   expect(rich.container.querySelector('[data-streamdown="code-block"]')).not.toBeNull();
 });
+
+test("a mermaid fence is drawn as a diagram block, never as highlighted code", async () => {
+  const { container } = render(<Markdown text={"```mermaid\nflowchart LR\n  a --> b\n```"} />);
+  await screen.findByText(/a --> b/, {}, { timeout: 10000 });
+  expect(container.querySelector('[data-streamdown="code-block"]')).toBeNull();
+  expect(container.textContent).not.toContain("Mermaid Error");
+}, 15000);
+
+test("a diagram is drawn in the palette that paints the page", async () => {
+  const { default: mermaid } = await import("mermaid");
+  const initialized = vi.spyOn(mermaid, "initialize");
+  try {
+    document.documentElement.classList.add("dark");
+    render(<Markdown text={"```mermaid\nflowchart LR\n  a --> b\n```"} />);
+    await waitFor(() => expect(initialized).toHaveBeenCalled(), { timeout: 10000 });
+    expect(initialized.mock.calls.at(-1)?.[0]).toMatchObject({ theme: "dark" });
+
+    document.documentElement.classList.remove("dark");
+    initialized.mockClear();
+    render(<Markdown text={"```mermaid\nflowchart RL\n  b --> a\n```"} />);
+    await waitFor(() => expect(initialized).toHaveBeenCalled(), { timeout: 10000 });
+    expect(initialized.mock.calls.at(-1)?.[0]).toMatchObject({ theme: "neutral" });
+  } finally {
+    document.documentElement.classList.remove("dark");
+    initialized.mockRestore();
+  }
+}, 15000);
+
+test("a streamed mermaid fence takes the diagram path too", async () => {
+  const { container } = render(<StreamingBody text={"```mermaid\nflowchart LR\n  a --> b\n```"} />);
+  await screen.findByText(/a --> b/, {}, { timeout: 10000 });
+  expect(container.querySelector('[data-streamdown="code-block"]')).toBeNull();
+  expect(container.textContent).not.toContain("Mermaid Error");
+}, 15000);
 
 test("raw html renders as visible text, elements and handlers included", () => {
   const { container } = render(

@@ -1,9 +1,17 @@
 import type { Root } from "mdast";
+import type { MermaidConfig } from "mermaid";
 import { createElement } from "react";
 import remarkBreaks from "remark-breaks";
 
 import { arrive } from "@/lib/arrive";
-import { Streamdown, defaultRehypePlugins, defaultRemarkPlugins, type Components } from "streamdown";
+import {
+  Streamdown,
+  defaultRehypePlugins,
+  defaultRemarkPlugins,
+  type Components,
+  type DiagramPlugin,
+  type MermaidErrorComponentProps,
+} from "streamdown";
 import { visit } from "unist-util-visit";
 
 /** Raw HTML an agent wrote is prose, not markup: a reply that says `<script>` is talking about
@@ -45,6 +53,51 @@ function bare(tag: (typeof BARE_TAGS)[number]) {
   return ({ node: _node, className: _className, ...props }: Record<string, unknown>) =>
     createElement(tag, props);
 }
+
+/** A `mermaid` fence is a drawing the reply describes, so it is drawn. The library that draws it
+ *  is loaded the first time a diagram asks for it, never in the page's own bundle. The SVG bakes
+ *  its colours in at render, so each render reads the scheme mark `scheme.ts` keeps on the root —
+ *  greys on a light page, mermaid's dark set on a dark one. A chart that will not parse —
+ *  half-streamed, or simply wrong — shows the fence's own text as the code it is; `initialize` is
+ *  a no-op because Streamdown never calls it, and each render configures the instance it
+ *  awaited. */
+const MERMAID_CONFIG: MermaidConfig = {
+  startOnLoad: false,
+  suppressErrorRendering: true,
+};
+
+function paintedTheme(): "dark" | "neutral" {
+  const root = document.documentElement.classList;
+  if (root.contains("dark")) return "dark";
+  if (root.contains("light")) return "neutral";
+  return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "neutral";
+}
+
+const MERMAID_PLUGINS: { mermaid: DiagramPlugin } = {
+  mermaid: {
+    name: "mermaid",
+    type: "diagram",
+    language: "mermaid",
+    getMermaid: (config = MERMAID_CONFIG) => ({
+      initialize: () => {},
+      render: async (id, source) => {
+        const { default: mermaid } = await import("mermaid");
+        mermaid.initialize({ ...config, theme: paintedTheme() });
+        return mermaid.render(id, source);
+      },
+    }),
+  },
+};
+
+function MermaidSource({ chart }: MermaidErrorComponentProps) {
+  return (
+    <pre>
+      <code>{chart}</code>
+    </pre>
+  );
+}
+
+const MERMAID_OPTIONS = { config: MERMAID_CONFIG, errorComponent: MermaidSource };
 
 const SPEAKABLE_PROTOCOLS = ["http:", "https:", "mailto:"];
 
@@ -96,6 +149,8 @@ export function Markdown({ text }: { text: string }) {
       mode="static"
       controls={false}
       components={COMPONENTS}
+      plugins={MERMAID_PLUGINS}
+      mermaid={MERMAID_OPTIONS}
       remarkPlugins={REMARK_PLUGINS}
       rehypePlugins={REHYPE_PLUGINS}
     >
@@ -114,6 +169,8 @@ export function StreamingBody({ text }: { text: string }) {
       className="typeset"
       controls={false}
       components={COMPONENTS}
+      plugins={MERMAID_PLUGINS}
+      mermaid={MERMAID_OPTIONS}
       remarkPlugins={REMARK_PLUGINS}
       rehypePlugins={ARRIVING_PLUGINS}
     >
