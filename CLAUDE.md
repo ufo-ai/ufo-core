@@ -187,7 +187,7 @@ as a portfolio, not a single bet:
   directory; `--timings-dir ""` writes nothing.
 - **To find CI time, merge those artifacts — never re-time the suite locally.** Every pytest job
   uploads its directory as `test-timings-test-shard-<0-5>` / `-control-test` / `-rls` /
-  `-integration` (`if: always()`, kept 14 days; an artifact name takes no `/`, so the shard is
+  `-integration-<0-2>` (`if: always()`, kept 14 days; an artifact name takes no `/`, so the shard is
   spelled in full inside each `run-summary.json`). `gh run download <run-id> --dir /tmp/timings
   --pattern 'test-timings-*'` then `python3 .github/scripts/ci_timings_report.py /tmp/timings
   [--merged-csv merged.csv]` prints per-job wall time, shard balance, the slowest tests, directories

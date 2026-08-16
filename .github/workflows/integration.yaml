@@ -16,9 +16,17 @@ permissions:
 
 jobs:
   integration:
+    name: integration ${{ matrix.shard }}
     # An org-hosted larger runner (4 vCPU, 16 GB, ~87 GB free disk), bought for its disk: the
     # ~6-7 GB sandbox image plus build scratch outgrow ubuntu-latest's ~14 GB free, and the serial
-    # pass below gains nothing from cores.
+    # pass below gains nothing from cores. Shards run on separate machines, so each owns its own
+    # Docker daemon, MinIO name, and Chrome — the single-owner constraints below are per-machine.
+    # Three shards is the knee: every shard pays ~3 minutes of setup, pull, and boot before its
+    # tests run, so a fourth buys seconds.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/3", "2/3", "3/3"]
     runs-on: linux-4-core
     timeout-minutes: 45
     services:
@@ -72,11 +80,11 @@ jobs:
       # a single owner of their shared resource. `integration` tests needing an absent key (a live
       # model) skip with a clear reason; Docker, Postgres, Chrome, and the DevTools ports are
       # required and fail loudly when unavailable so the gate proves its declared coverage.
-      - run: make test-integration
+      - run: make test-integration SHARD=${{ matrix.shard }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-timings-integration
+          name: test-timings-integration-${{ strategy.job-index }}
           path: .pytest-timings
           include-hidden-files: true
           if-no-files-found: warn

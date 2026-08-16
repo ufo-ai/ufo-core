@@ -23,6 +23,21 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: make check
+      - run: uv run pytest --collect-only -m integration -q
+
+  # The frontend gate: the edge suite plus everything the production wheel bakes. Both apps build
+  # on every push, BEFORE the wheel gate below, so the gated wheel is the production shape. Runs
+  # apart from `checks` so npm and mypy never sit on each other's critical path; the required
+  # `test` job asserts its result.
+  wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -30,8 +45,6 @@ jobs:
       - run: npm --prefix infra/modules/edge ci
       - run: npm --prefix infra/modules/edge exec -- playwright install --with-deps chromium
       - run: node --test infra/modules/edge/*.test.mjs
-      # Both apps build on every push, BEFORE the wheel gate below: the bundle image bakes them,
-      # so the gated wheel must be the production shape.
       - run: npm --prefix extensions/debugger/frontend ci
       - run: npm --prefix extensions/debugger/frontend run build
       - run: npm --prefix extensions/web/frontend ci
@@ -55,12 +68,11 @@ jobs:
               for entry in entries:
                   entry.load()()
           PY
-      - run: uv run pytest --collect-only -m integration -q
 
   # The portal is a built app. This job is the only one that installs its npm tree for testing:
   # it builds, proves the bundle and every view, and publishes the output the pytest shards read,
   # so no shard installs npm. The shards still need the runner's own node — two repl tests drive a
-  # real `LocalCarrier` through it — which `ubuntu-latest` ships. `checks` builds its own copy
+  # real `LocalCarrier` through it — which `ubuntu-latest` ships. `wheel` builds its own copy
   # because the wheel gate has to see the production shape assembled from a clean tree.
   web:
     runs-on: ubuntu-latest
@@ -158,12 +170,13 @@ jobs:
 
   test:
     if: always()
-    needs: [test-shard, control-test, integration]
+    needs: [test-shard, control-test, integration, wheel]
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ needs.test-shard.result }}" = success
       - run: test "${{ needs.control-test.result }}" = success
       - run: test "${{ needs.integration.result }}" = success
+      - run: test "${{ needs.wheel.result }}" = success
 
   # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel
   # suite's :5541). Setup CREATEs roles + databases, applies RLS

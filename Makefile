@@ -93,5 +93,5 @@ test-control: ## Run the control (gateway) suite
 test-web: $(WEB)/node_modules ## Run the portal's vitest suite
 	npm --prefix $(WEB) test
 
-test-integration: ## Run the serial, docker, and live-dependency pass (needs Docker and Postgres)
-	UFO_INTEGRATION_REQUIRED=1 uv run pytest -rs -m "serial or integration or docker"
+test-integration: ## Run the serial, docker, and live-dependency pass (needs Docker and Postgres); SHARD=1/3 runs one slice
+	UFO_INTEGRATION_REQUIRED=1 uv run pytest -rs -m "serial or integration or docker" $(if $(SHARD),--shard $(SHARD))
