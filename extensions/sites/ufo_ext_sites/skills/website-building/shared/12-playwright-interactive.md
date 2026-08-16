@@ -1,11 +1,13 @@
 # Playwright Interactive Skill
 
-Use this skill when a task needs interactive browser work in a persistent `js_repl` session. Keep the Playwright handles alive across code edits, reloads, and repeated checks so iteration stays fast.
+Use this skill when a task needs interactive browser work driven from `js_repl`. The browser runs as a background process outside the REPL, so page state survives between cells while every cell still finishes in well under a second.
 
-## Preconditions
+## How the REPL and the Browser Fit Together
 
-- The `js_repl` tool is available automatically — it starts a persistent Node.js REPL in the sandbox on first use.
-- Use `js_repl` with `reset: true` as a recovery tool, not routine cleanup. Resetting the context destroys your Playwright handles.
+- `js_repl` runs one `node` process per call, and the call returns only when that process exits. A browser or context left open holds the process on the event loop, so the call burns its whole budget and is then killed. **Never launch a browser inside a cell and leave it open.**
+- Start Chromium **once** with `bash` and `background: true`, with `--remote-debugging-port`. It outlives every cell, so the page, its URL, its scroll position, and the app state in it all persist.
+- Each cell connects with `chromium.connectOverCDP(...)`, does one burst of work, then drops the connection. Over CDP, `browser.close()` closes only the Playwright connection and the contexts that connection created — the Chromium you started with `bash` keeps running.
+- `js_repl` state is every block that exited 0, and each call re-runs that whole accumulated source. Keep browser cells self-contained and pass `reset: true`, so a cell never replays an earlier connect, click, or navigation.
 
 ## Core Workflow
 
@@ -19,66 +21,90 @@ Use this skill when a task needs interactive browser work in a persistent `js_re
    - For each claim or control-state pair, note the intended functional check, the specific state where the visual check must happen, and the evidence you expect to capture.
    - If a requirement is visually central but subjective, convert it into an observable QA check instead of leaving it implicit.
    - Add at least 2 exploratory or off-happy-path scenarios that could expose fragile behavior.
-2. Run the bootstrap cell once via `js_repl`.
-3. Start or confirm any required dev server using `bash` with `background: true`.
-4. Launch Chromium and keep reusing the same Playwright handles.
-5. After each code change, reload the page.
+2. Start or confirm any required dev server with `start_server`.
+3. Start Chromium once as a background `bash` task, then confirm the debug port answers.
+4. Per cell: connect over CDP, reuse the page that is already open, run one interaction burst, close the connection.
+5. After each code change, reload the page — the browser and its page are still there.
 6. Run functional QA with normal user input.
 7. Run a separate visual QA pass.
-8. Verify viewport fit and capture the screenshots needed to support your claims.
-9. Clean up the Playwright session only when the task is actually finished.
+8. Verify viewport fit and capture the screenshots your claims need. At least one screenshot must come back successfully.
+9. Stop the Chromium task when the task is actually finished.
 
-## Bootstrap (Run Once)
+## Start Chromium (Run Once)
 
-Use `js_repl` to run:
+Call `bash` with `background: true`:
+
+```
+chromium --headless=new --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
+  --user-data-dir=/tmp/ufo-chrome-qa --no-sandbox --disable-dev-shm-usage --disable-gpu about:blank
+```
+
+If `chromium` is not on `PATH`, resolve it with `command -v chromium || command -v chromium-browser`.
+
+Keep the `task`, `log`, and `stop` handles the background call hands back: `log` is where a browser that failed to start says why, and `stop` is how you end it.
+
+Then confirm it is listening with a normal `bash` call:
+
+```
+curl -sf http://127.0.0.1:9222/json/version
+```
+
+If the port already answers, a browser is already up — reuse it. Do not start a second one; each Chromium costs 200MB+.
+
+In the `sandbox_chrome` deploy shape the QA browser and the member's own browser are the same Chromium on this one endpoint, by design. Nothing in this file separates them, so read every cell below as acting on a shared browser. Expect all of this: the default context can already hold the member's tabs, so take the page you opened rather than the first page in the list; the iterate cell reloads those tabs too; a screenshot can return member page content; and the cleanup command at the end of this file stops that one browser for everyone, including a browser turn running in parallel.
+
+## Connect Per Cell
+
+Run this through `js_repl` with `reset: true`. For local servers, prefer `127.0.0.1` over `localhost`.
 
 ```javascript
 const { chromium } = await import('playwright');
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
-const page = await context.newPage();
-console.log('Playwright ready');
-```
-
-If `launch()` reports a missing browser executable, the sandbox ships a system browser instead — launch with `chromium.launch({ headless: true, executablePath: '/usr/bin/chromium', args: ['--no-sandbox'] })`.
-
-Browser handles are `const` to prevent accidentally launching duplicate Chromium instances (each one uses 200MB+). If you need to start over after an unrecoverable error, use `js_repl` with `reset: true` and re-run this bootstrap. The reset kills the old kernel and all its child processes, so nothing leaks.
-
-## Start or Reuse Web Session
-
-Navigate to the target URL. For local servers, prefer `127.0.0.1` over `localhost`. Use `var` for values that change across calls — the browser handles from bootstrap are `const` and persist automatically.
-
-```javascript
-var TARGET_URL = 'http://127.0.0.1:3000';
-await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
-console.log('Loaded:', await page.title());
-```
-
-## Reuse Sessions During Iteration
-
-Keep the same session alive whenever you can.
-
-Web renderer reload:
-
-```javascript
-for (const p of context.pages()) {
-  await p.reload({ waitUntil: 'domcontentloaded' });
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+try {
+  const context = browser.contexts()[0];
+  const page = context.pages().find((p) => p.url().startsWith('http')) ?? (await context.newPage());
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto('http://127.0.0.1:3000', { waitUntil: 'domcontentloaded' });
+  console.log('Loaded:', await page.title());
+} finally {
+  await browser.close();
 }
-console.log('Reloaded existing tabs');
+```
+
+- Work in `browser.contexts()[0]` — the browser's own default context. Pages there outlive the connection, which is what lets the next cell reuse them.
+- A context you create with `browser.newContext()` is discarded when you close the connection. Use one only inside a single cell (a phone-sized pass, an isolated login) and close it in that same cell.
+- Close the connection in `finally`. A check that throws must still let the process exit, otherwise the call hangs to its deadline instead of reporting the failure.
+- Set the viewport explicitly in each cell that judges layout. The page keeps whatever size the last cell gave it.
+
+## Iterate Against the Same Browser
+
+After a code edit, reload the pages that are already open:
+
+```javascript
+const { chromium } = await import('playwright');
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+try {
+  for (const p of browser.contexts()[0].pages()) {
+    await p.reload({ waitUntil: 'domcontentloaded' });
+    console.log('Reloaded:', p.url());
+  }
+} finally {
+  await browser.close();
+}
 ```
 
 Default posture:
 
 - Keep each `js_repl` call short and focused on one interaction burst.
-- Use `var` for mutable top-level bindings (URLs, test data, helpers). The browser handles from bootstrap are `const` — do not redeclare them.
-- If you need isolation, create a new page or a new context inside the same browser.
-- Fix helper mistakes in place; do not reset the REPL unless the context is actually broken.
+- Re-derive the handles at the top of every cell. No Playwright object survives the process; the browser and its pages do.
+- If you need isolation, open a new page in the default context, or a new context you close inside the same cell.
+- Use `reset: true` on browser cells so nothing from an earlier cell replays.
 
 ## Checklists
 
 ### Session Loop
 
-- Bootstrap `js_repl` once, then keep the same Playwright handles alive across iterations.
+- Start Chromium once as a background task, then confirm the debug port answers.
 - Launch the target runtime from the current workspace.
 - Make the code change.
 - Reload the page.
@@ -86,13 +112,14 @@ Default posture:
 - Re-run functional QA.
 - Re-run visual QA.
 - Capture final artifacts only after the current state is the one you are evaluating.
-- Execute cleanup before ending the task or leaving the session.
+- Stop the browser task before ending the task, or leave it up deliberately for further work.
 
 ### Reload Decision
 
 - After any code edit: just reload the page. The server reads files from disk — edits are visible immediately on reload.
-- NEVER restart the dev server after code changes. Restarting wastes steps, causes port conflicts, and kills browser handles.
+- NEVER restart the dev server after code changes. Restarting wastes steps and causes port conflicts.
 - Only restart the server if it has actually crashed (health check fails AND `lsof` shows nothing on the port).
+- Never restart Chromium to recover from a failed cell. A cell fails on its own, and the browser is a separate process that is almost certainly still healthy — confirm with `curl` before you touch it.
 
 ### Functional QA
 
@@ -110,6 +137,7 @@ Default posture:
 ### Visual QA
 
 - Treat visual QA as separate from functional QA.
+- A `js_repl` call that failed produced no evidence at all. Only a successful call that returned an image counts as a visual check.
 - Use the same shared QA inventory defined before testing and updated during QA; do not start visual coverage from a different implicit list.
 - Restate the user-visible claims and verify each one explicitly; do not assume a functional pass proves a visual claim.
 - A user-visible claim is not signed off until it has been inspected in the specific state where it is meant to be perceived.
@@ -134,6 +162,10 @@ Default posture:
 
 ### Signoff
 
+- **At least one screenshot came back successfully** — a `js_repl` call with `exit_code: 0` that returned the image. A screenshot is the only evidence a visual claim may rest on.
+- **With no successful screenshot, make no visual claim.** Do not say the result was verified, checked, or reviewed at any width. State plainly in the reply that visual verification was skipped, and say why: the browser never came up, the cells kept failing, or the task ran out of room.
+- **A screenshot of the wrong page is not evidence.** An image of `about:blank`, or of a page you did not navigate, supports no claim at any width — re-derive the site page and capture it again.
+- Every visual claim in the reply names the state and the viewport of a screenshot you actually looked at.
 - The functional path passed with normal user input.
 - Coverage is explicit against the shared QA inventory: note which requirements, implemented features, controls, states, and claims were exercised, and call out any intentional exclusions.
 - The visual QA pass covered the whole relevant interface.
@@ -146,32 +178,48 @@ Default posture:
 - A short exploratory pass was completed for interactive products, and the response mentions what that pass covered.
 - If screenshot review and numeric checks disagreed at any point, the discrepancy was investigated before signoff; visible clipping in screenshots is a failure to resolve, not something metrics can overrule.
 - Include a brief negative confirmation of the main defect classes you checked for and did not find.
-- Cleanup was executed, or you intentionally kept the session alive for further work.
+- The browser task was stopped, or you intentionally left it up for further work.
 
 ## Screenshot Examples
 
 Use `emitImage()` to return screenshots inline — the image appears directly in the tool result with no extra tool call needed.
 
-Desktop example:
+Both cells below take the site page with `pages().find((p) => p.url().startsWith('http'))`, the same handle the connect cell derives. Never take `pages()[0]`: the start command opens an `about:blank` tab that often sorts first, and capturing it either times out or returns an empty image that proves nothing. The desktop cell also calls `bringToFront()`, because over CDP a screenshot only lands on the active tab.
+
+Desktop:
 
 ```javascript
-var screenshot = await page.screenshot({ type: 'jpeg', quality: 85 });
-emitImage(screenshot, 'image/jpeg');
+const { chromium } = await import('playwright');
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+try {
+  const page = browser.contexts()[0].pages().find((p) => p.url().startsWith('http'));
+  await page.bringToFront();
+  await page.setViewportSize({ width: 1600, height: 900 });
+  emitImage(await page.screenshot({ type: 'jpeg', quality: 85 }), 'image/jpeg');
+} finally {
+  await browser.close();
+}
 ```
 
-Mobile example:
+Phone width — the extra context lives and dies inside this one cell:
 
 ```javascript
-var mobileCtx = await browser.newContext({
-  viewport: { width: 390, height: 844 },
-  isMobile: true,
-  hasTouch: true,
-});
-var mobilePg = await mobileCtx.newPage();
-await mobilePg.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
-var mobileShot = await mobilePg.screenshot({ type: 'jpeg', quality: 85 });
-emitImage(mobileShot, 'image/jpeg');
-await mobileCtx.close();
+const { chromium } = await import('playwright');
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+try {
+  const url = browser.contexts()[0].pages().find((p) => p.url().startsWith('http')).url();
+  const mobileCtx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  const mobilePg = await mobileCtx.newPage();
+  await mobilePg.goto(url, { waitUntil: 'domcontentloaded' });
+  emitImage(await mobilePg.screenshot({ type: 'jpeg', quality: 85 }), 'image/jpeg');
+  await mobileCtx.close();
+} finally {
+  await browser.close();
+}
 ```
 
 `emitImage(value, mediaType?)` accepts a Buffer, Uint8Array, base64 string, or `{bytes, mimeType}` object. Up to 5 images per execution; an image over ~1.5 MB raises — lower the JPEG quality. To save screenshots to disk instead (e.g. for persistence), use `page.screenshot({ path: ... })` and `read` to view them.
@@ -189,7 +237,7 @@ Do not assume a screenshot is acceptable just because the main widget is visible
 - Check region bounds, not just document bounds. Verify that each required visible region fits within the viewport in the startup state.
 - Passing viewport-fit checks only proves that the intended initial view is visible without unintended clipping or scrolling. It does not prove that the UI is visually correct or aesthetically successful.
 
-Web check:
+Web check, inside the same connect/`finally` shape:
 
 ```javascript
 console.log(
@@ -228,21 +276,13 @@ For projects with a build step (React, Vite, etc.), use the project's own dev se
 
 ## Cleanup
 
-Only run cleanup when the task is actually finished:
+The REPL has nothing to clean up — every cell already dropped its own connection. Only the browser process is left. Stop it when the task is actually finished, with the `stop` handle from the background `bash` call that started it, or with:
 
-```javascript
-if (context) {
-  await context.close().catch(() => {});
-}
-
-if (browser) {
-  await browser.close().catch(() => {});
-}
-
-console.log('Playwright session closed');
+```
+pkill -f -- '--remote-debugging-port=9222'
 ```
 
-Closing the browser closes all its pages. To reuse Playwright after cleanup, use `js_repl` with `reset: true` and re-run the bootstrap.
+`curl -sf http://127.0.0.1:9222/json/version` must then fail. To resume browser work later, start Chromium again the same way.
 
 ## Waiting for State Changes
 
@@ -265,6 +305,7 @@ Only use `waitForTimeout` when real elapsed time must pass (e.g., holding a key 
 
 - `Cannot find module 'playwright'`: run the one-time setup in the current workspace and verify the import before using `js_repl`.
 - Playwright package is installed but the browser executable is missing: run `npx playwright install chromium`.
-- `page.goto: net::ERR_CONNECTION_REFUSED`: the dev server may have crashed. Run `lsof -i :3000` — if nothing is listening, restart with the same `bash(background=true)` command from the Dev Server section, then `sleep 1 && curl -sf http://127.0.0.1:3000 > /dev/null && echo "ready"` before retrying navigation.
-- `Identifier has already been declared`: you are redeclaring a `const` or `let`. For the browser handles (`browser`, `context`, `page`), this is intentional — just reuse them without redeclaring. For other bindings, use `var` or choose a new name. Use `js_repl` with `reset: true` only when the context is genuinely stuck.
-- `js_repl` timed out or reset: rerun the bootstrap cell and recreate the session with shorter, more focused cells.
+- `connect ECONNREFUSED 127.0.0.1:9222`: Chromium is not up. Read the background task's `log`, start it again, then re-check `/json/version` before the next cell.
+- `js_repl` returned `exit_code: 124`: the cell's budget expired, the run was killed, and REPL state did not advance. The cause is nearly always a cell that opened a browser or a context and never closed it. Rewrite that cell around connect over CDP with `browser.close()` in `finally`; never re-run the same cell unchanged. Chromium is a separate process and is probably still fine — check `/json/version`.
+- `page.goto: net::ERR_CONNECTION_REFUSED`: the dev server may have crashed. Run `lsof -i :3000` — if nothing is listening, restart it with the same `start_server` call from the Dev Server section, then retry navigation.
+- `Identifier has already been declared`: an accumulated block already declared that binding, and every call replays the whole accumulation. Pass `reset: true` so the cell runs on its own.

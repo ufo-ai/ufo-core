@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +41,13 @@ from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext
 
 TOOL_NARRATION = "building the site"
+PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
+JS_CELL = re.compile(r"```javascript\n(.*?)```", re.S)
+
+
+def _playwright_guidance() -> str:
+    registry = skill_registry((sites_manifest.manifest(),))
+    return dict(registry.named("website-building").files)[PLAYWRIGHT_GUIDANCE].decode()
 
 
 @dataclass
@@ -285,6 +293,52 @@ def test_the_website_building_profile_uses_the_shared_finish_contract() -> None:
     assert "A delivery crosses an agent boundary" in prompt
     assert "call `finish` directly" not in WEBSITE_BUILDING_PROFILE.prompt
     assert "End the turn by calling the `finish` tool" in prompt
+
+
+def test_the_playwright_guidance_keeps_the_browser_outside_the_cell() -> None:
+    """`js_repl` runs one `node` process per call and returns only when that process exits, so a
+    browser held open for the next cell keeps the process on the event loop until the budget expires
+    and the run is killed. The browser has to outlive the cell as a process of its own: started once
+    through `bash` behind a debug port, connected to per cell."""
+    guidance = _playwright_guidance()
+    assert "--remote-debugging-port" in guidance
+    assert "background: true" in guidance
+    assert "connectOverCDP" in guidance
+    assert "chromium.launch(" not in guidance
+    lowered = guidance.lower()
+    assert "keep the handles alive" not in lowered
+    assert "handles alive across" not in lowered
+    assert "bootstrap" not in lowered, "the bootstrap cell is the timeout this guidance replaced"
+
+
+def test_every_playwright_example_cell_can_exit() -> None:
+    """Each example is a cell the model runs verbatim, so a connect with no matching close is a
+    documented deadline loss. The close sits in `finally`, so a check that throws still exits."""
+    cells = [cell for cell in JS_CELL.findall(_playwright_guidance()) if "connectOverCDP" in cell]
+    assert len(cells) >= 3
+    for cell in cells:
+        assert "browser.close()" in cell
+        assert "} finally {" in cell
+
+
+def test_the_playwright_signoff_gates_a_visual_claim_on_a_screenshot() -> None:
+    """A turn whose every browser call failed still reported "Verified at desktop and phone widths".
+    Signoff names the evidence a visual claim rests on, and names what the reply must say when that
+    evidence does not exist."""
+    signoff = _playwright_guidance().split("### Signoff", 1)[1].split("\n## ", 1)[0]
+    assert "At least one screenshot came back successfully" in signoff
+    assert "exit_code: 0" in signoff
+    assert "make no visual claim" in signoff
+    assert "visual verification was skipped" in signoff
+
+
+def test_the_website_building_prompt_gates_a_visual_claim_on_a_screenshot() -> None:
+    """The child's result is what the parent repeats to the member, so the same gate has to hold in
+    the profile prompt: the skill file only binds a child that read it."""
+    prompt = WEBSITE_BUILDING_PROFILE.prompt
+    assert "connects to it over CDP" in prompt
+    assert "exit_code: 0" in prompt
+    assert "visual verification was skipped" in prompt
 
 
 async def test_website_builds_and_lists_the_output(tmp_path: Path) -> None:
