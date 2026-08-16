@@ -34,7 +34,7 @@ from ufo.ext.conversation_slots import (
     ConversationSlotProvider,
 )
 from ufo.ext.surface import SurfaceSpec
-from ufo.grants import OAuthProvider, OAuthProviderResolver
+from ufo.grants import ConnectionRecorded, OAuthProvider, OAuthProviderResolver
 from ufo.hub import Hub
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.memory import MemorySearchProvider
@@ -330,10 +330,13 @@ HookEvent = Literal[
     "pre_compact",
     "post_compact",
     "page_change",
+    "connection_recorded",
 ]
 """The lifecycle events a hook binds to, named after Claude Code's taxonomy. Seven fire on the turn
 loop; `page_change` is the data-plane event the core page-change runner fires off the source-page
-feed. Claude Code names further events (`session_start`, `session_end`, `permission_request`,
+feed; `connection_recorded` is the control-plane event the connect flow fires as a member's provider
+connection lands, so the state a connection implies is created with it rather than noticed later.
+Claude Code names further events (`session_start`, `session_end`, `permission_request`,
 `subagent_stop`, `notification`) that this system has no producer for — no session, interactive
 permission prompt, or parent-side subagent boundary — so they are deliberately not members here: a
 declared event with no fire-point is exactly the crippling this taxonomy avoids. Each gains a member
@@ -430,6 +433,7 @@ HookPayload = (
     | PreCompact
     | PostCompact
     | PageChangeBatch
+    | ConnectionRecorded
 )
 
 
@@ -480,7 +484,9 @@ class HookContext:
     fires outside any turn — its turn/member fields are None — and the page-change runner
     builds its context in the jobs role with the metered off-turn model and the admit-turn invoker
     wired: a listener classifies and invokes exactly as a scheduled fire does, fed only by the
-    source pipeline so it can never fire on work it caused."""
+    source pipeline so it can never fire on work it caused. A control-plane event
+    (connection_recorded) fires outside any turn as well — inside the request that completed the
+    OAuth handoff, with that workspace bound and the connection already committed."""
 
     ext: ExtensionContext
     payload: HookPayload

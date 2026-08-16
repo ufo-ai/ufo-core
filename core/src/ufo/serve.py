@@ -56,6 +56,7 @@ from ufo.ext.conversation_slots import BoundConversationSlot
 from ufo.ext.loader import (
     CORE_OBJECT_KINDS,
     NotRegisteredError,
+    connection_hooks,
     connector_clis,
     core_object_kinds,
     durable_surfaces,
@@ -264,7 +265,7 @@ def run() -> None:
         tailer=HubTailer(hub=hub),
     )
     init_runtime(runtime)
-    install_connect_flow(_connect_flow(credentials, config, manifests))
+    install_connect_flow(_connect_flow(credentials, config, manifests, index, embed))
     install_credential_requests(
         None
         if credentials is None
@@ -1202,14 +1203,19 @@ def _connector_registry(
 
 
 def _connect_flow(
-    credentials: CredentialStore | None, config: Config, manifests: tuple[Manifest, ...]
+    credentials: CredentialStore | None,
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    index: IndexBackend | None = None,
+    embed: EmbedClient | None = None,
 ) -> ConnectFlow | None:
     """The process's connect flow — the tool validates against it, a surface privately authorizes
     through it, and the OAuth callback completes through it — sharing the credential key that seals
     its state and encrypts its tokens. No key means grants cannot be recorded, so all fail loud.
     The provider registry is every installed connector's OAuth descriptor keyed by its provider
     name; the `redirect_uri` is this deploy's external callback URL, the one value both legs of the
-    handoff present."""
+    handoff present; `connections` is the chain a landed connection publishes to, so an extension
+    creates what the connection implies while the callback is still open."""
     if credentials is None:
         return None
     providers: dict[str, OAuthProvider] = {}
@@ -1226,6 +1232,7 @@ def _connect_flow(
         store=GrantStore(),
         redirect_uri=_connect_redirect_uri(config, providers),
         resolver=open_connector_namespace(manifests),
+        connections=connection_hooks(manifests, credentials, index, embed),
     )
 
 

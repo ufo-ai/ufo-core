@@ -567,6 +567,22 @@ def seated_member_workspaces() -> WorkspaceCandidates:
     return owner_candidates(with_a_seated_member)
 
 
+def connection_workspaces() -> WorkspaceCandidates:
+    """The candidate seam a connection-driven job declares: the workspaces where the main agent
+    holds a connector grant. Core owns the `connector_grant`/`agent` tables, so it owns this query —
+    a workspace whose main agent has no connected account never fires the handler."""
+
+    def with_a_main_agent_connection() -> sa.Select[tuple[UUID]]:
+        return (
+            sa.select(tables.connector_grant.c.workspace_id)
+            .join(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
+            .where(tables.agent.c.is_main.is_(True))
+            .distinct()
+        )
+
+    return owner_candidates(with_a_main_agent_connection)
+
+
 def store_key_workspaces(extension: str, prefix: str) -> WorkspaceCandidates:
     """The candidate seam a store-backed job declares: the workspaces holding at least one of the
     extension's own `ext_store` keys under `prefix`. Core owns `ext_store`, so it owns this query —
@@ -1801,18 +1817,7 @@ class ExtensionContext:
         a member adds for a second agent grants that agent while still syncing once under one row.
         The core sync driver polls the row and lands its pages in memory; embedding stays a job."""
         payload = config.model_dump(mode="json")
-        non_identity = (
-            type(config).non_identity_fields
-            if isinstance(config, SourceRowConfig)
-            else frozenset[str]()
-        )
-        source_id = source_row_id(
-            self.store.workspace_id,
-            backend,
-            payload,
-            connection_id=connection_id,
-            non_identity_keys=non_identity,
-        )
+        source_id = self.source_id(backend, config, connection_id=connection_id)
         registered_at = datetime.now(UTC)
         async with workspace_tx() as connection:
             target_agent_id = agent_id
@@ -1961,6 +1966,26 @@ class ExtensionContext:
                 )
             )
         return source_id
+
+    def source_id(
+        self, backend: str, config: BaseModel, *, connection_id: UUID | None = None
+    ) -> UUID:
+        """The row `register_source` settles this authority on. It is derived, never read, so a
+        caller may name a row that does not exist and be naming the exact row registering would
+        create. Paired with `removed_source_ids` it is how a caller that registers on its own
+        initiative tells a feed nobody has yet from one the member deleted — which `register_source`
+        would otherwise revive."""
+        return source_row_id(
+            self.store.workspace_id,
+            backend,
+            config.model_dump(mode="json"),
+            connection_id=connection_id,
+            non_identity_keys=(
+                type(config).non_identity_fields
+                if isinstance(config, SourceRowConfig)
+                else frozenset[str]()
+            ),
+        )
 
     async def removed_source_ids(self, source_ids: tuple[UUID, ...]) -> frozenset[UUID]:
         """Which of these sources this workspace has removed. Deleting a source stamps

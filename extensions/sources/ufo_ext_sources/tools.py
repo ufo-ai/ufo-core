@@ -4,12 +4,20 @@ the object verbs, and the conversations that wake when one changes.
 A source object is one provider binding — an account (or the workspace's BYOK credential) plus a
 tenant URL where the provider needs one — carrying the selected streams, each stream a `source`
 row the core sync driver polls. Identity IS the binding, so names derive from it
-(`<provider>-<8-hex digest>`): apply with the wrong name refuses and hands back the exact one,
-changing streams is delete-and-recreate, and re-applying the identical spec is a no-op. A stream
-that declares its own reach — an email message stream, 30 days — bounds its first sync to that
-window or to whatever `backfill_days` asks for, resolved into an absolute date the row keeps.
+(`<provider>-<8-hex digest>`): apply with the wrong name refuses and hands back the exact one, and
+re-applying the identical spec is a no-op.
+
+The streams are what a binding carries rather than which binding it is, so an apply settles it on
+exactly the streams the submit names: one row is registered for each stream it adds, and the row of
+each stream it drops is removed with its pages — the one act that clears what a stream synced, which
+is why dropping one needs no delete of the binding and why nothing ever recreates it.
+
+A stream that declares its own reach — an email message stream, 30 days — bounds its first sync to
+that window or to whatever `backfill_days` asks for, resolved into an absolute date the row keeps.
 Raising it later re-pins further back from that same date and refetches; lowering it is
-delete-and-recreate. A stream declaring none takes no cutoff and reports none.
+delete-and-recreate. The window is judged on the streams a submit keeps alone, so a submit that
+drops the last windowed stream drops the window with that row. A stream declaring none takes no
+cutoff and reports none.
 
 A source is private to its registering member by default; the model decides `shared` at
 registration, and only the registrar may later flip a private source to shared — the reverse is
@@ -126,7 +134,8 @@ class SourceSpec(BaseModel):
     )
     streams: tuple[str, ...] = Field(
         min_length=1,
-        description="Exact stream names to sync; a wrong stream's refusal lists the provider's.",
+        description="Exact stream names to sync; a wrong stream's refusal lists the provider's. "
+        "A re-apply is the whole set: a stream left out of it is removed with its pages.",
     )
     account_id: str = Field(
         default="",
@@ -160,7 +169,8 @@ class SourceSpec(BaseModel):
             "nothing honours. It is pinned to a fixed date when the binding is registered, and "
             "raising it later re-pins the binding further back from that same date and refetches "
             "the wider window. Lowering it is refused — recreate the binding to reach back less "
-            "far, which tombstones what it had.",
+            "far, which tombstones what it had. A submit that drops every windowed stream drops "
+            "the window with their rows, so leave this unset in that one.",
         )
     )
 
@@ -299,10 +309,11 @@ def _require_triggers(ext: ExtensionContext | None) -> SourceTriggerStore:
     return SourceTriggerStore(_require_ext(ext))
 
 
-def _effective_days(request: int | Literal["all"] | None, declared: int | None) -> int | None:
+def effective_days(request: int | Literal["all"] | None, declared: int | None) -> int | None:
     """How many days back a stream is actually pinned: the member's request where they named one,
     the stream's own declaration where they did not, and None where the answer is all history —
-    either because they asked for it or because the stream declares no window at all."""
+    either because they asked for it or because the stream declares no window at all. The member's
+    apply and the connected-account registrar both pin rows through this one resolution."""
     if isinstance(request, int):
         return request
     if request is None:
@@ -336,8 +347,9 @@ TRIGGER_DELETE_GATE = "only the trigger's creator or a workspace admin may delet
 class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
     """The kind's handlers over the workspace's registered source rows: get/list reconstruct
     bindings by grouping rows on (provider, account, base_url); apply validates provider, streams,
-    tenant URL, and auth exactly as registration always has, then registers one row per stream
-    (the first sync is scheduled immediately) — private to the registering member unless the
+    tenant URL, and auth exactly as registration always has, then registers one row for each named
+    stream the binding does not hold (the first sync is scheduled immediately) and removes the row
+    of each stream it no longer names — private to the registering member unless the
     model asks for `shared`; delete removes the binding's rows and their synced pages follow
     through the page-tombstone pipeline. The per-member visibility and registrar-or-admin gate is
     the base's, in a turn and in the portal alike; this kind supplies the bindings, their specs,
@@ -360,7 +372,7 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         """A resync is the registering member's or an admin's and changes nothing else. Re-applying
         the identical spec of a source the caller can already see (`old` is non-None only for a
         visible source, since the base `get` hides the rest) is the documented no-op. Every other
-        apply — register, share-flip, recreate, rewindow — goes through the base's member/admin
+        apply — register, share-flip, restream, rewindow — goes through the base's member/admin
         gate."""
         if spec.resync:
             await self._resync(ctx, name, spec, old)
@@ -495,57 +507,42 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
             raise ValueError(
                 f"source names derive from the binding — apply this spec as name {derived!r}"
             )
-        resolved = SourceSpec(
-            provider=spec.provider,
-            streams=streams,
-            account_id=(
-                "" if resolved_account.account == DIRECT_ACCOUNT else resolved_account.account
-            ),
-            base_url=base_url or "",
-            shared=spec.shared,
-            backfill_days=spec.backfill_days,
-        )
         binding = await _binding_named(ctx.ext, name)
+        held: dict[str, _Stream] = (
+            {} if binding is None else {stream.name: stream for stream in binding.streams}
+        )
         if binding is not None:
             old_spec = binding.spec()
-            # Every refusal is raised before any write: a submit that edits the window AND what
-            # identifies the binding is refused whole, never left with the window applied and the
-            # rest rejected. So the identity comparison holds the window equal — it is decided on
-            # its own terms below — and both writes happen only once nothing can still raise.
-            aligned = old_spec.model_copy(update={"backfill_days": resolved.backfill_days})
-            share_flip = resolved != aligned
-            if share_flip:
-                if resolved.model_copy(update={"shared": aligned.shared}) != aligned:
-                    raise VerbNotSupported(
-                        "a source's identity is its config — delete the binding and recreate it"
-                    )
-                if not resolved.shared:
-                    raise VerbNotSupported(
-                        "a shared source stays shared — delete the binding and "
-                        "recreate it privately"
-                    )
-            if resolved.backfill_days != old_spec.backfill_days:
+            # Every refusal is raised before any write: a submit that edits the window AND the
+            # stream set is refused whole, never left with the streams applied and the window
+            # rejected. So each edit is decided on its own terms, and every write below happens
+            # only once nothing can still raise.
+            if old_spec.shared and not spec.shared:
+                raise VerbNotSupported(
+                    "a shared source stays shared — delete the binding and recreate it privately"
+                )
+            if spec.backfill_days != old_spec.backfill_days:
                 await self._widen_window(
                     ctx,
                     binding,
+                    kept=tuple(held[stream] for stream in streams if stream in held),
                     declared=declared,
                     windowed=windowed,
                     account=resolved_account.account,
                     base_url=base_url,
-                    request=resolved.backfill_days,
+                    request=spec.backfill_days,
                 )
-            if share_flip:
+            if spec.shared and not old_spec.shared:
                 await ext.set_source_subject(
                     tuple(stream.source_id for stream in binding.streams), SHARED_SUBJECT
                 )
-            return
-        subject = SHARED_SUBJECT if resolved.shared else member_subject(ctx.speaker_member_id)
+        subject = SHARED_SUBJECT if spec.shared else member_subject(ctx.speaker_member_id)
         registered_at = datetime.now(UTC)
         for stream in streams:
+            if stream in held:
+                continue
             days = (
-                _effective_days(spec.backfill_days, declared[stream])
-                if stream in windowed
-                else None
+                effective_days(spec.backfill_days, declared[stream]) if stream in windowed else None
             )
             await ext.register_source(
                 spec.provider,
@@ -561,12 +558,15 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
                 connection_id=resolved_account.connection_id,
                 agent_id=ctx.turn.agent_id,
             )
+        for dropped in sorted(set(held).difference(streams)):
+            await ext.remove_source(held[dropped].source_id)
 
     async def _widen_window(
         self,
         ctx: ToolContext,
         binding: _Binding,
         *,
+        kept: tuple[_Stream, ...],
         declared: dict[str, int | None],
         windowed: frozenset[str],
         account: str,
@@ -584,15 +584,19 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         floors — never revisited, never tombstoned, since mail is not `delete_missing`.
 
         Rows whose stream takes no window carry the request but hold no cutoff and are not
-        refetched."""
+        refetched.
+
+        Only the rows the same submit keeps are in play. A stream it drops loses its row and its
+        pages, so nothing is left between two floors to strand: dropping the last windowed stream
+        drops the window with it, and the request that comes back unset is no narrowing."""
         ext = _require_ext(ctx.ext)
         pins: dict[UUID, datetime | None] = {}
-        for stream in binding.streams:
+        for stream in kept:
             if stream.name not in windowed:
                 pins[stream.source_id] = None
                 continue
-            was = _effective_days(binding.backfill_days, declared[stream.name])
-            now_wants = _effective_days(request, declared[stream.name])
+            was = effective_days(binding.backfill_days, declared[stream.name])
+            now_wants = effective_days(request, declared[stream.name])
             if now_wants is None:
                 pins[stream.source_id] = None
                 continue
@@ -624,11 +628,11 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
                     backfill_days=request,
                     backfill_after=pins[stream.source_id],
                 )
-                for stream in binding.streams
+                for stream in kept
             },
             refetch=frozenset(
                 stream.source_id
-                for stream in binding.streams
+                for stream in kept
                 if pins[stream.source_id] != stream.backfill_after
             ),
         )
@@ -1128,8 +1132,8 @@ SOURCE_OBJECT = ObjectKind(
     name=SOURCE_KIND,
     description=(
         "A registered content-sync binding: one provider account's selected streams, synced "
-        "privately to its registering member unless shared. Changing streams is "
-        "delete-and-recreate; only the registrar may share, while an admin may inspect or remove."
+        "privately to its registering member unless shared. An apply settles it on the streams it "
+        "names; only the registrar may share, while an admin may inspect or remove."
     ),
     guidance=(
         "Apply a manifest to register selected streams of a content-source provider; an unknown "
@@ -1140,8 +1144,10 @@ SOURCE_OBJECT = ObjectKind(
         "its registering member by default; set `shared: true` at apply — or in a later "
         "re-apply by the registrar — to sync it into workspace-shared "
         "memory instead, only when the member's words say the source is for the team. "
-        "Unsharing is delete-and-recreate; a source's identity is otherwise its config, so "
-        "changing streams is delete and recreate too. Delete is registrar-or-admin. Reads show "
+        "Unsharing is delete-and-recreate. The streams a submit names are the streams the binding "
+        "then syncs: one it adds joins the binding, and one it drops has its row removed and its "
+        "pages tombstoned, so narrow a feed by re-applying it with fewer streams rather than by "
+        "deleting it. Delete is registrar-or-admin. Reads show "
         "shared sources plus the member's own — a workspace admin sees all. Its `access_to` link "
         "names the workspace credential slot a direct provider spends, or — while the source is "
         "private — the connection a brokered one resolves to. To be woken when a shared source "

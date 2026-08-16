@@ -4,8 +4,10 @@ the member-owned connection directly. BYOK values remain workspace credentials.
 
 `ConnectFlow` runs the two-legged OAuth handoff: `authorize` opens a provider's link carrying sealed
 state; `complete` verifies that state, exchanges the code for the connected account, reuses or
-creates its connection, and grants the intended agent. The broker holds the account's token and
-executes tools server-side, so no secret crosses this boundary."""
+creates its connection, grants the intended agent, and publishes the landed connection to the
+extensions that derive state from it (`ConnectionHooks`, the `connection_recorded` event). The
+broker holds the account's token and executes tools server-side, so no secret crosses this
+boundary."""
 
 import hashlib
 import re
@@ -155,12 +157,48 @@ class ConnectionSummary:
 
 
 @dataclass(frozen=True)
+class MainAgentConnection:
+    """One member-owned connection the workspace's main agent is granted: the account a feed would
+    sync and the member whose connection pays for it."""
+
+    id: UUID
+    provider: str
+    account_id: str
+    owner_member_id: UUID
+
+
+@dataclass(frozen=True)
 class GrantRecorded:
     """What `complete` returns once the handoff lands durably: the provider account now bound."""
 
     provider: str
     account_id: str
     agent_id: UUID
+
+
+@dataclass(frozen=True)
+class ConnectionRecorded:
+    """The connection a completed handoff landed, as the extensions deriving state from it read it:
+    the connection generation now live, the provider account it holds, the member who owns it, and
+    the agent the handoff granted. It is published once that row has committed, so a handler creates
+    what the connection implies while the member is still on the callback. The `connection_recorded`
+    hook payload lives beside the flow that publishes it, since `ufo.ext.manifest` imports this
+    module and folds it into `HookPayload`."""
+
+    connection_id: UUID
+    provider: str
+    account_id: str
+    owner_member_id: UUID
+    agent_id: UUID
+
+
+class ConnectionHooks(Protocol):
+    """Where a landed connection reaches the extensions that derive state from it — the source rows
+    a connected account feeds. Structural and injected rather than imported: the chain binds the
+    installed manifests, which import this module. `fire` swallows a handler's failure, so the
+    connection is recorded whatever an extension makes of it."""
+
+    async def fire(self, connection: ConnectionRecorded) -> None: ...
 
 
 class ConnectState(BaseModel):
@@ -198,8 +236,9 @@ class GrantStore:
         conversation_id: UUID,
         shared: bool,
         account_label: str | None = None,
-    ) -> None:
-        """Create or reuse the member's connection and grant the bound agent. A broker account has
+    ) -> UUID:
+        """Create or reuse the member's connection, grant the bound agent, and answer the connection
+        the grant landed on. A broker account has
         one owner per workspace; reconnecting it as another member fails instead of reassigning the
         account, its sources, and every existing edge. Reconnecting only widens sharing: a
         `shared=False` reconnect keeps a workspace-shared connection shared, so a per-agent
@@ -282,6 +321,7 @@ class GrantStore:
                     },
                 )
             )
+        return existing.id
 
     async def active_grants(self) -> tuple[Grant, ...]:
         """The bound agent's connection edges, joined to member-owned account identity."""
@@ -580,6 +620,7 @@ class ConnectFlow:
     store: GrantStore
     redirect_uri: str
     resolver: OAuthProviderResolver | None = None
+    connections: ConnectionHooks | None = None
 
     def authorize(
         self,
@@ -626,11 +667,14 @@ class ConnectFlow:
         return claims.workspace_id
 
     async def complete(self, *, state: str, code: str) -> GrantRecorded:
+        """Land the handoff, then publish the connection to the extensions that derive state from
+        it: what a connected account implies — the feeds it syncs — exists by the time the member
+        reads the callback, rather than at the next sweep of whatever job would notice later."""
         claims = self._open(state)
         descriptor = self._provider(claims.provider)
         with ws(claims.workspace_id), agent(claims.agent_id):
             account = await descriptor.exchange(code, self.redirect_uri, claims.workspace_id, state)
-            await self.store.record(
+            connection_id = await self.store.record(
                 provider=descriptor.provider,
                 account_id=account.account_id,
                 host=descriptor.host,
@@ -639,6 +683,16 @@ class ConnectFlow:
                 shared=claims.shared,
                 account_label=account.account_label,
             )
+            if self.connections is not None:
+                await self.connections.fire(
+                    ConnectionRecorded(
+                        connection_id=connection_id,
+                        provider=descriptor.provider,
+                        account_id=account.account_id,
+                        owner_member_id=claims.grantor_member_id,
+                        agent_id=claims.agent_id,
+                    )
+                )
         return GrantRecorded(
             provider=descriptor.provider, account_id=account.account_id, agent_id=claims.agent_id
         )
@@ -923,4 +977,42 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
             agents=tuple(sorted(agent_names.get(key, ()))),
         )
         for key, summary in grouped.items()
+    )
+
+
+async def main_agent_connections() -> tuple[MainAgentConnection, ...]:
+    """This workspace's connections the main agent holds a grant for, provider-ordered — what a feed
+    registrar may sync without being told. A feed registered off one of these grants the main agent,
+    so a connection held only by a shipped agent is absent: the account a member connected for that
+    agent stays with it."""
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.connection.c.id,
+                    tables.connection.c.provider,
+                    tables.connection.c.account_id,
+                    tables.connection.c.owner_member_id,
+                )
+                .select_from(
+                    tables.connection.join(
+                        tables.connector_grant,
+                        tables.connector_grant.c.connection_id == tables.connection.c.id,
+                    ).join(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
+                )
+                .where(
+                    tables.connection.c.workspace_id == ws_current().workspace_id,
+                    tables.agent.c.is_main.is_(True),
+                )
+                .order_by(tables.connection.c.provider, tables.connection.c.account_id)
+            )
+        ).all()
+    return tuple(
+        MainAgentConnection(
+            id=row.id,
+            provider=row.provider,
+            account_id=row.account_id,
+            owner_member_id=row.owner_member_id,
+        )
+        for row in rows
     )

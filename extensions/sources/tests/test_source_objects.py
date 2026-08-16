@@ -3,8 +3,9 @@
 Every mutation drives the real tool dispatch (`turn_tools` over the extension's manifest), and
 assertions read back through the durable `source` rows and the verbs' own results: derived names,
 error-driven discovery (unknown provider/stream refusals listing the valid sets), the tenant-URL
-safety rules, broker- and direct-auth resolution, delete marking the row removed and tombstoning
-its pages, and revival on an identical re-registration. A source is private to its registering
+safety rules, broker- and direct-auth resolution, an apply settling a live binding on the streams
+it names, delete marking the row removed and tombstoning its pages, and revival on an identical
+re-registration. A source is private to its registering
 member by default; sharing it and deleting it are gated to the registrar or a workspace admin."""
 
 import json
@@ -318,8 +319,7 @@ def test_manifest_declares_the_source_kind() -> None:
     declared = manifest()
     assert declared.tools == ()
     assert SOURCE_KIND in {kind.name for kind in declared.objects}
-    [hook] = declared.hooks
-    assert hook.event == "page_change"
+    assert "page_change" in {hook.event for hook in declared.hooks}
     assert {slot.name for slot in declared.credentials} == set(CONNECTORS)
     assert {source.backend for source in declared.sources} == set(CONNECTORS)
 
@@ -825,27 +825,6 @@ async def test_registration_requires_a_speaking_member(
         await tool.handler(ctx, args)
 
 
-async def test_changing_streams_is_refused_as_an_update(db: None) -> None:
-    state = await _workspace()
-    grants = GrantStore()
-    await _grant(state, grants, ASANA, "acct-one")
-    ctx = _context(state, grants, brokered=(ASANA,))
-    name = binding_name(ASANA, "acct-one", None)
-    tool = _TOOLS["object_apply"]
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(ASANA, ("workspaces",), name))
-        args = tool.input_model.model_validate(
-            {
-                "user_description": TOOL_NARRATION,
-                "manifest": _manifest_text(ASANA, ("workspaces", "projects"), name),
-            }
-        )
-        with pytest.raises(VerbNotSupported, match="delete"):
-            await tool.handler(ctx, args)
-    rows = await _rows(state, ASANA)
-    assert [row["config"]["stream"] for row in rows] == ["workspaces"]
-
-
 async def test_a_mail_binding_pins_a_thirty_day_first_sync_window(db: None) -> None:
     """A mail stream's declared window resolves at registration into an absolute cutoff the row
     keeps, and re-applying the same spec leaves that cutoff where it is. The row id is the one this
@@ -1133,12 +1112,12 @@ async def test_the_portals_row_acts_survive_a_binding_that_holds_a_window(db: No
     assert after["subject"] == SHARED_SUBJECT
 
 
-async def test_a_submit_editing_the_window_and_the_identity_is_refused_whole(db: None) -> None:
-    """Widening writes to the rows, and the identity refusal comes from the same apply, so the
-    order of the two decides whether a submit that changes both is refused whole or left half
-    applied. Every check runs before either write: this submit widens 7 to 90 AND drops a stream,
-    and has to come back refused with the binding still on 7 days and still syncing both streams —
-    not re-pinned to 90 by an apply the member was told did not happen."""
+async def test_a_submit_editing_the_window_and_the_streams_is_refused_whole(db: None) -> None:
+    """Both edits an apply absorbs — the window and the stream set — write rows, so the order of
+    the two decides whether a submit that changes both is refused whole or left half applied. Every
+    check runs before either write: this submit narrows 90 days to 7 AND drops a stream, and has to
+    come back refused with the binding still pinned to 90 and still syncing both streams — not left
+    holding one stream by an apply the member was told did not happen."""
     state = await _workspace()
     grants = GrantStore()
     await _grant(state, grants, OUTLOOK, "acct-one")
@@ -1146,18 +1125,121 @@ async def test_a_submit_editing_the_window_and_the_identity_is_refused_whole(db:
     name = binding_name(OUTLOOK, "acct-one", None)
     apply_tool = _TOOLS["object_apply"]
     with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(OUTLOOK, ("events", "messages"), name, backfill_days=7))
+        await _apply(ctx, _manifest_text(OUTLOOK, ("events", "messages"), name, backfill_days=90))
         args = apply_tool.input_model.model_validate(
             {
                 "user_description": TOOL_NARRATION,
-                "manifest": _manifest_text(OUTLOOK, ("messages",), name, backfill_days=90),
+                "manifest": _manifest_text(OUTLOOK, ("messages",), name, backfill_days=7),
             }
         )
-        with pytest.raises(VerbNotSupported, match="identity is its config"):
+        with pytest.raises(VerbNotSupported, match="only ever widens"):
             await apply_tool.handler(ctx, args)
     rows = {str(row["config"]["stream"]): row["config"] for row in await _rows(state, OUTLOOK)}
     assert sorted(rows) == ["events", "messages"]
-    assert {config["backfill_days"] for config in rows.values()} == {7}
+    assert {config["backfill_days"] for config in rows.values()} == {90}
+
+
+async def test_dropping_the_last_windowed_stream_narrows_a_binding_that_holds_a_window(
+    db: None,
+) -> None:
+    """A narrowing that drops every stream the window reaches has to complete. The window is weighed
+    on the rows the submit keeps: the dropped `messages` row goes with its pages, so its pin decides
+    nothing and the unset request arriving with the narrowing lowers no live floor. Weighing the
+    dropped row instead refused this submit as a narrowing, while keeping `backfill_days: 90` is
+    refused because no named stream honours it — the member had no submit left and had to delete a
+    binding to drop one stream from it.
+
+    The kept rows are relabelled, never refetched: neither takes a cutoff, so their cursors
+    stand."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, OUTLOOK, "acct-one")
+    ctx = _context(state, grants, brokered=(OUTLOOK,))
+    name = binding_name(OUTLOOK, "acct-one", None)
+    kept = ("contacts", "events")
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(OUTLOOK, (*kept, "messages"), name, backfill_days=90))
+    async with workspace_tx() as connection:
+        await connection.execute(sa.update(tables.source).values(cursor="9001"))
+    before = {str(row["config"]["stream"]): row for row in await _rows(state, OUTLOOK)}
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(
+            ValueError, match="no selected 'outlook' stream takes a backfill window"
+        ):
+            await _apply(ctx, _manifest_text(OUTLOOK, kept, name, backfill_days=90))
+        narrowed = await _apply(ctx, _manifest_text(OUTLOOK, kept, name))
+        fetched = await _get(ctx, name)
+    rows = {str(row["config"]["stream"]): row for row in await _rows(state, OUTLOOK)}
+
+    assert narrowed["result"] == "updated"
+    assert rows["messages"]["removed_at"] is not None
+    assert [rows[stream]["removed_at"] for stream in kept] == [None, None]
+    assert [rows[stream]["id"] for stream in kept] == [before[stream]["id"] for stream in kept]
+    assert {rows[stream]["config"]["backfill_days"] for stream in kept} == {None}
+    assert {rows[stream]["config"]["backfill_after"] for stream in kept} == {None}
+    assert {rows[stream]["cursor"] for stream in kept} == {"9001"}
+    assert fetched["spec"]["streams"] == list(kept)
+    assert fetched["spec"]["backfill_days"] is None
+
+
+async def test_a_re_apply_settles_the_binding_on_the_streams_it_names(db: None) -> None:
+    """A binding's name derives from provider, account and tenant URL alone, so its streams are
+    what it carries rather than which binding it is: a submit naming a different set is the same
+    binding with different content, never a second one, and the member ends with exactly the
+    streams they name.
+
+    Dropping `stories` removes its row and tombstones its pages — the one act that clears what a
+    stream synced, which is why the whole binding had to be deleted before. Adding `users` takes
+    the binding's own disclosure and owner. Naming `stories` again revives its single row, since
+    the row id derives from the config: no stream ever holds two."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    ctx = _context(state, grants, brokered=(ASANA,))
+    name = binding_name(ASANA, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(ASANA, ("stories", "tasks"), name))
+        before = {str(row["config"]["stream"]): row for row in await _rows(state, ASANA)}
+        page_id = uuid4()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.page).values(
+                    id=page_id,
+                    workspace_id=state.workspace_id,
+                    source_id=before["stories"]["id"],
+                    digest="sha256:x",
+                    body_ref="pages/x",
+                    subject=member_subject(state.owner_id),
+                    tombstone=False,
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+        narrowed = await _apply(ctx, _manifest_text(ASANA, ("tasks", "users"), name))
+        rows = {str(row["config"]["stream"]): row for row in await _rows(state, ASANA)}
+        async with workspace_tx() as connection:
+            tombstone = (
+                await connection.execute(
+                    sa.select(tables.page.c.tombstone).where(tables.page.c.id == page_id)
+                )
+            ).scalar_one()
+        fetched = await _get(ctx, name)
+        readded = await _apply(ctx, _manifest_text(ASANA, ("stories", "tasks", "users"), name))
+        revived = {str(row["config"]["stream"]): row for row in await _rows(state, ASANA)}
+    assert narrowed == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
+    assert sorted(rows) == ["stories", "tasks", "users"]
+    assert rows["stories"]["removed_at"] is not None
+    assert tombstone is True or tombstone == 1
+    assert rows["tasks"] == before["tasks"]
+    assert rows["users"]["removed_at"] is None
+    assert rows["users"]["subject"] == member_subject(state.owner_id)
+    assert rows["users"]["owner_member_id"] == state.owner_id
+    assert rows["users"]["connection_id"] == before["tasks"]["connection_id"]
+    assert fetched["spec"]["streams"] == ["tasks", "users"]
+    assert readded["result"] == "updated"
+    assert sorted(revived) == ["stories", "tasks", "users"]
+    assert revived["stories"]["id"] == before["stories"]["id"]
+    assert revived["stories"]["removed_at"] is None
 
 
 async def test_narrowing_a_live_bindings_window_is_delete_and_recreate(db: None) -> None:

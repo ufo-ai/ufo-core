@@ -16,12 +16,16 @@ from httpx import ASGITransport, AsyncClient
 from ufo.agent_scope import AgentUnbound, agent
 from ufo.audience import conversation_audience
 from ufo.connectors import CliCredential, ForwardedResponse
+from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
+from ufo.ext.loader import connection_hooks
+from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
 from ufo.grants import (
     ConnectFlow,
     ConnectHandoff,
     ConnectionOwnedByAnotherMember,
     ConnectionPermissionDenied,
+    ConnectionRecorded,
     ConnectRequestInvalid,
     ConnectStateInvalid,
     ConnectUnavailable,
@@ -507,6 +511,77 @@ async def test_connect_flow_records_a_durable_grant_with_account_label(db: None)
         GRANTED_HOST,
         member_id,
     )
+
+
+async def test_a_landed_connection_reaches_every_extension_that_derives_from_it(db: None) -> None:
+    """The control-plane seam: completing the handoff publishes the committed connection to each
+    declared `connection_recorded` hook, so an extension creates what the connection implies inside
+    the callback. A handler that raises is swallowed — the connection is recorded and the next
+    handler still runs — because the extension's own job retries what it did not finish."""
+    published: list[ConnectionRecorded] = []
+
+    async def _explode(ctx: HookContext) -> HookOutcome:
+        raise RuntimeError("connection consumer exploded")
+
+    async def _publish(ctx: HookContext) -> HookOutcome:
+        assert isinstance(ctx.payload, ConnectionRecorded)
+        published.append(ctx.payload)
+        return None
+
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    manifests = (
+        Manifest(
+            name="boom_ext",
+            version="0",
+            hooks=(HookSpec(event="connection_recorded", handler=_explode),),
+        ),
+        Manifest(
+            name="probe_ext",
+            version="0",
+            hooks=(HookSpec(event="connection_recorded", handler=_publish),),
+        ),
+    )
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+        connections=connection_hooks(
+            manifests, CredentialStore(fernet=Fernet(Fernet.generate_key()))
+        ),
+    )
+    state = parse_qs(
+        urlparse(
+            flow.authorize(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                provider="stub",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
+        ).query
+    )["state"][0]
+    recorded = await flow.complete(state=state, code="the-code")
+    assert recorded.account_id == "acct-42"
+    [landed] = published
+    assert (landed.provider, landed.account_id, landed.owner_member_id, landed.agent_id) == (
+        "stub",
+        "acct-42",
+        member_id,
+        agent_id,
+    )
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            assert (
+                await connection.execute(
+                    sa.select(tables.connection.c.id).where(
+                        tables.connection.c.workspace_id == workspace_id
+                    )
+                )
+            ).scalar_one() == landed.connection_id
 
 
 async def test_connect_flow_records_null_account_label(db: None) -> None:

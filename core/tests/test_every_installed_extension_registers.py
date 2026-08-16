@@ -44,7 +44,9 @@ from ufo.config import (
 from ufo.credentials import CredentialStore
 from ufo.ext.context import context_for
 from ufo.ext.loader import (
+    CONNECTION_RECORDED,
     NotRegisteredError,
+    connection_hooks,
     discovered,
     discovered_packs,
     embed_backend,
@@ -277,9 +279,14 @@ def _check_hooks(manifest: Manifest, store: CredentialStore) -> None:
     if not manifest.hooks:
         return
     chain = turn_hooks((manifest,), store, audience=conversation_audience(None))
+    connections = connection_hooks((manifest,), store)
     for spec in manifest.hooks:
         if spec.event == "page_change":
             assert "page_change" not in chain.hooks
+            continue
+        if spec.event == CONNECTION_RECORDED:
+            assert CONNECTION_RECORDED not in chain.hooks
+            assert any(bound.spec is spec for bound in connections.hooks)
             continue
         assert any(bound.spec is spec for bound in chain.hooks[spec.event])
 

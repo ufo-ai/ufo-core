@@ -12,7 +12,9 @@ exactly what every derivation (tools, jobs, routes, proxy rules) sees.
 
 `turn_tools` reads the active manifests into the set a turn dispatches against and the owning
 ExtensionContext for each extension tool; `turn_hooks` reads them into the turn's reactive
-`HookChain` — every declared hook bound to its extension's scoped context, grouped by event."""
+`HookChain` — every declared hook bound to its extension's scoped context, grouped by event; and
+`connection_hooks` reads them into the `ConnectionHookChain` the connect flow publishes a landed
+connection to."""
 
 import asyncio
 import hashlib
@@ -69,6 +71,7 @@ from ufo.ext.manifest import (
     declared_slots,
 )
 from ufo.ext.surface import TurnTailer
+from ufo.grants import ConnectionRecorded
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.members import MEMBER_OBJECT
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
@@ -108,6 +111,7 @@ TURN_HOOK_EVENTS: tuple[HookEvent, ...] = (
     "pre_compact",
     "post_compact",
 )
+CONNECTION_RECORDED: HookEvent = "connection_recorded"
 GATING_EVENTS: frozenset[HookEvent] = frozenset({"pre_tool_use", "user_prompt_submit"})
 ALLOWED_OUTCOMES: dict[HookEvent, tuple[type, ...]] = {
     "pre_tool_use": (Deny, ModifyInput),
@@ -118,6 +122,7 @@ ALLOWED_OUTCOMES: dict[HookEvent, tuple[type, ...]] = {
     "pre_compact": (),
     "post_compact": (),
     "page_change": (),
+    "connection_recorded": (),
 }
 
 
@@ -887,10 +892,65 @@ def turn_hooks(
             public_base_url=public_base_url,
         )
         for spec in manifest.hooks:
-            if spec.event == "page_change":
+            if spec.event not in TURN_HOOK_EVENTS:
                 continue
             grouped[spec.event].append(BoundHook(spec=spec, ext=context))
     return HookChain(
         hooks={event: tuple(bound) for event, bound in grouped.items()},
         audience=audience,
     )
+
+
+@dataclass(frozen=True)
+class ConnectionHookChain:
+    """The control-plane counterpart of the turn chain: the `connection_recorded` hooks a landed
+    connection reaches, in lockfile pin order. The connect flow publishes inside the request that
+    completed the handoff, with the workspace bound and the connection committed, so an extension
+    creates what the connection implies — a connected account's feeds — before the member reads the
+    callback. Observe-only: the connection is recorded whatever a handler makes of it, so a handler
+    that raises or outlives the hook timeout is logged and swallowed, and the extension's own job
+    retries the creation it did not finish."""
+
+    hooks: tuple[BoundHook, ...] = ()
+
+    async def fire(self, connection: ConnectionRecorded) -> None:
+        for hook in self.hooks:
+            try:
+                async with asyncio.timeout(HOOK_TIMEOUT_SECONDS):
+                    await hook.spec.handler(HookContext(ext=hook.ext, payload=connection))
+            except Exception as error:
+                log(
+                    "hook.swallowed",
+                    extension=hook.ext.store.extension,
+                    hook_event=CONNECTION_RECORDED,
+                    error_class=type(error).__name__,
+                )
+
+
+def connection_hooks(
+    manifests: tuple[Manifest, ...],
+    credential_store: CredentialStore | None,
+    index: IndexBackend | None = None,
+    embed: EmbedClient | None = None,
+) -> ConnectionHookChain:
+    """The chain the connect flow publishes to — every declared `connection_recorded` hook bound to
+    its extension's workspace-scoped ExtensionContext, the same handle its jobs receive, so the
+    connect-time creation and the job that retries it run identical code. An extension that declares
+    hooks without a credential key set fails loud, since its context needs the credential store."""
+    bound: list[BoundHook] = []
+    for manifest in manifests:
+        specs = tuple(spec for spec in manifest.hooks if spec.event == CONNECTION_RECORDED)
+        if not specs:
+            continue
+        if credential_store is None:
+            raise RuntimeError(
+                f"extension {manifest.name!r} declares hooks but no credential key is set"
+            )
+        context = context_for(
+            manifest.name,
+            frozenset(slot.name for slot in manifest.credentials),
+            index,
+            embed,
+        )
+        bound.extend(BoundHook(spec=spec, ext=context) for spec in specs)
+    return ConnectionHookChain(hooks=tuple(bound))

@@ -7,10 +7,16 @@ from ufo.grants import (
     ConnectionPermissionDenied as ConnectionPermissionDenied,
 )
 from ufo.grants import (
+    ConnectionRecorded as ConnectionRecorded,
+)
+from ufo.grants import (
     ConnectionSummary as ConnectionSummary,
 )
 from ufo.grants import (
     GrantSummary as GrantSummary,
+)
+from ufo.grants import (
+    MainAgentConnection as MainAgentConnection,
 )
 from ufo.grants import (
     account_object_name as account_object_name,
@@ -20,4 +26,7 @@ from ufo.grants import (
 )
 from ufo.grants import (
     grant_summaries as grant_summaries,
+)
+from ufo.grants import (
+    main_agent_connections as main_agent_connections,
 )
