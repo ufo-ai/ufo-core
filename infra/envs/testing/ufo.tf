@@ -28,10 +28,15 @@ locals {
     "131.0.72.0/22",
   ]
 
-  system_namespace          = module.platform.system_namespace
+  system_namespace = module.platform.system_namespace
+
+  # The three sequential shutdown phases. `graceful_shutdown_seconds` is the window `DBOS.destroy`
+  # polls in-flight turns for before it cancels them, so the model round a roll interrupts finishes
+  # and records. Half of prod's 600: testing rolls on every merge and the pods' SIGKILL deadline
+  # derives from these below, so a roll is bounded at 400s, inside the deploy's 10m rollout waits.
   prestop_seconds           = 10
   request_shutdown_seconds  = 30
-  graceful_shutdown_seconds = 0
+  graceful_shutdown_seconds = 300
 
   # The digest-pinned runtime image used by migration, proxy, and serve.
   bundle_image = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"

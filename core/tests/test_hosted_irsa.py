@@ -202,10 +202,11 @@ def test_hosted_proxy_rolls_all_replacements_and_drains_connections() -> None:
 def test_hosted_shutdown_grace_is_environment_specific() -> None:
     """The env local is the single source for each drain window: the rendered `[serve]` config
     interpolates the local (never a second literal), and the pod's termination grace is computed
-    from both sequential shutdown phases — so no value can drift from its enforcement."""
+    from both sequential shutdown phases — so no value can drift from its enforcement. Both envs
+    hold a rolling pod open for the in-flight turn, which is what carries the model round."""
     testing = TESTING_CONFIG.read_text()
     prod = PROD_CONFIG.read_text()
-    assert "  graceful_shutdown_seconds = 0\n" in testing
+    assert "  graceful_shutdown_seconds = 300\n" in testing
     assert "  graceful_shutdown_seconds = 600\n" in prod
     for config in (testing, prod):
         assert "  prestop_seconds           = 10\n" in config
