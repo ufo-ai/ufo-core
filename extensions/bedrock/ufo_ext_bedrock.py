@@ -166,6 +166,13 @@ BEDROCK_MODEL_SPECS = (
         OPENAI_CONTEXT_WINDOW,
         "responses",
     ),
+    _openai(
+        "openai.gpt-5.6-luna",
+        ModelPrice(200_000, 1_200_000, 20_000, 200_000, 200_000),
+        "2026-02",
+        OPENAI_CONTEXT_WINDOW,
+        "responses",
+    ),
 )
 
 

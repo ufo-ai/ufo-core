@@ -128,6 +128,10 @@ locals {
     [pack]
     name = "assistant_hosted"
 
+    [models]
+    ambient_reply_model = "openai.gpt-5.6-luna"
+    background_jobs_model = "openai.gpt-5.6-luna"
+
     [memory]
     index_backend = "turbopuffer"
 
