@@ -351,6 +351,21 @@ def test_the_review_agent_never_cancels_and_keeps_each_head_separate() -> None:
     assert "cancel_spawn" not in agent.spec.prompt
 
 
+def test_the_review_agent_stops_unchanged_head_revisions_without_more_tools() -> None:
+    (agent,) = coding.manifest().agents
+    assert "A new head SHA is the only source change that starts review work." in agent.spec.prompt
+    assert "stop in the next response without another tool call" in agent.spec.prompt
+    assert "report that no action was needed" in agent.spec.prompt
+
+
+def test_the_review_agent_bounds_each_child_evidence_pass() -> None:
+    (agent,) = coding.manifest().agents
+    assert "Make one bounded evidence pass." in agent.spec.prompt
+    assert "Issue independent reads and searches together." in agent.spec.prompt
+    assert "Do not repeat a command when its output was complete." in agent.spec.prompt
+    assert "return the JSON result immediately" in agent.spec.prompt
+
+
 def test_the_review_agent_reaches_github_through_the_slot_this_pack_declares() -> None:
     """Public internet stays blocked, so a child's `git fetch` reaches github.com only through the
     git slot's own injection rule — which is why the pack that ships the agent is the pack that
