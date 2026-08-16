@@ -94,7 +94,9 @@ turn. So a member opens a conversation with the agent — the portal today — a
 stands on its own.
 
 It is a skill and not a prompt section because it is a task, not a capability: the index carries one
-line, and the instructions reach the model only on the turn a member actually asks. A standing block
+line, and the instructions reach the model only on the turn a member actually asks. It reaches
+only a turn a member is speaking on, because the acts it names are speaker-gated — a spawn, a
+schedule, or a source arrival cannot make a grant and has nobody to ask. A standing block
 would tax every turn with work nobody requested, and would have to tell the agent not to act on it.
 
 Nothing is pushed at a member and no conversation is opened on their behalf. A member asks the main

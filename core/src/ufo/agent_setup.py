@@ -100,8 +100,9 @@ ROSTER_HEADER = (
 )
 
 
-async def setup_skill(agent_id: UUID, is_main: bool) -> RuntimeSkill | None:
-    """The loadable skill telling an agent what it still needs, or None when it needs nothing.
+async def setup_skill(agent_id: UUID, is_main: bool, has_speaker: bool) -> RuntimeSkill | None:
+    """The loadable skill telling an agent what it still needs, or None when it needs nothing
+    or the turn cannot act on it.
 
     An agent with grants outstanding is told about itself. The main agent is told the roster,
     because it is the one agent that may grant an account to another (`connect_account` takes an
@@ -111,8 +112,15 @@ async def setup_skill(agent_id: UUID, is_main: bool) -> RuntimeSkill | None:
     It is a skill rather than a prompt section because it is a task, not a capability: the index
     carries one line, and the instructions reach the model only on the turn a member actually asks.
 
+    It reaches only a turn a member is speaking on, because every act it names is speaker-gated:
+    `connect_account` refuses without one. A turn nobody speaks on — a spawn, a schedule, a source
+    arrival — would be handed instructions it cannot follow and a member it cannot ask, and would
+    keep reporting the same grant on every later turn.
+
     Derived from the grants on every turn, so it erases itself as they land rather than needing a
     flag that a later revoke would leave stale."""
+    if not has_speaker:
+        return None
     pending = await pending_setup()
     mine = next((entry for entry in pending if entry[0] == agent_id), None)
     if mine is None:

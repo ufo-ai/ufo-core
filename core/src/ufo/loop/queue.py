@@ -438,7 +438,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
             tools = ToolRegistry(_agent_tools(all_tools, agent.tools, turn.admission_source))
-            if (waiting := await setup_skill(turn.agent_id, agent.is_main)) is not None:
+            waiting = await setup_skill(
+                turn.agent_id, agent.is_main, turn.speaker_member_id is not None
+            )
+            if waiting is not None:
                 skills = skills.merged_with((waiting,))
             system_prompt = render_system_prompt(
                 agent.prompt,

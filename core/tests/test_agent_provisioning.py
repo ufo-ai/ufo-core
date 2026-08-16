@@ -521,7 +521,7 @@ async def test_an_agent_that_is_not_set_up_is_told_so_in_its_own_conversation(
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert created is not None
     with ws(workspace_id):
-        skill = await setup_skill(created.id, is_main=False)
+        skill = await setup_skill(created.id, is_main=False, has_speaker=True)
     assert skill is not None
     assert skill.name == SETUP_SKILL_NAME
     assert "You are installed but not set up" in skill.instructions
@@ -540,10 +540,10 @@ async def test_the_setup_slot_empties_as_the_grants_land(
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert created is not None
     with ws(workspace_id):
-        assert await setup_skill(created.id, is_main=False) is not None
+        assert await setup_skill(created.id, is_main=False, has_speaker=True) is not None
     await _grant_connection(workspace_id, created.id, sample.CONNECTOR_PROVIDER)
     with ws(workspace_id):
-        assert await setup_skill(created.id, is_main=False) is None
+        assert await setup_skill(created.id, is_main=False, has_speaker=True) is None
 
 
 async def test_a_workspace_with_nothing_shipped_carries_no_setup_slot(
@@ -554,7 +554,7 @@ async def test_a_workspace_with_nothing_shipped_carries_no_setup_slot(
     main = await _row(workspace_id, DEFAULT_AGENT_NAME)
     assert main is not None
     with ws(workspace_id):
-        assert await setup_skill(main.id, is_main=True) is None
+        assert await setup_skill(main.id, is_main=True, has_speaker=True) is None
 
 
 async def test_an_agent_with_nothing_outstanding_is_told_nothing(
@@ -568,8 +568,8 @@ async def test_an_agent_with_nothing_outstanding_is_told_nothing(
     shipped = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert main is not None and shipped is not None
     with ws(workspace_id):
-        assert await setup_skill(main.id, is_main=False) is None
-        assert await setup_skill(shipped.id, is_main=False) is not None
+        assert await setup_skill(main.id, is_main=False, has_speaker=True) is None
+        assert await setup_skill(shipped.id, is_main=False, has_speaker=True) is not None
 
 
 def test_a_provision_refuses_an_allowlist_that_cannot_obtain_its_own_grants() -> None:
@@ -605,8 +605,25 @@ async def test_the_main_agent_is_told_which_agents_it_can_connect_an_account_for
     main = await _row(workspace_id, DEFAULT_AGENT_NAME)
     assert main is not None
     with ws(workspace_id):
-        roster = await setup_skill(main.id, is_main=True)
-        assert await setup_skill(main.id, is_main=False) is None
+        roster = await setup_skill(main.id, is_main=True, has_speaker=True)
+        assert await setup_skill(main.id, is_main=False, has_speaker=True) is None
     assert roster is not None
     assert f"- {PROVISIONED_AGENT_NAME} — still needs" in roster.instructions
     assert "`connect_account` with `agent` set to" in roster.instructions
+
+
+async def test_a_turn_nobody_speaks_on_is_not_told_to_ask(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every act the skill names is speaker-gated: `connect_account` refuses without one. A spawn, a
+    schedule, or a source arrival would be handed instructions it cannot follow and a member it
+    cannot ask, so it is told nothing and the grant waits for a member's own turn."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
+    assert created is not None and main is not None
+    with ws(workspace_id):
+        assert await setup_skill(created.id, is_main=False, has_speaker=True) is not None
+        assert await setup_skill(created.id, is_main=False, has_speaker=False) is None
+        assert await setup_skill(main.id, is_main=True, has_speaker=False) is None
