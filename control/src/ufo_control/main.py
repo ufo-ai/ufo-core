@@ -83,15 +83,22 @@ def migrate() -> None:
 
 
 @main.command()
-@click.argument("object_number", type=click.IntRange(min=1))
 @click.argument("email")
 @click.option("--business", help="What they said their company does.")
 @click.option("--goals", help="What they said they want an agent to do.")
-def invite(object_number: int, email: str, business: str | None, goals: str | None) -> None:
-    """Grant a waitlist object's email domain one new workspace and email it the invitation.
+@click.option(
+    "--object",
+    "object_number",
+    type=click.IntRange(min=1),
+    help="The waitlist object this approves, when it approves one.",
+)
+def invite(email: str, business: str | None, goals: str | None, object_number: int | None) -> None:
+    """Grant an email domain one new workspace and email it the invitation.
 
     Both intake answers open the new workspace's main agent prompt. They travel together: a grant
-    describes this customer completely or not at all.
+    describes this customer completely or not at all. `--object` names a waitlist object where one
+    exists; a grant approved from the intake form answers a form response, which is no waitlist
+    object, so it carries no number.
     """
     if bool(business) != bool(goals):
         raise click.ClickException("--business and --goals are given together or not")
@@ -101,11 +108,14 @@ def invite(object_number: int, email: str, business: str | None, goals: str | No
     except (InviteError, WorkEmailError) as error:
         raise click.ClickException(str(error)) from error
     expires = minted.expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
-    click.echo(f"object #{minted.object_number} granted to {minted.email}, expires {expires} UTC")
+    approved = (
+        f"object #{minted.object_number}" if minted.object_number is not None else minted.email
+    )
+    click.echo(f"{approved} granted to {minted.email}, expires {expires} UTC")
 
 
 async def _mint_invite(
-    object_number: int, email: str, profile: SignupProfile | None
+    object_number: int | None, email: str, profile: SignupProfile | None
 ) -> MintedInvite:
     """The SES sender is built before the grant lands, so a deploy missing its mail configuration
     refuses without spending the object's one live grant. A grant that outlives its own invitation
@@ -125,7 +135,7 @@ async def _mint_invite(
         await sender.send(minted.email, subject, body)
     except Exception as error:
         raise click.ClickException(
-            f"object #{minted.object_number} is granted to {minted.email}, but the invitation "
+            f"{minted.email} is granted, but the invitation "
             f"could not be emailed ({error}); the grant stands — tell them to run the installer"
         ) from error
     return minted

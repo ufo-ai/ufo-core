@@ -341,6 +341,39 @@ async def test_the_verb_carries_a_claim_keyed_delivery_across_to_its_domain(
         await pool.close()
 
 
+async def test_the_verb_frees_an_object_number_a_live_ledger_still_requires(
+    empty_database: str,
+) -> None:
+    """A grant approved from the intake form names no waitlist object, so the column has to be
+    nullable on a database that already holds the ledger — `create table if not exists` is a no-op
+    there, so only RESHAPE can free it. The proof mints an unnumbered grant through the store."""
+    connection = await asyncpg.connect(empty_database)
+    try:
+        await connection.execute(f"create schema {SCHEMA}")
+        await connection.execute(
+            f"create table {SCHEMA}.invite_code ("
+            "  id uuid primary key,"
+            "  object_number integer not null check (object_number > 0),"
+            "  email text not null,"
+            "  email_domain text not null,"
+            "  expires_at timestamptz not null,"
+            "  consumed_at timestamptz,"
+            "  created_at timestamptz not null default now())"
+        )
+    finally:
+        await connection.close()
+
+    await shape_control_schema(empty_database)
+
+    pool = await asyncpg.create_pool(empty_database, min_size=1, max_size=2)
+    try:
+        minted = await InviteCodes(pool=pool).mint(None, "founder@formco.io")
+        assert minted.object_number is None
+        assert isinstance(await InviteCodes(pool=pool).redeem("formco.io", uuid4()), InviteAccepted)
+    finally:
+        await pool.close()
+
+
 def test_the_gateway_refuses_to_boot_an_unshaped_schema(
     empty_database: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -376,7 +409,10 @@ def test_operator_verbs_refuse_an_unshaped_schema(migrate: CliRunner) -> None:
     """Every verb that reads a ledger states the same precondition the same way, so an operator who
     reaches for one before the deploy has shaped the schema is told which verb to run instead of
     reading a raw `UndefinedTableError`."""
-    for argv in (["invite", "1", "cli@mintco.io"], ["slack-connect-retry", "unshaped.io"]):
+    for argv in (
+        ["invite", "cli@mintco.io", "--object", "1"],
+        ["slack-connect-retry", "unshaped.io"],
+    ):
         result = migrate.invoke(main, argv)
         assert result.exit_code != 0, result.output
         assert "run `ufo-control migrate`" in str(result.exception)

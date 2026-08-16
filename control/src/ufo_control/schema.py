@@ -74,6 +74,7 @@ TRANSLATE_DELIVERY = (
 RESHAPE = (
     f"alter table {gateway_store.TABLE} drop column if exists code_hash,"
     " drop column if exists attempts",
+    f"alter table {gateway_invite.TABLE} alter column object_number drop not null",
     f"alter table {gateway_invite.TABLE} add column if not exists business text,"
     " add column if not exists goals text,"
     " drop column if exists role,"

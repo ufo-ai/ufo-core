@@ -656,7 +656,7 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
 
 
 def test_invite_cli_rejects_a_nonpositive_object_number() -> None:
-    result = CliRunner().invoke(main, ["invite", "0", "cli@mintco.io"])
+    result = CliRunner().invoke(main, ["invite", "cli@mintco.io", "--object", "0"])
     assert result.exit_code != 0
     assert "not in the range" in result.output
 
@@ -673,8 +673,8 @@ def test_invite_cli_grants_a_redeemable_domain(
     os.environ[POSTGRES_OWNER_DSN_ENV] = shared_role_env.owner_dsn
     try:
         with caplog.at_level(logging.INFO):
-            granted = CliRunner().invoke(main, ["invite", "42", "cli@mintco.io"])
-        refused = CliRunner().invoke(main, ["invite", "43", "someone@gmail.com"])
+            granted = CliRunner().invoke(main, ["invite", "cli@mintco.io", "--object", "42"])
+        refused = CliRunner().invoke(main, ["invite", "someone@gmail.com", "--object", "43"])
     finally:
         if previous is None:
             os.environ.pop(POSTGRES_OWNER_DSN_ENV, None)

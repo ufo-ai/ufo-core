@@ -8,6 +8,12 @@ open a workspace on one grant — and stamps the claim's ``invite_id`` in the sa
 crash can never leave a consumed grant detached from its claim. The consumption lands before the
 workspace write; repeated redemption by that claim is accepted.
 
+An object number names the waitlist object a grant approved, and only that. A grant approved from
+the intake form answers a form response, which is no waitlist object, so it carries none — inventing
+one would ask an operator to pick a number nothing holds and to check it is free against a ledger no
+agent can read. Postgres treats nulls as distinct, so any number of unnumbered grants coexist while
+the waitlist's own numbers stay one to one.
+
 A grant names a domain rather than travelling as a bearer secret. The member proves the granted
 domain by verifying their own email, so the invitation carries nothing to retype, a forwarded
 invitation reaches only the company it was issued to, and the colleague who actually runs the
@@ -31,7 +37,7 @@ INVITE_TTL = timedelta(days=14)
 DDL = (
     f"create table if not exists {TABLE} ("
     "  id uuid primary key,"
-    "  object_number integer not null check (object_number > 0),"
+    "  object_number integer check (object_number > 0),"
     "  email text not null,"
     "  email_domain text not null,"
     "  business text,"
@@ -73,7 +79,7 @@ class SignupProfile:
 
 @dataclass(frozen=True)
 class MintedInvite:
-    object_number: int
+    object_number: int | None
     email: str
     expires_at: datetime
 
@@ -96,7 +102,7 @@ class InviteConsumed:
 @dataclass(frozen=True)
 class InviteAccepted:
     invite_id: UUID
-    object_number: int
+    object_number: int | None
     consumed_at: datetime
 
 
@@ -131,7 +137,7 @@ class InviteCodes:
         return SignupProfile(business=row["business"], goals=row["goals"])
 
     async def mint(
-        self, object_number: int, email: str, profile: SignupProfile | None = None
+        self, object_number: int | None, email: str, profile: SignupProfile | None = None
     ) -> MintedInvite:
         address, domain = normalize_email(email)
         WorkEmailPolicy().validate(address)
@@ -143,9 +149,10 @@ class InviteCodes:
         expires_at = now + self.ttl
         async with self.pool.acquire() as connection:
             async with connection.transaction():
-                await self._refuse_standing(
-                    connection, "object_number", object_number, f"object #{object_number}", now
-                )
+                if object_number is not None:
+                    await self._refuse_standing(
+                        connection, "object_number", object_number, f"object #{object_number}", now
+                    )
                 await self._refuse_standing(connection, "email_domain", domain, domain, now)
                 await connection.execute(
                     f"delete from {TABLE}"

@@ -5,6 +5,7 @@ and a grant that outlives a failed send still stands."""
 
 import logging
 from dataclasses import replace
+from uuid import uuid4
 
 import click
 import pytest
@@ -17,7 +18,12 @@ from ufo_control.gateway_email import (
     PUBLIC_BASE_URL_ENV,
     SES_SENDER_ENV,
 )
-from ufo_control.gateway_invite import InviteCodes, InviteError, SignupProfile
+from ufo_control.gateway_invite import (
+    InviteAccepted,
+    InviteCodes,
+    InviteError,
+    SignupProfile,
+)
 from ufo_control.gateway_store import OnboardStore
 
 APEX = "https://testing.flyingobject.ai"
@@ -97,11 +103,43 @@ def test_a_partial_profile_is_refused_before_the_ledger_is_touched(
 ) -> None:
     """Click's own parsing, so the operator sees the refusal rather than a grant that names a
     customer half-way."""
-    result = CliRunner().invoke(
-        main.main, ["invite", "9", "half@partial.com", "--business", "robotics"]
-    )
+    result = CliRunner().invoke(main.main, ["invite", "half@partial.com", "--business", "robotics"])
     assert result.exit_code != 0
     assert "given together or not" in result.output
+
+
+async def test_a_grant_can_approve_a_form_response_that_names_no_object(
+    store: OnboardStore, console_email: None
+) -> None:
+    """A form response is no waitlist object, so its grant carries no number — nobody has to invent
+    one or check it is free against a ledger no agent can read. Nulls are distinct in Postgres, so
+    unnumbered grants coexist while the waitlist's own numbers stay one to one."""
+    await main._mint_invite(None, "founder@formco.io", None)
+    await main._mint_invite(None, "founder@otherformco.io", None)
+    await main._mint_invite(11, "founder@waitlistco.io", None)
+
+    rows = await store.pool.fetch(
+        "select email_domain, object_number from ufo_control.invite_code order by created_at"
+    )
+    assert [(r["email_domain"], r["object_number"]) for r in rows] == [
+        ("formco.io", None),
+        ("otherformco.io", None),
+        ("waitlistco.io", 11),
+    ]
+
+    invites = InviteCodes(pool=store.pool)
+    assert isinstance(await invites.redeem("formco.io", uuid4()), InviteAccepted)
+
+
+def test_the_verb_takes_the_email_and_leaves_the_object_optional(
+    store: OnboardStore, console_email: None
+) -> None:
+    """The waitlist is on its way out, so the address is the argument and the object is the option
+    that names one where it exists."""
+    result = CliRunner().invoke(main.main, ["invite", "founder@verbco.io"])
+    assert result.exit_code == 0, result.output
+    assert "founder@verbco.io granted to founder@verbco.io" in result.output
+    assert "object #" not in result.output
 
 
 async def test_a_grant_without_intake_answers_records_none(

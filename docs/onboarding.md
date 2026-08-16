@@ -148,8 +148,10 @@ newer version than the client reports in `x-ufo-script`);
 token is machine-consumed and never printed.
 
 Creating a workspace is invite-gated; joining an existing one never is. A grant names one email
-domain, so the verified email *is* the redemption: `ufo-control invite <object-number> <email>`
-grants a waitlist object's domain and emails the invitation to it. Its `--business` and `--goals`
+domain, so the verified email *is* the redemption: `ufo-control invite <email>`
+grants that email's domain a workspace and emails the invitation to it. `--object` names a
+waitlist object where one exists; a grant approved from the intake form answers a form response,
+which is no waitlist object, so it carries no number. Its `--business` and `--goals`
 options carry what the intake form collected — what their company does, and what they want an agent
 to do; they are given together or not at all,
 and they open the main agent's prompt in the workspace that grant creates. They arrive through
