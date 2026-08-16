@@ -76,7 +76,14 @@ export type AdminPayload = {
   deploy: { sandbox_internet: boolean; extensions: DeployExtension[] };
 };
 
-export type ChatFile = { filename: string; url: string | null; size_bytes: number };
+/** A file a turn shared. `preview_url` is a same-origin picture of it, carried only when the file
+ *  is itself an image — the chat draws those inline in the reply instead of as a card. */
+export type ChatFile = {
+  filename: string;
+  url: string | null;
+  size_bytes: number;
+  preview_url: string | null;
+};
 
 export type QuestionOption = { label: string; description?: string };
 

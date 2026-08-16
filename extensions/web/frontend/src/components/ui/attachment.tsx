@@ -75,14 +75,16 @@ export function AttachmentDescription({ className, ...props }: ComponentProps<"s
 }
 
 /** A row of files that scrolls sideways rather than wrapping, so a message carrying six of them
- *  stays one row tall and the reply beneath it does not move down the page. */
+ *  stays one row tall and the reply beneath it does not move down the page. The fade that says
+ *  "more that way" ramps over the row's edges, so the ramp lives in gutters the padding opens and
+ *  the negative margin gives back — over the first card, it would eat the card's left border. */
 export function AttachmentGroup({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
       data-slot="attachment-group"
       className={cn(
-        "flex min-w-0 gap-lg overflow-x-auto overscroll-x-contain py-2xs",
-        "scroll-fade-x scrollbar-none snap-x snap-mandatory scroll-px-2xs",
+        "-mx-sm flex min-w-0 gap-lg overflow-x-auto overscroll-x-contain px-sm py-2xs",
+        "scroll-fade-x scrollbar-none snap-x snap-mandatory scroll-px-sm",
         "*:data-[slot=attachment]:flex-none *:data-[slot=attachment]:snap-start",
         className,
       )}

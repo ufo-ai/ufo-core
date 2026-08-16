@@ -64,6 +64,7 @@ export type ChatProps = {
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
   onSettled?: () => void;
+  onOpenArtifacts?: () => void;
 };
 
 export function Chat({
@@ -73,6 +74,7 @@ export function Chat({
   onCreated,
   onActivity,
   onSettled,
+  onOpenArtifacts,
 }: ChatProps) {
   const chatKey = conversationId ?? "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
@@ -147,7 +149,9 @@ export function Chat({
             />
           )}
         >
-          {trailing && trailing.length ? <Files files={trailing} /> : null}
+          {trailing && trailing.length ? (
+            <Files files={trailing} onOpenArtifacts={onOpenArtifacts} />
+          ) : null}
           {credentials ? (
             <Handoff>
               <div>{credentials.reason}</div>
@@ -202,23 +206,66 @@ export function Chat({
   );
 }
 
-/** What the turn shared, as a row that scrolls sideways rather than a column that pushes the
- *  composer down the page. */
-function Files({ files }: { files: ChatFile[] }) {
+/** What the turn shared, under the reply that shared it. A file that is itself a picture is drawn
+ *  as one — part of the answer, and pressing it opens the artifacts sidebar where the file's own
+ *  record is; every other file is a card on a row that scrolls sideways rather than a column that
+ *  pushes the composer down the page. */
+function Files({ files, onOpenArtifacts }: { files: ChatFile[]; onOpenArtifacts?: () => void }) {
+  const pictures = files.filter((file) => file.preview_url);
+  const cards = files.filter((file) => !file.preview_url);
   return (
-    <AttachmentGroup className="mt-2xs">
-      {files.map((file) => (
-        <Attachment key={file.filename} size="sm">
-          <AttachmentContent>
-            <AttachmentTitle>
-              {file.url ? <a href={file.url}>{file.filename}</a> : file.filename}
-            </AttachmentTitle>
-            <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
-          </AttachmentContent>
-        </Attachment>
+    <>
+      {pictures.map((file) => (
+        <Picture key={file.filename} file={file} onOpen={onOpenArtifacts} />
       ))}
-    </AttachmentGroup>
+      {cards.length ? (
+        <AttachmentGroup className="mt-2xs">
+          {cards.map((file) => (
+            <Attachment key={file.filename} size="sm">
+              <AttachmentContent>
+                <AttachmentTitle>
+                  {file.url ? <a href={file.url}>{file.filename}</a> : file.filename}
+                </AttachmentTitle>
+                <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
+              </AttachmentContent>
+            </Attachment>
+          ))}
+        </AttachmentGroup>
+      ) : null}
+    </>
   );
+}
+
+/** One shared picture, named by its filename. A pane with no sidebar to open draws it as a link to
+ *  the file itself. */
+function Picture({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
+  const drawn = (
+    <img
+      loading="lazy"
+      alt={file.filename}
+      src={file.preview_url ?? undefined}
+      className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
+    />
+  );
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        className="mt-2xs w-fit cursor-pointer border-0 bg-transparent p-0"
+      >
+        {drawn}
+      </button>
+    );
+  }
+  if (file.url) {
+    return (
+      <a href={file.url} className="mt-2xs w-fit">
+        {drawn}
+      </a>
+    );
+  }
+  return <div className="mt-2xs w-fit">{drawn}</div>;
 }
 
 function Handoff({ children }: { children: ReactNode }) {

@@ -5411,18 +5411,36 @@ async def test_shared_files_stream_and_reload_as_download_links(
                 updated_at=sa.func.now(),
             )
         )
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key=f"artifacts/{uuid4()}/portrait.jpg",
+                workspace_id=workspace_id,
+                filename="portrait.jpg",
+                subject="the portrait",
+                media_type="image/jpeg",
+                size_bytes=5,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     events = dict(await _collect_events(client, token, turn_id))
-    (file,) = events["files"]["files"]
-    assert file["filename"] == "report.pdf"
-    assert file["size_bytes"] == 3
-    assert file["url"].startswith("https://web/artifacts/")
+    streamed = {file["filename"]: file for file in events["files"]["files"]}
+    assert streamed["report.pdf"]["size_bytes"] == 3
+    assert streamed["report.pdf"]["url"].startswith("https://web/artifacts/")
+    assert streamed["report.pdf"]["preview_url"] is None
+    assert streamed["portrait.jpg"]["preview_url"].startswith("/artifacts/")
+    assert "&preview=" in streamed["portrait.jpg"]["preview_url"]
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     loaded = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
         headers=cookie,
     )
-    assert loaded.json()["files"][0]["url"].startswith("https://web/artifacts/")
-    assert loaded.json()["files"][0]["size_bytes"] == 3
+    reloaded = {file["filename"]: file for file in loaded.json()["files"]}
+    assert reloaded["report.pdf"]["url"].startswith("https://web/artifacts/")
+    assert reloaded["report.pdf"]["size_bytes"] == 3
+    assert reloaded["report.pdf"]["preview_url"] is None
+    assert reloaded["portrait.jpg"]["preview_url"].startswith("/artifacts/")
 
 
 async def test_composer_files_land_in_the_workspace_before_the_turn(

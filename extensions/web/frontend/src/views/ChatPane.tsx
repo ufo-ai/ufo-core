@@ -85,6 +85,9 @@ export function ChatPane({
             onCreated={onCreated}
             onActivity={onActivity}
             onSettled={settled}
+            onOpenArtifacts={
+              conversationId && onSelectSlot ? () => onSelectSlot("artifacts") : undefined
+            }
           />
         </div>
         {conversationId && slot ? (

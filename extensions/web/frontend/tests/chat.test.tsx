@@ -1663,7 +1663,7 @@ test("a settled turn names each shared file once, with its size", async () => {
 
   StreamFake.last().emit("message", { text: "Here it is." });
   StreamFake.last().emit("files", {
-    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048 }],
+    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null }],
   });
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -1692,7 +1692,7 @@ test("a file the running turn shares stands under the log before the turn ends",
 
   StreamFake.last().emit("message", { text: "Here it is." });
   StreamFake.last().emit("files", {
-    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048 }],
+    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null }],
   });
 
   expect(await screen.findByRole("link", { name: "report.csv" })).toBeTruthy();
@@ -1735,7 +1735,7 @@ test("a file the last turn shared does not stand under the message that opens th
 
   StreamFake.last().emit("message", { text: "Here it is." });
   StreamFake.last().emit("files", {
-    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048 }],
+    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null }],
   });
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -1754,6 +1754,72 @@ test("a file the last turn shared does not stand under the message that opens th
   land({ turn_id: "turn-2", conversation_id: CONVO_ID, title: "hello" });
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
   expect(screen.queryByRole("link", { name: "report.csv" })).toBeNull();
+});
+
+test("an image the turn shares stands inline in the answer and opens the artifacts sidebar", async () => {
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({
+        type: "artifacts",
+        artifacts: [
+          {
+            filename: "portrait.jpg",
+            subject: null,
+            media_type: "image/jpeg",
+            size_bytes: 88_000,
+            created_at: "2026-08-15T12:00:00Z",
+            url: "/dl/portrait.jpg",
+            preview: {
+              type: "image",
+              media_type: "image/jpeg",
+              url: "/artifacts/preview/portrait.jpg?token=signed",
+            },
+          },
+        ],
+        truncated: false,
+      }),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [
+          { id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifacts", count: 1 },
+        ],
+      }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "find a headshot");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  StreamFake.last().emit("message", { text: "Here is the portrait." });
+  StreamFake.last().emit("files", {
+    files: [
+      {
+        filename: "portrait.jpg",
+        url: "/dl/portrait.jpg",
+        size_bytes: 88_000,
+        preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+      },
+      { filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null },
+    ],
+  });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+
+  const picture = await screen.findByRole("img", { name: "portrait.jpg" });
+  expect(picture.getAttribute("src")).toBe("/artifacts/preview/portrait.jpg?token=signed");
+  expect(screen.queryByRole("link", { name: "portrait.jpg" })).toBeNull();
+  expect(screen.getByRole("link", { name: "report.csv" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "portrait.jpg" }));
+  expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
+  expect(await screen.findByRole("complementary", { name: "Artifacts" })).toBeTruthy();
 });
 
 test("a credential handoff stores a value and drops the prompt it answered", async () => {

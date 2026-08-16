@@ -2697,15 +2697,26 @@ async def _pending_prompts(
 
 
 async def _turn_files(ctx: SurfaceContext, turn_id: UUID) -> list[dict[str, object]]:
-    return [
-        {
-            "filename": artifact.filename,
-            "subject": artifact.subject,
-            "size_bytes": artifact.size_bytes,
-            "url": ctx.artifact_link(artifact),
-        }
-        for artifact in await ctx.shared_artifacts(turn_id)
-    ]
+    """The files a turn shared, each with a same-origin `preview_url` when the file is itself a
+    picture — the chat draws those inline in the reply, and the page's CSP loads images only from
+    its own origin, so the minted link travels without its base."""
+    files: list[dict[str, object]] = []
+    for artifact in await ctx.shared_artifacts(turn_id):
+        preview_url = None
+        minted = ctx.artifact_preview_link(artifact)
+        if minted is not None:
+            parsed = urlsplit(minted)
+            preview_url = urlunsplit(("", "", parsed.path, parsed.query, ""))
+        files.append(
+            {
+                "filename": artifact.filename,
+                "subject": artifact.subject,
+                "size_bytes": artifact.size_bytes,
+                "url": ctx.artifact_link(artifact),
+                "preview_url": preview_url,
+            }
+        )
+    return files
 
 
 async def _events(
