@@ -5965,18 +5965,27 @@ def test_every_shape_a_tool_free_checkpoint_can_render() -> None:
     assert writing.report(300.0) == "Preparing the response · 5m in"
 
 
+PROGRESS_ARMING_LEAD = timedelta(seconds=0.5)
+"""How far ahead of the arming a turn's start is dated where no test states an age. A reporter reads
+the clock once at startup to decide whether its first post can be the turn's first, and these tests
+compress the ladder's base interval to tens of milliseconds — less than the database work between
+the arming call and that read — so a turn started "now" can read as one already past its first
+checkpoint and post bare. A start dated a moment ahead holds the first interval in front of the
+reporter whatever the machine is doing, and leaves the ladder behind it as short as it was."""
+
+
 async def _arm_followers(
-    workspace_id: UUID, turn_id: UUID, hub: InProcessHub, age: timedelta = timedelta()
+    workspace_id: UUID, turn_id: UUID, hub: InProcessHub, age: timedelta = -PROGRESS_ARMING_LEAD
 ) -> None:
     """Arm the turn's followers the way the turn's own execution does: fire the Slack manifest's
     `user_prompt_submit` hook through the real chain, with the loop's tailer bound to this hub. The
     chain wants a credential key set; the bot token itself resolves through the bound workspace.
 
     The turn is reported as having started `age` ago. A first execution fires this within a second
-    of admission, which is what the default stands in for — these tests compress the ladder to tens
-    of milliseconds, so the real row's age would read as a resume — and a test exercising a resumed
-    run passes the wait the member has actually had. The resolution is asserted clean because the
-    event gates the turn: a handler that raises here would deny it.
+    of admission, which is what the default's lead stands in for — these tests compress the ladder
+    to tens of milliseconds, so the real row's age would read as a resume — and a test exercising a
+    resumed run passes the wait the member has actually had. The resolution is asserted clean
+    because the event gates the turn: a handler that raises here would deny it.
     """
     with ws(workspace_id):
         turn, agent, audience = await _load_turn(turn_id)
