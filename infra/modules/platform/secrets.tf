@@ -66,13 +66,6 @@ locals {
 resource "aws_secretsmanager_secret" "postgres" {
   name = "${local.secret_prefix}/postgres"
   tags = local.tags
-
-  dynamic "replica" {
-    for_each = var.secret_replica_region == "" ? [] : [var.secret_replica_region]
-    content {
-      region = replica.value
-    }
-  }
 }
 
 resource "aws_secretsmanager_secret_version" "postgres" {
@@ -87,13 +80,6 @@ resource "aws_secretsmanager_secret_version" "postgres" {
 resource "aws_secretsmanager_secret" "platform" {
   name = "${local.secret_prefix}/platform"
   tags = local.tags
-
-  dynamic "replica" {
-    for_each = var.secret_replica_region == "" ? [] : [var.secret_replica_region]
-    content {
-      region = replica.value
-    }
-  }
 }
 
 resource "tls_private_key" "egress_ca" {
@@ -189,7 +175,6 @@ resource "aws_secretsmanager_secret_version" "platform" {
     "ufo-token-secret"        = random_password.ufo_token.result
     "egress-ca-cert"          = tls_self_signed_cert.egress_ca.cert_pem
     "egress-ca-key"           = tls_private_key.egress_ca.private_key_pem
-    "serve-credential-key"    = local.serve_credential_key
     "ufo-cache-control-token" = random_password.cache_control_token.result
   })
 }
@@ -197,13 +182,6 @@ resource "aws_secretsmanager_secret_version" "platform" {
 resource "aws_secretsmanager_secret" "api_keys" {
   name = "${local.secret_prefix}/api-keys"
   tags = local.tags
-
-  dynamic "replica" {
-    for_each = var.secret_replica_region == "" ? [] : [var.secret_replica_region]
-    content {
-      region = replica.value
-    }
-  }
 }
 
 resource "aws_secretsmanager_secret_version" "api_keys" {

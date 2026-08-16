@@ -12,12 +12,11 @@ data "aws_iam_roles" "sso_admin" {
 module "platform" {
   source = "../../modules/platform"
 
-  name                  = "ufo-testing"
-  secret_replica_region = var.proxy_region
-  region                = var.region
-  hostname              = var.apex_host
-  dns_zone_name         = "flyingobject.ai"
-  cloudflare_api_token  = var.cloudflare_api_token
+  name                 = "ufo-testing"
+  region               = var.region
+  hostname             = var.apex_host
+  dns_zone_name        = "flyingobject.ai"
+  cloudflare_api_token = var.cloudflare_api_token
 
   ses_sender                     = var.ses_sender
   owns_account_resources         = true

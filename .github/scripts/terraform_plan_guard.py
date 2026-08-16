@@ -8,7 +8,6 @@ REGENERABLE_RESOURCE_TYPES = frozenset(
     {
         "aws_acm_certificate",
         "aws_ecr_lifecycle_policy",
-        "aws_ecs_task_definition",
         "aws_elasticache_subnet_group",
         "aws_s3_bucket_server_side_encryption_configuration",
         "aws_secretsmanager_secret_version",

@@ -50,7 +50,6 @@ PERSISTENT_DELETIONS = (
 REGENERABLE_TYPE_DELETIONS = (
     ("module.platform.aws_acm_certificate.sandbox_proxy_public", "aws_acm_certificate"),
     ("module.platform.aws_ecr_lifecycle_policy.this", "aws_ecr_lifecycle_policy"),
-    ("module.sandbox_proxy_west.aws_ecs_task_definition.this", "aws_ecs_task_definition"),
     ("module.platform.aws_elasticache_subnet_group.redis", "aws_elasticache_subnet_group"),
     (
         "module.platform.aws_s3_bucket_server_side_encryption_configuration.blob",
@@ -232,7 +231,6 @@ def test_local_cases_name_declared_resources() -> None:
         (ROOT / "infra" / "modules" / "platform", "module.platform."),
         (ROOT / "infra" / "modules" / "edge", "module.prod."),
         (ROOT / "infra" / "modules" / "edge", "module.testing."),
-        (ROOT / "infra" / "modules" / "sandbox_proxy_west", "module.sandbox_proxy_west."),
     )
     for root, prefix in roots:
         for path in sorted(root.glob("*.tf")):
