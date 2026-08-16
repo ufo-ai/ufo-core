@@ -36,9 +36,14 @@ struct Params {
 }
 
 /// Run the params' argv with its env overlaid, in `cwd`, group-killed at `timeout_s`, and answer
-/// the `{"exit_code", "stdout_b64", "stderr_b64"}` reply JSON. Output lands in workdir files, not
-/// pipes: a backgrounded child inheriting the streams must not hold the reply open after the
-/// command itself exits.
+/// the `{"exit_code", "timed_out", "stdout_b64", "stderr_b64"}` reply JSON. Output lands in workdir
+/// files, not pipes: a backgrounded child inheriting the streams must not hold the reply open after
+/// the command itself exits.
+///
+/// `timed_out` says the deadline here ended the command, which nothing else can tell: the group
+/// signal makes it exit `128 + SIGKILL`, the same code a member's own `kill` produces. The server
+/// reads it to report the budget that expired, and the work a command detached into its own group
+/// keeps running behind that report.
 pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<Vec<u8>, String> {
     let parsed: Params =
         serde_json::from_str(params).map_err(|error| format!("bad exec params: {error}"))?;
@@ -83,12 +88,15 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => return Ok(reply(SPAWN_FAILED_CODE, &[], error.to_string().as_bytes())),
+        Err(error) => {
+            let detail = error.to_string();
+            return Ok(reply(SPAWN_FAILED_CODE, false, &[], detail.as_bytes()));
+        }
     };
-    let code = await_exit(&mut child, timeout_s);
+    let (code, timed_out) = await_exit(&mut child, timeout_s);
     let out = fs::read(&out_path).unwrap_or_default();
     let err = fs::read(&err_path).unwrap_or_default();
-    Ok(reply(code, &out, &err))
+    Ok(reply(code, timed_out, &out, &err))
 }
 
 /// What a command verifies TLS with: this machine's own trust store, then the deploy's egress CA.
@@ -126,19 +134,20 @@ fn sink(path: &Path) -> Result<File, String> {
     File::create(path).map_err(|error| format!("could not create {}: {error}", path.display()))
 }
 
-fn await_exit(child: &mut Child, timeout_s: u64) -> i32 {
+/// The command's exit code, and whether the deadline is what ended it.
+fn await_exit(child: &mut Child, timeout_s: u64) -> (i32, bool) {
     let deadline = Instant::now() + Duration::from_secs(timeout_s);
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return exit_code(status),
+            Ok(Some(status)) => return (exit_code(status), false),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     kill(child);
-                    return child.wait().map(exit_code).unwrap_or(1);
+                    return (child.wait().map(exit_code).unwrap_or(1), true);
                 }
                 thread::sleep(EXIT_POLL);
             }
-            Err(_) => return 1,
+            Err(_) => return (1, false),
         }
     }
 }
@@ -166,9 +175,10 @@ fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
-fn reply(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
+fn reply(exit_code: i32, timed_out: bool, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "exit_code": exit_code,
+        "timed_out": timed_out,
         "stdout_b64": STANDARD.encode(stdout),
         "stderr_b64": STANDARD.encode(stderr),
     }))
@@ -196,10 +206,10 @@ mod tests {
 
     #[test]
     fn reply_is_padded_standard_base64() {
-        let result = parsed(&reply(0, b"hi\n", &[0x00, 0xff]));
+        let result = parsed(&reply(0, false, b"hi\n", &[0x00, 0xff]));
         assert_eq!(result["stdout_b64"], "aGkK");
         assert_eq!(result["stderr_b64"], "AP8=");
-        assert_eq!(parsed(&reply(0, &[], &[]))["stdout_b64"], "");
+        assert_eq!(parsed(&reply(0, false, &[], &[]))["stdout_b64"], "");
     }
 
     #[cfg(unix)]
@@ -214,6 +224,7 @@ mod tests {
         .unwrap();
         let result = parsed(&reply);
         assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["timed_out"], false);
         assert_eq!(decoded(&result, "stdout_b64"), b"hi\n");
         assert_eq!(result["stderr_b64"], "");
     }
@@ -247,7 +258,9 @@ mod tests {
         )
         .unwrap();
         assert!(started.elapsed() < Duration::from_secs(10));
-        assert_eq!(parsed(&reply)["exit_code"], 128 + libc::SIGKILL);
+        let result = parsed(&reply);
+        assert_eq!(result["exit_code"], 128 + libc::SIGKILL);
+        assert_eq!(result["timed_out"], true);
     }
 
     #[cfg(unix)]
@@ -262,6 +275,7 @@ mod tests {
         .unwrap();
         let result = parsed(&reply);
         assert_eq!(result["exit_code"], 127);
+        assert_eq!(result["timed_out"], false);
         assert_ne!(result["stderr_b64"], "");
     }
 

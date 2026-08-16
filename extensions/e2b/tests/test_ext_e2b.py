@@ -166,6 +166,9 @@ class _Commands:
     launch_never_answers: bool = False
     """A box that answers nothing at all — its launch, its stop and any probe alike, which is what
     a frozen `envd` looks like from outside."""
+    launch_hangs: bool = False
+    """A launch the provider holds without answering: the window in which the caller has no pid for
+    a command that may already be running."""
     _next_pid: int = 2000
 
     async def outcome(self, cmd: str) -> _Result:
@@ -214,6 +217,8 @@ class _Commands:
             return _Result("", "", 0)
         self.users.append(user)
         self.envs.append(envs)
+        if self.launch_hangs and background:
+            await asyncio.Event().wait()
         if not background:
             return await self.outcome(cmd)
         self._next_pid += 1
@@ -1278,6 +1283,72 @@ async def test_a_stop_the_sandbox_refuses_still_reports_the_deadline(
     ]
 
 
+async def _until(condition: Callable[[], bool]) -> None:
+    """Let the carrier's own task run until it reaches the state a cancel is aimed at, so the cancel
+    lands at a known point rather than wherever a fixed number of loop turns leaves it."""
+    for _ in range(1_000):
+        if condition():
+            await asyncio.sleep(0)
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("the carrier never reached the state the cancel is aimed at")
+
+
+async def test_a_cancelled_command_is_stopped_and_leaves_no_lease(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A preempted turn unwinds the whole call, and the command it launched answers to nobody after
+    it: its output goes to a stream no reader holds, and a replayed step re-issues the command
+    rather than reattaching. So the group ends here, as the deadline ends it, and the lease goes
+    with it — a cancel says nothing about how long the container still answers."""
+    sdk, carrier = _leased(_Clock())
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.hangs = True
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        running = asyncio.ensure_future(carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60))
+        await _until(lambda: bool(commands.alive))
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    assert commands.alive == {}
+    assert any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
+    assert _events(caplog, "sandbox.e2b.lease_dropped") == [
+        {"conversation_id": str(handle.conversation_id), "during": "cancel"}
+    ]
+    commands.hangs = False
+    recovered = await carrier.exec(handle, ("bash", "-lc", "echo back"), 60)
+
+    assert recovered.exit_code == 0
+    assert sdk.connected == ["sbx-1"]
+
+
+async def test_a_cancel_before_the_launch_answers_names_no_group(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A launch still in flight leaves no pid, so there is no group to signal and nothing here
+    invents one. The lease is dropped all the same: the next call reattaches to the container rather
+    than trusting a deadline this call never finished using."""
+    sdk, carrier = _leased(_Clock())
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.launch_hangs = True
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        running = asyncio.ensure_future(carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60))
+        await _until(lambda: any("pytest" in cmd for cmd, _, _ in commands.runs))
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    assert not any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
+    assert _events(caplog, "sandbox.e2b.lease_dropped") == [
+        {"conversation_id": str(handle.conversation_id), "during": "cancel"}
+    ]
+
+
 async def test_a_box_that_stopped_answering_refuses_the_next_command_at_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1436,6 +1507,50 @@ async def test_the_deadline_stop_ends_the_launcher_and_spares_its_detached_task(
             return
         await asyncio.sleep(0.05)
     raise AssertionError("the stopped task never wrote its exit code")
+
+
+async def test_a_cancel_ends_the_launcher_and_spares_its_detached_task(tmp_path: Path) -> None:
+    """A cancel reaches exactly as far as the deadline does, proved on real processes: the
+    launcher's group ends, and the wrapper the launcher forked into a group of its own keeps running
+    with its log and exit file intact, so the recovered turn reattaches to the work instead of
+    paying for it twice."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    commands = _ProcessCommands(root=tmp_path)
+    sdk.sandboxes["sbx-live"] = _Sandbox(
+        sandbox_id="sbx-live",
+        provider=_Provider(clock=sdk.clock, expires_at=0),
+        commands=cast(_Commands, commands),
+        files=_Files(),
+    )
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-live")
+    base = f"{tmp_path}/tasks/t-0002"
+    launch = ("sh", "-c", TASK_BASH, "sh", TASK_LAUNCH + TASK_WAIT, TASK_WRAPPER, base, "sleep 30")
+
+    running = asyncio.ensure_future(carrier.exec(handle, launch, 60))
+    for _ in range(200):
+        if commands.launched:
+            break
+        await asyncio.sleep(0.05)
+    launcher = commands.launched[0]
+    for _ in range(200):
+        launched = await carrier.exec(
+            handle, ("bash", "-lc", f'cat "{base}.pid" 2>/dev/null || true'), 5
+        )
+        if launched.stdout.strip():
+            break
+        await asyncio.sleep(0.05)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert await asyncio.wait_for(launcher.wait(), 10) == -9
+    probe = await carrier.exec(handle, ("sh", "-c", TASK_PROBE, "sh", base), 5)
+    assert probe.exit_code == 0
+    wrapper = probe.stdout.strip()
+    assert wrapper
+    stopped = await carrier.exec(handle, ("bash", "-lc", f'kill "{wrapper}"'), 5)
+    assert stopped.exit_code == 0
 
 
 def _leased(clock: _Clock) -> tuple[_Sdk, E2BCarrier]:

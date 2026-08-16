@@ -613,7 +613,17 @@ class E2BCarrier:
         A stream severed while the command runs arrives as neither of those SDK exceptions, and as
         no class this can name. The command itself keeps running inside the sandbox and completes,
         so this is never retried — it is reported, and the lease is
-        dropped so the next call reattaches rather than trust a deadline the provider abandoned."""
+        dropped so the next call reattaches rather than trust a deadline the provider abandoned.
+
+        A cancelled step — the turn preempted, the whole call unwound — ends the wait without ever
+        reaching those paths, and the command it launched would otherwise outlive every process that
+        can name it: its group runs on with its output going to a stream nobody reads, and no replay
+        reattaches, because every `bash` caller but the builtin tool re-issues its command rather
+        than resuming one. So the group is stopped here exactly as the deadline stops it, which
+        leaves whatever the command detached into a group of its own — the builtin tool's background
+        task — running to be reattached by the task files it keeps. The lease goes first, since
+        dropping the reference cannot be interrupted and a lease the next call trusts is worse than
+        one it re-leases: the cancel says nothing about how long this container still answers."""
         sandbox = await self._sandbox(handle, timeout_s + LEASE_MARGIN_SECONDS)
         await self._still_there(sandbox, handle.container_id)
         command = f"{SESSION_LEADER_CMD} {shlex.join(argv)}"
@@ -641,6 +651,11 @@ class E2BCarrier:
                 exit_code=EXEC_TIMEOUT_CODE,
                 timed_out_after_s=timeout_s,
             )
+        except asyncio.CancelledError:
+            self._drop(handle.conversation_id, "cancel")
+            if running is not None:
+                await self._stop_group(sandbox, handle.container_id, running.pid)
+            raise
         except Exception:
             self._drop(handle.conversation_id, "exec")
             raise

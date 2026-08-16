@@ -22,6 +22,7 @@ from ufo.sandbox.session import (
     SandboxUnreachable,
 )
 from ufo.sandbox.terminal import (
+    EXEC_TIMEOUT_CODE,
     TerminalCarrier,
     TerminalGone,
     TerminalOp,
@@ -312,6 +313,55 @@ async def test_exec_decodes_a_base64_reply() -> None:
     await _answer(terminals, conversation_id, reply)
     result = await running
     assert result.exit_code == 3 and result.stdout == "out\n" and result.stderr == "err\n"
+
+
+async def test_exec_reports_the_clients_expired_deadline_as_a_timeout() -> None:
+    """The seconds the op allowed are what the `bash` tool needs to hand back the handles of a
+    command still running on the member's machine; without them a timed-out call reports a bare
+    exit code and the model never learns the work continues."""
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+    reply = json.dumps(
+        {
+            "exit_code": 137,
+            "timed_out": True,
+            "stdout_b64": base64.b64encode(b"partial\n").decode(),
+            "stderr_b64": "",
+        }
+    ).encode()
+    running = asyncio.ensure_future(carrier.exec(handle, ("sleep", "999"), timeout_s=30))
+    await asyncio.sleep(0)
+    await _answer(terminals, conversation_id, reply)
+    result = await running
+    assert result.timed_out_after_s == 30
+    assert result.exit_code == EXEC_TIMEOUT_CODE
+    assert result.stdout == "partial\n"
+
+
+async def test_exec_reports_a_command_the_member_killed_as_its_own_exit() -> None:
+    """A group signal the client did not send answers the same code, so only the reply's own field
+    says whose deadline ended the command — and a client the deploy has not yet updated sends none.
+    """
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+    for reply in (
+        json.dumps(
+            {"exit_code": 137, "timed_out": False, "stdout_b64": "", "stderr_b64": ""}
+        ).encode(),
+        json.dumps({"exit_code": 137, "stdout_b64": "", "stderr_b64": ""}).encode(),
+    ):
+        running = asyncio.ensure_future(carrier.exec(handle, ("sleep", "999"), timeout_s=30))
+        await asyncio.sleep(0)
+        await _answer(terminals, conversation_id, reply)
+        result = await running
+        assert result.timed_out_after_s is None
+        assert result.exit_code == 137
 
 
 async def test_exec_refuses_a_malformed_base64_reply() -> None:

@@ -49,6 +49,10 @@ OP_WRITE = "write"
 OP_READ = "read"
 OP_FILE = "fileop"
 OP_NOT_FOUND_PREFIX = "ENOENT"
+EXEC_TIMEOUT_CODE = 124
+"""What an exec the op's own deadline stopped exits with, whatever the client's signal made of the
+command — the code every other carrier reports for its own deadline, so a caller reading the code
+sees one shape across all of them."""
 OP_DEADLINE_SLACK_SECONDS = 30.0
 """Added to an op's own timeout: the margin for the round trips around the op, not for the op."""
 WALK_SKIP_NAMES = (
@@ -619,7 +623,15 @@ class TerminalCarrier:
         """Run an argv already resolved to the member's real paths, without the `/workspace`
         rewrite `exec` applies — the one caller that composes concrete host paths itself (a tree
         walk's enumeration) must not have them rewritten a second time, which would mangle a bound
-        directory that itself contains `/workspace`."""
+        directory that itself contains `/workspace`.
+
+        The client reports its own deadline firing in the reply, and only it can: the op's deadline
+        is enforced on the member's machine, where the stopped command dies of the group signal and
+        so answers `128 + SIGKILL` — a code a command killed by anything else answers too. Reading
+        it as a timeout would call a member's own `kill` a budget expiry, and reading nothing at all
+        is what left a timed-out `bash` on this carrier reporting a bare exit code instead of the
+        handles its command is still running behind. A client the deploy has not yet updated sends
+        no such field, and its reply reads as the command's own exit exactly as before."""
         try:
             reply = await self.terminals.send(
                 handle.conversation_id,
@@ -633,11 +645,13 @@ class TerminalCarrier:
         except TerminalOpFailed as error:
             raise RuntimeError(str(error)) from error
         result = _reply_object(reply, OP_EXEC)
-        code = result.get("exit_code", 1)
+        timed_out = result.get("timed_out") is True
+        code = EXEC_TIMEOUT_CODE if timed_out else result.get("exit_code", 1)
         return ExecResult(
             stdout=_reply_stream(result, "stdout").decode(errors="replace"),
             stderr=_reply_stream(result, "stderr").decode(errors="replace"),
             exit_code=code if isinstance(code, int) else 1,
+            timed_out_after_s=timeout_s if timed_out else None,
         )
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
