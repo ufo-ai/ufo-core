@@ -363,11 +363,12 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
 
 
 async def recall_hook(ctx: HookContext) -> HookOutcome:
-    """Auto-inject memory relevant to the inbound into the turn's system context. user_prompt_submit
-    is gating — a raising or slow handler denies the turn — so recall stays strictly best-effort: it
-    runs under its own soft timeout below the hook deadline and swallows every error, returning None
-    on any failure or empty result rather than ever failing the turn. Injected lines are bounded
-    per-item (RECALL_ITEM_MAX_CHARS, truncated with RECALL_TRUNCATION_MARK) and in total
+    """Auto-inject memory relevant to the inbound after the submitted message in the model context.
+    user_prompt_submit is gating — a raising or slow handler denies the turn — so recall stays
+    strictly best-effort: it runs under its own soft timeout below the hook deadline and swallows
+    every error, returning None on any failure or empty result rather than ever failing the turn.
+    Injected lines are bounded per-item (RECALL_ITEM_MAX_CHARS, truncated with
+    RECALL_TRUNCATION_MARK) and in total
     (RECALL_TOTAL_MAX_CHARS counted against each rendered "- " line plus its "\n" separator, so the
     joined text itself never exceeds the budget): an item past the total budget is dropped whole, so
     the recall event's memory_ids names only the items whose lines actually made it into the

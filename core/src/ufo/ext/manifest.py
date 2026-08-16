@@ -459,8 +459,9 @@ class ModifyOutput:
 
 @dataclass(frozen=True)
 class InjectContext:
-    """Append text to the turn's context — the system prompt on user_prompt_submit, the tool result
-    on post_tool_use (user_prompt_submit and post_tool_use only)."""
+    """Append text to the turn's context — after the submitted message in the model context on
+    user_prompt_submit, the tool result on post_tool_use (user_prompt_submit and post_tool_use
+    only)."""
 
     text: str
 

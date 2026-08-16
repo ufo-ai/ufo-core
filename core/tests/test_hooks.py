@@ -700,7 +700,7 @@ async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -
     assert post["after_tokens"] > 0
 
 
-async def test_user_prompt_submit_inject_reaches_the_system_context(
+async def test_user_prompt_submit_inject_reaches_the_founding_message(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn(uuid4())
@@ -716,7 +716,10 @@ async def test_user_prompt_submit_inject_reaches_the_system_context(
     model = CapturingModel()
     frame = await _engine(turn, model, tmp_path, chain).run()
     assert frame.status == "done"
-    assert "INJECTED-GUIDANCE" in model.seen_system[0]
+    founding = model.seen[0][-1].content
+    assert isinstance(founding, str)
+    assert founding.endswith("\n\n<injected_context>\nINJECTED-GUIDANCE\n</injected_context>")
+    assert "INJECTED-GUIDANCE" not in model.seen_system[0]
 
 
 async def test_user_prompt_submit_deny_refuses_the_turn_before_the_model(

@@ -167,6 +167,7 @@ TRUNCATION_SALVAGE_NOTICE = (
     "read it and salvage what it already contains instead of regenerating it."
 )
 DENIED_INBOUND_NOTICE = "<denied_member_message>{reason}</denied_member_message>"
+INJECTED_CONTEXT = "{content}\n\n<injected_context>\n{injected}\n</injected_context>"
 CONTEXT_TIME_FORMAT = "%A %Y-%m-%d %H:%M %Z"
 FORCE_FINAL_PROMPT = (
     "You have reached the maximum number of tool-use rounds. Do not call any more tools. "
@@ -1031,17 +1032,18 @@ class TurnEngine:
                     Message(role="user", content=founding_denial),
                 )
             else:
-                if inbound.injected:
-                    system = f"{system}\n\n{inbound.injected}"
                 messages = await self._load_messages()
+                founding = messages[-1].content
+                if not isinstance(founding, str):
+                    raise RuntimeError("founding inbound did not render as text")
                 if not self.turn.spawned:
-                    founding = messages[-1].content
-                    if not isinstance(founding, str):
-                        raise RuntimeError("founding inbound did not render as text")
                     requesters[self.turn.id] = ActiveMessage(
                         member_id=self.turn.speaker_member_id,
                         rendered=founding,
                     )
+                if inbound.injected:
+                    rendered = INJECTED_CONTEXT.format(content=founding, injected=inbound.injected)
+                    messages = (*messages[:-1], Message(role="user", content=rendered))
             while True:
                 (
                     final_messages,
@@ -1527,7 +1529,7 @@ class TurnEngine:
             return None, submitted.denied
         content = _context_tag(message_id, context, created_at) + body
         if submitted.injected:
-            content = f"{content}\n\n<injected_context>\n{submitted.injected}\n</injected_context>"
+            content = INJECTED_CONTEXT.format(content=content, injected=submitted.injected)
         return content, None
 
     @DBOS.step(preemptible=True)

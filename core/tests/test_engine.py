@@ -4949,7 +4949,10 @@ async def test_done_turn_persists_the_system_string_and_injected_context(
 ) -> None:
     """The transcript blob carries the exact system string the model ran with plus the
     user_prompt_submit injection on its own, so the debug surface renders both without
-    re-deriving either."""
+    re-deriving either. The injection reaches the model inside the founding user message, walled
+    exactly as an arrival's is: recall searches the inbound text, so a system block carrying it
+    holds different bytes on every turn and the cached prefix — the block itself and the whole
+    history under it — is re-billed at the cache-write rate instead of read."""
     recalled = "<recalled_memory>the vault code is 4821</recalled_memory>"
 
     async def recall(ctx: HookContext) -> HookOutcome:
@@ -4974,8 +4977,14 @@ async def test_done_turn_persists_the_system_string_and_injected_context(
     stored = await engine.transcript.read()
     assert stored is not None
     assert stored.system == model.seen_system[0]
-    assert stored.system is not None and stored.system.endswith(f"\n\n{recalled}")
+    assert recalled not in model.seen_system[0]
     assert stored.injected == recalled
+    founding = (
+        f"<context>\nmessage_ref: {turn.id}\ntime: Thursday 2026-07-09 18:32 UTC\n</context>\nhi"
+        f"\n\n<injected_context>\n{recalled}\n</injected_context>"
+    )
+    assert model.seen[0][-1].content == founding
+    assert stored.messages[0].content == founding
 
     bare = await _seed_turn("queued", None)
     bare_model = CapturingModel()
@@ -4984,7 +4993,69 @@ async def test_done_turn_persists_the_system_string_and_injected_context(
     bare_stored = await bare_engine.transcript.read()
     assert bare_stored is not None
     assert bare_stored.system == bare_model.seen_system[0]
+    assert bare_stored.system == stored.system
     assert bare_stored.injected is None
+
+
+@dataclass(frozen=True, repr=False)
+class _RequestCapturingCompaction(Compaction):
+    """Records the active member requests each round hands compaction, and compacts nothing."""
+
+    seen: list[tuple[str, ...]] = field(default_factory=list)
+
+    async def maybe_compact(
+        self,
+        messages: tuple[Message, ...],
+        force: bool = False,
+        active_requests: tuple[str, ...] = (),
+    ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
+        self.seen.append(active_requests)
+        return messages, ()
+
+
+async def test_the_active_request_carries_the_member_text_without_the_injection(
+    db: None, tmp_path: Path
+) -> None:
+    """Compaction keeps every active member request verbatim, so the request the turn registers is
+    captured before the injection is wrapped in: the injected context reaches the model after the
+    submitted message and never travels as something the member asked for."""
+    recalled = "<recalled_memory>the vault code is 4821</recalled_memory>"
+
+    async def recall(ctx: HookContext) -> HookOutcome:
+        return InjectContext(text=recalled)
+
+    chain = HookChain(
+        hooks={
+            "user_prompt_submit": (
+                BoundHook(
+                    spec=HookSpec(event="user_prompt_submit", handler=recall),
+                    ext=context_for("probe", frozenset()),
+                ),
+            )
+        },
+        audience=conversation_audience(None),
+    )
+    turn = await _seed_turn("queued", None)
+    model = CapturingModel()
+    compaction = _RequestCapturingCompaction(
+        client=model,
+        model="claude-opus-4-8",
+        blob=FilesystemBlobStore(root=tmp_path),
+        conversation_id=turn.conversation_id,
+    )
+    engine = replace(
+        _engine(turn, model, tmp_path, compaction=compaction),
+        hooks=chain,
+    )
+    frame = await engine.run()
+    assert frame is not None and frame.status == "done"
+    submitted = (
+        f"<context>\nmessage_ref: {turn.id}\ntime: Thursday 2026-07-09 18:32 UTC\n</context>\nhi"
+    )
+    assert compaction.seen == [(submitted,)]
+    assert model.seen[0][-1].content == (
+        f"{submitted}\n\n<injected_context>\n{recalled}\n</injected_context>"
+    )
 
 
 class _NoArgs(BaseModel):
