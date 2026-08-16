@@ -717,7 +717,7 @@ class ConnectHandoff:
                 raise ConnectRequestInvalid("connect request has expired")
             url = self.flow.authorize(
                 workspace_id=workspace_id,
-                agent_id=row.agent_id,
+                agent_id=request.grantee_agent_id or row.agent_id,
                 provider=request.provider,
                 grantor_member_id=request.requester_member_id,
                 conversation_id=row.conversation_id,

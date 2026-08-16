@@ -438,7 +438,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
             tools = ToolRegistry(_agent_tools(all_tools, agent.tools, turn.admission_source))
-            if (waiting := await setup_skill(turn.agent_id)) is not None:
+            if (waiting := await setup_skill(turn.agent_id, agent.is_main)) is not None:
                 skills = skills.merged_with((waiting,))
             system_prompt = render_system_prompt(
                 agent.prompt,
@@ -670,6 +670,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.agent.c.prompt,
                     tables.agent.c.model,
                     tables.agent.c.reasoning,
+                    tables.agent.c.is_main,
                     tables.agent.c.tools,
                     tables.agent.c.internet_access_allowed,
                     tables.conversation.c.audience,
@@ -713,6 +714,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
             prompt=row.prompt,
             model=row.model,
             reasoning=row.reasoning,
+            is_main=row.is_main,
             tools=None if row.tools is None else tuple(row.tools),
             internet_access_allowed=row.internet_access_allowed,
         ),

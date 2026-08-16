@@ -80,37 +80,56 @@ async def pending_setup() -> tuple[tuple[UUID, str, AgentSetup], ...]:
     return tuple(pending)
 
 
+def _wants(missing: AgentSetup) -> str:
+    return ", ".join(f"a {provider} account" for provider in missing.connectors)
+
+
 SETUP_SKILL_NAME = "agent-setup"
 SETUP_SKILL_DESCRIPTION = (
     "Finish setting up an agent this workspace installed: grant it the accounts it works from. "
     "Load when a member asks to set one up, or asks why one is not working."
 )
 SETUP_HEADER = (
-    "You are installed but not set up. Ask the member for what is missing, then obtain it in this "
-    "conversation: `connect_account` for an account. Every grant binds to the agent whose "
-    "conversation it is made in, so all of it happens here, with you."
+    "You are installed but not set up. Ask the member for what is missing, then call "
+    "`connect_account` for each account. A grant made in your own conversation binds to you."
+)
+ROSTER_HEADER = (
+    "These agents are installed and not set up. A member must grant each account, and you are the "
+    "only agent that may grant one to another agent: call `connect_account` with `agent` set to "
+    "that agent's name, in this conversation, with the member speaking."
 )
 
 
-async def setup_skill(agent_id: UUID) -> RuntimeSkill | None:
+async def setup_skill(agent_id: UUID, is_main: bool) -> RuntimeSkill | None:
     """The loadable skill telling an agent what it still needs, or None when it needs nothing.
 
-    It reaches the agent itself because that is the only conversation where the grants can land:
-    `connect_account` writes to the turn's own agent, and the `source` kind takes no agent target.
-    How a member on a surface bound only to the main agent reaches this agent at all is RFC 0033's
-    question, not this one's.
+    An agent with grants outstanding is told about itself. The main agent is told the roster,
+    because it is the one agent that may grant an account to another (`connect_account` takes an
+    `agent`), so a member on a surface bound only to it — Slack, the CLI — finishes the setup by
+    asking, without opening the portal.
 
     It is a skill rather than a prompt section because it is a task, not a capability: the index
     carries one line, and the instructions reach the model only on the turn a member actually asks.
 
     Derived from the grants on every turn, so it erases itself as they land rather than needing a
     flag that a later revoke would leave stale."""
-    mine = next((entry for entry in await pending_setup() if entry[0] == agent_id), None)
+    pending = await pending_setup()
+    mine = next((entry for entry in pending if entry[0] == agent_id), None)
     if mine is None:
-        return None
+        others = [entry for entry in pending if entry[0] != agent_id]
+        if not is_main or not others:
+            return None
+        lines = [
+            f"- {name} — still needs {_wants(missing)}. {missing.instructions}".rstrip()
+            for _agent, name, missing in others
+        ]
+        return RuntimeSkill(
+            name=SETUP_SKILL_NAME,
+            description=SETUP_SKILL_DESCRIPTION,
+            instructions="\n".join((ROSTER_HEADER, "", *lines)),
+        )
     _, _, missing = mine
-    wants = ", ".join(f"a {provider} account" for provider in missing.connectors)
-    body = f"{SETUP_HEADER}\n\nYou still need {wants}. {missing.instructions}"
+    body = f"{SETUP_HEADER}\n\nYou still need {_wants(missing)}. {missing.instructions}"
     return RuntimeSkill(
         name=SETUP_SKILL_NAME, description=SETUP_SKILL_DESCRIPTION, instructions=body.rstrip()
     )

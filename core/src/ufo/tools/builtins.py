@@ -390,6 +390,12 @@ class ConnectAccountInput(BaseModel):
         description="Connect the account for the whole workspace rather than privately to the "
         "speaking member. Set it only when the member's words say the account is for the team.",
     )
+    agent: str = Field(
+        default="",
+        description="Grant the connection to this agent instead of yourself, by name. Only the "
+        "workspace main agent may name another agent. Use it when a member asks you to finish "
+        "setting up an agent that cannot ask for itself.",
+    )
     user_description: str = Field(
         description="Which account you are connecting them to, in plain language for the activity "
         "timeline."
@@ -1032,15 +1038,43 @@ CONNECT_ACCOUNT_DIRECTIVE = (
 )
 
 
+async def _grantee_agent_id(ctx: ToolContext, name: str) -> UUID | None:
+    """The agent a connection is granted to when the asking agent names another, or None when it
+    grants to itself. A grant is a change to one agent's authority, so the same rule the object
+    verbs use governs it: only the workspace main agent may name another agent. The name is
+    resolved here rather than at the handoff, so the durable request already carries the agent the
+    seal will bind and no later step re-decides it."""
+    if not name:
+        return None
+    async with workspace_tx() as connection:
+        rows = {
+            row.name: row
+            for row in await connection.execute(
+                sa.select(tables.agent.c.id, tables.agent.c.name, tables.agent.c.is_main).where(
+                    tables.agent.c.workspace_id == ctx.turn.workspace_id
+                )
+            )
+        }
+    asking = next((row for row in rows.values() if row.id == ctx.turn.agent_id), None)
+    if asking is None or not asking.is_main:
+        raise ValueError("only the workspace main agent may connect an account for another agent")
+    target = rows.get(name)
+    if target is None:
+        raise ValueError(f"no agent named {name!r}")
+    return None if target.id == ctx.turn.agent_id else target.id
+
+
 async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -> ToolResult:
     """Leave a provider-validated private OAuth handoff for the speaking member."""
     if ctx.speaker_member_id is None:
         raise ValueError("connect requires a speaking member to gate the grant")
+    grantee = await _grantee_agent_id(ctx, args.agent.strip())
     await installed_connect_flow().validate_provider(args.provider)
     request = ConnectRequest(
         provider=args.provider,
         requester_member_id=ctx.speaker_member_id,
         shared=args.shared,
+        grantee_agent_id=grantee,
     )
     return ToolResult(
         content=(TextContent(text=f"{CONNECT_ACCOUNT_DIRECTIVE}\n{request.model_dump_json()}"),)

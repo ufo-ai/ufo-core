@@ -154,11 +154,17 @@ class CredentialRequest(BaseModel):
 class ConnectRequest(BaseModel):
     """The `connect_account` tool's structured terminal handoff; `shared` carries the model's
     disclosure decision to the grant. The exact requester is durable while the authorization URL
-    is minted only after that member privately claims it."""
+    is minted only after that member privately claims it.
+
+    `grantee_agent_id` names the agent the connection is granted to when that is not the asking
+    agent — the main agent connecting an account on behalf of an agent that cannot ask for itself.
+    It is resolved and gated when the request is made, so the durable request already names the
+    agent the seal will bind, and no later step re-decides it."""
 
     provider: str
     requester_member_id: UUID
     shared: bool = False
+    grantee_agent_id: UUID | None = None
 
 
 TERMINAL_ERROR_MESSAGE_MAX_CHARS = 2_000
@@ -184,6 +190,9 @@ class Agent(BaseModel):
     prompt: str
     model: str
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
+    is_main: bool = False
+    """Whether this is the workspace's one main agent — the only agent that may grant an account to
+    another, so the only one told which shipped agents are still waiting."""
     tools: tuple[str, ...] | None = None
     """The agent's tool allowlist, or None for the member-facing set. A name the live registry does
     not answer is absent rather than an error: an extension the deploy stopped installing leaves the

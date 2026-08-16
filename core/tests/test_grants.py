@@ -1475,6 +1475,7 @@ async def test_connect_account_carries_the_shared_intent(db: None) -> None:
         "provider": "stub",
         "requester_member_id": str(member_id),
         "shared": True,
+        "grantee_agent_id": None,
     }
 
 
@@ -1639,3 +1640,149 @@ async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerles
     anonymous = replace(_turn_context(workspace_id, agent_id, conversation_id, None), grants=store)
     with ws(workspace_id), agent(agent_id):
         assert await anonymous.connector_accounts("stub") == ()
+
+
+async def test_the_main_agent_connects_an_account_for_another_agent(db: None) -> None:
+    """A member on a surface bound only to the main agent finishes another agent's setup by asking.
+    The named agent is resolved and gated when the request is made, so the durable request already
+    carries the agent the seal will bind."""
+    workspace_id = await _workspace()
+    member_id, main_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).values(is_main=True).where(tables.agent.c.id == main_id)
+        )
+    shipped = await _agent(workspace_id, "shipped")
+    install_connect_flow(
+        ConnectFlow(
+            providers={"stub": StubProvider()},
+            fernet=Fernet(Fernet.generate_key()),
+            store=GrantStore(),
+            redirect_uri=REDIRECT_URI,
+        )
+    )
+    ctx = _turn_context(workspace_id, main_id, conversation_id, member_id)
+    result = await connect_account_handler(
+        ctx,
+        ConnectAccountInput(
+            provider="stub", agent="shipped", user_description="connecting their account"
+        ),
+    )
+    assert result.is_error is False
+    request = ConnectRequest.model_validate_json(result.content[0].text.splitlines()[1])
+    assert request.grantee_agent_id == shipped
+
+
+async def test_the_grant_lands_on_the_named_agent_not_the_asking_one(db: None) -> None:
+    """The whole point of the target: the member answers on the main agent's turn, and the
+    connection must still belong to the agent that needs it. The seal carries the grantee, so the
+    callback records the grant against that agent."""
+    workspace_id = await _workspace()
+    member_id, main_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).values(is_main=True).where(tables.agent.c.id == main_id)
+        )
+    shipped = await _agent(workspace_id, "shipped")
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+    )
+    install_connect_flow(flow)
+    ctx = _turn_context(workspace_id, main_id, conversation_id, member_id)
+    result = await connect_account_handler(
+        ctx,
+        ConnectAccountInput(
+            provider="stub", agent="shipped", user_description="connecting their account"
+        ),
+    )
+    request = ConnectRequest.model_validate_json(result.content[0].text.splitlines()[1])
+    terminal = TerminalFrame(status="done", connect_request=request)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=ctx.turn.id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=main_id,
+                seq=1,
+                status="done",
+                inbound="set up shipped",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=terminal.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    url = await ConnectHandoff(flow).authorize(workspace_id, ctx.turn.id, member_id)
+    state = parse_qs(urlparse(url).query)["state"][0]
+    app = FastAPI()
+    app.include_router(callback_router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
+        done = await client.get("/v1/connect/callback", params={"state": state, "code": "the-code"})
+        assert done.status_code == 200
+    async with workspace_tx() as connection:
+        granted = (
+            await connection.execute(
+                sa.select(tables.connector_grant.c.agent_id).where(
+                    tables.connector_grant.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    assert [row.agent_id for row in granted] == [shipped]
+
+
+async def test_an_agent_that_is_not_main_cannot_connect_for_another(db: None) -> None:
+    """A grant changes one agent's authority, so naming a different agent is the main agent's act
+    alone — the same rule the object verbs hold. Any other agent is refused where it asks."""
+    workspace_id = await _workspace()
+    member_id, asking = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    await _agent(workspace_id, "shipped")
+    install_connect_flow(
+        ConnectFlow(
+            providers={"stub": StubProvider()},
+            fernet=Fernet(Fernet.generate_key()),
+            store=GrantStore(),
+            redirect_uri=REDIRECT_URI,
+        )
+    )
+    ctx = _turn_context(workspace_id, asking, conversation_id, member_id)
+    with pytest.raises(ValueError, match="only the workspace main agent"):
+        await connect_account_handler(
+            ctx,
+            ConnectAccountInput(
+                provider="stub", agent="shipped", user_description="connecting their account"
+            ),
+        )
+
+
+async def test_connecting_for_an_unknown_agent_is_refused(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, main_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).values(is_main=True).where(tables.agent.c.id == main_id)
+        )
+    install_connect_flow(
+        ConnectFlow(
+            providers={"stub": StubProvider()},
+            fernet=Fernet(Fernet.generate_key()),
+            store=GrantStore(),
+            redirect_uri=REDIRECT_URI,
+        )
+    )
+    ctx = _turn_context(workspace_id, main_id, conversation_id, member_id)
+    with pytest.raises(ValueError, match="no agent named"):
+        await connect_account_handler(
+            ctx,
+            ConnectAccountInput(
+                provider="stub", agent="absent", user_description="connecting their account"
+            ),
+        )

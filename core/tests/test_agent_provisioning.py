@@ -521,7 +521,7 @@ async def test_an_agent_that_is_not_set_up_is_told_so_in_its_own_conversation(
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert created is not None
     with ws(workspace_id):
-        skill = await setup_skill(created.id)
+        skill = await setup_skill(created.id, is_main=False)
     assert skill is not None
     assert skill.name == SETUP_SKILL_NAME
     assert "You are installed but not set up" in skill.instructions
@@ -540,10 +540,10 @@ async def test_the_setup_slot_empties_as_the_grants_land(
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert created is not None
     with ws(workspace_id):
-        assert await setup_skill(created.id) is not None
+        assert await setup_skill(created.id, is_main=False) is not None
     await _grant_connection(workspace_id, created.id, sample.CONNECTOR_PROVIDER)
     with ws(workspace_id):
-        assert await setup_skill(created.id) is None
+        assert await setup_skill(created.id, is_main=False) is None
 
 
 async def test_a_workspace_with_nothing_shipped_carries_no_setup_slot(
@@ -554,23 +554,22 @@ async def test_a_workspace_with_nothing_shipped_carries_no_setup_slot(
     main = await _row(workspace_id, DEFAULT_AGENT_NAME)
     assert main is not None
     with ws(workspace_id):
-        assert await setup_skill(main.id) is None
+        assert await setup_skill(main.id, is_main=True) is None
 
 
 async def test_an_agent_with_nothing_outstanding_is_told_nothing(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The skill is about the asking agent alone. Handing one agent another's outstanding grants
-    would name work it cannot do: every grant binds to the agent whose conversation it is made
-    in."""
+    """An agent that is not the main one is told about itself alone. Another agent's outstanding
+    grants would name work it cannot do: it may not grant an account to a different agent."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
     workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
     main = await _row(workspace_id, DEFAULT_AGENT_NAME)
     shipped = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert main is not None and shipped is not None
     with ws(workspace_id):
-        assert await setup_skill(main.id) is None
-        assert await setup_skill(shipped.id) is not None
+        assert await setup_skill(main.id, is_main=False) is None
+        assert await setup_skill(shipped.id, is_main=False) is not None
 
 
 def test_a_provision_refuses_an_allowlist_that_cannot_obtain_its_own_grants() -> None:
@@ -593,3 +592,21 @@ def test_a_provision_that_declares_no_setup_keeps_a_bare_allowlist() -> None:
     spec = AgentSpec(model="auto", reasoning="auto", internet_access_allowed=False, prompt="probe")
     provision = AgentProvision(name="self-contained", spec=spec, tools=("sample_echo",))
     assert provision.tools == ("sample_echo",)
+
+
+async def test_the_main_agent_is_told_which_agents_it_can_connect_an_account_for(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member on Slack or the CLI reaches only the main agent, and the main agent is the one
+    agent that may grant an account to another. So it is told the roster and the verb, and the
+    member finishes the setup by asking rather than by opening the portal."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
+    assert main is not None
+    with ws(workspace_id):
+        roster = await setup_skill(main.id, is_main=True)
+        assert await setup_skill(main.id, is_main=False) is None
+    assert roster is not None
+    assert f"- {PROVISIONED_AGENT_NAME} — still needs" in roster.instructions
+    assert "`connect_account` with `agent` set to" in roster.instructions
