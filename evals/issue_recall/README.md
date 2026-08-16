@@ -89,9 +89,22 @@ families — one triplet of restatements per filing topic (a plain statement, a 
 operations ledger beside its stale earlier copy, and a point-in-time snapshot beside its revision.
 Copies rank independently, so a retrieval that cannot see they are one fact burns injection slots
 the related set needed; `duplicateCopiesInjected` records per turn how many injected memories were
-a second-or-later copy from one family. The ledger is also the junk-drawer distractor: its dated
+a second-or-later copy from one family. The families also calibrate the dedup sweep's supersede
+threshold: measured on text-embedding-3-large, the ledger pair sits at 0.909 cosine and the
+snapshot pair at 0.985 — above `SUPERSEDE_COSINE` (0.90) — while the reworded triplets sit at
+0.63–0.83 and the nearest cross-family pair at 0.55. So the threshold retires near-verbatim copies
+and never collapses distinct facts, and free rewordings are a measured non-goal of
+embedding-threshold dedup: no value separates 0.83 from 0.55 safely, so they stay live and the
+injection-side slot guard bounds what they cost. The ledger is also the junk-drawer distractor: its dated
 entries sweep all three topics' vocabulary, so it partial-matches every graded query and floods
 the context when it wins a slot.
+
+`_commit_ambient` seeds every family with a raw content-addressed insert rather than
+`MemoryStore.commit`: the haystack is history, written before the write path bounded a body, and its
+operations ledger is longer than `MEMORY_BODY_MAX_CHARS` — a body `commit` refuses today.
+`MemoryDeduper`'s sweep is the healing this models:
+`test_the_dedup_sweep_collapses_the_seeded_families` proves one run collapses every family to its
+single live member while every other ambient row stays live.
 
 A denominator alone would not have been enough. `derive_facts` writes the graded facts in
 issue-tracker voice — "Atlas issue #388 (closed) reported that `atlas sync` retried token refresh in
@@ -115,7 +128,7 @@ stylesheet dropping the footer on landscape pages. `AbsentTopicGrader` scores th
 opposite of coverage — there is nothing to find, so the reply must not claim there is.
 
 They exist because the haystack is issue-shaped by design. With 83 issue-shaped memories in a pool of
-483, an injection of eight carries one on roughly four queries in five whatever the topic, which is
+496, an injection of eight carries one on roughly four queries in five whatever the topic, which is
 an alternative explanation for the agent citing existing issues in the coverage cases: it might be
 reaching for "check what is already filed" because its context looks like an issue tracker rather
 than because the relevant issues were recalled. A reply that attributes one of these asks to a corpus

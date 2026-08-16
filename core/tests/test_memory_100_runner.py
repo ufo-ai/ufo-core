@@ -124,11 +124,19 @@ class RecallTarget:
         {"memory_ids": [], "error_class": ""},
         {"memory_ids": [], "error_class": "x" * 129},
         {"memory_ids": [str(uuid4())], "error_class": "TimeoutError"},
+        {"memory_ids": [], "skipped": ""},
+        {"memory_ids": [], "skipped": "x" * 65},
     ),
 )
 def test_memory_recall_event_rejects_invalid_attributes(attributes: object) -> None:
     with pytest.raises(ValidationError):
         MemoryRecallEvent.model_validate(attributes)
+
+
+def test_memory_recall_event_accepts_a_skipped_internal_admission() -> None:
+    event = MemoryRecallEvent.model_validate({"memory_ids": [], "skipped": "internal_admission"})
+    assert event.memory_ids == ()
+    assert event.skipped == "internal_admission"
 
 
 def _cases() -> tuple[SnapshotCase, ...]:

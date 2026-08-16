@@ -13,6 +13,7 @@ the readiness this produces, so the producer and its consumer are proved togethe
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4, uuid5
 
@@ -20,7 +21,12 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.condenser import FACT_EXTRACT_TOOL
+from ufo_ext_memory.condenser import (
+    CONSOLIDATE_EMBED_CHARS,
+    DEDUP_MIN_AGE,
+    FACT_EXTRACT_TOOL,
+    MemoryDeduper,
+)
 from ufo_ext_memory.events import MAX_RECALLED_MEMORY_IDS
 from ufo_ext_memory.store import MemoryStore, memory_item, recall_subjects
 from ufo_testsupport.migrations import apply_cached_migrations
@@ -28,6 +34,7 @@ from ufo_testsupport.migrations import apply_cached_migrations
 from evals.issue_recall.corpus import (
     ABSENT_FILINGS,
     CASES,
+    DUPLICATE_FAMILIES,
     FILINGS,
     MACHINE_CONTROLS,
     PAGES,
@@ -41,7 +48,7 @@ from evals.issue_recall.state import CorpusAttestor
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.context import SourceReader, context_for
+from ufo.ext.context import ScopedStore, SourceReader, context_for
 from ufo.indexing import TextChunker
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
@@ -161,6 +168,112 @@ def _materializer(
         registry=_registry(client),
         postgres=False,
     )
+
+
+@dataclass
+class _DisjointEmbed:
+    """A stand-in EmbedClient for the dedup sweep: one axis per distinct ambient body, except every
+    member of a `DUPLICATE_FAMILIES` family shares its family's axis. Cosine is exactly 1.0 within a
+    family and exactly 0.0 across every other pair, so the sweep collapses only what the fixture
+    calls a duplicate."""
+
+    vectors: dict[str, tuple[float, ...]]
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        return tuple(self.vectors[text] for text in texts)
+
+
+def _dedup_embed() -> _DisjointEmbed:
+    family_axis = {
+        memory.ref: index for index, family in enumerate(DUPLICATE_FAMILIES) for memory in family
+    }
+    singles = [memory for memory in ambient_memories() if memory.ref not in family_axis]
+    axis = dict(family_axis) | {
+        memory.ref: len(DUPLICATE_FAMILIES) + offset for offset, memory in enumerate(singles)
+    }
+    total = len(DUPLICATE_FAMILIES) + len(singles)
+    vectors = {
+        memory.body[:CONSOLIDATE_EMBED_CHARS]: tuple(
+            1.0 if i == axis[memory.ref] else 0.0 for i in range(total)
+        )
+        for memory in ambient_memories()
+    }
+    return _DisjointEmbed(vectors)
+
+
+async def _age_past_the_dedup_floor(workspace_id: UUID) -> None:
+    """Backdate the seeded corpus past DEDUP_MIN_AGE. The sweep reads only rows old enough to be
+    history — a freshly materialized haystack is, by wall clock, the write path's own business —
+    so the accreted store this fixture models is what the rows must claim to be."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(memory_item)
+            .values(created_at=datetime.now(UTC) - DEDUP_MIN_AGE * 2)
+            .where(memory_item.c.workspace_id == workspace_id)
+        )
+
+
+async def _live_ids(ids: set[UUID]) -> set[UUID]:
+    async with workspace_tx() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    sa.select(memory_item.c.id).where(
+                        memory_item.c.id.in_(ids), memory_item.c.superseded_by.is_(None)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return set(rows)
+
+
+async def test_ambient_duplicates_survive_materialization(
+    seeded_workspace: UUID, tmp_path: Path
+) -> None:
+    """The haystack models the accreted store a live deploy holds before the dedup job heals it, so
+    materialization must leave every family member live — a collapse here would mean a run reached
+    the corpus with the sweep the eval measures against, before the eval ever asked for it."""
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    readiness = await _materializer(tmp_path, PageEchoModelClient(), blob).run()
+
+    by_ref = {owner.ref: owner.memory_id for owner in readiness.ambient}
+    with ws(readiness.workspace_id):
+        for family in DUPLICATE_FAMILIES:
+            live = await _live_ids({by_ref[memory.ref] for memory in family})
+            assert len(live) == len(family)
+
+
+async def test_the_dedup_sweep_collapses_the_seeded_families(
+    seeded_workspace: UUID, tmp_path: Path
+) -> None:
+    """Every ambient row shares (SHARED_SUBJECT, FACT), so the sweep's single group covers the whole
+    haystack and one run reaches every family. Non-family rows must stay live: an embed fake that
+    collapses everything, or a sweep too eager, would still pass the family assertions below for the
+    wrong reason."""
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    readiness = await _materializer(tmp_path, PageEchoModelClient(), blob).run()
+    deduper = MemoryDeduper(
+        embed=_dedup_embed(),
+        transaction=workspace_tx,
+        workspace_id=readiness.workspace_id,
+        store=ScopedStore(extension=memory_manifest.NAME),
+    )
+
+    with ws(readiness.workspace_id):
+        await _age_past_the_dedup_floor(readiness.workspace_id)
+        for _ in range(len(DUPLICATE_FAMILIES) + 1):
+            await deduper.run()
+
+    by_ref = {owner.ref: owner.memory_id for owner in readiness.ambient}
+    family_refs = {memory.ref for family in DUPLICATE_FAMILIES for memory in family}
+    non_family_ids = {memory_id for ref, memory_id in by_ref.items() if ref not in family_refs}
+    with ws(readiness.workspace_id):
+        for family in DUPLICATE_FAMILIES:
+            live = await _live_ids({by_ref[memory.ref] for memory in family})
+            assert len(live) == 1
+        assert await _live_ids(non_family_ids) == non_family_ids
 
 
 async def test_materializes_the_fixture_into_a_recallable_attested_corpus(

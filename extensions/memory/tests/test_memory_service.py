@@ -13,17 +13,20 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+import ufo_ext_memory.store as memory_store
 from sqlalchemy.exc import IntegrityError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import (
     FACT,
+    RECALL_ITEM_MAX_CHARS,
     MemoryIndexer,
     MemoryStore,
     MemoryWrite,
     PageIndexer,
     Recalled,
     decay_factor,
+    drop_near_duplicates,
     enforce_type_diversity,
     fuse_hits,
     fuse_recall,
@@ -927,18 +930,19 @@ def test_fuse_recall_folds_in_the_un_embedded_tail_leg() -> None:
 
 
 async def test_recall_blend_promotes_the_semantically_closer_fact(db: None) -> None:
-    """The cosine blend end to end: two equally-worded facts committed at the same time tie on the
-    lexical leg and on decay, so recall's order is decided by the raw query-chunk cosine — the fact
-    whose embedding is nearer the query ranks first."""
+    """The cosine blend end to end: two distinctly-worded but equally query-relevant facts
+    committed at the same time tie on the lexical leg and on decay, so recall's order is decided by
+    the raw query-chunk cosine — the fact whose embedding is nearer the query ranks first. The
+    trailing word differs only enough to keep the near-duplicate guard from collapsing the pair."""
     workspace_id = await _workspace()
     when = datetime(2025, 1, 1, tzinfo=UTC)
     close = await _seed_item(
-        workspace_id, SHARED_SUBJECT, "budget review notes", vec((0, 1.0)), created_at=when
+        workspace_id, SHARED_SUBJECT, "budget review notes near", vec((0, 1.0)), created_at=when
     )
     far = await _seed_item(
         workspace_id,
         SHARED_SUBJECT,
-        "budget review notes",
+        "budget review notes far",
         vec((0, 0.3), (1, 0.95)),
         created_at=when,
     )
@@ -1338,22 +1342,134 @@ def test_enforce_type_diversity_caps_a_class_and_backfills() -> None:
     assert sum(1 for row in kept if row.item_class == "fact") == 3
 
 
+def test_drop_near_duplicates_keeps_the_highest_ranked_copy() -> None:
+    a = Recalled(
+        uuid4(), "shared", "fact", "the deploy has no code_review profile, only coding", None, 0.9
+    )
+    b = Recalled(
+        uuid4(),
+        "shared",
+        "fact",
+        "re-confirmed: the deploy has no code_review profile, only coding",
+        None,
+        0.8,
+    )
+    c = Recalled(
+        uuid4(), "shared", "fact", "invoices are net-30 on the first business day", None, 0.7
+    )
+
+    assert drop_near_duplicates((a, b, c), 8) == (a, c)
+
+
+def test_drop_near_duplicates_keeps_distinct_bodies_in_order() -> None:
+    items = tuple(
+        Recalled(uuid4(), "shared", "fact", f"fact number {n} about system {n}", None, 1 - n / 10)
+        for n in range(4)
+    )
+
+    assert drop_near_duplicates(items, 8) == items
+
+
+def test_drop_near_duplicates_shingles_nothing_past_the_items_it_was_asked_to_keep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard runs on every member turn over a candidate pool far larger than the slots recall
+    can fill, and its cost is one trigram set per body it examines. Once it holds the distinct items
+    the caller asked for it stops: the bodies below them are never shingled, so a pool carrying
+    2,000-character rows costs the turn only what its slots need."""
+    shingled: list[str] = []
+    shingles = memory_store._body_shingles
+
+    def counting(body: str) -> frozenset[str]:
+        shingled.append(body)
+        return shingles(body)
+
+    monkeypatch.setattr(memory_store, "_body_shingles", counting)
+    items = tuple(
+        Recalled(uuid4(), "shared", "fact", f"fact number {n} about system {n}", None, 1 - n / 10)
+        for n in range(6)
+    )
+
+    assert drop_near_duplicates(items, 2) == items[:2]
+    assert shingled == [item.body for item in items[:2]]
+
+
+def test_drop_near_duplicates_collapses_on_a_matching_injectable_prefix() -> None:
+    """Recall only ever injects a body's first RECALL_ITEM_MAX_CHARS (`recall_hook` truncates every
+    line there), so prefix-equality already is injected-content-equality: two bodies sharing that
+    prefix but diverging well past it inject as identical lines and should collapse to the
+    higher-ranked copy."""
+    shared_prefix = " ".join(f"clause{i}" for i in range(400))
+    assert len(shared_prefix) > RECALL_ITEM_MAX_CHARS
+    tail_a = " ".join(f"onlyinA{i}" for i in range(400))
+    tail_b = " ".join(f"onlyinB{i}" for i in range(400))
+    higher = Recalled(uuid4(), "shared", "fact", f"{shared_prefix} {tail_a}", None, 0.9)
+    lower = Recalled(uuid4(), "shared", "fact", f"{shared_prefix} {tail_b}", None, 0.8)
+
+    assert drop_near_duplicates((higher, lower), 8) == (higher,)
+
+
+async def test_recall_drops_the_lower_ranked_near_duplicate_and_backfills_the_freed_slot(
+    db: None,
+) -> None:
+    """`drop_near_duplicates` proves its wiring inside `MemoryStore.recall`, not only as a
+    standalone function: a near-duplicate restatement (word-trigram Jaccard >= 0.6, not identical
+    text) ranks just behind the fact it restates and must not spend a second slot on it, so at
+    limit=2 the
+    freed slot backfills with the next distinct, lower-ranked fact rather than truncating early. If
+    the wiring reverted to `enforce_type_diversity(ranked, limit)` this would return the duplicate
+    pair and drop the distinct fact instead."""
+    workspace_id = await _workspace()
+    when = datetime(2025, 1, 1, tzinfo=UTC)
+    strong = vec((6, 1.0))
+    original = await _seed_item(
+        workspace_id,
+        SHARED_SUBJECT,
+        "the deploy has no code_review profile, only coding",
+        strong,
+        created_at=when,
+    )
+    duplicate = await _seed_item(
+        workspace_id,
+        SHARED_SUBJECT,
+        "re-confirmed: the deploy has no code_review profile, only coding",
+        vec((6, 0.85), (7, 0.4)),
+        created_at=when,
+    )
+    distinct = await _seed_item(
+        workspace_id,
+        SHARED_SUBJECT,
+        "the deploy retry queue backs off exponentially",
+        vec((6, 0.5), (8, 0.7)),
+        created_at=when,
+    )
+    recalled = await _store(StubEmbed(strong), workspace_id).recall(
+        "deploy",
+        frozenset({SHARED_SUBJECT}),
+        2,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
+    assert [item.memory_id for item in recalled] == [original, distinct]
+    assert duplicate not in [item.memory_id for item in recalled]
+
+
 async def test_recall_reorders_by_information_age(db: None) -> None:
     """Two equally-matching facts committed together rank by source information time: the current
-    one first and the year-old page fact demoted, end to end over the real index."""
+    one first and the year-old page fact demoted, end to end over the real index. The trailing word
+    differs only enough to keep the near-duplicate guard from collapsing the pair."""
     workspace_id = await _workspace()
     probe = vec((8, 1.0))
     old = await _seed_item(
         workspace_id,
         SHARED_SUBJECT,
-        "budget review meeting",
+        "budget review meeting stale",
         probe,
         as_of=datetime.now(UTC) - timedelta(days=365),
     )
     new = await _seed_item(
         workspace_id,
         SHARED_SUBJECT,
-        "budget review meeting",
+        "budget review meeting fresh",
         probe,
         as_of=datetime.now(UTC),
     )
@@ -1367,19 +1483,21 @@ async def test_recall_reorders_by_information_age(db: None) -> None:
 
 
 async def test_recall_filters_to_the_created_at_window(db: None) -> None:
+    """The trailing word on each body differs only enough to keep the near-duplicate guard from
+    collapsing the pair the `span` case expects both of."""
     workspace_id = await _workspace()
     probe = vec((0, 1.0))
     old = await _seed_item(
         workspace_id,
         SHARED_SUBJECT,
-        "alpha budget review",
+        "alpha budget review stale",
         probe,
         created_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
     new = await _seed_item(
         workspace_id,
         SHARED_SUBJECT,
-        "alpha budget review",
+        "alpha budget review fresh",
         probe,
         created_at=datetime(2025, 1, 1, tzinfo=UTC),
     )

@@ -110,7 +110,7 @@
       <dt>half-life</dt>
       <dd>per kind: fact 365d · preference 180d · decision 120d · event 30d · task 14d</dd>
       <dt>superseded</dt>
-      <dd>a consolidation pass replaced this fact with a semantic summary; kept here, dropped from recall</dd>
+      <dd>a newer statement replaced this one — the dedup sweep or a consolidation summary; kept here, dropped from recall</dd>
     </dl>
   </details>
   <div id="rows"><p class="note">loading…</p></div>
@@ -212,7 +212,7 @@
       ? '<span class="src"><code class="ref">' + escapeHtml(m.source_ref) + "</code></span>"
       : "";
     const superseded = m.superseded_by
-      ? ' <span class="flag gone" title="replaced by consolidation: ' + escapeHtml(m.superseded_by) + '">superseded</span>'
+      ? ' <span class="flag gone" title="replaced by: ' + escapeHtml(m.superseded_by) + '">superseded</span>'
       : "";
     const halfLife = m.half_life_days == null ? "—" : m.half_life_days + "d";
     return (

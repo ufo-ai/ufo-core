@@ -141,7 +141,9 @@ class CorrectionIntent(BaseModel):
     """One memory correction from the workspace memory view: a corrective memory recorded through
     `memory_update`, exactly the write chat performs — a new item under the correcting member's own
     audience, naming the corrected item in `source_ref`. The named item is never edited or removed:
-    the memory kind refuses apply and delete, and consolidation is what ends an item."""
+    the memory kind refuses apply and delete, and both statements stand until the dedup sweep
+    retires a near-duplicate original toward the newest statement — the correction — leaving the row
+    and its provenance in place."""
 
     verb: Literal["record"]
     kind: Literal["memory"]

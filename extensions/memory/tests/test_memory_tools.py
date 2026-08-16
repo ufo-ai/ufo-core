@@ -9,7 +9,7 @@ import asyncio
 import gc
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -21,7 +21,15 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, MemoryObjects
-from ufo_ext_memory.store import MemoryIndexer, SourceMatch, memory_item
+from ufo_ext_memory.store import (
+    MemoryIndexer,
+    MemoryStore,
+    MemoryWrite,
+    Recalled,
+    SourceMatch,
+    memory_item,
+    store_for,
+)
 
 from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
@@ -39,12 +47,11 @@ from ufo.sdk.audience import (
     room_audience,
 )
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
-from ufo.subjects import member_subject
+from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
 from ufo.workspace import ws
 
 TOOL_NARRATION = "remembering what they told me"
-
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
 
 
@@ -104,6 +111,41 @@ def _indexer(embed: object) -> MemoryIndexer:
         chunker=TextChunker(),
         page_states=_ext(DefaultIndex(transaction=workspace_tx), embed).page_states,
     )
+
+
+def _store(embed: object) -> MemoryStore:
+    return store_for(_ext(DefaultIndex(transaction=workspace_tx), embed))
+
+
+async def _live_bodies(subject: str) -> tuple[str, ...]:
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(memory_item.c.body)
+                .where(memory_item.c.subject == subject, memory_item.c.superseded_by.is_(None))
+                .order_by(memory_item.c.body)
+            )
+        ).scalars()
+    return tuple(rows)
+
+
+async def _rows_by_body() -> dict[str, sa.RowMapping]:
+    async with workspace_tx() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.id,
+                        memory_item.c.body,
+                        memory_item.c.superseded_by,
+                        memory_item.c.created_at,
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return {row["body"]: row for row in rows}
 
 
 def _tool_ctx(
@@ -236,6 +278,7 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
                 status="running",
                 inbound="what is the vault code",
                 created_at=datetime(2026, 7, 9, tzinfo=UTC),
+                admission_source="member",
             ),
             agent=Agent(prompt="p", model="claude-opus-4-8"),
             speaker_member_id=member,
@@ -301,6 +344,7 @@ async def test_recall_hook_observes_search_failure_without_denial(
         status="running",
         inbound="what is the vault code",
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
+        admission_source="member",
     )
     with caplog.at_level(logging.INFO, logger="ufo"), ws(workspace_id):
         outcome = await memory.recall_hook(
@@ -317,6 +361,266 @@ async def test_recall_hook_observes_search_failure_without_denial(
     assert outcome is None
     assert record.ufo["memory_ids"] == []
     assert record.ufo["error_class"] == error_name[: memory.MAX_RECALL_ERROR_CLASS_CHARS]
+
+
+def test_memory_write_rejects_an_oversized_body() -> None:
+    with pytest.raises(ValidationError):
+        memory.MemoryWrite(subject="shared", body="x" * (memory.MEMORY_BODY_MAX_CHARS + 1))
+
+
+def test_memory_update_input_rejects_an_oversized_body() -> None:
+    with pytest.raises(ValidationError):
+        memory.MemoryUpdateInput(body="x" * (memory.MEMORY_BODY_MAX_CHARS + 1))
+
+
+async def _retire(body: str, superseded_by: UUID) -> None:
+    """Put one row where the dedup sweep leaves it — retired at the copy that replaced it — so a
+    test drives the revival that follows through the real `commit` rather than through a sweep it
+    is not about."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(memory_item)
+            .values(superseded_by=superseded_by)
+            .where(memory_item.c.body == body)
+        )
+
+
+async def test_re_committing_a_retired_body_revives_it(db: None) -> None:
+    """Restating a body the sweep retired resolves to that same row by content address, so without
+    the upsert clearing `superseded_by` the restatement would land back under the fence and stay
+    invisible to every reader. The re-asserted body is live again; retiring the copy that replaced
+    it is the next sweep's business, not this write's."""
+    workspace_id = await _workspace()
+    original = "the deploy has no code_review profile"
+    reworded = "re-confirmed: the deploy still has no code_review profile"
+    embed = StubEmbed(vec((0, 1.0)))
+    with ws(workspace_id):
+        store = _store(embed)
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=reworded))
+        await _retire(original, (await _rows_by_body())[reworded]["id"])
+
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
+        bodies = await _live_bodies(SHARED_SUBJECT)
+        rows = await _rows_by_body()
+
+    assert bodies == (reworded, original)
+    assert rows[original]["superseded_by"] is None
+
+
+async def _backdate(body: str, created_at: datetime) -> datetime:
+    """Age one row's `created_at` and read back what the backend stored, so a test compares two
+    values that came out of the same column rather than a Python constant against sqlite's
+    second-resolution `now()`."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(memory_item).values(created_at=created_at).where(memory_item.c.body == body)
+        )
+    return (await _rows_by_body())[body]["created_at"]
+
+
+async def test_a_revival_carries_fresh_recency_and_a_plain_re_commit_does_not(db: None) -> None:
+    """A revival is a fresh assertion, so it takes a fresh `created_at`: recall decays it from the
+    restatement rather than from a wording the member abandoned, and the dedup sweep — whose winner
+    is the newest copy — sees the restatement as newer than the copy that retired it. Leaving the
+    old stamp would have the next sweep retire the member's restatement right back. An identical
+    re-commit of a live row restates nothing and keeps the stamp it has, so replaying one body
+    cannot walk a row's recency forward."""
+    workspace_id = await _workspace()
+    original = "the deploy has no code_review profile"
+    reworded = "re-confirmed: the deploy still has no code_review profile"
+    stale = datetime.now(UTC) - timedelta(hours=6)
+    embed = StubEmbed(vec((0, 1.0)))
+    with ws(workspace_id):
+        store = _store(embed)
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=reworded))
+        rewrite = await _backdate(reworded, datetime.now(UTC) - timedelta(hours=3))
+
+        aged = await _backdate(original, stale)
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
+        replayed = (await _rows_by_body())[original]["created_at"]
+
+        await _retire(original, (await _rows_by_body())[reworded]["id"])
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
+        rows = await _rows_by_body()
+
+    assert replayed == aged
+    assert rows[original]["created_at"] > rewrite
+    assert rows[original]["superseded_by"] is None
+
+
+def _stub_turn(
+    workspace_id: UUID,
+    *,
+    admission_source: str = "member",
+    parent_turn_id: UUID | None = None,
+) -> Turn:
+    return Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=1,
+        status="running",
+        inbound="what do you remember",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+        admission_source=admission_source,
+        parent_turn_id=parent_turn_id,
+    )
+
+
+def _hook(workspace_id: UUID, turn: Turn, speaker_member_id: UUID | None = None) -> HookContext:
+    return HookContext(
+        ext=_ext(object(), object()),
+        turn=turn,
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        speaker_member_id=speaker_member_id,
+        audience=conversation_audience(None),
+        payload=UserPromptSubmit(text="what do you remember"),
+    )
+
+
+async def test_recall_hook_skips_an_internal_root_admission(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    class StubStore:
+        async def recall(
+            self, query: str, subjects: frozenset[str], limit: int, *, source_reader: object
+        ) -> tuple[Recalled, ...]:
+            nonlocal calls
+            calls += 1
+            return ()
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: StubStore())
+    workspace_id = uuid4()
+    turn = _stub_turn(workspace_id, admission_source="internal", parent_turn_id=None)
+    with caplog.at_level(logging.INFO, logger="ufo"), ws(workspace_id):
+        outcome = await memory.recall_hook(_hook(workspace_id, turn))
+
+    assert outcome is None
+    record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
+    assert record.ufo["memory_ids"] == []
+    assert record.ufo["skipped"] == memory.RECALL_SKIP_INTERNAL
+    assert calls == 0
+
+
+async def test_recall_hook_serves_a_member_message_folded_onto_an_internal_root(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission folds a member's message onto whatever turn is live, without testing what founded
+    it — so a member writing while a monitor fire or a subagent delivery runs fires this hook on an
+    internal root turn, carrying their own text and their own speaker. That is a member's prompt and
+    must be recalled against; skipping on the turn alone silently denied memory to every message
+    that landed mid-notice."""
+    calls = 0
+
+    class StubStore:
+        async def recall(
+            self, query: str, subjects: frozenset[str], limit: int, *, source_reader: object
+        ) -> tuple[Recalled, ...]:
+            nonlocal calls
+            calls += 1
+            return ()
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: StubStore())
+    workspace_id = uuid4()
+    turn = _stub_turn(workspace_id, admission_source="internal", parent_turn_id=None)
+    with caplog.at_level(logging.INFO, logger="ufo"), ws(workspace_id):
+        await memory.recall_hook(_hook(workspace_id, turn, speaker_member_id=uuid4()))
+
+    record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
+    assert "skipped" not in record.ufo
+    assert calls == 1
+
+
+async def test_recall_hook_still_serves_child_and_scheduled_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class StubStore:
+        async def recall(
+            self, query: str, subjects: frozenset[str], limit: int, *, source_reader: object
+        ) -> tuple[Recalled, ...]:
+            nonlocal calls
+            calls += 1
+            return ()
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: StubStore())
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        for admission_source, parent_turn_id in (
+            ("internal", uuid4()),
+            ("scheduled", None),
+            ("member", None),
+        ):
+            turn = _stub_turn(
+                workspace_id, admission_source=admission_source, parent_turn_id=parent_turn_id
+            )
+            await memory.recall_hook(_hook(workspace_id, turn))
+
+    assert calls == 3
+
+
+async def test_recall_hook_bounds_injected_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Four bodies at exactly the per-item cap sum to precisely RECALL_TOTAL_MAX_CHARS on their raw
+    text (8,000) but their rendered lines — each with its "- " prefix and "\\n" separator — sum to
+    8,011: 11 bytes over. The budget must be charged against the rendered line, not the bare body,
+    so the last item has to drop whole and the joined text must never cross the line."""
+    items = tuple(
+        Recalled(
+            uuid4(), "shared", "fact", letter * memory.RECALL_ITEM_MAX_CHARS, None, 0.9 - n / 10
+        )
+        for n, letter in enumerate(("w", "x", "y", "z"))
+    )
+
+    class StubStore:
+        async def recall(
+            self, query: str, subjects: frozenset[str], limit: int, *, source_reader: object
+        ) -> tuple[Recalled, ...]:
+            return items
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: StubStore())
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        outcome = await memory.recall_hook(_hook(workspace_id, _stub_turn(workspace_id)))
+
+    assert isinstance(outcome, InjectContext)
+    assert len(outcome.text) <= len(memory.RECALL_CONTEXT_PREFIX) + memory.RECALL_TOTAL_MAX_CHARS
+    assert "z" * memory.RECALL_ITEM_MAX_CHARS not in outcome.text
+
+
+async def test_recall_hook_omits_a_budget_dropped_item_from_the_event(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recall event's memory_ids must never claim an item the char budget dropped. Each body
+    is already over the per-item cap and truncated to it, so four of them exceed the total budget
+    and the last must drop whole — from both the injected text and the logged ids."""
+    items = tuple(
+        Recalled(uuid4(), "shared", "fact", letter * 2_500, None, 1.0 - index / 10)
+        for index, letter in enumerate("abcd")
+    )
+
+    class StubStore:
+        async def recall(
+            self, query: str, subjects: frozenset[str], limit: int, *, source_reader: object
+        ) -> tuple[Recalled, ...]:
+            return items
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: StubStore())
+    workspace_id = uuid4()
+    turn = _stub_turn(workspace_id)
+    with caplog.at_level(logging.INFO, logger="ufo"), ws(workspace_id):
+        outcome = await memory.recall_hook(_hook(workspace_id, turn))
+
+    record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
+    assert record.ufo["memory_ids"] == [str(item.memory_id) for item in items[:3]]
+    assert isinstance(outcome, InjectContext)
+    assert "d" * 2_500 not in outcome.text
+    assert memory.RECALL_TRUNCATION_MARK in outcome.text
 
 
 async def test_recall_hook_excludes_episodic_topic_pointers(
@@ -365,6 +669,7 @@ async def test_recall_hook_excludes_episodic_topic_pointers(
                         status="running",
                         inbound="api key pricing",
                         created_at=datetime(2026, 7, 9, tzinfo=UTC),
+                        admission_source="member",
                     ),
                     agent=Agent(prompt="p", model="claude-opus-4-8"),
                     speaker_member_id=member,
@@ -468,6 +773,7 @@ async def test_shared_recall_excludes_message_bound_private_memory(
                     status="running",
                     inbound="launch note",
                     created_at=datetime(2026, 7, 9, tzinfo=UTC),
+                    admission_source="member",
                 ),
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
                 speaker_member_id=member,

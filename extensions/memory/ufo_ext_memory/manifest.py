@@ -1,13 +1,14 @@
 """The memory extension's declared points: the two tools, the `memory` object kind, the recall
-hook, two page-change consumers, two derivation jobs.
+hook, two page-change consumers, three derivation jobs.
 
 `memory_search` and `memory_update` are the agent's durable-memory tools; the `user_prompt_submit`
 hook auto-injects relevant memory into the turn's context before the model runs. Two `page_change`
 hooks ride independent core-runner cursors: `index_pages` turns each replayed source-page change
 into index chunks + a mirror row, and `derive_facts` distills each into durable `fact`
-memory_items with a bounded metered model pass. Two JobSpecs run the interval derivations:
-`memory_index` turns committed items into index chunks, and `memory_consolidate` clusters aged
-facts into `semantic` summaries that supersede their originals. Recall stays best-effort under a
+memory_items with a bounded metered model pass. Three JobSpecs run the interval derivations:
+`memory_index` turns committed items into index chunks, `memory_consolidate` clusters aged facts
+into `semantic` summaries that supersede their originals, and `memory_dedup` sweeps one group of
+duplicate copies per tick onto its newest copy. Recall stays best-effort under a
 gating hook: the handler owns a soft timeout below the hook deadline and swallows every error,
 returning None rather than ever denying the turn.
 """
@@ -44,10 +45,13 @@ from ufo.sdk.operator import resolve_operator_workspace
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_memory.condenser import (
+    DEDUP_MIN_AGE,
     MIN_CLUSTER_FACTS,
+    MIN_DUPLICATE_COPIES,
     MIN_OLDEST_AGE,
     FactDeriver,
     MemoryConsolidator,
+    MemoryDeduper,
 )
 from ufo_ext_memory.events import (
     MAX_RECALL_ERROR_CLASS_CHARS,
@@ -60,6 +64,8 @@ from ufo_ext_memory.store import (
     FACT,
     KIND_FACT,
     MAX_CONFIDENCE,
+    MEMORY_BODY_MAX_CHARS,
+    RECALL_ITEM_MAX_CHARS,
     ItemClass,
     MemoryIndexer,
     MemoryKind,
@@ -80,12 +86,18 @@ VERSION = "0.1.0"
 MEMORY_SEARCH_LIMIT = 8
 MAX_MEMORY_QUERIES = 3
 RECALL_LIMIT = MAX_RECALLED_MEMORY_IDS
+INTERNAL_ADMISSION = "internal"
+RECALL_SKIP_INTERNAL = "internal_admission"
 RECALL_SOFT_TIMEOUT_SECONDS = 4.0
 RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
+RECALL_TOTAL_MAX_CHARS = 8_000
+RECALL_TRUNCATION_MARK = " …[truncated]"
 MEMORY_INDEX_JOB = "memory_index"
 MEMORY_INDEX_SCHEDULE = "0 * * * * *"
 CONSOLIDATE_JOB = "memory_consolidate"
 CONSOLIDATE_SCHEDULE = "0 0 * * * *"
+DEDUP_JOB = "memory_dedup"
+DEDUP_SCHEDULE = "0 30 * * * *"
 logger = logging.getLogger(__name__)
 
 
@@ -115,9 +127,10 @@ class MemoryUpdateInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     body: str = Field(
+        max_length=MEMORY_BODY_MAX_CHARS,
         description="A durable fact to remember about the user, written from their perspective "
         "(e.g. 'I prefer concise summaries'). Store persistent facts — role, company, team, "
-        "preferences, projects, key people — never ephemeral instructions like 'make it shorter'."
+        "preferences, projects, key people — never ephemeral instructions like 'make it shorter'.",
     )
     item_class: ItemClass = Field(
         default=FACT, description="The memory item class; defaults to a fact."
@@ -353,10 +366,36 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
     """Auto-inject memory relevant to the inbound into the turn's system context. user_prompt_submit
     is gating — a raising or slow handler denies the turn — so recall stays strictly best-effort: it
     runs under its own soft timeout below the hook deadline and swallows every error, returning None
-    on any failure or empty result rather than ever failing the turn."""
+    on any failure or empty result rather than ever failing the turn. Injected lines are bounded
+    per-item (RECALL_ITEM_MAX_CHARS, truncated with RECALL_TRUNCATION_MARK) and in total
+    (RECALL_TOTAL_MAX_CHARS counted against each rendered "- " line plus its "\n" separator, so the
+    joined text itself never exceeds the budget): an item past the total budget is dropped whole, so
+    the recall event's memory_ids names only the items whose lines actually made it into the
+    injected text. A speakerless root
+    turn admitted INTERNAL_ADMISSION (a machine fold: subagent result deliveries, internal notices)
+    carries no topical text to recall against, so it skips recall entirely; a child subagent turn or
+    a scheduled turn keeps recall regardless of admission_source. What the skip tests is the
+    arrival, not only the turn it lands on: admission folds a member's message onto whatever turn is
+    live, so a member writing while an internal root turn runs fires this hook with their own text
+    and their own `speaker_member_id` — a member's prompt, recalled against like any other."""
     if not isinstance(ctx.payload, UserPromptSubmit):
         return None
     if ctx.turn is None:
+        return None
+    if (
+        ctx.speaker_member_id is None
+        and ctx.turn.admission_source == INTERNAL_ADMISSION
+        and ctx.turn.parent_turn_id is None
+    ):
+        try:
+            log(
+                MEMORY_RECALL_EVENT,
+                turn_id=str(ctx.turn.id),
+                memory_ids=[],
+                skipped=RECALL_SKIP_INTERNAL,
+            )
+        except Exception:
+            logger.warning("memory.recall_log_failed", exc_info=True)
         return None
     subjects = recall_subjects(ctx.audience)
     reader = SourceReader(
@@ -378,19 +417,32 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
         error_class = type(error).__name__[:MAX_RECALL_ERROR_CLASS_CHARS]
         logger.warning("memory.recall_hook.degraded", exc_info=True)
     injected = tuple(item for item in recalled if item.recall_mode != "topic")
+    lines: list[str] = []
+    kept: list[Recalled] = []
+    total = 0
+    for item in injected:
+        body = item.body
+        if len(body) > RECALL_ITEM_MAX_CHARS:
+            body = body[:RECALL_ITEM_MAX_CHARS] + RECALL_TRUNCATION_MARK
+        line = f"- {body}"
+        separator = 1 if lines else 0
+        if total + separator + len(line) > RECALL_TOTAL_MAX_CHARS:
+            break
+        lines.append(line)
+        kept.append(item)
+        total += separator + len(line)
     if ctx.turn is not None:
         try:
             log(
                 MEMORY_RECALL_EVENT,
                 turn_id=str(ctx.turn.id),
-                memory_ids=[str(item.memory_id) for item in injected],
+                memory_ids=[str(item.memory_id) for item in kept],
                 **({"error_class": error_class} if error_class is not None else {}),
             )
         except Exception:
             logger.warning("memory.recall_log_failed", exc_info=True)
     if error_class is not None:
         return None
-    lines = [f"- {item.body}" for item in injected]
     return InjectContext(RECALL_CONTEXT_PREFIX + "\n".join(lines)) if lines else None
 
 
@@ -450,6 +502,17 @@ async def consolidate_memory(ctx: ExtensionContext) -> None:
     ).run()
 
 
+async def dedup_memory(ctx: ExtensionContext) -> None:
+    if ctx.embed is None:
+        raise RuntimeError("memory_dedup requires the embed backend; none is wired")
+    await MemoryDeduper(
+        embed=ctx.embed,
+        transaction=ctx.transaction,
+        workspace_id=ctx.store.workspace_id,
+        store=ctx.store,
+    ).run()
+
+
 def _items_awaiting_index() -> sa.Select[tuple[UUID]]:
     return (
         sa.select(memory_item.c.workspace_id)
@@ -474,6 +537,28 @@ def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]:
         )
         .group_by(memory_item.c.workspace_id)
         .having(sa.func.count() >= MIN_CLUSTER_FACTS)
+    )
+
+
+def _dedupable_workspaces() -> sa.Select[tuple[UUID]]:
+    """Workspaces holding a duplicate backlog a sweep could collapse: at least MIN_DUPLICATE_COPIES
+    live tool-written rows sharing one (subject, item_class), each past DEDUP_MIN_AGE — the sweep's
+    own floor, folded into the candidate read so a workspace whose copies are all fresh is never
+    bound, fresh writes being the commit path's to dedup. The projection is distinct — a workspace
+    with several such groups is one candidate bound once, not one per group — and a workspace whose
+    repeats are all page-derived is never bound, those rows being the deriver's. Built per tick, so
+    the age cutoff tracks `now`."""
+    cutoff = datetime.now(UTC) - DEDUP_MIN_AGE
+    return (
+        sa.select(memory_item.c.workspace_id)
+        .where(
+            memory_item.c.created_from_page_id.is_(None),
+            memory_item.c.superseded_by.is_(None),
+            memory_item.c.created_at <= cutoff,
+        )
+        .group_by(memory_item.c.workspace_id, memory_item.c.subject, memory_item.c.item_class)
+        .having(sa.func.count() >= MIN_DUPLICATE_COPIES)
+        .distinct()
     )
 
 
@@ -540,6 +625,12 @@ def manifest() -> Manifest:
                 schedule=CONSOLIDATE_SCHEDULE,
                 handler=consolidate_memory,
                 candidates=owner_candidates(_consolidatable_workspaces),
+            ),
+            JobSpec(
+                name=DEDUP_JOB,
+                schedule=DEDUP_SCHEDULE,
+                handler=dedup_memory,
+                candidates=owner_candidates(_dedupable_workspaces),
             ),
         ),
         memory_search=(

@@ -21,6 +21,8 @@ from evals.harness.harness import EvalReport
 from evals.harness.registry import EvalTask
 from evals.harness.target import CapabilityTarget
 
+MAX_RECALL_SKIP_REASON_CHARS = 64
+
 
 class MemoryRecallEvent(BaseModel):
     """One turn's injected recall, as the extension exported it."""
@@ -31,6 +33,7 @@ class MemoryRecallEvent(BaseModel):
     error_class: str | None = Field(
         default=None, min_length=1, max_length=MAX_RECALL_ERROR_CLASS_CHARS
     )
+    skipped: str | None = Field(default=None, min_length=1, max_length=MAX_RECALL_SKIP_REASON_CHARS)
 
     @model_validator(mode="after")
     def _valid_outcome(self) -> MemoryRecallEvent:

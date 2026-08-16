@@ -16,6 +16,7 @@ Everything reaches the database through the extension's workspace-scoped
 internal.
 """
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -61,6 +62,7 @@ TYPE_DIVERSITY_RATIO = 0.6
 MAX_CONFIDENCE = 10
 DEFAULT_CONFIDENCE = 5
 MEMORY_INVENTORY_LIMIT = 500
+MEMORY_BODY_MAX_CHARS = 4_000
 HALFLIFE_DAYS: dict[str, float] = {
     "fact": 365.0,
     "preference": 180.0,
@@ -283,7 +285,7 @@ class MemoryWrite(BaseModel):
     (fact/preference/decision/event/task), and `confidence` (1..10) scales a fact's decayed rank."""
 
     subject: str
-    body: str
+    body: str = Field(max_length=MEMORY_BODY_MAX_CHARS)
     item_class: ItemClass = FACT
     memory_kind: MemoryKind = KIND_FACT
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
@@ -429,6 +431,45 @@ def decay_factor(item: Recalled, now: datetime) -> float:
     )
 
 
+RECALL_OVERLAP_JACCARD = 0.6
+RECALL_ITEM_MAX_CHARS = 2_000
+RECALL_DEDUP_OVERSAMPLE = 4
+
+
+def _body_shingles(body: str) -> frozenset[str]:
+    words = [word for word in re.split(r"\W+", body.lower()) if word]
+    return frozenset(" ".join(words[i : i + 3]) for i in range(max(1, len(words) - 2)))
+
+
+def drop_near_duplicates(items: tuple[Recalled, ...], keep: int) -> tuple[Recalled, ...]:
+    """Two live copies of one fact rank together and burn injection slots restating it — the
+    audited store held facts in 3-27 live copies. Word-trigram Jaccard is deterministic and cheap
+    enough for the recall soft timeout; the dedup sweep is the real fix, this guards the slots
+    against what it has not healed yet. Shingled over each body's injectable prefix only
+    (RECALL_ITEM_MAX_CHARS) — recall truncates every line there anyway, so prefix-equality is
+    injected-content-equality.
+
+    It walks only as far as `keep` distinct items, and shingles nothing past them: the caller reads
+    a candidate pool far larger than the slots it can fill, and a body ranked below the last usable
+    slot costs a turn nothing to skip. Even bounded, the pass is arithmetic over trigram sets of up
+    to RECALL_ITEM_MAX_CHARS — its caller runs it off the event loop."""
+    kept: list[Recalled] = []
+    shingles: list[frozenset[str]] = []
+    for item in items:
+        if len(kept) >= keep:
+            break
+        own = _body_shingles(item.body[:RECALL_ITEM_MAX_CHARS])
+        if any(
+            len(own & seen) / len(own | seen) >= RECALL_OVERLAP_JACCARD
+            for seen in shingles
+            if own | seen
+        ):
+            continue
+        kept.append(item)
+        shingles.append(own)
+    return tuple(kept)
+
+
 def enforce_type_diversity(rows: tuple[Recalled, ...], limit: int) -> tuple[Recalled, ...]:
     """gbrain `enforceTypeDiversity`: take rows in rank order, admitting at most
     TYPE_DIVERSITY_RATIO of `limit` per item class, then backfill from the deferred remainder only
@@ -497,7 +538,27 @@ class MemoryStore:
         than accumulating a duplicate recallable row; a re-commit that binds it to another page
         revision makes it due again, since whether that revision may be published is the index job's
         question to answer, while an identical re-commit at the same binding leaves the existing
-        chunks and their digest untouched."""
+        chunks and their digest untouched.
+
+        A reworded restatement hashes to a fresh id, so the content address cannot upsert it and
+        both bodies land live. Retiring one onto the other is dedup — derived state, which this
+        write path never produces — so `MemoryDeduper` is the sole superseder of a tool-written
+        row, and near-duplicate copies accrete until the sweep's next eligible rotation collapses
+        them onto the newest one. The sweep's own age floor is the second span they stand through:
+        a row younger than DEDUP_MIN_AGE is invisible to it, so a burst of restatements is
+        recallable in full until it ages into history.
+
+        Re-asserting a retired body brings it back: the upsert clears `superseded_by`, so a member
+        restating what the sweep retired makes it live again, and `created_at` moves to now — a
+        revival is a fresh assertion, so it carries fresh recency for recall's decay and for the
+        sweep, whose winner is the newest copy. Only a revival moves it: an identical re-commit of
+        a live row keeps the row's original `created_at`, since nothing about it was restated.
+        Without the move, the copy that retired it would still be the newer row, and the next sweep
+        would retire the member's restatement right back. Its chunks and digest stand — the stamp
+        is a read-time fence that never withdrew them, and the id is content-addressed over the
+        body, so what the index holds is still exactly this body's. Without that clear, the
+        restatement would land back under the fence the sweep set and stay invisible to every
+        reader."""
         item_id = uuid5(
             MEMORY_ITEM_NAMESPACE,
             "\x00".join((str(self.workspace_id), write.subject, write.item_class, write.body)),
@@ -529,6 +590,7 @@ class MemoryStore:
                     statement.excluded.created_from_page_revision
                 ),
             )
+            revived = memory_item.c.superseded_by.is_not(None)
             await connection.execute(
                 statement.on_conflict_do_update(
                     index_elements=[memory_item.c.id],
@@ -550,6 +612,10 @@ class MemoryStore:
                             (rebound, None), else_=memory_item.c.embedding_claimed_at
                         ),
                         memory_item.c.as_of: statement.excluded.as_of,
+                        memory_item.c.created_at: sa.case(
+                            (revived, sa.func.now()), else_=memory_item.c.created_at
+                        ),
+                        memory_item.c.superseded_by: None,
                         memory_item.c.updated_at: sa.func.now(),
                     },
                 )
@@ -707,15 +773,22 @@ class MemoryStore:
         source_reader: SourceReader,
     ) -> tuple[Recalled, ...]:
         """Fuse the index legs with the cosine re-score blend and a lexical leg over the un-embedded
-        tail, read the surviving items back, then rank by recency decay (fact half-lives), cap
-        per-class diversity, and rewrite episodic hits to topic pointers. The tail leg makes a
-        just-committed fact recallable before the index job derives its chunks. An optional
+        tail, read the surviving items back, then rank by recency decay (fact half-lives), drop
+        near-duplicate bodies, cap per-class diversity, and rewrite episodic hits to topic
+        pointers. The tail leg makes a just-committed fact recallable before the index job derives
+        its chunks. An optional
         half-open `[start, end)` bound on `created_at` restricts recall to a window; the index never
         sees the bound, so the filter lands in the row read-back alongside the superseded drop and
         the source-grant fence — a page-derived row survives only for a reader holding one of its
         source links. The index legs fetch a bounded candidate pool rather than just `limit`, so the
         fence has higher-ranked-but-ungranted rows to discard without starving the `limit` granted
-        rows a reader may see; it is a row filter, not an index partition."""
+        rows a reader may see; it is a row filter, not an index partition.
+
+        Ranking that pool down to the slots is `_shortlist`, in a worker thread: this runs from the
+        recall hook on every member turn, and its arithmetic holds no await for the turn's soft
+        timeout to interrupt. The near-duplicate guard there reads the pool but stops at `limit *
+        RECALL_DEDUP_OVERSAMPLE` distinct items — enough material for the type-diversity cap to
+        choose from, and nothing spent shingling rows no slot could reach."""
         source_ids = await self._source_ids(source_reader)
         pool = max(limit, RECALL_CANDIDATE_POOL)
         lexical, vector = await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, pool)
@@ -727,7 +800,16 @@ class MemoryStore:
             start,
             end,
         )
-        now = datetime.now(UTC)
+        shortlist = await asyncio.to_thread(self._shortlist, enriched, limit, datetime.now(UTC))
+        return tuple(as_topic_pointer(item, index) for index, item in enumerate(shortlist))
+
+    def _shortlist(
+        self, enriched: tuple[Recalled, ...], limit: int, now: datetime
+    ) -> tuple[Recalled, ...]:
+        """The candidate pool narrowed to the slots the caller asked for: rank by recency decay,
+        drop the near-duplicate bodies, then cap per-class diversity. Every step is arithmetic over
+        the whole pool, which is the one GIL-bound stretch of a recall — so the caller runs it in a
+        worker thread rather than holding the process the hook fires in."""
         ranked = tuple(
             sorted(
                 (replace(item, score=item.score * decay_factor(item, now)) for item in enriched),
@@ -735,8 +817,8 @@ class MemoryStore:
                 reverse=True,
             )
         )
-        diversified = enforce_type_diversity(ranked, limit)
-        return tuple(as_topic_pointer(item, index) for index, item in enumerate(diversified))
+        guarded = drop_near_duplicates(ranked, limit * RECALL_DEDUP_OVERSAMPLE)
+        return enforce_type_diversity(guarded, limit)
 
     async def search_sources(
         self,

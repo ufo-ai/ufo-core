@@ -20,15 +20,20 @@ import ufo_ext_memory.manifest as memory_manifest
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import (
+    DEDUP_CURSOR_KEY,
+    DEDUP_MIN_AGE,
     FACT_EXTRACT_TOOL,
     MIN_CLUSTER_FACTS,
     MIN_OLDEST_AGE,
     FactDeriver,
     MemoryConsolidator,
+    MemoryDeduper,
+    cosine,
 )
 from ufo_ext_memory.store import (
     FACT,
     KIND_FACT,
+    MEMORY_BODY_MAX_CHARS,
     SEMANTIC,
     MemoryIndexer,
     MemoryStore,
@@ -41,14 +46,21 @@ from ufo_ext_memory.store import (
 from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ModelAccess, PageState, ScopedStore, SourceReader, context_for
+from ufo.ext.context import (
+    JsonValue,
+    ModelAccess,
+    PageState,
+    ScopedStore,
+    SourceReader,
+    context_for,
+)
 from ufo.ext.manifest import (
     HookContext,
     HookOutcome,
     HookSpec,
     Manifest,
 )
-from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, Hit, IndexScope, TextChunker
+from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, EmbedClient, Hit, IndexScope, TextChunker
 from ufo.jobs import PageChangeRunner, TurnDispatcher, core_jobs
 from ufo.loop.delivery import DeliverySweep
 from ufo.loop.subagents import SubagentRegistry
@@ -94,6 +106,42 @@ class StubEmbed:
 
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(self._vector for _ in texts)
+
+
+@dataclass
+class MappedEmbed:
+    """A stand-in EmbedClient keyed by body, so one group can hold copies that cluster and facts
+    that do not — the dependency the dedup decision reads, never the asserted thing. A body it was
+    not given raises, which is how a test poisons one group's sweep; `calls` counts the passes,
+    which is how a test witnesses a group skipped rather than re-embedded."""
+
+    vectors: dict[str, tuple[float, ...]]
+    calls: int = 0
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        self.calls += 1
+        missing = [text for text in texts if text not in self.vectors]
+        if missing:
+            raise LookupError(f"no vector for {missing}")
+        return tuple(self.vectors[text] for text in texts)
+
+
+@dataclass
+class SupersedingEmbed:
+    """Retires one row from inside the embed call — the window between the sweep's read of a group
+    and its locked stamp, where another writer can retire a copy the pass is about to move."""
+
+    vector: tuple[float, ...]
+    retire: UUID
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(memory_item)
+                .values(superseded_by=uuid4())
+                .where(memory_item.c.id == self.retire)
+            )
+        return tuple(self.vector for _ in texts)
 
 
 @dataclass
@@ -623,6 +671,39 @@ async def test_derive_facts_writes_subject_scoped_facts_through_page_change(
     assert fact.memory_kind == "event"
     assert fact.confidence == 8
     assert fact.created_from_page_id == page_id
+
+
+async def test_derive_facts_truncates_an_oversized_model_body(db: None, tmp_path: object) -> None:
+    """`ExtractedFact.body` is untrusted model output with no bound of its own — the deriver
+    truncates at the `MemoryWrite` boundary rather than letting a long extraction raise."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    page_id, _source_id = await _seed_page(
+        blob, workspace_id, "Acme ships the widget to the whole team on friday."
+    )
+    oversized = "the widget ships friday " * 200
+    assert len(oversized) > MEMORY_BODY_MAX_CHARS
+    payload = json.dumps(
+        {
+            "facts": [
+                {
+                    "page_id": str(page_id),
+                    "notability": "high",
+                    "memory_kind": "event",
+                    "confidence": 8,
+                    "body": oversized,
+                }
+            ]
+        }
+    )
+    client = ExtractionModelClient(payload, Usage(input_tokens=50, output_tokens=20))
+    runner = _runner(blob, vec((0, 1.0)), _registry(client))
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+
+    rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
+    assert len(rows) == 1
+    assert rows[0].body == oversized[:MEMORY_BODY_MAX_CHARS]
 
 
 async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
@@ -1630,6 +1711,576 @@ async def test_consolidate_candidates_name_only_workspaces_with_a_clusterable_ba
         if job.name == memory_manifest.CONSOLIDATE_JOB
     )
     assert await consolidate.candidates() == (clusterable,)
+
+
+# --- dedup -------------------------------------------------------------------
+
+
+LEDGER_COPIES = (
+    "the ops ledger tracks every invoice the finance team files",
+    "the ops ledger tracks each invoice that the finance team files",
+    "the ops ledger tracks all invoices the finance team files",
+)
+
+
+async def _seed_copy(
+    workspace_id: UUID,
+    subject: str,
+    item_class: str,
+    body: str,
+    created_at: datetime,
+    superseded_by: UUID | None = None,
+    created_from_page_id: UUID | None = None,
+) -> UUID:
+    """One memory row exactly as history left it, seeded at a chosen `created_at` rather than
+    committed — the ages the sweep reads are what a test fixes, and they are what makes the newest
+    copy of a group deterministic."""
+    item_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(memory_item).values(
+                id=item_id,
+                workspace_id=workspace_id,
+                subject=subject,
+                body=body,
+                item_class=item_class,
+                memory_kind=KIND_FACT,
+                confidence=5,
+                source_ref=None,
+                created_from_page_id=created_from_page_id,
+                created_from_page_revision=(1 if created_from_page_id is not None else None),
+                source_id=(uuid4() if created_from_page_id is not None else None),
+                embedding_digest="sha256:seeded",
+                superseded_by=superseded_by,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+    return item_id
+
+
+def _deduper(workspace_id: UUID, embed: EmbedClient) -> MemoryDeduper:
+    return MemoryDeduper(
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        store=ScopedStore(extension=memory_manifest.NAME),
+    )
+
+
+def _live(rows: list[sa.Row]) -> set[UUID]:
+    return {row.id for row in rows if row.superseded_by is None}
+
+
+async def _by_body(workspace_id: UUID) -> dict[str, sa.Row]:
+    return {row.body: row for row in await _facts(workspace_id)}
+
+
+async def _age(item_id: UUID, created_at: datetime, superseded_by: UUID | None = None) -> None:
+    """Put one row where history left it — at a chosen age, optionally already retired — so a test
+    drives the revival that follows through the real `commit` instead of simulating it. Ages are
+    chosen hours apart because `now()` is second-resolution on sqlite, where two rows written in
+    one test would otherwise tie."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(memory_item)
+            .values(created_at=created_at, superseded_by=superseded_by)
+            .where(memory_item.c.id == item_id)
+        )
+
+
+async def _cursor_value(value: JsonValue) -> None:
+    await ScopedStore(extension=memory_manifest.NAME).put(DEDUP_CURSOR_KEY, value)
+
+
+async def _let_time_pass(workspace_id: UUID, elapsed: timedelta) -> None:
+    """Age every row in the workspace by `elapsed`, which is what the clock does between a write and
+    the sweep that first sees it — the sweep reads nothing under DEDUP_MIN_AGE. Rows move relative
+    to the stamps they already carry, so a test that drives real commits still proves which of them
+    the write path made newer."""
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(memory_item.c.id, memory_item.c.created_at).where(
+                    memory_item.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+        for row in rows:
+            await connection.execute(
+                sa.update(memory_item)
+                .values(created_at=row.created_at - elapsed)
+                .where(memory_item.c.id == row.id)
+            )
+
+
+async def test_dedup_supersedes_all_but_the_newest_copy(db: None) -> None:
+    """The accreted ledger copies, collapsed: every copy of one statement is stamped at the newest
+    one, which is the current statement. No summary row and no model pass — that is the
+    consolidator's job, over facts that are related rather than restatements — and `semantic` rows
+    are swept like any other, since the ledgers that accreted are exactly that class."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=3)
+    ids = [
+        await _seed_copy(
+            workspace_id, SHARED_SUBJECT, SEMANTIC, body, start + timedelta(minutes=index)
+        )
+        for index, body in enumerate(LEDGER_COPIES)
+    ]
+    with ws(workspace_id):
+        await _deduper(workspace_id, StubEmbed(vec((25, 1.0)))).run()
+
+    rows = await _facts(workspace_id)
+    assert len(rows) == len(LEDGER_COPIES)
+    assert _live(rows) == {ids[-1]}
+    assert {row.superseded_by for row in rows if row.id in ids[:-1]} == {ids[-1]}
+
+
+def test_cosine_scores_direction_and_gives_a_zero_vector_no_score() -> None:
+    """Every collapse decision either clustering pass makes is this number: parallel vectors of any
+    magnitude score 1.0, orthogonal ones 0.0, and a row the embed backend answered with nothing has
+    no direction to compare — it must score 0.0 rather than divide by zero."""
+    assert cosine(vec((0, 1.0)), vec((0, 1.0))) == pytest.approx(1.0)
+    assert cosine(vec((0, 3.0)), vec((0, 0.5))) == pytest.approx(1.0)
+    assert cosine(vec((0, 1.0)), vec((1, 1.0))) == pytest.approx(0.0)
+    assert cosine(vec((0, 1.0)), vec()) == 0.0
+
+
+async def test_a_pair_far_apart_in_the_group_still_collapses_in_one_run(db: None) -> None:
+    """A duplicate pair is found by distance, never by position: the two copies here sit at opposite
+    ends of the group's recency order with distinct facts filling every rank between them, and one
+    run still retires the older onto the newer. Bounding a tick by taking the newest slice of the
+    group instead would leave this pair live for good — the ordering says nothing about which rows
+    restate each other, and the group's own fingerprint would then never move again."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=6)
+    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
+    filler = tuple(f"unrelated standing fact number {index}" for index in range(8))
+    older = await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, restated[0], start)
+    for index, body in enumerate(filler):
+        await _seed_copy(
+            workspace_id, SHARED_SUBJECT, FACT, body, start + timedelta(minutes=index + 1)
+        )
+    newer = await _seed_copy(
+        workspace_id,
+        SHARED_SUBJECT,
+        FACT,
+        restated[1],
+        start + timedelta(minutes=len(filler) + 1),
+    )
+    embed = MappedEmbed(
+        {restated[0]: vec((44, 1.0)), restated[1]: vec((44, 1.0))}
+        | {body: vec((45 + index, 1.0)) for index, body in enumerate(filler)}
+    )
+    with ws(workspace_id):
+        await _deduper(workspace_id, embed).run()
+
+    stamps = {row.id: row.superseded_by for row in await _facts(workspace_id)}
+    assert stamps[older] == newer
+    assert stamps[newer] is None
+    assert len(_live(await _facts(workspace_id))) == len(filler) + 1
+
+
+async def test_dedup_leaves_distinct_facts_and_page_derived_rows(db: None) -> None:
+    """The sweep collapses restatements, never a group. Two facts of one subject that merely share
+    it stay live and unstamped, and a page-derived row restating one of them word for word is not
+    a copy the sweep may touch at all — its lifecycle belongs to supersede_page_facts."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=3)
+    alpha, beta = "the alpha release ships in march", "the beta program opens to twelve customers"
+    kept = [
+        await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, alpha, start),
+        await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, beta, start + timedelta(minutes=1)),
+        await _seed_copy(
+            workspace_id,
+            SHARED_SUBJECT,
+            FACT,
+            alpha,
+            start + timedelta(minutes=2),
+            created_from_page_id=uuid4(),
+        ),
+    ]
+    embed = MappedEmbed({alpha: vec((26, 1.0)), beta: vec((27, 1.0))})
+    with ws(workspace_id):
+        await _deduper(workspace_id, embed).run()
+
+    assert _live(await _facts(workspace_id)) == set(kept)
+
+
+async def test_dedup_never_collapses_across_subject_or_class(db: None) -> None:
+    """Every body here embeds to one vector, so only the `(subject, item_class)` grouping keeps a
+    member's own note and a semantic ledger out of a shared fact's collapse. Three groups of two
+    copies collapse to three heads, each its own group's newest — a sweep that clustered across
+    groups would leave one head for all six."""
+    workspace_id = await _workspace()
+    member = member_subject(uuid4())
+    start = datetime.now(UTC) - timedelta(hours=3)
+    groups = {
+        (member, FACT): ("a private note", "a private note restated"),
+        (SHARED_SUBJECT, SEMANTIC): ("a semantic ledger", "the ledger restated"),
+        (SHARED_SUBJECT, FACT): ("a shared fact", "the shared fact restated"),
+    }
+    heads: dict[UUID, UUID] = {}
+    for index, ((subject, item_class), (older, newer)) in enumerate(groups.items()):
+        offset = start + timedelta(minutes=index)
+        donor = await _seed_copy(workspace_id, subject, item_class, older, offset)
+        heads[donor] = await _seed_copy(
+            workspace_id, subject, item_class, newer, offset + timedelta(seconds=30)
+        )
+    with ws(workspace_id):
+        deduper = _deduper(workspace_id, StubEmbed(vec((43, 1.0))))
+        for _ in groups:
+            await deduper.run()
+
+    stamps = {row.id: row.superseded_by for row in await _facts(workspace_id)}
+    assert _live(await _facts(workspace_id)) == set(heads.values())
+    assert {donor: stamps[donor] for donor in heads} == heads
+
+
+async def test_dedup_sweeps_one_group_per_run_and_rotates_past_it(db: None) -> None:
+    """One (subject, item_class) group per run, so a workspace with a long backlog is swept across
+    ticks instead of in one unbounded transaction — and the cursor advances past the group it just
+    read, whether or not that group had anything to collapse. A sweep that restarted at the first
+    group every tick would leave every later group's copies live for good."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=3)
+    member = member_subject(uuid4())
+    distinct = ("the aurora index rebuilds nightly", "the beacon queue drains at noon")
+    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
+    for index, body in enumerate(distinct):
+        await _seed_copy(workspace_id, member, FACT, body, start + timedelta(minutes=index))
+    copies = [
+        await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, body, start + timedelta(minutes=index))
+        for index, body in enumerate(restated)
+    ]
+    embed = MappedEmbed(
+        {
+            distinct[0]: vec((28, 1.0)),
+            distinct[1]: vec((29, 1.0)),
+            restated[0]: vec((30, 1.0)),
+            restated[1]: vec((30, 1.0)),
+        }
+    )
+    with ws(workspace_id):
+        deduper = _deduper(workspace_id, embed)
+        await deduper.run()
+        after_first = _live(await _facts(workspace_id))
+        cursor = await ScopedStore(extension=memory_manifest.NAME).get(DEDUP_CURSOR_KEY)
+        await deduper.run()
+        after_second = _live(await _facts(workspace_id))
+
+    assert cursor == [member, FACT]
+    assert len(after_first) == 4
+    assert len(after_second) == 3
+    assert copies[0] not in after_second
+    assert copies[1] in after_second
+
+
+async def test_dedup_stamps_live_rows_only_and_leaves_an_earlier_stamp_alone(db: None) -> None:
+    """A superseded row is not the sweep's to move. A row an earlier rewrite stamped keeps that
+    stamp rather than being re-pointed at the newest copy, and is never read as a copy to collapse:
+    only a member restating that body may bring it back, and `commit` — not this sweep — is what
+    clears the stamp when they do."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=3)
+    middle = await _seed_copy(
+        workspace_id, SHARED_SUBJECT, FACT, LEDGER_COPIES[1], start + timedelta(minutes=1)
+    )
+    newest = await _seed_copy(
+        workspace_id, SHARED_SUBJECT, FACT, LEDGER_COPIES[2], start + timedelta(minutes=2)
+    )
+    oldest = await _seed_copy(
+        workspace_id, SHARED_SUBJECT, FACT, LEDGER_COPIES[0], start, superseded_by=middle
+    )
+    with ws(workspace_id):
+        await _deduper(workspace_id, StubEmbed(vec((31, 1.0)))).run()
+
+    stamps = {row.id: row.superseded_by for row in await _facts(workspace_id)}
+    assert stamps == {oldest: middle, middle: newest, newest: None}
+
+
+async def test_dedup_heals_the_restatements_the_write_path_let_through(db: None) -> None:
+    """The sweep's whole reason, end to end through the real writer: `commit` derives nothing, so
+    two restatements of one statement both land live however near they are. The sweep is what
+    collapses them afterwards — once they are old enough to be history rather than a member's live
+    working memory."""
+    workspace_id = await _workspace()
+    probe = vec((32, 1.0))
+    store = _store(workspace_id, probe)
+    with ws(workspace_id):
+        for body in ("the retro ships every second thursday", "the retro ships each second"):
+            await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=body))
+        assert len(_live(await _facts(workspace_id))) == 2
+
+        await _let_time_pass(workspace_id, DEDUP_MIN_AGE * 2)
+        await _deduper(workspace_id, StubEmbed(probe)).run()
+
+    rows = await _facts(workspace_id)
+    live = _live(rows)
+    assert len(live) == 1
+    assert {row.superseded_by for row in rows if row.superseded_by is not None} == live
+
+
+async def test_dedup_candidates_name_a_workspace_once_per_duplicate_backlog(db: None) -> None:
+    """The dedup JobSpec binds a workspace exactly once however many duplicate groups it holds —
+    two groups are two grouped rows and one candidate. A workspace whose groups hold a single row,
+    one whose only repeats are page-derived, and one whose copies are all younger than the sweep's
+    own floor are never bound at all, so a fleet's healed and freshly-written workspaces run no
+    transaction on the tick."""
+    duplicated, single, page_derived, fresh = (
+        await _workspace(),
+        await _workspace(),
+        await _workspace(),
+        await _workspace(),
+    )
+    for index in range(2):
+        await _seed_copy(
+            fresh, SHARED_SUBJECT, FACT, f"a statement just written {index}", datetime.now(UTC)
+        )
+    stamp = datetime.now(UTC) - timedelta(hours=3)
+    for subject in (SHARED_SUBJECT, member_subject(uuid4())):
+        for index in range(2):
+            await _seed_copy(duplicated, subject, FACT, f"a repeated statement {index}", stamp)
+    await _seed_copy(single, SHARED_SUBJECT, FACT, "the only statement", stamp)
+    for index in range(2):
+        await _seed_copy(
+            page_derived,
+            SHARED_SUBJECT,
+            FACT,
+            f"a derived statement {index}",
+            stamp,
+            created_from_page_id=uuid4(),
+        )
+    dedup = next(
+        job for job in memory_manifest.manifest().jobs if job.name == memory_manifest.DEDUP_JOB
+    )
+    assert await dedup.candidates() == (duplicated,)
+
+
+async def test_the_sweep_keeps_the_copy_a_member_just_re_asserted(db: None) -> None:
+    """The revive and the sweep have to agree on which copy is current, or they undo each other
+    every hour. A member restates a body an earlier tick retired; `commit` revives that row and
+    moves its `created_at` to the restatement, so when the next sweep reads both copies live the
+    restatement is the newest and the copy that replaced it is what retires. Without the moved stamp
+    the sweep hands the member's wording straight back to the version they replaced, and restating
+    again never wins."""
+    workspace_id = await _workspace()
+    probe = vec((33, 1.0))
+    original = "the deploy has no code_review profile"
+    reworded = "re-confirmed: the deploy still has no code_review profile"
+    store = _store(workspace_id, probe)
+    with ws(workspace_id):
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=reworded))
+        rows = await _by_body(workspace_id)
+        now = datetime.now(UTC)
+        await _age(rows[reworded].id, now - timedelta(hours=3))
+        await _age(rows[original].id, now - timedelta(hours=6), rows[reworded].id)
+
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
+        assert _live(await _facts(workspace_id)) == {rows[original].id, rows[reworded].id}
+
+        await _let_time_pass(workspace_id, timedelta(hours=2))
+        await _deduper(workspace_id, StubEmbed(probe)).run()
+
+    settled = await _by_body(workspace_id)
+    assert settled[original].superseded_by is None
+    assert settled[reworded].superseded_by == settled[original].id
+
+
+@pytest.mark.parametrize(
+    ("cursor", "collapses"),
+    [(["member:zzzz", FACT], "shared"), (["shared", FACT], "member")],
+    ids=["vanished-cursor-walks-on", "last-group-wraps-to-first"],
+)
+async def test_the_walk_advances_past_a_cursor_whose_group_is_gone(
+    db: None, cursor: list[str], collapses: str
+) -> None:
+    """The cursor is an exclusive lower bound, not a lookup: the next tick takes the first group
+    ordering strictly after it and wraps at the end. A cursor naming a group that has since been
+    collapsed away must carry the walk forward to the group after it — restarting at the front
+    there re-walks the whole prefix after every collapse, so a workspace whose permanent groups
+    outnumber its backlogged ones heals in O(n·m) ticks instead of O(n+m)."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=3)
+    member = f"member:{uuid4()}"
+    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
+    collapsible = {
+        "member": [
+            await _seed_copy(workspace_id, member, FACT, body, start + timedelta(minutes=index))
+            for index, body in enumerate(restated)
+        ],
+        "shared": [
+            await _seed_copy(
+                workspace_id, SHARED_SUBJECT, FACT, body, start + timedelta(minutes=index)
+            )
+            for index, body in enumerate(restated)
+        ],
+    }
+    with ws(workspace_id):
+        await _cursor_value(cursor)
+        await _deduper(workspace_id, StubEmbed(vec((34, 1.0)))).run()
+
+    live = _live(await _facts(workspace_id))
+    swept, untouched = (
+        collapsible[collapses],
+        collapsible["shared" if collapses == "member" else "member"],
+    )
+    assert swept[0] not in live
+    assert swept[1] in live
+    assert set(untouched) <= live
+
+
+async def test_a_group_whose_sweep_raises_does_not_halt_the_walk(db: None) -> None:
+    """Fail-loud is the job erroring, not the workspace's healing stopping. The cursor advances
+    before the group is read, so a group that raises every tick costs one retry per rotation while
+    every other group still gets swept — where advancing afterwards would pin the walk to the
+    poisoned group and leave the rest of the backlog live for good."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=3)
+    member = f"member:{uuid4()}"
+    poisoned = ("the aurora index rebuilds nightly", "the aurora index is rebuilt each night")
+    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
+    for index, body in enumerate(poisoned):
+        await _seed_copy(workspace_id, member, FACT, body, start + timedelta(minutes=index))
+    copies = [
+        await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, body, start + timedelta(minutes=index))
+        for index, body in enumerate(restated)
+    ]
+    embed = MappedEmbed({restated[0]: vec((35, 1.0)), restated[1]: vec((35, 1.0))})
+    with ws(workspace_id):
+        deduper = _deduper(workspace_id, embed)
+        with pytest.raises(LookupError):
+            await deduper.run()
+        await deduper.run()
+
+    live = _live(await _facts(workspace_id))
+    assert copies[0] not in live
+    assert copies[1] in live
+
+
+async def test_an_unchanged_group_is_skipped_instead_of_re_embedded_every_tick(db: None) -> None:
+    """A healed group must not pay for its own health forever. Every workspace holding two shared
+    facts is a standing candidate, so a tick that re-embeds the whole group whether or not anything
+    moved bills the fleet for up to DEDUP_GROUP_MAX embeddings an hour in perpetuity. The sweep
+    records what the group looked like and skips it while that still holds; a row entering the
+    group makes it due again."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=3)
+    alpha, beta = "the alpha release ships in march", "the beta program opens to twelve customers"
+    added = "the gamma trial starts in june"
+    await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, alpha, start)
+    await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, beta, start + timedelta(minutes=1))
+    embed = MappedEmbed({alpha: vec((36, 1.0)), beta: vec((37, 1.0)), added: vec((38, 1.0))})
+    with ws(workspace_id):
+        deduper = _deduper(workspace_id, embed)
+        await deduper.run()
+        swept = embed.calls
+        await deduper.run()
+        skipped = embed.calls
+
+        await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, added, start + timedelta(minutes=2))
+        await deduper.run()
+
+    assert swept == 1
+    assert skipped == 1
+    assert embed.calls == 2
+
+
+async def test_a_copy_retired_mid_pass_leaves_its_whole_cluster_unstamped(db: None) -> None:
+    """The guard on the locked-donor pattern, exercised where it is actually reachable: another
+    writer retires one copy in the window between the sweep's read and its stamp. The locked read
+    no longer matches what the pass decided on, so nothing is stamped at all — a partial stamp
+    would move rows the sweep never verified, onto a head chosen from a set that no longer
+    exists."""
+    workspace_id = await _workspace()
+    start = datetime.now(UTC) - timedelta(hours=3)
+    ids = [
+        await _seed_copy(
+            workspace_id, SHARED_SUBJECT, SEMANTIC, body, start + timedelta(minutes=index)
+        )
+        for index, body in enumerate(LEDGER_COPIES)
+    ]
+    with ws(workspace_id):
+        await _deduper(workspace_id, SupersedingEmbed(vec((39, 1.0)), ids[0])).run()
+
+    stamps = {row.id: row.superseded_by for row in await _facts(workspace_id)}
+    assert stamps[ids[1]] is None
+    assert stamps[ids[2]] is None
+    assert stamps[ids[0]] not in (None, ids[2])
+
+
+async def test_copies_under_the_age_floor_are_left_for_a_later_tick(db: None) -> None:
+    """The sweep owns history, never a member's live working memory. A pair written minutes ago is
+    untouched however near-identical it is — a periodic tick that happened to land must never retire
+    a member's minutes-old memory, and an eval seeding a corpus must not have it collapse underneath
+    the run. The same pair, once past the floor, is exactly what the sweep is for."""
+    workspace_id = await _workspace()
+    just_now = datetime.now(UTC)
+    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
+    copies = [
+        await _seed_copy(
+            workspace_id, SHARED_SUBJECT, FACT, body, just_now - timedelta(minutes=index)
+        )
+        for index, body in enumerate(restated)
+    ]
+    with ws(workspace_id):
+        deduper = _deduper(workspace_id, StubEmbed(vec((41, 1.0))))
+        await deduper.run()
+        fresh = _live(await _facts(workspace_id))
+
+        await _let_time_pass(workspace_id, DEDUP_MIN_AGE * 2)
+        await deduper.run()
+        aged = _live(await _facts(workspace_id))
+
+    assert fresh == set(copies)
+    assert aged == {copies[0]}
+
+
+async def test_a_fresh_copy_survives_the_sweep_of_the_family_it_joins(db: None) -> None:
+    """The floor fences the rows the sweep reads, not just the groups it visits. A member writing a
+    third wording of a statement whose older copies are already a swept family must keep it: the
+    aged copies collapse around it while the minutes-old row is neither read nor stamped, so no
+    tick can retire what a member wrote just before it landed. The row joins the family on the
+    rotation that first reads it as history."""
+    workspace_id = await _workspace()
+    now = datetime.now(UTC)
+    aged_bodies = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
+    accreted = [
+        await _seed_copy(
+            workspace_id, SHARED_SUBJECT, FACT, body, now - timedelta(hours=3, minutes=index)
+        )
+        for index, body in enumerate(aged_bodies)
+    ]
+    fresh = await _seed_copy(
+        workspace_id, SHARED_SUBJECT, FACT, "the vault key is rotated every sunday", now
+    )
+    with ws(workspace_id):
+        await _deduper(workspace_id, StubEmbed(vec((42, 1.0)))).run()
+
+    stamps = {row.id: row.superseded_by for row in await _facts(workspace_id)}
+    assert stamps[fresh] is None
+    assert stamps[accreted[0]] is None
+    assert stamps[accreted[1]] == accreted[0]
+
+
+@pytest.mark.parametrize(
+    "stored",
+    ["shared", ["shared"], ["shared", FACT, "extra"], [1, 2]],
+    ids=["not-a-list", "one-element", "three-elements", "not-strings"],
+)
+async def test_a_cursor_the_sweep_did_not_write_fails_loud(db: None, stored: JsonValue) -> None:
+    """Only an absent key means no tick has run. A value of any other shape is a corrupted key
+    space, and silently reading it as "start from the beginning" would hide that for good while
+    quietly re-walking the prefix every tick."""
+    workspace_id = await _workspace()
+    stamp = datetime.now(UTC) - timedelta(hours=3)
+    for index, body in enumerate(LEDGER_COPIES[:2]):
+        await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, body, stamp + timedelta(minutes=index))
+    with ws(workspace_id):
+        await _cursor_value(stored)
+        with pytest.raises(RuntimeError, match=DEDUP_CURSOR_KEY):
+            await _deduper(workspace_id, StubEmbed(vec((40, 1.0)))).run()
 
 
 # --- seam --------------------------------------------------------------------

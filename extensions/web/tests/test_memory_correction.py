@@ -1,15 +1,17 @@
 """The workspace memory view's correction lane end to end: a row's correction posts a `record`
 intent on the main agent's lane, the turn dispatches `memory_update` verbatim — exactly the write
 chat performs — so a new item lands under the correcting member's own audience naming the
-corrected item in `source_ref`, and the named item is never edited or superseded (consolidation
-owns that). The refusal polarities: a malformed or cross-paired intent is 400 before any turn, a
-walled agent is not-found, and another member's private item is untouchable — a correction naming
-it still writes only the corrector's own subject, invisible to the named item's owner."""
+corrected item in `source_ref`. The named item is never edited or removed; both statements stand
+until the dedup sweep retires the near-duplicate original toward the correction, the newest of the
+two, and a correction further away retires nothing even then. The refusal polarities: a malformed
+or cross-paired intent is 400 before any turn, a walled agent is not-found, and another member's
+private item is untouchable — a correction naming it still writes only the corrector's own subject,
+invisible to the named item's owner."""
 
 import json
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,8 +19,10 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory import manifest as memory_manifest_module
+from ufo_ext_memory.condenser import DEDUP_MIN_AGE, MemoryDeduper
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, memory_item
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import SESSION_COOKIE
@@ -37,7 +41,7 @@ from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
-from ufo.ext.context import context_for
+from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import memory_search, skill_registry
 from ufo.hub import InProcessHub
 from ufo.indexing import TextChunker
@@ -75,10 +79,32 @@ STANDIN_REGISTRY = ModelRegistry(
 )
 
 
+def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
+    values = [0.0] * EMBED_DIM
+    for index, value in axes:
+        values[index] = value
+    return tuple(values)
+
+
+BODY_VECTORS = {
+    "the codename is bluebird": vec((0, 1.0)),
+    "the codename is redwood": vec((0, 0.98), (1, 0.02)),
+    "the standup is at 9am": vec((2, 1.0)),
+    "the standup moved to a written thread and no longer meets": vec((3, 1.0)),
+    "the launch is friday": vec((4, 1.0)),
+    "the launch is monday": vec((5, 1.0)),
+}
+UNLISTED_VECTOR = vec((6, 1.0))
+
+
 @dataclass(frozen=True)
 class StubEmbed:
+    """Fixes the vector of every body this module writes, so each correction sits deliberately
+    inside or outside SUPERSEDE_COSINE of the item it names. A query string is unlisted and embeds
+    orthogonally to all of them, leaving the lexical leg to answer the search."""
+
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        return tuple(() for _ in texts)
+        return tuple(BODY_VECTORS.get(text, UNLISTED_VECTOR) for text in texts)
 
 
 async def _seed_workspace() -> tuple[UUID, UUID]:
@@ -227,6 +253,41 @@ async def _remember(workspace_id: UUID, subject: str, body: str) -> None:
         await _index(workspace_id)
 
 
+async def _live_bodies(workspace_id: UUID) -> set[str]:
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(memory_item.c.body).where(
+                    memory_item.c.workspace_id == workspace_id,
+                    memory_item.c.superseded_by.is_(None),
+                )
+            )
+        ).scalars()
+    return set(rows)
+
+
+async def _sweep(workspace_id: UUID, *bodies_oldest_first: str) -> None:
+    """One dedup tick over the pair, with the named bodies aged into history in the order given: the
+    sweep reads nothing under DEDUP_MIN_AGE and keeps the newest copy of a cluster, and `now()` is
+    second-resolution on sqlite, so which of two rows written in one turn is newer is fixed here
+    rather than left to the clock."""
+    stamped = datetime.now(UTC) - DEDUP_MIN_AGE * 2
+    async with workspace_tx() as connection:
+        for offset, body in enumerate(bodies_oldest_first):
+            await connection.execute(
+                sa.update(memory_item)
+                .values(created_at=stamped + timedelta(minutes=offset))
+                .where(memory_item.c.workspace_id == workspace_id, memory_item.c.body == body)
+            )
+    with ws(workspace_id):
+        await MemoryDeduper(
+            embed=StubEmbed(),
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            store=ScopedStore(extension=memory_manifest_module.NAME),
+        ).run()
+
+
 async def _index(workspace_id: UUID) -> None:
     index = DefaultIndex(transaction=workspace_tx)
     embed = StubEmbed()
@@ -240,13 +301,16 @@ async def _index(workspace_id: UUID) -> None:
         ).run()
 
 
-async def test_a_correction_records_a_new_item_and_the_original_stands(
+async def test_a_correction_stands_beside_its_statement_until_the_sweep(
     memory_web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The whole lane: search finds the member's item, the correction intent applies, and the
     corrective item is re-readable through the same search projection — under the member's own
-    subject, naming the corrected item in `source_ref` — while the original row is untouched:
-    body unchanged, never superseded."""
+    subject, naming the corrected item in `source_ref`. The write derives nothing, so both
+    statements are live and recallable the moment the turn lands; the dedup sweep is what retires
+    the original, once the pair is old enough to be history, onto the correction as the newer of
+    the two. The named row is neither edited nor removed either way: it keeps its id and body and
+    gains only `superseded_by`, so the stale statement leaves recall while its provenance stands."""
     client, workspace_id, agent_id = memory_web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -268,6 +332,11 @@ async def test_a_correction_records_a_new_item_and_the_original_stands(
     assert corrected.status_code == 200
     outcome = corrected.json()
     assert outcome["applied"] is True, outcome
+    assert await _live_bodies(workspace_id) == {
+        "the codename is bluebird",
+        "the codename is redwood",
+    }
+    await _sweep(workspace_id, "the codename is bluebird", "the codename is redwood")
     async with workspace_tx() as connection:
         rows = (
             (
@@ -298,8 +367,9 @@ async def test_a_correction_records_a_new_item_and_the_original_stands(
     by_body = {row["body"]: row for row in rows}
     original = by_body["the codename is bluebird"]
     correction = by_body["the codename is redwood"]
+    assert len(rows) == 2
     assert original["id"] == original_id
-    assert original["superseded_by"] is None
+    assert original["superseded_by"] == correction["id"]
     assert correction["subject"] == member_subject(member_id)
     assert correction["source_ref"] == f"corrects memory/{original_id}"
     assert turn["status"] == "done"
@@ -307,8 +377,46 @@ async def test_a_correction_records_a_new_item_and_the_original_stands(
     await _index(workspace_id)
     reread = await client.get("/surface/web/workspace/memory?q=codename", headers=cookie)
     texts = {match["text"] for match in reread.json()["matches"]}
-    assert "the codename is redwood" in texts
-    assert "the codename is bluebird" in texts
+    assert texts == {"the codename is redwood"}
+
+
+async def test_a_correction_further_than_the_fence_leaves_both_live(
+    memory_web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Supersede is a distance, not a lane: a correction whose body sits outside SUPERSEDE_COSINE of
+    the item it names survives the sweep that reads the pair, and both statements stay recallable —
+    a member who narrows a statement rather than restating it keeps what they narrowed."""
+    client, workspace_id, agent_id = memory_web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    replacement = "the standup moved to a written thread and no longer meets"
+    await _remember(workspace_id, member_subject(member_id), "the standup is at 9am")
+    async with workspace_tx() as connection:
+        original_id = (
+            await connection.execute(
+                sa.select(memory_item.c.id).where(memory_item.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    corrected = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "record",
+            "kind": "memory",
+            "corrects": str(original_id),
+            "body": replacement,
+        },
+        headers=cookie,
+    )
+    assert corrected.status_code == 200
+    assert corrected.json()["applied"] is True
+    await _sweep(workspace_id, "the standup is at 9am", replacement)
+    assert await _live_bodies(workspace_id) == {"the standup is at 9am", replacement}
+    await _index(workspace_id)
+    reread = await client.get("/surface/web/workspace/memory?q=standup", headers=cookie)
+    assert {match["text"] for match in reread.json()["matches"]} == {
+        "the standup is at 9am",
+        replacement,
+    }
 
 
 async def test_a_correction_never_touches_another_members_item(
