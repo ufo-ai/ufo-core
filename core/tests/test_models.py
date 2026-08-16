@@ -80,6 +80,12 @@ ANTHROPIC_SPEC = ModelSpec(
     reasoning=_REASONS,
     api_surface="chat",
 )
+
+
+def test_model_request_defaults_conversation_cache_to_5m() -> None:
+    assert REQUEST.prompt_cache_ttl == "5m"
+
+
 OPENAI_SPEC = ModelSpec(
     id="gpt-5.5",
     provider="openai",
@@ -347,7 +353,6 @@ async def test_anthropic_request_carries_image_and_tool_result_images() -> None:
 
 @pytest.mark.parametrize("ttl", ["1h", "5m"])
 async def test_anthropic_caches_tools_system_and_growing_conversation(ttl: str) -> None:
-    """Every breakpoint carries the request's TTL, so one turn never writes two cache premiums."""
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
@@ -364,12 +369,15 @@ async def test_anthropic_caches_tools_system_and_growing_conversation(ttl: str) 
         request
     ):
         pass
-    cache = {"type": "ephemeral", "ttl": ttl}
-    assert create.kwargs["cache_control"] == cache
-    assert create.kwargs["system"] == [{"type": "text", "text": "be terse", "cache_control": cache}]
+    system_cache = {"type": "ephemeral", "ttl": "1h"}
+    conversation_cache = {"type": "ephemeral", "ttl": ttl}
+    assert create.kwargs["cache_control"] == conversation_cache
+    assert create.kwargs["system"] == [
+        {"type": "text", "text": "be terse", "cache_control": system_cache}
+    ]
     tools = create.kwargs["tools"]
     assert "cache_control" not in tools[0]
-    assert tools[1]["cache_control"] == cache
+    assert tools[1]["cache_control"] == system_cache
 
 
 async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -> None:
@@ -491,13 +499,8 @@ async def test_anthropic_maps_deltas_then_single_usage() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("ttl", "field"),
-    [("5m", "cache_write_5m_tokens"), ("1h", "cache_write_1h_tokens")],
-)
-async def test_anthropic_maps_aggregate_cache_creation_to_the_requested_ttl(
-    ttl: str, field: str
-) -> None:
+@pytest.mark.parametrize("ttl", ["5m", "1h"])
+async def test_anthropic_prices_cache_creation_without_ttl_detail_at_1h(ttl: str) -> None:
     create = ScriptedCreate(
         (
             [
@@ -514,7 +517,7 @@ async def test_anthropic_maps_aggregate_cache_creation_to_the_requested_ttl(
     request = REQUEST.model_copy(update={"prompt_cache_ttl": ttl})
     client = AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC)
     events = [event async for event in client.complete(request)]
-    assert events[-1] == Usage(output_tokens=1, **{field: 7})
+    assert events[-1] == Usage(output_tokens=1, cache_write_1h_tokens=7)
 
 
 async def test_anthropic_yields_the_whole_reasoning_sequence_once_the_stream_closes() -> None:

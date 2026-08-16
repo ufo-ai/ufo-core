@@ -927,11 +927,8 @@ class TurnEngine:
 
     @property
     def cache_ttl(self) -> PromptCacheTtl:
-        """The TTL every model call this turn writes its cache breakpoints at. A subagent turn ends
-        with its conversation, so nothing reads the prefix an hour later and it pays the cheaper 5m
-        write; the main agent's conversation spans bursty gaps between member messages, where a 5m
-        entry expires before the next turn reads it."""
-        return "1h" if self.turn.subagent_profile is None else "5m"
+        """The TTL every model call in this turn uses for its cache breakpoints."""
+        return "5m"
 
     async def run(self) -> TerminalFrame | None:
         meter = _TurnMeter(started=time.monotonic(), profile=self.profile)

@@ -946,20 +946,27 @@ resource "datadog_dashboard" "prompt_cache" {
     defaults = ["main"]
   }
 
+  template_variable {
+    name     = "provider"
+    prefix   = "provider"
+    defaults = ["*"]
+  }
+
   widget {
     note_definition {
       content          = <<-EOT
         Anthropic charges 1.25x base input for a 5-minute write, 2x for a 1-hour write, and
-        0.1x for a read. A read refreshes the entry.
+        0.1x for a read. Tools and the system prompt use 1 hour. The changing conversation tail
+        uses 5 minutes. A read refreshes the entry.
 
         `gap` is the time from the prior turn's terminal write to this turn's first model request.
         `within_turn` marks later rounds and `new` marks a conversation's first turn. A hit after
         5 minutes proves that the 1-hour window had value. Later-round reads show the value of the
         first round's write inside one turn.
 
-        The 1-hour write premium is 0.75x base input. A protected read saves 0.9x. The extended
-        window pays for itself above 83.3 read tokens per 100 write tokens, before latency and rate
-        limit value.
+        The 1-hour write premium over a 5-minute write is 0.75x base input. A protected read avoids
+        a 1.25x rewrite and costs 0.1x, so it saves 1.15x. The extended window pays for itself above
+        65.2 read tokens per 100 write tokens, before latency and rate limit value.
 
         The board does not link a first-round hit to the prior turn's round count. Use it to select
         a policy, then compare that policy with the same token and visible-event measures.
@@ -988,7 +995,7 @@ resource "datadog_dashboard" "prompt_cache" {
     timeseries_definition {
       title = "first model requests by idle gap"
       request {
-        q            = "sum:ufo.model_cache_round_total{$env,$profile,provider:anthropic,round:first} by {gap}.as_count()"
+        q            = "sum:ufo.model_cache_round_total{$env,$profile,$provider,round:first} by {gap}.as_count()"
         display_type = "bars"
       }
     }
@@ -1005,12 +1012,12 @@ resource "datadog_dashboard" "prompt_cache" {
         aggregator = "sum"
         conditional_formats {
           comparator = ">="
-          value      = 83.3
+          value      = 65.2
           palette    = "white_on_green"
         }
         conditional_formats {
           comparator = "<"
-          value      = 83.3
+          value      = 65.2
           palette    = "white_on_yellow"
         }
       }
@@ -1021,7 +1028,7 @@ resource "datadog_dashboard" "prompt_cache" {
     timeseries_definition {
       title = "first-round prompt cache hit ratio by idle gap"
       request {
-        q            = "100 * sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:cache_read} by {gap}.as_count() / (sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:cache_read} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:input} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:cache_write_5m} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:cache_write_1h} by {gap}.as_count())"
+        q            = "100 * sum:ufo.model_cache_tokens_total{$env,$profile,$provider,round:first,kind:cache_read} by {gap}.as_count() / (sum:ufo.model_cache_tokens_total{$env,$profile,$provider,round:first,kind:cache_read} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,$provider,round:first,kind:input} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,$provider,round:first,kind:cache_write_5m} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,$provider,round:first,kind:cache_write_1h} by {gap}.as_count())"
         display_type = "line"
       }
     }
@@ -1029,9 +1036,9 @@ resource "datadog_dashboard" "prompt_cache" {
 
   widget {
     timeseries_definition {
-      title = "cache tokens by round, kind, and requested TTL"
+      title = "cache tokens by round, kind, and conversation TTL"
       request {
-        q            = "sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic} by {round,kind,ttl}.as_count()"
+        q            = "sum:ufo.model_cache_tokens_total{$env,$profile,$provider} by {round,kind,ttl}.as_count()"
         display_type = "bars"
       }
     }
@@ -1041,11 +1048,11 @@ resource "datadog_dashboard" "prompt_cache" {
     timeseries_definition {
       title = "first visible event wait by cache result and idle gap"
       request {
-        q            = "p50:ufo.model_first_visible_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
+        q            = "p50:ufo.model_first_visible_event_ms{$env,$profile,$provider,round:first} by {result,gap}"
         display_type = "line"
       }
       request {
-        q            = "p95:ufo.model_first_visible_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
+        q            = "p95:ufo.model_first_visible_event_ms{$env,$profile,$provider,round:first} by {result,gap}"
         display_type = "line"
       }
     }
@@ -1053,9 +1060,9 @@ resource "datadog_dashboard" "prompt_cache" {
 
   widget {
     timeseries_definition {
-      title = "model requests by round and requested TTL"
+      title = "model requests by round and conversation TTL"
       request {
-        q            = "sum:ufo.model_cache_round_total{$env,$profile,provider:anthropic} by {round,ttl}.as_count()"
+        q            = "sum:ufo.model_cache_round_total{$env,$profile,$provider} by {round,ttl}.as_count()"
         display_type = "bars"
       }
     }

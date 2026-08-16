@@ -38,6 +38,7 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
+SYSTEM_PROMPT_CACHE_TTL = "1h"
 STREAM_TRANSPORT_ERRORS = (
     anthropic.APITimeoutError,
     httpx.TimeoutException,
@@ -158,14 +159,15 @@ class AnthropicClient:
             cache_write_1h_tokens = 0
             output_tokens: int | None = None
             stop_reason: str | None = None
-            breakpoint_cache = {"type": "ephemeral", "ttl": request.prompt_cache_ttl}
+            system_cache = {"type": "ephemeral", "ttl": SYSTEM_PROMPT_CACHE_TTL}
+            conversation_cache = {"type": "ephemeral", "ttl": request.prompt_cache_ttl}
             create_kwargs: dict[str, Any] = {
                 "model": request.model,
                 "system": [
                     {
                         "type": "text",
                         "text": request.system,
-                        "cache_control": breakpoint_cache,
+                        "cache_control": system_cache,
                     }
                 ],
                 "messages": [
@@ -174,7 +176,7 @@ class AnthropicClient:
                 ],
                 "max_tokens": request.max_tokens,
                 "stream": True,
-                "cache_control": breakpoint_cache,
+                "cache_control": conversation_cache,
             }
             effort = self.spec.wire_reasoning(request.reasoning, request.tools)
             if effort not in (None, "off"):
@@ -186,7 +188,7 @@ class AnthropicClient:
                     {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                     for t in request.tools
                 ]
-                create_kwargs["tools"][-1]["cache_control"] = breakpoint_cache
+                create_kwargs["tools"][-1]["cache_control"] = system_cache
                 create_kwargs["tool_choice"] = (
                     {"type": "auto", "disable_parallel_tool_use": False}
                     if request.tool_choice is None
@@ -212,10 +214,7 @@ class AnthropicClient:
                                 cache_creation_tokens = (
                                     message.usage.cache_creation_input_tokens or 0
                                 )
-                                if request.prompt_cache_ttl == "5m":
-                                    cache_write_5m_tokens = cache_creation_tokens
-                                else:
-                                    cache_write_1h_tokens = cache_creation_tokens
+                                cache_write_1h_tokens = cache_creation_tokens
                             else:
                                 cache_write_5m_tokens = creation.ephemeral_5m_input_tokens
                                 cache_write_1h_tokens = creation.ephemeral_1h_input_tokens

@@ -133,8 +133,8 @@ class ModelRequest(BaseModel):
     absent parameter as its default effort has to state it. `tool_choice` compels the named tool as
     the round's single act — it must name an offered tool, and the request runs with reasoning off
     (Anthropic rejects a forced tool choice under extended thinking). `prompt_cache_ttl` is how long
-    the breakpoints this request writes stay warm; a client whose provider caches on its own (the
-    OpenAI-wire clients) ignores it."""
+    the changing conversation tail stays warm; the Anthropic client keeps the tools and system
+    prefix for one hour, and clients whose provider caches on its own ignore it."""
 
     model: str
     system: str
@@ -143,7 +143,7 @@ class ModelRequest(BaseModel):
     tools: tuple[ToolSchema, ...] = ()
     tool_choice: str | None = None
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
-    prompt_cache_ttl: PromptCacheTtl = "1h"
+    prompt_cache_ttl: PromptCacheTtl = "5m"
 
     @model_validator(mode="after")
     def _forced_choice_names_an_offered_tool_with_reasoning_off(self) -> "ModelRequest":

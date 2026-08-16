@@ -1675,8 +1675,8 @@ async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
         )
         for point in points["ufo.model_cache_round_total"]
     } == {
-        ("first", "5m_1h", "1h", "miss", 1),
-        ("later", "within_turn", "1h", "miss", 1),
+        ("first", "5m_1h", "5m", "miss", 1),
+        ("later", "within_turn", "5m", "miss", 1),
     }
     assert {
         (point.attributes["round"], point.attributes["gap"], point.attributes["kind"], point.value)
@@ -1775,7 +1775,7 @@ async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_s
             "model": "claude-opus-4-8",
             "provider": "anthropic",
             "profile": "main",
-            "ttl": "1h",
+            "ttl": "5m",
             "round": "first",
             "gap": "new",
             "result": "hit",
@@ -4923,12 +4923,10 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
     assert child_model.seen[0][-1].content == "hi"
 
 
-async def test_a_subagent_turn_requests_the_5m_prompt_cache_ttl(db: None, tmp_path: Path) -> None:
-    """A subagent turn's rounds ask for the 5m cache TTL where the main agent's keep 1h: nothing
-    reads the child's prefix once the child ends, so it pays the cheaper write."""
+async def test_every_turn_requests_the_5m_prompt_cache_ttl(db: None, tmp_path: Path) -> None:
     main_model = CapturingModel()
     await _engine(await _seed_turn("queued", None), main_model, tmp_path).run()
-    assert main_model.seen_cache_ttl == ["1h"]
+    assert main_model.seen_cache_ttl == ["5m"]
 
     child = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "probe"})
     child_model = CapturingModel()

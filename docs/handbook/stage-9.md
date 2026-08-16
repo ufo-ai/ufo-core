@@ -1172,9 +1172,9 @@ def profile(self) -> str
 def cache_ttl(self) -> PromptCacheTtl
 ```
 
-**Purpose**: Chooses how long model prompt cache entries should live. Main conversations use a longer cache because future turns may reuse the prefix; subagents use a shorter one because they are short-lived.
+**Purpose**: Chooses how long the changing conversation tail stays in the model prompt cache. Every turn uses five minutes; the Anthropic client separately keeps the stable tools and system prefix for one hour.
 
-**Data flow**: It checks whether the turn is a subagent turn and returns either a one-hour or five-minute cache setting.
+**Data flow**: It returns the five-minute cache setting.
 
 **Call relations**: `run.rank_find` and `_stream_once` use this when building model requests.
 
