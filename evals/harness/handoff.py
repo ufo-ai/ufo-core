@@ -91,7 +91,7 @@ def handoff_record(
     conversation_id: UUID, messages: tuple[Message, ...], result: str
 ) -> SubagentHandoff:
     """One child conversation's handoff: its whole transcript against the payload its last terminal
-    turn carried, so a conversation a `message_subagent` follow-up extended is counted once and
+    turn carried, so a conversation a `message_spawn` follow-up extended is counted once and
     whole rather than attributed to its final turn."""
     closing = _last_assistant_text(messages)
     return SubagentHandoff(

@@ -239,9 +239,9 @@ def delegated_written_report_scorer(
         spawns = tuple(
             (index, call)
             for index, call in enumerate(output.calls)
-            if call.name == "spawn_subagent"
+            if call.name == "spawn"
             and call.succeeded
-            and call.input.get("profile") == "general_purpose"
+            and str(call.input.get("target", "")).removeprefix("profile:") == "general_purpose"
         )
         task_shape = None
         result_shape = None

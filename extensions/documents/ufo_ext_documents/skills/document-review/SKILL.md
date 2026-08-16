@@ -144,7 +144,7 @@ Before spawning, determine which **issue types** are relevant from the user's re
 - "check for confidential info" → `non_public_info`
 
 ```
-spawn_subagent(
+spawn(
   objective="""
   Load load_skill(name="document-review") and execute its workflow to review the attached document.
 

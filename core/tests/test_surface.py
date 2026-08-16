@@ -85,7 +85,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import (
-    SUBAGENT_RESULT_KEY_PREFIX,
+    SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     WRITEBACK_PENDING,
     TerminalFrame,
@@ -3617,9 +3617,9 @@ async def test_agent_origin_refs_names_only_the_machine_envelopes(db: None, tmp_
         conversation_id,
         agent_id,
         seq=4,
-        inbound='<subagent_result profile="x" subagent_id="y" status="done">…</subagent_result>',
+        inbound='<spawn_result target="profile:x" spawn_id="y" status="done">…</spawn_result>',
         admission_source="internal",
-        idempotency_key=f"{SUBAGENT_RESULT_KEY_PREFIX}{uuid4()}",
+        idempotency_key=f"{SPAWN_RESULT_KEY_PREFIX}{uuid4()}",
     )
 
     refs = await _context(

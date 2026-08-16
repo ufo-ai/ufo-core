@@ -5075,7 +5075,7 @@ async def test_every_status_line_stays_inside_slacks_character_limit(
 
     described = "Handing the Star City Games collector fix to a coding agent"
     cut = f"{described[: slack.STATUS_DESCRIPTION_LIMIT]}…"
-    await _until(cut, ToolCall(tool="spawn_subagent", preview="{}", description=described))
+    await _until(cut, ToolCall(tool="spawn", preview="{}", description=described))
     slug = "reconcile_every_invoice_line_against_the_ledger"
     await _until(
         slack.STATUS_WORKING_TEXT.format(tool=slug)[: slack.STATUS_TEXT_LIMIT],

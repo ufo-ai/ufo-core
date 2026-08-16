@@ -770,7 +770,7 @@ async def test_a_reject_cap_holds_a_turn_carrying_work_already_paid_for(db: None
         workspace_id,
         conversation_id,
         agent_id,
-        "<subagent_result …>",
+        "<spawn_result …>",
         "subagent-result:held",
         holds_work_already_done=True,
     )

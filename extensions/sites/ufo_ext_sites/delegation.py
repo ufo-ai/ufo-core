@@ -5,8 +5,8 @@ returns its summary. The child runs in this conversation's sandbox, so what it b
 the turn ends and the site it hosts is registered against this conversation — the child has its own
 conversation and transcript, not its own filesystem. It reaches the child through `ctx.spawn` — the
 same Spawn seam
-`spawn_subagent` uses — so a delegated build is scoped to the profile's tools, never a raw sites
-handle. Its typed input carries the two per-build knobs the generic `spawn_subagent` payload can't
+the `spawn` tool uses — so a delegated build is scoped to the profile's tools, never a raw sites
+handle. Its typed input carries the two per-build knobs the generic `spawn` payload can't
 describe to the spawning agent: `preload_skills`, which seeds the child's context with a skill's
 instructions before its first round, and `extended_context`, which lifts its round ceiling for a
 large build. The tool is `side_effecting` and keys its child on the call's `idempotency_key`, so
@@ -56,7 +56,7 @@ class BuildWebsiteInput(BaseModel):
 
 async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResult:
     result = await ctx.spawn(
-        WEBSITE_BUILDING_NAME,
+        f"profile:{WEBSITE_BUILDING_NAME}",
         args.model_dump(exclude_none=True, exclude={"user_description"}),
         dedup_key=ctx.idempotency_key,
     )

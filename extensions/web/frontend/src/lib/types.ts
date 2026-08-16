@@ -45,8 +45,8 @@ export type Conversation = {
 export type OwnedConversation = Conversation & { agent: ConversationAgent };
 
 /** What the create act draws its form from: the `agent` kind's own spec schema and the model ids
- *  this deploy serves. The boot read carries it for a workspace admin and null for everyone else —
- *  the kind admits a create from nobody else, and an act that cannot land is not drawn. */
+ *  this deploy serves. The boot read carries it for every signed-in member — any speaking member
+ *  may create an agent and owns what they created. */
 export type NewAgentForm = {
   spec_schema: { properties?: Record<string, SchemaProperty>; required?: string[] };
   models: string[];

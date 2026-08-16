@@ -83,6 +83,7 @@ METRICS = (
 ERROR_CLASS_DIMENSION = "error_class"
 PROFILE_DIMENSION = "profile"
 MAIN_PROFILE = "main"
+AGENT_PROFILE = "agent"
 HISTOGRAMS = {
     "db_tx_acquire_ms": ("path",),
     "model_round_ms": ("model", "provider", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
@@ -370,12 +371,15 @@ def current_traceparent() -> str | None:
     return carrier.get(TRACEPARENT_HEADER)
 
 
-def turn_profile(subagent_profile: str | None) -> str:
-    """The `profile` dimension for one turn: the subagent profile it runs under, or `main` for a
-    member-facing turn. The profile name, never the turn's agent or id — the set of profiles a
-    deploy declares is fixed and small, so the dimension costs a bounded number of series per
-    metric while separating a subagent's latency and steps from the main agent's."""
-    return subagent_profile or MAIN_PROFILE
+def turn_profile(subagent_profile: str | None, spawned: bool = False) -> str:
+    """The `profile` dimension for one turn: the subagent profile it runs under, `agent` for a
+    spawned agent child, or `main` for a member-facing turn. A profile name or a constant, never
+    the turn's agent or id — the set of profiles a deploy declares is fixed and small, so the
+    dimension costs a bounded number of series per metric while separating a spawned turn's
+    latency and steps from the main agent's."""
+    if subagent_profile is not None:
+        return subagent_profile
+    return AGENT_PROFILE if spawned else MAIN_PROFILE
 
 
 @contextmanager

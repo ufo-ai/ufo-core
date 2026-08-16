@@ -151,7 +151,7 @@ CASES = (
                     ("connect_github", {}),
                     ("connect_account", {"provider": "github"}),
                 ),
-                ("spawn_subagent",),
+                ("spawn",),
                 (("load_skill", "connect_github"), ("load_skill", "connect_account")),
             ),
         ),
@@ -166,7 +166,7 @@ CASES = (
             skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
                 (("connect_github", {}),),
-                ("connect_account", "spawn_subagent"),
+                ("connect_account", "spawn"),
                 (("load_skill", "connect_github"),),
             ),
         ),
@@ -181,7 +181,7 @@ CASES = (
             skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
                 (("connect_account", {"provider": "github"}),),
-                ("connect_github", "spawn_subagent"),
+                ("connect_github", "spawn"),
                 (("load_skill", "connect_account"),),
             ),
         ),

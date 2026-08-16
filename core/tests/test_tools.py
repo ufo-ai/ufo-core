@@ -99,7 +99,9 @@ class StubSubagentControl:
             turn_id, SubagentStatus(turn_id=turn_id, status="cancelled", text="")
         )
 
-    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
+    async def message(
+        self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool = False
+    ) -> SubagentStatus:
         self.messaged.append((turn_id, text, dedup_key))
         return self.statuses.get(turn_id, SubagentStatus(turn_id=turn_id, status="queued", text=""))
 
@@ -188,13 +190,13 @@ def test_registry_schemas_cover_every_tool() -> None:
         "glob",
         "grep",
         "share_file",
-        "spawn_subagent",
+        "spawn",
         "ask_user",
         "request_credentials",
         "load_skill",
         "connect_account",
-        "cancel_subagent",
-        "message_subagent",
+        "cancel_spawn",
+        "message_spawn",
     }
     bash = next(schema for schema in schemas if schema.name == "bash")
     assert "command" in bash.input_schema["properties"]
@@ -665,50 +667,50 @@ async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:
         await _load_skill(ctx, "nope")
 
 
-async def test_cancel_subagent_cancels_and_reports_status(tmp_path: Path) -> None:
+async def test_cancel_spawn_cancels_and_reports_status(tmp_path: Path) -> None:
     child = uuid4()
     control = StubSubagentControl()
     ctx = make_context(FakeSandbox(), tmp_path, subagents=control)
-    result = await run("cancel_subagent", ctx, subagent_id=str(child), user_description="x")
+    result = await run("cancel_spawn", ctx, spawn_id=str(child), user_description="x")
     assert control.cancelled == [child]
     assert json.loads(result.content[0].text) == {
-        "subagent_id": str(child),
+        "spawn_id": str(child),
         "status": "cancelled",
     }
 
 
-async def test_cancel_subagent_malformed_id_raises(tmp_path: Path) -> None:
+async def test_cancel_spawn_malformed_id_raises(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path, subagents=StubSubagentControl())
     with pytest.raises(ValueError):
-        await run("cancel_subagent", ctx, subagent_id="not-a-uuid", user_description="x")
+        await run("cancel_spawn", ctx, spawn_id="not-a-uuid", user_description="x")
 
 
-async def test_message_subagent_forwards_the_message_keyed_on_the_call(tmp_path: Path) -> None:
+async def test_message_spawn_forwards_the_message_keyed_on_the_call(tmp_path: Path) -> None:
     child = uuid4()
     control = StubSubagentControl()
-    assert REGISTRY.get("message_subagent").side_effecting is True
+    assert REGISTRY.get("message_spawn").side_effecting is True
     ctx = replace(
         make_context(FakeSandbox(), tmp_path, subagents=control),
-        idempotency_key="turn-1/message_subagent/call-2",
+        idempotency_key="turn-1/message_spawn/call-2",
     )
     result = await run(
-        "message_subagent",
+        "message_spawn",
         ctx,
-        subagent_id=str(child),
+        spawn_id=str(child),
         message="also check X",
         user_description="x",
     )
-    assert control.messaged == [(child, "also check X", "turn-1/message_subagent/call-2")]
-    assert json.loads(result.content[0].text) == {"subagent_id": str(child), "status": "queued"}
+    assert control.messaged == [(child, "also check X", "turn-1/message_spawn/call-2")]
+    assert json.loads(result.content[0].text) == {"spawn_id": str(child), "status": "queued"}
 
 
-async def test_message_subagent_without_an_idempotency_key_fails_loud(tmp_path: Path) -> None:
+async def test_message_spawn_without_an_idempotency_key_fails_loud(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path, subagents=StubSubagentControl())
     with pytest.raises(RuntimeError, match="idempotency key"):
         await run(
-            "message_subagent",
+            "message_spawn",
             ctx,
-            subagent_id=str(uuid4()),
+            spawn_id=str(uuid4()),
             message="also check X",
             user_description="x",
         )
@@ -737,13 +739,13 @@ class _IdleSpawnClient:
         raise AssertionError("an unknown profile must be rejected before any child is enqueued")
 
 
-async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profiles(
-    tmp_path: Path,
+async def test_spawn_unknown_target_is_an_error_naming_the_valid_targets(
+    tmp_path: Path, db: None
 ) -> None:
-    """A guessed profile name is a recoverable mistake: spawn_subagent returns an is_error result
-    naming the bad profile and the registered ones (resolved through the real registry the live
-    spawn dispatches against), so the model retries against a valid name instead of dead-ending on
-    a bare KeyError."""
+    """A guessed target name is a recoverable mistake: spawn returns an is_error result
+    naming the bad target and what is spawnable (resolved through the real registry and agent
+    rows the live spawn dispatches against), so the model retries against a valid name instead of
+    dead-ending on a bare KeyError."""
     parent = Turn(
         id=uuid4(),
         workspace_id=uuid4(),
@@ -762,9 +764,9 @@ async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profi
     )
     ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
     result = await run(
-        "spawn_subagent",
+        "spawn",
         ctx,
-        profile="assistant",
+        target="assistant",
         payload={"task": "x"},
         user_description="handing off the research",
     )
@@ -774,11 +776,11 @@ async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profi
     assert "research" in text
 
 
-async def test_spawn_subagent_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path) -> None:
+async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path) -> None:
     recorded: list[tuple[str | None, bool]] = []
 
     async def _record(
-        profile: str,
+        target: str,
         payload: dict[str, object],
         background: bool = False,
         dedup_key: str | None = None,
@@ -788,30 +790,30 @@ async def test_spawn_subagent_keys_the_child_on_the_calls_idempotency_key(tmp_pa
         recorded.append((dedup_key, delivers_result))
         return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)
 
-    assert REGISTRY.get("spawn_subagent").side_effecting is True
+    assert REGISTRY.get("spawn").side_effecting is True
     ctx = replace(
         make_context(FakeSandbox(), tmp_path, spawn=_record),
-        idempotency_key="turn-1/spawn_subagent/call-1",
+        idempotency_key="turn-1/spawn/call-1",
     )
     result = await run(
-        "spawn_subagent",
+        "spawn",
         ctx,
-        profile="research",
+        target="research",
         payload={"task": "x"},
         background=True,
         user_description="handing off the research",
     )
-    assert recorded == [("turn-1/spawn_subagent/call-1", True)]
+    assert recorded == [("turn-1/spawn/call-1", True)]
     assert not result.is_error
 
     await run(
-        "spawn_subagent",
+        "spawn",
         ctx,
-        profile="research",
+        target="research",
         payload={"task": "x"},
         user_description="handing off the research",
     )
-    assert recorded[1] == ("turn-1/spawn_subagent/call-1", False)
+    assert recorded[1] == ("turn-1/spawn/call-1", False)
 
 
 SEAL_MEMBER = UUID("11111111-1111-1111-1111-111111111111")

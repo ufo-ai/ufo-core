@@ -491,17 +491,25 @@ function RunRow({
     <li className="flex flex-col gap-hair">
       <details className="group/run" onToggle={(event) => setOpen(event.currentTarget.open)}>
         <summary className="flex cursor-pointer list-none items-center gap-sm">
-          <a
-            className="shrink-0"
-            href={subagentConversationHash(
-              run.profile,
-              run.conversation_id,
-              root ?? undefined,
-            )}
-          >
-            {run.name || "Subagent · " + run.profile}
-          </a>
-          {current ? <span className="min-w-0 truncate">{"· " + current}</span> : null}
+          {run.profile.startsWith("agent:") ? (
+            <span className="shrink-0">
+              {run.name || "Agent · " + run.profile.slice("agent:".length)}
+            </span>
+          ) : (
+            <a
+              className="shrink-0"
+              href={subagentConversationHash(
+                run.profile,
+                run.conversation_id,
+                root ?? undefined,
+              )}
+            >
+              {run.name || "Subagent · " + run.profile}
+            </a>
+          )}
+          {current ? (
+            <span className="shimmer min-w-0 truncate">{"· " + current}</span>
+          ) : null}
           <IconChevronRight
             aria-hidden
             className="size-icon shrink-0 transition-transform group-open/run:rotate-90"

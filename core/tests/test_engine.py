@@ -1208,7 +1208,9 @@ async def test_a_subagent_turn_claims_its_childs_result_and_leaves_member_rows_p
     """A subagent conversation is its parent's private channel, so a member row there stays
     pending rather than being drained into a child's context. Its own children's results are
     internally admitted and are exactly what it folds — the delivery that replaces waiting."""
-    turn = (await _seed_turn("running", None)).model_copy(update={"subagent_profile": "coding"})
+    turn = (await _seed_turn("running", None)).model_copy(
+        update={"subagent_profile": "coding", "parent_turn_id": uuid4()}
+    )
     with ws(turn.workspace_id):
         engine = _engine(turn, object(), tmp_path)
         stranger = await _queue_arrival(turn, "member text", admission_source="member")
@@ -1327,8 +1329,8 @@ async def test_preemptibility_reads_the_builtin_declarations(db: None, tmp_path:
     engine = _engine(turn, object(), tmp_path)
     assert engine._redoes_on_replay("bash") is False
     assert engine._redoes_on_replay("read") is True
-    assert engine._redoes_on_replay("spawn_subagent") is False
-    assert engine._redoes_on_replay("message_subagent") is False
+    assert engine._redoes_on_replay("spawn") is False
+    assert engine._redoes_on_replay("message_spawn") is False
     assert engine._redoes_on_replay("unknown") is False
 
 
@@ -2389,7 +2391,9 @@ async def test_a_subagent_turn_meters_under_its_profile(
     profile it ran as — and so does every tool call it dispatched and every token it spent, which is
     what separates a coding subagent's latency, steps and spend from the work the main agent did."""
     reader = _metric_capture(monkeypatch)
-    turn = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "coding"})
+    turn = (await _seed_turn("queued", None)).model_copy(
+        update={"subagent_profile": "coding", "parent_turn_id": uuid4()}
+    )
     carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
     with ws(turn.workspace_id):
         frame = await _engine(turn, ToolCallingModel(), tmp_path, carrier=carrier).run()
@@ -3829,7 +3833,9 @@ async def test_round_budget_exhaustion_meters_under_the_turn_profile(
     which agent is doing it — a prompt or tool-loop bug lives in one profile. Untagged, the count
     answers only that someone hit a ceiling, which no operator can act on."""
     reader = _metric_capture(monkeypatch)
-    turn = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "coding"})
+    turn = (await _seed_turn("queued", None)).model_copy(
+        update={"subagent_profile": "coding", "parent_turn_id": uuid4()}
+    )
     with ws(turn.workspace_id):
         frame = await replace(_engine(turn, NeverAnsweringModel(), tmp_path), max_rounds=2).run()
     assert frame.status == "done"
@@ -4917,7 +4923,9 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
         "</context>\n"
         "hi"
     )
-    child = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "probe"})
+    child = (await _seed_turn("queued", None)).model_copy(
+        update={"subagent_profile": "probe", "parent_turn_id": uuid4()}
+    )
     child_model = CapturingModel()
     await _engine(child, child_model, tmp_path).run()
     assert child_model.seen[0][-1].content == "hi"
@@ -4928,7 +4936,9 @@ async def test_every_turn_requests_the_5m_prompt_cache_ttl(db: None, tmp_path: P
     await _engine(await _seed_turn("queued", None), main_model, tmp_path).run()
     assert main_model.seen_cache_ttl == ["5m"]
 
-    child = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "probe"})
+    child = (await _seed_turn("queued", None)).model_copy(
+        update={"subagent_profile": "probe", "parent_turn_id": uuid4()}
+    )
     child_model = CapturingModel()
     await _engine(child, child_model, tmp_path).run()
     assert child_model.seen_cache_ttl == ["5m"]
@@ -5231,7 +5241,7 @@ async def test_dispatch_offloads_on_the_handler_text_not_the_walled_result(
 async def test_dispatch_walls_a_result_marked_untrusted_by_its_handler(
     db: None, tmp_path: Path
 ) -> None:
-    """A trusted tool returning a subagent profile's untrusted output (spawn_subagent over the
+    """A trusted tool returning a subagent profile's untrusted output (spawn over the
     browser profile) is walled exactly as an untrusted tool's own result."""
     turn = await _seed_turn("queued", None)
 

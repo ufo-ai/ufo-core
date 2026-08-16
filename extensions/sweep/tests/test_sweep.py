@@ -183,7 +183,7 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
         supplied_by_profile[profile] = supplied
         references = (
             (next(iter(supplied)), next(iter(memory_refs - supplied)))
-            if profile == "sweep-work"
+            if profile == "profile:sweep-work"
             else ()
         )
         findings = (
@@ -204,8 +204,10 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
         )
         return SimpleNamespace(
             output=ScoutOutput(
-                findings=findings if profile == "sweep-work" else findings[:1],
-                coverage="x" * MAX_COVERAGE_CHARS if profile == "sweep-work" else "complete",
+                findings=findings if profile == "profile:sweep-work" else findings[:1],
+                coverage="x" * MAX_COVERAGE_CHARS
+                if profile == "profile:sweep-work"
+                else "complete",
             )
         )
 
@@ -300,7 +302,7 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
     assert payload["missing"] == []
     work = next(finding for finding in payload["findings"] if finding["section"] == "work")
     assert len(work["references"]) == 1
-    assert work["references"][0] in supplied_by_profile["sweep-work"]
+    assert work["references"][0] in supplied_by_profile["profile:sweep-work"]
     unsupported = next(
         finding for finding in payload["findings"] if finding["stable_subject_key"] == "unsupported"
     )
@@ -308,7 +310,7 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
     assert REFERENCE_COVERAGE in payload["coverage"]["work"]
     assert len(payload["coverage"]["work"]) == MAX_COVERAGE_CHARS
     assert row.candidate_input_keys == []
-    assert {"sweep-work", "unsupported"} <= set(row.candidate_finding_keys)
+    assert {"profile:sweep-work", "unsupported"} <= set(row.candidate_finding_keys)
     assert row.candidate_cursor.replace(tzinfo=UTC) < now - timedelta(days=6)
     assert json.loads(repeated.content[0].text)["findings"] == []
 
@@ -340,7 +342,7 @@ async def test_sweep_ledgers_only_bounded_scout_input_and_keeps_the_cursor_open(
     supplied: set[str] = set()
 
     async def spawn(profile: str, payload: dict, **kwargs: object) -> SimpleNamespace:
-        if profile == "sweep-work":
+        if profile == "profile:sweep-work":
             supplied.update(record["stable_subject_key"] for record in payload["records"])
         return SimpleNamespace(output=ScoutOutput(findings=(), coverage="complete"))
 
@@ -654,7 +656,7 @@ async def test_sweep_continues_with_one_failed_scout_and_uses_stable_child_keys(
 
     async def spawn(profile: str, payload: dict, **kwargs: object) -> SimpleNamespace:
         calls.append((profile, kwargs.get("dedup_key")))
-        if profile == "sweep-public-context":
+        if profile == "profile:sweep-public-context":
             raise RuntimeError("provider unavailable")
         finding = Finding(
             title=profile,
@@ -730,7 +732,7 @@ async def test_sweep_fails_when_fewer_than_three_scouts_finish(db: None, tmp_pat
     workspace_id, member_id, agent_id, turn_id = await _seed()
 
     async def spawn(profile: str, payload: dict, **kwargs: object) -> SimpleNamespace:
-        if profile in {"sweep-work", "sweep-missed-items"}:
+        if profile in {"profile:sweep-work", "profile:sweep-missed-items"}:
             raise RuntimeError("model unavailable")
         return SimpleNamespace(output=ScoutOutput(findings=(), coverage="complete"))
 

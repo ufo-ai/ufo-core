@@ -1,11 +1,16 @@
-"""Typed subagents: a registry of profiles and the spawn that runs one as a child turn.
+"""Typed spawn: one verb that runs a subagent profile or a workspace agent as a child turn.
 
-A profile names a prompt, a tool subset, and an input/output schema. `spawn` validates the payload
-against the input schema, admits a child turn linked to its parent (`parent_turn_id`) on its own
-conversation, and enqueues it on the turn queue — a distinct partition, so the parent may await it
-without the queue serializing them into a deadlock. Foreground awaits the child's terminal and
-returns its schema-validated output; background returns the child turn id at once and the child
-delivers its own result through `SubagentResult` when it finishes."""
+A profile names a prompt, a tool subset, and an input/output schema; a workspace agent row carries
+its own prompt, model, tool allowlist, and declared (or default) I/O contract. `spawn` resolves the
+target across both namespaces, validates the payload against the target's input contract, admits a
+child turn linked to its parent (`parent_turn_id`) on its own conversation, and enqueues it on the
+turn queue — a distinct partition, so the parent may await it without the queue serializing them
+into a deadlock. Foreground awaits the child's terminal and returns its contract-validated output;
+background returns the child turn id at once and the child delivers its own result through
+`SubagentResult` when it finishes. An agent child is a fully async peer: it runs as the target
+agent — its identity, its sandbox, its whole tool set — the spawn returns its identity at once
+whatever the caller asked, and the spawning conversation is where its messages arrive; a profile
+child runs under the spawning turn's agent, as it always has."""
 
 import asyncio
 from collections.abc import Sequence
@@ -22,6 +27,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.audience import Audience, audience_member
 from ufo.cancellation import cancel_one_turn
+from ufo.contracts import Contract, input_contract, output_contract
 from ufo.db import workspace_tx
 from ufo.ext.context import TurnInvoker
 from ufo.ext.manifest import SubagentProfile
@@ -42,7 +48,7 @@ from ufo.schema.records import (
     DELIVERY_DELIVERED,
     DELIVERY_PENDING,
     INTERNAL_ADMISSION,
-    SUBAGENT_RESULT_KEY_PREFIX,
+    SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
@@ -50,26 +56,36 @@ from ufo.schema.records import (
     Turn,
     turn_id_for,
 )
+from ufo.seats import member_is_admin
 from ufo.skills.runtime import CORE_SKILLS, LoadedSkill, loaded_context
 from ufo.tools.context import (
+    AmbiguousSpawnTarget,
     SpawnResult,
     SubagentStatus,
+    UnknownSpawnTarget,
     UnknownSubagentProfile,
     UntrustedContentError,
 )
 from ufo.untrusted import wall
 
 SUBAGENT_POLL_SECONDS = 0.1
-RESULT_OPEN = '<subagent_result profile="{profile}" subagent_id="{subagent_id}" status="{status}">'
-RESULT_CLOSE = "</subagent_result>"
-RESULT_CLOSE_ESCAPE = "&lt;/subagent_result&gt;"
+PROFILE_TARGET_KIND = "profile"
+AGENT_TARGET_KIND = "agent"
+STATUS_QUESTION = "question"
+RESULT_OPEN = '<spawn_result target="{target}" spawn_id="{spawn_id}" status="{status}">'
+RESULT_CLOSE = "</spawn_result>"
+RESULT_CLOSE_ESCAPE = "&lt;/spawn_result&gt;"
 RESULT_UNKNOWN_PROFILE = (
-    "The subagent's profile is no longer registered, so its answer could not be checked "
+    "The spawn's profile is no longer registered, so its answer could not be checked "
     "against a schema and is withheld."
 )
 RESULT_INVALID = (
-    "The subagent's final answer does not match its output schema, so it was dropped rather than "
+    "The spawn's final answer does not match its output schema, so it was dropped rather than "
     "delivered. Failures: {faults}"
+)
+AGENT_SPAWN_REFUSAL = (
+    "agent {name!r} is not yours to spawn — spawn an agent you own, or have a workspace admin "
+    "run it"
 )
 PRELOAD_PROMPT_CHAR_BOUND = 200_000
 FINISH_CONTRACT = (
@@ -104,10 +120,27 @@ class SubagentRegistry:
             raise ValueError(f"duplicate subagent profiles: {', '.join(duplicates)}")
 
     def get(self, name: str) -> SubagentProfile:
-        for profile in self.profiles:
-            if profile.name == name:
-                return profile
-        raise UnknownSubagentProfile(name, tuple(sorted(profile.name for profile in self.profiles)))
+        profile = self.find(name)
+        if profile is None:
+            raise UnknownSubagentProfile(
+                name, tuple(sorted(profile.name for profile in self.profiles))
+            )
+        return profile
+
+    def find(self, name: str) -> SubagentProfile | None:
+        return next((profile for profile in self.profiles if profile.name == name), None)
+
+
+@dataclass(frozen=True)
+class AgentTarget:
+    """A workspace agent resolved as a spawn target: the row facts the spawn needs — identity,
+    owner, payload contract, and answer contract."""
+
+    id: UUID
+    name: str
+    owner_member_id: UUID | None
+    input_schema: dict[str, object] | None
+    output_schema: dict[str, object] | None
 
 
 def subagent_system_prompt(
@@ -146,7 +179,7 @@ def subagent_system_prompt(
 
 @dataclass(frozen=True)
 class Subagents:
-    """The spawn workflow, bound to the turn that spawns: resolve the profile, admit and enqueue a
+    """The spawn workflow, bound to the turn that spawns: resolve the target, admit and enqueue a
     child turn, then (foreground) await and validate its output."""
 
     client: DBOSClient
@@ -160,11 +193,19 @@ class Subagents:
 
     @property
     def acting_member_id(self) -> UUID | None:
-        return self.requester_member_id or self.parent.on_behalf_of_member_id
+        """The member whose authority a spawn carries: the bound requester, else the turn's
+        founding speaker, else the initiator a speakerless turn acts on behalf of — the same fold
+        `ToolContext.acting_member_id` applies, so the ownership gate, the catalog, and the
+        child's own stamp all read one member."""
+        return (
+            self.requester_member_id
+            or self.parent.speaker_member_id
+            or self.parent.on_behalf_of_member_id
+        )
 
     async def spawn(
         self,
-        profile: str,
+        target: str,
         payload: dict[str, Any],
         background: bool = False,
         dedup_key: str | None = None,
@@ -176,9 +217,30 @@ class Subagents:
         the spawning tool step reconnects: `_admit` is idempotent, DBOS dedups the re-enqueue on the
         existing workflow id, and `_await_terminal` returns a child that already finished at once —
         completed branches are memoized by their own durable terminal, never respawned or rebilled.
-        Without a key, each call mints a fresh random child."""
-        resolved = self.registry.get(profile)
-        typed_input = resolved.input_model.model_validate(payload)
+        Without a key, each call mints a fresh random child. An agent target always runs
+        background and always delivers: it is an independent peer nobody blocks on, and its
+        answers reach this conversation as arrivals."""
+        resolved = await self._resolve(target)
+        match resolved:
+            case SubagentProfile():
+                agent_id = self.parent.agent_id
+                profile_name: str | None = resolved.name
+                inherits_sandbox = True
+                input_model: Contract = resolved.input_model
+                output_model: Contract = resolved.output_model
+                untrusted = resolved.untrusted_output
+            case AgentTarget():
+                if not await self._may_spawn(resolved.owner_member_id):
+                    raise ValueError(AGENT_SPAWN_REFUSAL.format(name=resolved.name))
+                agent_id = resolved.id
+                profile_name = None
+                inherits_sandbox = False
+                input_model = input_contract(resolved.input_schema)
+                output_model = output_contract(resolved.output_schema)
+                untrusted = True
+                background = True
+                delivers_result = True
+        typed_input = input_model.model_validate(payload)
         conversation_id = (
             uuid5(NAMESPACE_URL, f"{self.parent.id}/{dedup_key}")
             if dedup_key is not None
@@ -186,7 +248,14 @@ class Subagents:
         )
         turn_id = turn_id_for(self.parent.workspace_id, conversation_id, 1)
         if await self._admit(
-            conversation_id, turn_id, profile, typed_input.model_dump_json(), delivers_result, name
+            conversation_id,
+            turn_id,
+            agent_id=agent_id,
+            profile=profile_name,
+            inherits_sandbox=inherits_sandbox,
+            inbound=typed_input.model_dump_json(),
+            delivers_result=delivers_result,
+            name=name,
         ):
             await self._enqueue(turn_id, conversation_id)
         if background:
@@ -199,15 +268,23 @@ class Subagents:
                 if part
             )
             raise RuntimeError(
-                f"subagent {profile!r} turn ended {terminal.status}"
+                f"spawn {target!r} turn ended {terminal.status}"
                 + (f" ({diagnostic})" if diagnostic else "")
             )
+        if terminal.question is not None:
+            return SpawnResult(
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                output=None,
+                terminal=terminal,
+                untrusted=untrusted,
+            )
         try:
-            output = resolved.output_model.model_validate_json(terminal.text)
+            output = output_model.model_validate_json(terminal.text)
         except ValidationError as error:
-            if resolved.untrusted_output:
+            if untrusted:
                 raise UntrustedContentError(
-                    f"subagent {profile!r} returned output that failed validation: {error}"
+                    f"spawn {target!r} returned output that failed validation: {error}"
                 ) from error
             raise
         return SpawnResult(
@@ -215,36 +292,38 @@ class Subagents:
             conversation_id=conversation_id,
             output=output,
             terminal=terminal,
-            untrusted=resolved.untrusted_output,
+            untrusted=untrusted,
         )
 
     async def result(self, turn_id: UUID) -> SpawnResult:
         """Read the exact terminal and validated output of a finished child this conversation
-        spawned. A failed child or invalid output returns no output, so a host-side consumer can
-        represent that terminal without trusting the model to relay its result."""
+        spawned. A failed child, a child that ended asking, or invalid output returns no output, so
+        a host-side consumer can represent that terminal without trusting the model to relay its
+        result."""
         profile = await self._require_child(turn_id)
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.turn.c.conversation_id, tables.turn.c.terminal).where(
-                        tables.turn.c.id == turn_id
-                    )
+                    sa.select(
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.agent_id,
+                        tables.turn.c.terminal,
+                    ).where(tables.turn.c.id == turn_id)
                 )
             ).one()
         if row.terminal is None:
-            raise ValueError(f"subagent {turn_id} has not finished")
+            raise ValueError(f"spawn {turn_id} has not finished")
         terminal = TerminalFrame.model_validate(row.terminal)
-        try:
-            resolved = self.registry.get(profile)
-        except UnknownSubagentProfile:
-            output = None
+        contract: Contract | None
+        if profile is None:
+            contract = output_contract(await self._agent_output_schema(row.agent_id))
         else:
+            resolved = self.registry.find(profile)
+            contract = None if resolved is None else resolved.output_model
+        output = None
+        if contract is not None and terminal.status == "done" and terminal.question is None:
             try:
-                output = (
-                    resolved.output_model.model_validate_json(terminal.text)
-                    if terminal.status == "done"
-                    else None
-                )
+                output = contract.model_validate_json(terminal.text)
             except ValidationError:
                 output = None
         return SpawnResult(
@@ -261,7 +340,7 @@ class Subagents:
         call and bounds the hold itself — the browser task, which times out and cancels. A parent
         with nothing to do but wait ends its turn instead: the child delivers its own output
         through `SubagentResult`, so waiting is never how a result is collected."""
-        profiles: dict[UUID, str] = {}
+        profiles: dict[UUID, str | None] = {}
         for turn_id in turn_ids:
             profiles[turn_id] = await self._require_child(turn_id)
         statuses: list[SubagentStatus] = []
@@ -296,21 +375,28 @@ class Subagents:
         text = "" if row.terminal is None else TerminalFrame.model_validate(row.terminal).text
         return SubagentStatus(turn_id=turn_id, status=row.status, text=text)
 
-    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
+    async def message(
+        self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool = False
+    ) -> SubagentStatus:
         """Queue a follow-up for a background child by admitting the next turn on the child's own
         conversation with `text` as its inbound. The child's partition serializes it after the turn
         in flight (create-or-attach hands it the same sandbox), and the engine loads the child's
-        accumulated transcript as prior context — so the follow-up continues the subagent under its
-        own profile rather than starting fresh. Admission is idempotent through
+        accumulated transcript as prior context — so the follow-up continues the child under its
+        own contract rather than starting fresh. Admission is idempotent through
         `turn.idempotency_key`: a re-run of the messaging tool step (crash recovery) finds the turn
         it already admitted under `dedup_key` instead of admitting a second one at the next seq.
-        Returns the follow-up's status; refuses a turn id that is not a child of this parent,
-        mirroring cancel, and a profile this registry no longer holds. That last check is the
-        admission's, not the child's: the follow-up carries the profile of the child it continues,
-        so admitting one whose profile nothing resolves queues a turn that can only die in its own
-        setup, where the caller that asked for it is no longer there to be told."""
+        `delivers_result` marks the follow-up delivering even when the child was awaited foreground
+        — the caller that answers a bubbled question ends its own turn, so the continuation's
+        answer must arrive as a delivery or not at all. Returns the follow-up's status; refuses a
+        turn id that is not a child of this parent, mirroring cancel, and a profile this registry
+        no longer holds. That last check is the admission's, not the child's: the follow-up
+        carries the profile of the child it continues, so admitting one whose profile nothing
+        resolves queues a turn that can only die in its own setup, where the caller that asked for
+        it is no longer there to be told. An agent child carries no profile and nothing to
+        resolve — its agent row cannot vanish."""
         profile = await self._require_child(turn_id)
-        self.registry.get(profile)
+        if profile is not None:
+            self.registry.get(profile)
         async with workspace_tx() as connection:
             child = (
                 await connection.execute(
@@ -370,7 +456,9 @@ class Subagents:
                         terminal=None,
                         parent_turn_id=self.parent.id,
                         result_delivery=(
-                            None if child.result_delivery is None else DELIVERY_PENDING
+                            DELIVERY_PENDING
+                            if delivers_result or child.result_delivery is not None
+                            else None
                         ),
                         subagent_profile=child.subagent_profile,
                         traceparent=current_traceparent(),
@@ -408,20 +496,111 @@ class Subagents:
             await self._enqueue(followup_id, child.conversation_id)
         return SubagentStatus(turn_id=followup_id, status=followup_status, text="")
 
-    def _untrusted_output(self, profile: str) -> bool:
-        """Trust fails closed: a child whose profile is no longer registered walls as
-        untrusted rather than passing its output through as instructions."""
-        try:
-            return self.registry.get(profile).untrusted_output
-        except UnknownSubagentProfile:
-            return True
+    async def _resolve(self, target: str) -> SubagentProfile | AgentTarget:
+        """The target a spawn names, across both namespaces. A `profile:`/`agent:` prefix is exact;
+        a bare name both kinds hold is refused naming the qualified forms, and a bare name neither
+        holds is refused naming what is spawnable."""
+        kind, qualified, bare = target.partition(":")
+        if qualified and kind == PROFILE_TARGET_KIND:
+            profile = self.registry.find(bare)
+            if profile is None:
+                raise UnknownSpawnTarget(target, self._profile_names(), await self._agent_names())
+            return profile
+        if qualified and kind == AGENT_TARGET_KIND:
+            agent = await self._agent_target(bare)
+            if agent is None:
+                raise UnknownSpawnTarget(target, self._profile_names(), await self._agent_names())
+            return agent
+        profile = self.registry.find(target)
+        agent = await self._agent_target(target)
+        if profile is not None and agent is not None:
+            raise AmbiguousSpawnTarget(target)
+        if profile is not None:
+            return profile
+        if agent is not None:
+            return agent
+        raise UnknownSpawnTarget(target, self._profile_names(), await self._agent_names())
 
-    async def _require_child(self, turn_id: UUID) -> str:
-        """The profile of a child this conversation delegated, or a refusal. A child that hands its
-        result back wakes a *later* turn, and that turn is the one holding the id the result named —
-        gated on the spawning turn alone it could never message or cancel the very child that woke
-        it. So a sibling turn of the same conversation qualifies, and the authority check, which is
-        what actually walls one member's child off from another's, is unchanged."""
+    def _profile_names(self) -> tuple[str, ...]:
+        return tuple(sorted(profile.name for profile in self.registry.profiles))
+
+    async def _agent_names(self) -> tuple[str, ...]:
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.agent.c.name)
+                    .where(tables.agent.c.workspace_id == self.parent.workspace_id)
+                    .order_by(tables.agent.c.name)
+                )
+            ).all()
+        return tuple(row.name for row in rows)
+
+    async def _agent_target(self, name: str) -> AgentTarget | None:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.agent.c.id,
+                        tables.agent.c.name,
+                        tables.agent.c.owner_member_id,
+                        tables.agent.c.input_schema,
+                        tables.agent.c.output_schema,
+                    ).where(
+                        tables.agent.c.workspace_id == self.parent.workspace_id,
+                        tables.agent.c.name == name,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        return AgentTarget(
+            id=row.id,
+            name=row.name,
+            owner_member_id=row.owner_member_id,
+            input_schema=row.input_schema,
+            output_schema=row.output_schema,
+        )
+
+    async def _agent_output_schema(self, agent_id: UUID) -> dict[str, object] | None:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.agent.c.output_schema).where(tables.agent.c.id == agent_id)
+                )
+            ).scalar_one()
+
+    async def _may_spawn(self, owner_member_id: UUID | None) -> bool:
+        """The spawn side of ownership: the owner runs their own agent, and a workspace admin runs
+        any — including the ownerless rows (main, provisioned) that are the admins'. This mirrors
+        the portal's reach, which gives a non-admin only the main agent, their grants, and their
+        own rows, so chat opens no agent the portal would refuse."""
+        if owner_member_id is not None and owner_member_id == self.acting_member_id:
+            return True
+        if self.acting_member_id is None:
+            return False
+        async with workspace_tx() as connection:
+            return await member_is_admin(
+                connection, self.parent.workspace_id, self.acting_member_id
+            )
+
+    def _untrusted_output(self, profile: str | None) -> bool:
+        """Trust fails closed for profiles: a child whose profile is no longer registered walls as
+        untrusted rather than passing its output through as instructions. An agent child (no
+        profile) always walls: it holds the whole member-facing tool set, open-web readers
+        included, so its answer derives from whatever it read — the vouched prompt does not vouch
+        the content."""
+        if profile is None:
+            return True
+        resolved = self.registry.find(profile)
+        return True if resolved is None else resolved.untrusted_output
+
+    async def _require_child(self, turn_id: UUID) -> str | None:
+        """The profile of a child this conversation delegated (None for an agent child), or a
+        refusal. A child that hands its result back wakes a *later* turn, and that turn is the one
+        holding the id the result named — gated on the spawning turn alone it could never message
+        or cancel the very child that woke it. So a sibling turn of the same conversation
+        qualifies, and the authority check, which is what actually walls one member's child off
+        from another's, is unchanged."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -444,27 +623,36 @@ class Subagents:
                         )
                     )
                 ).scalar_one() == 1
-        if row is None or not spawned_here or row.on_behalf_of_member_id != self.acting_member_id:
-            raise ValueError(f"{turn_id} is not a subagent this conversation spawned")
+        if (
+            row is None
+            or row.parent_turn_id is None
+            or not spawned_here
+            or row.on_behalf_of_member_id != self.acting_member_id
+        ):
+            raise ValueError(f"{turn_id} is not a spawn of this conversation")
         return row.subagent_profile
 
     async def _admit(
         self,
         conversation_id: UUID,
         turn_id: UUID,
-        profile: str,
+        *,
+        agent_id: UUID,
+        profile: str | None,
+        inherits_sandbox: bool,
         inbound: str,
         delivers_result: bool = False,
         name: str = "",
     ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
-        traceparent so the child's span joins the parent's trace, and with the spawning turn's own
-        sandbox conversation — a subagent runs where the turn that spawned it runs, so the files it
-        writes are the ones the parent reads. Inherited here rather than resolved per turn, so a
-        grandchild carries the same one. The inserts do nothing on
-        conflict, so a deterministic (`dedup_key`) child re-admitted by a recovery re-run of the
-        spawning step settles on the rows already there — the first run's child stands, never a
-        duplicate."""
+        traceparent so the child's span joins the parent's trace. A profile child runs in the
+        spawning turn's own sandbox conversation — it runs where the turn that spawned it runs, so
+        the files it writes are the ones the parent reads, and a grandchild carries the same one.
+        An agent child gets its own: the target's sandbox size and internet policy are its own
+        settings, and a shared filesystem under a different egress policy would bypass them. The
+        inserts do nothing on conflict, so a deterministic (`dedup_key`) child re-admitted by a
+        recovery re-run of the spawning step settles on the rows already there — the first run's
+        child stands, never a duplicate."""
         async with workspace_tx() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             await connection.execute(
@@ -472,10 +660,12 @@ class Subagents:
                 .values(
                     id=conversation_id,
                     workspace_id=self.parent.workspace_id,
-                    agent_id=self.parent.agent_id,
+                    agent_id=agent_id,
                     surface=SUBAGENT_SURFACE,
                     sandbox_conversation_id=(
-                        self.parent.sandbox_conversation_id or self.parent.conversation_id
+                        (self.parent.sandbox_conversation_id or self.parent.conversation_id)
+                        if inherits_sandbox
+                        else None
                     ),
                     queue_key=str(turn_id),
                     member_id=audience_member(self.audience),
@@ -492,7 +682,7 @@ class Subagents:
                     id=turn_id,
                     workspace_id=self.parent.workspace_id,
                     conversation_id=conversation_id,
-                    agent_id=self.parent.agent_id,
+                    agent_id=agent_id,
                     seq=1,
                     status="queued",
                     inbound=inbound,
@@ -521,7 +711,7 @@ class Subagents:
                 )
             ).one()
             if claimed.on_behalf_of_member_id != self.acting_member_id:
-                raise ValueError("subagent dedup key belongs to another member request")
+                raise ValueError("spawn dedup key belongs to another member request")
             if claimed.status != "queued":
                 return False
             await connection.execute(
@@ -582,9 +772,11 @@ class SubagentResult:
     its next turn once that turn has ended — so a parent never holds a turn open waiting on a
     child. Delivery is keyed on the child turn, so a recovery re-run of the delivering execution
     settles on the arrival already posted rather than a second one, and it carries the same
-    schema-validated output a foreground spawn returns: a child that ended any way but `done`, or
-    whose final answer does not match its profile's schema, arrives as that failure rather than as
-    prose the parent would read as an answer.
+    contract-validated output a foreground spawn returns: a child that ended any way but `done`,
+    or whose final answer does not match its contract, arrives as that failure rather than as
+    prose the parent would read as an answer. A child that ended asking arrives as its structured
+    question — the need bubbles to the spawning conversation, which answers through `message_spawn`
+    or re-raises with its own ask.
 
     The arrival is posted first and the child stamped `delivered` after, both here and in the sweep
     that finds what this path missed: a crash between the two leaves the child `pending` and the
@@ -597,10 +789,8 @@ class SubagentResult:
     async def deliver(self, child: Turn) -> None:
         if child.result_delivery != DELIVERY_PENDING or child.parent_turn_id is None:
             return
-        if child.subagent_profile is None:
-            raise RuntimeError("a delivering child turn carries no subagent profile")
         if child.terminal is None:
-            raise RuntimeError("a subagent result is delivered only from a committed terminal")
+            raise RuntimeError("a spawn result is delivered only from a committed terminal")
         async with workspace_tx() as connection:
             parent = (
                 await connection.execute(
@@ -610,11 +800,22 @@ class SubagentResult:
                     )
                 )
             ).one()
+            child_agent = (
+                None
+                if child.subagent_profile is not None
+                else (
+                    await connection.execute(
+                        sa.select(tables.agent.c.name, tables.agent.c.output_schema).where(
+                            tables.agent.c.id == child.agent_id
+                        )
+                    )
+                ).one()
+            )
         await self.invoker.invoke(
             parent.conversation_id,
             parent.agent_id,
-            self._body(child.subagent_profile, child.id, child.terminal),
-            f"{SUBAGENT_RESULT_KEY_PREFIX}{child.id}",
+            self._body(child, child_agent),
+            f"{SPAWN_RESULT_KEY_PREFIX}{child.id}",
             on_behalf_of_member_id=child.on_behalf_of_member_id,
             holds_work_already_done=True,
         )
@@ -628,26 +829,38 @@ class SubagentResult:
                 )
             )
 
-    def _body(self, profile: str, child_id: UUID, terminal: TerminalFrame) -> str:
+    def _body(self, child: Turn, child_agent: sa.Row | None) -> str:
         """The child's answer inside the envelope naming which child answered. A profile no longer
         registered still delivers: the parent learns its child ended and with what, which is the
         whole reason it ended its own turn, and an unresolvable profile walls the payload rather
         than reaching the parent as prose. `RESULT_CLOSE` is escaped inside the payload for the
         same reason the wall escapes its own: content that closes the element holding it continues
         as instructions to the parent."""
-        resolved = next((known for known in self.registry.profiles if known.name == profile), None)
-        payload, status = self._payload(resolved, terminal)
-        if resolved is None or resolved.untrusted_output:
-            payload = wall(profile, payload)
+        if child.terminal is None:
+            raise RuntimeError("a spawn result is delivered only from a committed terminal")
+        if child.subagent_profile is not None:
+            target = f"{PROFILE_TARGET_KIND}:{child.subagent_profile}"
+            resolved = self.registry.find(child.subagent_profile)
+            contract: Contract | None = None if resolved is None else resolved.output_model
+            walled = resolved is None or resolved.untrusted_output
+            wall_label = child.subagent_profile
+        else:
+            if child_agent is None:
+                raise RuntimeError("an agent child delivery carries no agent row")
+            target = f"{AGENT_TARGET_KIND}:{child_agent.name}"
+            contract = output_contract(child_agent.output_schema)
+            walled = True
+            wall_label = child_agent.name
+        payload, status = self._payload(contract, child.terminal)
+        if walled:
+            payload = wall(wall_label, payload)
         return (
-            RESULT_OPEN.format(profile=profile, subagent_id=child_id, status=status)
+            RESULT_OPEN.format(target=target, spawn_id=child.id, status=status)
             + f"\n{payload.replace(RESULT_CLOSE, RESULT_CLOSE_ESCAPE)}\n"
             + RESULT_CLOSE
         )
 
-    def _payload(
-        self, resolved: SubagentProfile | None, terminal: TerminalFrame
-    ) -> tuple[str, str]:
+    def _payload(self, contract: Contract | None, terminal: TerminalFrame) -> tuple[str, str]:
         if terminal.status != "done":
             diagnostic = ": ".join(
                 part
@@ -655,14 +868,15 @@ class SubagentResult:
                 if part
             )
             return diagnostic, terminal.status
-        if resolved is None:
+        if terminal.question is not None:
+            return terminal.question.model_dump_json(), STATUS_QUESTION
+        if contract is None:
             return RESULT_UNKNOWN_PROFILE, "invalid"
-        model = resolved.output_model
         try:
-            return model.model_validate_json(terminal.text).model_dump_json(), "done"
+            return contract.model_validate_json(terminal.text).model_dump_json(), "done"
         except ValidationError as error:
             faults = "; ".join(
-                f"{'.'.join(str(part) for part in fault['loc']) or model.__name__}: {fault['msg']}"
+                f"{'.'.join(str(part) for part in fault['loc']) or 'output'}: {fault['msg']}"
                 for fault in error.errors(include_url=False, include_input=False)
             )
             return RESULT_INVALID.format(faults=faults), "invalid"

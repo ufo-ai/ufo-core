@@ -327,7 +327,7 @@ test("a live run states its name and current step, and clears the wait when it e
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("tool", {
-    tool: "spawn_subagent",
+    tool: "spawn",
     preview: "",
     description: "Handing the research off",
   });

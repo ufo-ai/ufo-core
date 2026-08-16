@@ -2,7 +2,7 @@
 
 `serve` sources the tools into the turn's tool set and the profile into the SubagentRegistry. The
 raw browser/computer-use tools are profile-only: a main agent never holds them — it delegates with
-`browser_task`/`wide_browse`, and `spawn_subagent("browser", ...)` runs a web-automation child
+`browser_task`/`wide_browse`, and `spawn("browser", ...)` runs a web-automation child
 turn scoped to the full browser surface. Its prompt section teaches the main agent to delegate,
 and the subagent's own prompt teaches the operate-and-capture workflow."""
 

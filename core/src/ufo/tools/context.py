@@ -39,6 +39,7 @@ from ufo.audience import SHARED_AUDIENCE, Audience, audience_subjects, conversat
 from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
+from ufo.contracts import ValidatedJson
 from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, SourceReader
@@ -79,7 +80,7 @@ class UntrustedContentError(Exception):
 
 
 class UnknownSubagentProfile(Exception):
-    """A spawn named a profile the registry does not hold. Its message names the bad profile and
+    """A registry lookup named a profile it does not hold. Its message names the bad profile and
     lists the registered profile names, so the spawning tool surfaces an error the model retries
     against a valid name instead of dead-ending on a bare KeyError. The same two facts ride as
     fields, so a failed setup names which profile failed in telemetry that carries no exception
@@ -93,6 +94,32 @@ class UnknownSubagentProfile(Exception):
         self.registered = registered
 
 
+class UnknownSpawnTarget(Exception):
+    """A spawn named a target neither namespace holds. Its message lists what is spawnable — the
+    registered profiles and the workspace's agents — so the model retries against a valid name."""
+
+    def __init__(self, requested: str, profiles: tuple[str, ...], agents: tuple[str, ...]) -> None:
+        super().__init__(
+            f"unknown spawn target {requested!r}; profiles: {', '.join(profiles) or 'none'}; "
+            f"agents: {', '.join(agents) or 'none'}"
+        )
+        self.requested = requested
+        self.profiles = profiles
+        self.agents = agents
+
+
+class AmbiguousSpawnTarget(Exception):
+    """A bare spawn target that both a profile and a workspace agent hold. The message names the
+    qualified forms so the caller picks one."""
+
+    def __init__(self, requested: str) -> None:
+        super().__init__(
+            f"spawn target {requested!r} names both a profile and an agent; "
+            f"use 'profile:{requested}' or 'agent:{requested}'"
+        )
+        self.requested = requested
+
+
 class ToolResult(BaseModel):
     content: tuple[ContentBlock, ...]
     is_error: bool = False
@@ -101,13 +128,15 @@ class ToolResult(BaseModel):
 
 @dataclass(frozen=True)
 class SpawnResult:
-    """The exact child and, once finished, its terminal and validated output. A background spawn
-    has neither terminal nor output yet. `untrusted` carries the profile's `untrusted_output`
-    declaration, so the returning tool result is walled as data."""
+    """The exact child and, once finished, its terminal and validated output — a profile child's
+    pydantic model, or an agent child's contract-validated JSON. A background spawn has neither
+    terminal nor output yet; a child that ended asking has a terminal carrying its question and no
+    output. `untrusted` carries a profile's `untrusted_output` declaration, so the returning tool
+    result is walled as data."""
 
     turn_id: UUID
     conversation_id: UUID
-    output: BaseModel | None
+    output: BaseModel | ValidatedJson | None
     terminal: TerminalFrame | None = None
     untrusted: bool = False
 
@@ -126,8 +155,10 @@ class SubagentStatus:
 
 
 class Spawn(Protocol):
-    """Delegate a subtask to a named subagent profile: validate the payload against the profile's
-    input schema, run a child turn, and (foreground) return its schema-validated output.
+    """Delegate a subtask to a named target — a subagent profile or a workspace agent: validate
+    the payload against the target's input contract, run a child turn, and (foreground) return its
+    contract-validated output. A bare target name is resolved across both namespaces; the
+    `profile:`/`agent:` qualified forms are exact, and host-side callers use them.
 
     `dedup_key` makes the child's identity deterministic from the parent turn and the key rather
     than random, so a caller that re-runs on crash recovery (a dispatch step dying mid-await, a
@@ -144,7 +175,7 @@ class Spawn(Protocol):
 
     async def __call__(
         self,
-        profile: str,
+        target: str,
         payload: dict[str, Any],
         background: bool = False,
         dedup_key: str | None = None,
@@ -166,7 +197,9 @@ class SubagentControl(Protocol):
 
     async def cancel(self, turn_id: UUID) -> SubagentStatus: ...
 
-    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus: ...
+    async def message(
+        self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool = False
+    ) -> SubagentStatus: ...
 
 
 @dataclass(eq=False)
@@ -222,6 +255,10 @@ class ToolContext:
     connectors: ConnectorRegistry | None = None
     find: FindCompleter | None = None
     requestable_credentials: CredentialRequests | None = None
+    models: tuple[str, ...] = ()
+    """The model ids this deploy serves, `auto` first — the closed set a write that stores a
+    model must hold to, since an id the registry cannot answer fails at every later turn's
+    setup and leaves no member-reachable repair."""
     public_base_url: str | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
 

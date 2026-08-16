@@ -109,8 +109,8 @@ def output(
     if delegated:
         calls.append(
             ToolInvocation(
-                name="spawn_subagent",
-                input={"profile": lane, "payload": {"objective": "work"}},
+                name="spawn",
+                input={"target": lane, "payload": {"objective": "work"}},
                 result='{"result": "done"}',
                 has_result=True,
             )
@@ -558,8 +558,8 @@ async def test_the_route_gate_reads_only_calls_that_act(tmp_path: Path) -> None:
         response="done",
         calls=(
             ToolInvocation(
-                name="spawn_subagent",
-                input={"profile": CODING_LANE, "payload": {"objective": envelope}},
+                name="spawn",
+                input={"target": CODING_LANE, "payload": {"objective": envelope}},
                 result='{"result": "done"}',
                 has_result=True,
             ),
@@ -944,7 +944,7 @@ async def test_the_delegation_gate_refuses_a_turn_that_worked_the_repository_its
     assert verdict.evidence["ownTools"] == ["read", "bash", "edit"]
     assert (await grader(output(own_tools=("read", "share_file")))).passed
     merged = await grader(
-        output(commands=("git fetch --depth 1 origin HEAD",), own_tools=("spawn_subagent", "write"))
+        output(commands=("git fetch --depth 1 origin HEAD",), own_tools=("spawn", "write"))
     )
     assert merged.passed, merged.reason
-    assert merged.evidence["ownTools"] == ["spawn_subagent", "write"]
+    assert merged.evidence["ownTools"] == ["spawn", "write"]

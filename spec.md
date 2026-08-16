@@ -51,7 +51,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `workspace` | The team unit: name, config digest. Members are unlimited — one flat fee per workspace, nothing bounded or counted here. |
 | `member` | A human. `is_admin` grants workspace management to any number of members; onboarding makes the first member an admin, the last admin cannot be removed, and at least one seated admin remains able to act in chat. `seated_at` marks a member the agent answers: set by the row that creates them (the column's own default, so no creation path can mint a member the agent silently refuses), cleared only by an admin's revoke in chat, gated at admission and per round. `timezone` is the latest valid IANA zone received from chat metadata; UTC is the default for member-local jobs. Clearing the seat is the one way to remove a person's access, since the row is an identity and a memory subject that outlives it and the `member` kind refuses delete. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
 | `surface_installation` | A chat installation's unique external identity → workspace binding, bound to one agent — the agent every conversation the surface creates lands on (a new binding lands on the workspace's explicit main agent). Shared ingress uses it only to select a candidate credential, authenticates the original request bytes, then binds that workspace. |
-| `agent` | A configured agent: name, prompt, model policy, reasoning effort, sandbox size, granted tool set, skill packs, memory scope. Exactly one per workspace is `is_main`: onboarding creates it, unbound surfaces route to it, and it may update any agent's prompt without crossing member or audience boundaries. A row an extension shipped (`agents`, below) additionally records that extension, the name it declared, and the version that created the row. |
+| `agent` | A configured agent: name, prompt, model policy, reasoning effort, sandbox size, granted tool set, skill packs, memory scope, and an optional raw-JSON-Schema I/O contract a spawn of it validates against (reference- and pattern-free — $ref and regular expressions are refused at the write — and unset means task in, result out). Any speaking member creates one and owns what they created; the owner or a workspace admin edits it, and an ownerless row — the main agent, a provisioned agent — answers to admins alone. Exactly one per workspace is `is_main`: onboarding creates it and unbound surfaces route to it. A row an extension shipped (`agents`, below) additionally records that extension, the name it declared, and the version that created the row. |
 | `connection` | One member-owned broker account identity per `(workspace, provider, account)`. It holds no secret. `shared` controls disclosure and `account_label` names the account. `connect_account` creates or reuses it and refuses to reassign another member's account. Deleting it atomically stops its sources, tombstones their pages, and removes every connector grant. |
 | `connector_grant` | One connection → agent attachment. It records the granting conversation; sharing lives on the connection. `connect_account` creates the intended edge. The `connector_grant` object flips the connection's sharing flag or revokes only the current agent's edge. Account resolution admits the exact acting member's private attachments plus shared connections, preferring private; egress remains agent-scoped. |
 | `source` | One member-owned, agent-neutral synced dataset. `shared` widens its member audience; it never grants an agent access. Sync uses the owner's connection independently of agent grants and stores one physical copy. |
@@ -59,7 +59,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `source_grant` | One source → agent recall edge. Registration grants the agent it names, whether the feed is new or already live and syncing; removing the source deletes every edge. The main agent may read an owned source without an edge only while that source's exact owner is the live speaker; a scheduled run or subagent carries its initiator's authority but never this exception. |
 | `credential` | BYOK secrets, encrypted at rest. Slots are declared by extensions; values are workspace-scoped. |
 | `conversation` | Surface context ↔ queue key (Slack thread, CLI session, web session), permanently bound to one agent at creation — its surface's installation binding, else the workspace's main agent. Admission derives every turn's agent from that binding; a caller-supplied agent id is an assertion admission refuses on mismatch. Its persisted `Audience` atom is `shared`, `member:<uuid>`, `room:<surface>:<room>`, or sealed `foreign:<surface>:<room>` and is carried unchanged through the turn. `surface_label` is the origin in the surface's own grammar (Slack: `#general`, `Direct message`), written by the surface that owns the encoding and never parsed by core; a surface that names none leaves it null, and a rename corrects on the next message that carries the name. The `conversation` object exposes it as a spec field and a filter/order field, under the same audience gate as the row. `title` is what the conversation is called: the member's own opening words, written by the turn that opens it and rewritten only by a surface that has a better name (the portal's title job). It is content, withheld with the rest from a row the reader may not read, and it is what a conversations search narrows on — in the listing query, ahead of its bound, so a conversation older than the bound is still reachable by name. |
-| `turn`, `transcript` | The loop's durable log: lifecycle, per-member-inbound `speaker_member_id` distinct from the conversation's `Audience`, full-conversation transcript + compaction records. A turn's speaker attributes its founding message; authority binds per inbound message. Timer, system, and subagent turns carry no speaker. `on_behalf_of_member_id` is the initiating member a speakerless scheduled fire or subagent acts on behalf of for capability use — distinct from message attribution and conversation audience; scheduled fires derive it from `scheduled_task.created_by_member_id`, subagents copy the bound requester at spawn, and a turn woken by a delivered subagent result carries forward the one its child held. Sub-turn steps — each model round, tool call, and compaction — are DBOS's own `operation_outputs` step log, memoized so a crash-recovery re-run replays completed work instead of redoing it. |
+| `turn`, `transcript` | The loop's durable log: lifecycle, per-member-inbound `speaker_member_id` distinct from the conversation's `Audience`, full-conversation transcript + compaction records. A turn's speaker attributes its founding message; authority binds per inbound message. Timer, system, and subagent turns carry no speaker. `on_behalf_of_member_id` is the initiating member a speakerless scheduled fire or subagent acts on behalf of for capability use — distinct from message attribution and conversation audience; scheduled fires derive it from `scheduled_task.created_by_member_id`, spawns copy the bound requester — else the spawning turn's founding speaker — at spawn, and a turn woken by a delivered subagent result carries forward the one its child held. Sub-turn steps — each model round, tool call, and compaction — are DBOS's own `operation_outputs` step log, memoized so a crash-recovery re-run replays completed work instead of redoing it. |
 | `memory_item` (memory extension) | Memory scoped to one exact audience subject. The memory extension owns this table via its own migration; the index backend owns `chunk`. |
 | `monitor` (monitors extension) | A durable watch: a shell probe run in the conversation's sandbox on an interval, whose changed output, failure streak, or deadline fires exactly one arrival; retired on fire, re-armed explicitly, read back as the `monitor` kind. The extension owns the table via its own migration. |
 | `pause` (scheduled_tasks extension) | A workflow wait: one per conversation, fired as a scheduled turn unless a member message arrived past its arming watermarks. The extension owns the table via its own migration. |
@@ -106,19 +106,27 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   quote the header format — so it holds across turns, across a compaction, and across replay, and a
   repeat load re-mounts the files and names the skill in one line. A result the engine offloaded or
   truncated cut the workflow off, so that one loads again.
-- **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
-  spawn = child turn with parent linkage; foreground awaits its validated output; background
-  returns its identity at once and may deliver that same validated output to the
-  parent's conversation when it finishes — an arrival folded into the live turn or admitted as the
-  next turn, so no parent holds a turn open waiting on a child. The caller records whether anyone
-  will await. Subagent control reads a finished child of that conversation as its exact identity,
-  terminal, and validated output. A forced close records `incomplete_reason=round_budget` on the
-  terminal beside its schema-shaped answer. A woken turn reads the durable record, never the ending
-  turn's working memory. Two payload
-  knobs any profile may declare: `preload_skills` mounts the named skills with their `depends`
-  closure and injects their instructions before the child's first round; `extended_context` lifts
-  its round budget to the
-  main ceiling. Extensions register profiles.
+- **Typed spawn** — one verb over two target kinds. A subagent profile (registry of name, prompt,
+  tool subset, input/output schema; extensions register them) runs as a child turn under the
+  spawning agent, in its sandbox: foreground awaits its validated output; background returns its
+  identity at once and may deliver that same validated output to the parent's conversation when
+  it finishes — an arrival folded into the live turn or admitted as the next turn, so no parent
+  holds a turn open waiting on a child; the caller records whether anyone will await. A workspace
+  agent target is a fully async peer: it runs as itself — its prompt, model, whole tool set, own
+  sandbox, memory, and grants, under the declared (or default task/result) contract its row
+  carries — spawnable by its owner or a workspace admin, an ownerless row (the main agent, a
+  provisioned agent) being the admins', so no prompt the acting member did not write or vet runs
+  under their member gates — the
+  spawn returns its identity at once whatever the caller asked, and its
+  contract-validated answer (walled as data — the child's tools read the open web), or the
+  structured question it ended asking, arrives on the spawning
+  conversation; `message_spawn` is the reply channel, and neither lifecycle nor cancellation ties
+  it to its spawner. Spawn control reads a finished child of that conversation as its exact
+  identity, terminal, and validated output. A forced close records `incomplete_reason=round_budget`
+  on the terminal beside its schema-shaped answer. A woken turn reads the durable record, never
+  the ending turn's working memory. Two payload knobs any profile may declare: `preload_skills`
+  mounts the named skills with their `depends` closure and injects their instructions before the
+  child's first round; `extended_context` lifts its round budget to the main ceiling.
 - **Compaction** — full-conversation `messages.json.lz4` transcript with monotonic seq +
   `compactions/<cid>/{before,after,summary}` records in the blob store; a deterministic pipeline
   groups the over-window head into API rounds, compresses it into a validated structured
@@ -174,7 +182,7 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   applies to explicit work for that member; automatic room/shared recall carries no acting member
   and cannot inject their private source.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
-  `ask_user`, `request_credentials`, `spawn_subagent`, `load_skill`, `share_file`, and the five
+  `ask_user`, `request_credentials`, `spawn`, `load_skill`, `share_file`, and the five
   object verbs (`object_list`/`get`/`explain`/`apply`/`delete`) over extension-registered kinds
   (RFC 0017) — one generic CRUD surface instead of per-extension config tools. Object lists accept
   exact first-class-field filters and field ordering over the fields each kind declares — its own
@@ -251,7 +259,7 @@ metering** (every model/API call made from inside the sandbox lands in the ledge
 declare `sandbox_internet`; its deploy's live turns may then reach globally routable public IPv4
 through a metered opaque tunnel. DNS is pinned and every IPv6, loopback, private, link-local,
 reserved, multicast, or shared-space answer is refused. Tokenless and ended turns cannot use public
-internet. An admin may narrow that deploy capability per agent through the agent object's
+internet. An agent's owner or an admin may narrow that deploy capability per agent through the agent object's
 `internet_access_allowed`; the proxy snapshots it into that turn's cached rules.
 Extensions never register raw network rules; the proxy's rewrite rules are *derived* from their
 manifests — sandbox internet, a credential slot, a connector, or a model provider implies its
@@ -468,7 +476,8 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 The web surface is the member portal and its own audience authority: every member reaches the
 workspace's main agent — the agent every surface routes an unbound member to — and beyond it the
 portal lists and admits exactly the non-main agents whose web audience holds the signed-in
-member — grants kept in the web extension's own store, granted and revoked in chat
+member — a row they own joins by ownership alone, the rest by grants kept in the web extension's
+own store, granted and revoked in chat
 (`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent). A
 member-private extension conversation is listed as a chat and admits that member's replies, but
 does not grant another conversation or an agent panel. A workspace admin reaches and administers

@@ -174,7 +174,7 @@ async def test_build_website_forwards_the_optional_knobs_into_the_spawn(tmp_path
             extended_context=True,
         ),
     )
-    assert captured["profile"] == "website_building"
+    assert captured["profile"] == "profile:website_building"
     assert captured["payload"] == {
         "objective": "build a landing page",
         "preload_skills": ("website-building",),

@@ -161,7 +161,7 @@ class ExecutorRecovery:
 @dataclass(frozen=True)
 class CancelReconciler:
     """Cascade a cancel to the descendant turns it spawned — the sole mechanism that carries a
-    cancel down the tree. Cancelling a turn (the eval driver's deadline, the `cancel_subagent` tool)
+    cancel down the tree. Cancelling a turn (the eval driver's deadline, the `cancel_spawn` tool)
     is a local act through `cancel_one_turn`: it terminalizes just that turn. This sweep cancels
     everything beneath it. On an interval it finds every non-terminal turn with a cancelled
     ancestor — climbing the `parent_turn_id` chain, so a live grandchild beneath a child that
@@ -200,14 +200,19 @@ class CancelReconciler:
         """Every non-terminal turn that has a cancelled ancestor, with its workspace. Climbs the
         `parent_turn_id` chain from each live turn: a turn is an orphan the moment any turn above it
         is cancelled, whatever the statuses in between — so a live grandchild under an intermediate
-        that finished `done` is caught, not only a direct child of the cancelled turn. Bounded by
-        the live-turn count and depth; it stops climbing once a cancelled ancestor is hit."""
+        that finished `done` is caught, not only a direct child of the cancelled turn.
+
+        The climb never crosses an agent-child boundary (parent linkage without a profile): a
+        spawned agent is an independent peer, so cancelling its spawner leaves it and everything
+        beneath it running, while cancelling the agent child itself still reaps its own subtree.
+        Bounded by the live-turn count and depth; it stops climbing once a cancelled ancestor is
+        hit."""
         turn = tables.turn
         chain = (
             sa.select(
                 turn.c.id.label("orphan"),
                 turn.c.workspace_id.label("orphan_workspace"),
-                turn.c.parent_turn_id.label("ancestor_parent"),
+                self._profile_child_parent(turn).label("ancestor_parent"),
                 turn.c.status.label("ancestor_status"),
             )
             .where(turn.c.status.in_(NON_TERMINAL_STATUSES))
@@ -218,7 +223,7 @@ class CancelReconciler:
             sa.select(
                 chain.c.orphan,
                 chain.c.orphan_workspace,
-                ancestor.c.parent_turn_id,
+                self._profile_child_parent(ancestor),
                 ancestor.c.status,
             )
             .select_from(chain.join(ancestor, ancestor.c.id == chain.c.ancestor_parent))
@@ -232,3 +237,6 @@ class CancelReconciler:
             .where(chain.c.ancestor_status == CANCELLED)
             .distinct()
         )
+
+    def _profile_child_parent(self, turn: sa.Table | sa.FromClause) -> sa.ColumnElement:
+        return sa.case((turn.c.subagent_profile.is_(None), sa.null()), else_=turn.c.parent_turn_id)

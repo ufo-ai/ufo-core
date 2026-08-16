@@ -404,7 +404,7 @@ def test_no_member_facing_cancel_contradicts_the_corpus() -> None:
     that a lie."""
     cancels = {tool.name for tool in BUILTIN_TOOLS if "cancel" in tool.name}
 
-    assert cancels == {"cancel_subagent"}, f"unexpected cancel tool(s): {cancels}"
+    assert cancels == {"cancel_spawn"}, f"unexpected cancel tool(s): {cancels}"
 
 
 BANNED_COPY = (

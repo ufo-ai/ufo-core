@@ -61,8 +61,8 @@ def test_writing_tools_are_the_file_builtins_without_execution_or_delivery() -> 
         "fetch_url",
         "share_file",
         "ask_user",
-        "spawn_subagent",
-        "cancel_subagent",
+        "spawn",
+        "cancel_spawn",
     }.isdisjoint(profile.tool_names)
 
 

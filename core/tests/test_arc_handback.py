@@ -95,7 +95,7 @@ async def test_completion_handback_rejects_a_turn_held_open(tmp_path: Path) -> N
             tmp_path,
             (turn(1),),
             children=(turn(1, subagent_profile="general_purpose"),),
-            opening_calls=("spawn_subagent", "wait_for_subagents", "write"),
+            opening_calls=("spawn", "wait_for_subagents", "write"),
         )
     )
     assert not verdict.passed
@@ -117,7 +117,7 @@ async def test_completion_handback_names_the_silent_terminal(tmp_path: Path) -> 
             tmp_path,
             (turn(1),),
             children=(turn(1, subagent_profile="general_purpose", reply=ASSIGNMENT_NONCE),),
-            opening_calls=("spawn_subagent",),
+            opening_calls=("spawn",),
         )
     )
     assert not verdict.passed
@@ -133,7 +133,7 @@ async def test_completion_handback_rejects_a_wake_that_wrote_the_wrong_value(
             tmp_path,
             (turn(1), turn(2)),
             children=(turn(1, subagent_profile="general_purpose"),),
-            opening_calls=("spawn_subagent",),
+            opening_calls=("spawn",),
         )
     )
     assert not verdict.passed
@@ -149,7 +149,7 @@ async def test_completion_handback_passes_when_a_woken_turn_wrote_the_value(
             tmp_path,
             (turn(1), turn(2)),
             children=(turn(1, subagent_profile="general_purpose"),),
-            opening_calls=("spawn_subagent",),
+            opening_calls=("spawn",),
         )
     )
     assert verdict.passed

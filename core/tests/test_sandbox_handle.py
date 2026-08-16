@@ -1320,7 +1320,14 @@ async def _admitted_child(workspace_id: UUID, parent: Turn) -> UUID | None:
     )
     conversation_id, turn_id = uuid4(), uuid4()
     with ws(workspace_id):
-        await spawner._admit(conversation_id, turn_id, GENERAL_PURPOSE, "{}")
+        await spawner._admit(
+            conversation_id,
+            turn_id,
+            agent_id=parent.agent_id,
+            profile=GENERAL_PURPOSE,
+            inherits_sandbox=True,
+            inbound="{}",
+        )
         async with workspace_tx() as connection:
             return (
                 await connection.execute(

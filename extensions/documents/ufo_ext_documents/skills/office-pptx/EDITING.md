@@ -39,7 +39,7 @@ Prints a `<p:sldId>` element to insert into `<p:sldIdLst>`.
 **Phase 5 — QA (mandatory).** Every edit MUST complete all three QA steps from SKILL.md before delivering:
 
 1. Content QA — `python -m markitdown output.pptx`
-2. Visual QA — convert to images (`soffice` + `pdftoppm`), then `spawn_subagent` to inspect
+2. Visual QA — convert to images (`soffice` + `pdftoppm`), then `spawn` to inspect
 3. Fix-and-verify — fix subagent findings, re-convert, re-check
 
 Do NOT skip visual QA for edits. Color changes, reordering, and layout fixes all produce visual bugs that only show up in rendered slides.

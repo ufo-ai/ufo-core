@@ -546,7 +546,7 @@ class SubagentProfile:
     against `input_model`, and the child ends its turn by calling the engine's finish tool, whose
     input schema is `output_model` — the terminal a spawn validates is schema-shaped by
     construction. The loader collects every
-    manifest's profiles into the SubagentRegistry `spawn_subagent` dispatches against. `max_rounds`
+    manifest's profiles into the SubagentRegistry `spawn` dispatches against. `max_rounds`
     caps the child's agentic tool-use rounds; on exhaustion a forced finish call produces a
     best-effort, schema-shaped final answer — the turn fails only if that forced call still
     violates the schema, and the parent receives a failure as a tool error, never a crash. A deep
@@ -555,7 +555,7 @@ class SubagentProfile:
     a model distinct from its parent — possibly a different provider — while `None` inherits the
     parent's; a spawn resolves and bills the child under whichever model answers it.
     `untrusted_output` declares the child's answer derives from untrusted content (web pages, third
-    parties): every path that returns it to a parent — a foreground spawn_subagent, and the
+    parties): every path that returns it to a parent — a foreground spawn, and the
     arrival a background child delivers — walls it as data, exactly as an untrusted tool's own
     result is walled. `isolated_tools` makes
     `tool_names` exact by excluding cross-extension grants and subagent defaults."""

@@ -4,7 +4,7 @@ A turn's subagents run as independent DBOS workflows keyed by their own turn ids
 turn's workflow leaves its descendants running unless something cancels them too. This primitive
 cancels exactly one turn; the cascade to descendants is the cancel reconciler's job. It lives
 outside any role package (surfaces, loop, jobs) because every cancel initiator reaches it — the eval
-driver, the `cancel_subagent` tool, and the reconciler — and it talks to the durable turn row and
+driver, the `cancel_spawn` tool, and the reconciler — and it talks to the durable turn row and
 the DBOS store directly, the shared substrate both roles hold, never across a role's queue/blob/hub
 seam."""
 
@@ -39,9 +39,11 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(tables.turn.c.status, tables.turn.c.subagent_profile).where(
-                    tables.turn.c.id == turn_id
-                )
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.subagent_profile,
+                    tables.turn.c.parent_turn_id,
+                ).where(tables.turn.c.id == turn_id)
             )
         ).one_or_none()
     if row is None or row.status not in NON_TERMINAL_STATUSES:
@@ -66,6 +68,6 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
         "turn_terminal_total",
         status=CANCELLED,
         error_class="",
-        profile=turn_profile(row.subagent_profile),
+        profile=turn_profile(row.subagent_profile, spawned=row.parent_turn_id is not None),
     )
     return True

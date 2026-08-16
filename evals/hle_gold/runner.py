@@ -46,7 +46,7 @@ VISION_FORBIDDEN_TOOLS = frozenset(
         "fetch_url",
         "browser_task",
         "wide_browse",
-        "spawn_subagent",
+        "spawn",
     }
 )
 CONTAMINATION_MARKERS = (

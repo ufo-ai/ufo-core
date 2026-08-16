@@ -1,18 +1,21 @@
 """The core-registered `agent` object kind: the workspace's agent as a workspace object.
 
-The spec holds the prompt, model, reasoning effort, sandbox size, and public-internet policy.
-`object_apply` is their one member write path. In chat, only the main agent can change a prompt;
-an admin prepared intent can change any field. Create is admin-gated on the main agent's lane and
-never copies grants, credentials, sources, or derived data. Delete raises; a non-admin mutation
-raises `AdminRequired`."""
+The spec holds the prompt, model, reasoning effort, sandbox size, public-internet policy, and the
+optional I/O contract a spawn of the agent validates against. `object_apply` is their one member
+write path. Any speaking member creates agents and owns the ones they created; an owner or a
+workspace admin edits, and an ownerless row — the main agent, a provisioned agent — answers to
+admins alone. Create never copies grants, credentials, sources, or derived data. Delete raises; a
+mutation by anyone else raises `AdminRequired`."""
 
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic_core.core_schema import ValidationInfo
 from sqlalchemy.exc import IntegrityError
 
+from ufo.contracts import check_declared_schema
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.models.interface import AUTO_MODEL
@@ -32,7 +35,6 @@ from ufo.objects import (
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_SANDBOX_SIZE,
-    INTENT_ADMISSION,
     ReasoningEffort,
     SandboxSize,
 )
@@ -41,12 +43,9 @@ from ufo.workspace import ws_current
 
 AGENT_KIND = "agent"
 AGENT_UNDELETABLE = "agents cannot be deleted through objects"
-AGENT_EDIT_GATE = "editing an agent requires a workspace admin"
-AGENT_CREATE_GATE = "creating an agent requires a workspace admin, on the main agent"
+AGENT_EDIT_GATE = "editing an agent requires its owner or a workspace admin"
+AGENT_CREATE_GATE = "creating an agent requires a speaking member"
 AGENT_PROMPT_REQUIRED = "creating an agent requires a prompt"
-AGENT_TURN_EDIT_GATE = (
-    "an agent turn may change only a prompt, and only the workspace main agent may do it"
-)
 
 
 def _effective_model(ctx: ToolContext, stored: str) -> str:
@@ -93,11 +92,46 @@ class AgentSpec(BaseModel):
             "change takes effect on the next turn."
         ),
     )
+    input_schema: dict[str, JsonValue] | None = Field(
+        default=None,
+        description=(
+            "Raw JSON Schema (top-level type 'object') for the payload a spawn of this agent "
+            "takes. Unset means the default {task: string} contract."
+        ),
+    )
+    output_schema: dict[str, JsonValue] | None = Field(
+        default=None,
+        description=(
+            "Raw JSON Schema (top-level type 'object') for the final answer a spawn of this "
+            "agent returns. Unset means the default {result: string} contract."
+        ),
+    )
+
+    @field_validator("input_schema", "output_schema")
+    @classmethod
+    def _declared_schema(
+        cls, value: dict[str, JsonValue] | None, info: ValidationInfo
+    ) -> dict[str, JsonValue] | None:
+        if value is not None:
+            check_declared_schema(value, info.field_name or "schema")
+        return value
+
+
+def _known_model(ctx: ToolContext, model: str) -> None:
+    """Refuse a model id this deploy's registry cannot answer, where it is written.
+
+    `ModelRegistry.spec` raises on an unknown id, and a turn reads the stored model at setup before
+    it dispatches anything — so an id that reaches the row fails every later turn of that agent, on
+    every surface, and the repair turn fails the same way. The write is the only place a member can
+    still be told."""
+    if ctx.models and model not in ctx.models:
+        raise ValueError(f"no model named {model!r}")
 
 
 @dataclass(frozen=True)
 class AgentObjects:
-    """Admin-gated handlers over the complete `agent` row."""
+    """Owner-gated handlers over the complete `agent` row: the owner or an admin writes, and an
+    ownerless row (main, provisioned) answers to admins alone."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         async with workspace_tx() as connection:
@@ -138,6 +172,8 @@ class AgentObjects:
             reasoning=row.reasoning,
             sandbox_size=row.sandbox_size,
             prompt=row.prompt,
+            input_schema=row.input_schema,
+            output_schema=row.output_schema,
         )
         return ObjectDetail(
             spec=spec,
@@ -168,6 +204,7 @@ class AgentObjects:
         return {
             "main": row.is_main,
             "model": _effective_model(ctx, row.model),
+            "owner_member_id": None if row.owner_member_id is None else str(row.owner_member_id),
             "provisioned_by": row.provisioned_by,
             "provisioned_name": row.provisioned_name,
             "provisioned_version": row.provisioned_version,
@@ -188,28 +225,36 @@ class AgentObjects:
         row = await self._row(name)
         if row is None:
             raise UnknownObject(f"no agent object named {name!r}")
-        if not await ctx.speaker_is_admin():
+        owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
+        if not owned and not await ctx.speaker_is_admin():
             raise AdminRequired(AGENT_EDIT_GATE)
+        _known_model(ctx, spec.model)
         next_prompt = row.prompt if spec.prompt is None else spec.prompt
         prompt_changed = next_prompt != row.prompt
         next_sandbox_size = (
             spec.sandbox_size if "sandbox_size" in spec.model_fields_set else row.sandbox_size
+        )
+        next_input_schema = (
+            spec.input_schema if "input_schema" in spec.model_fields_set else row.input_schema
+        )
+        next_output_schema = (
+            spec.output_schema if "output_schema" in spec.model_fields_set else row.output_schema
         )
         settings_changed = (
             spec.model,
             spec.internet_access_allowed,
             spec.reasoning,
             next_sandbox_size,
+            next_input_schema,
+            next_output_schema,
         ) != (
             row.model,
             row.internet_access_allowed,
             row.reasoning,
             row.sandbox_size,
+            row.input_schema,
+            row.output_schema,
         )
-        if ctx.turn.admission_source != INTENT_ADMISSION and (
-            not await ctx.agent_is_main() or settings_changed
-        ):
-            raise AdminRequired(AGENT_TURN_EDIT_GATE)
         if not next_prompt.strip():
             raise ValueError("an agent prompt cannot be empty")
         if not prompt_changed and not settings_changed:
@@ -223,6 +268,8 @@ class AgentObjects:
                     internet_access_allowed=spec.internet_access_allowed,
                     reasoning=spec.reasoning,
                     sandbox_size=next_sandbox_size,
+                    input_schema=next_input_schema,
+                    output_schema=next_output_schema,
                     updated_at=sa.func.now(),
                 )
                 .where(
@@ -233,12 +280,14 @@ class AgentObjects:
 
     async def _create(self, ctx: ToolContext, name: str, spec: AgentSpec) -> None:
         """Insert the agent row — never main, never a copy of anything but the submitted
-        configuration. The (workspace, name) unique constraint arbitrates a concurrent create of
-        the same name; the loser reads back as a name refusal, not a second row."""
-        if not await ctx.speaker_is_admin() or not await ctx.agent_is_main():
-            raise AdminRequired(AGENT_CREATE_GATE)
+        configuration, owned by the member who asked for it. The (workspace, name) unique
+        constraint arbitrates a concurrent create of the same name; the loser reads back as a name
+        refusal, not a second row."""
+        if ctx.speaker_member_id is None:
+            raise ValueError(AGENT_CREATE_GATE)
         if spec.prompt is None or not spec.prompt.strip():
             raise ValueError(AGENT_PROMPT_REQUIRED)
+        _known_model(ctx, spec.model)
         async with workspace_tx() as connection:
             try:
                 await connection.execute(
@@ -252,6 +301,9 @@ class AgentObjects:
                         internet_access_allowed=spec.internet_access_allowed,
                         reasoning=spec.reasoning,
                         sandbox_size=spec.sandbox_size,
+                        input_schema=spec.input_schema,
+                        output_schema=spec.output_schema,
+                        owner_member_id=ctx.speaker_member_id,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -282,6 +334,9 @@ class AgentObjects:
                         tables.agent.c.reasoning,
                         tables.agent.c.sandbox_size,
                         tables.agent.c.tools,
+                        tables.agent.c.input_schema,
+                        tables.agent.c.output_schema,
+                        tables.agent.c.owner_member_id,
                         tables.agent.c.provisioned_by,
                         tables.agent.c.provisioned_name,
                         tables.agent.c.provisioned_version,
@@ -305,22 +360,25 @@ class AgentObjects:
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "A workspace agent: its prompt, model, reasoning effort, and public-internet policy, "
-        "readable by all members, updatable and creatable by a workspace admin. It cannot be "
-        "deleted through objects."
+        "A workspace agent: its prompt, model, reasoning effort, public-internet policy, and the "
+        "I/O contract a spawn of it validates against — readable by all members, creatable by any "
+        "member, updatable by its owner or a workspace admin. It cannot be deleted through "
+        "objects."
     ),
     guidance=(
-        "A workspace agent as an object. In chat, the main agent may apply the current spec with "
-        "only prompt changed — admin only, taking effect on the next turn. Omit prompt to keep it "
-        "unchanged. The admin portal may also change model, internet_access_allowed, reasoning, "
-        "and sandbox_size. Blocking public internet leaves "
+        "A workspace agent as an object. Any member may create one and owns what they created; "
+        "its owner or a workspace admin may apply changes, taking effect on the next turn. The "
+        "main agent and provisioned agents have no owner, so only an admin edits them. Omit "
+        "prompt on an update to keep it unchanged. Blocking public internet leaves "
         "exact model, credential, connector, and transfer hosts available. Reasoning 'auto' lets "
         "an Anthropic model set its own thinking depth per request and falls to the provider "
         "default elsewhere; a fixed level pins it. Sandbox size ('small', 'medium', 'large') "
         "picks the cpu/memory tier a new conversation's sandbox is provisioned at, where the "
         "deploy's sandbox backend offers sizes; existing conversations keep the sandbox they "
-        "have. Applying a name no agent holds "
-        "creates one — admin only, from the main agent, and the spec then requires `prompt`; a new "
+        "have. input_schema and output_schema (raw JSON Schema, top-level type 'object') fix the "
+        "contract a spawn of this agent validates against; unset means {task} in and {result} "
+        "out. Applying a name no agent holds "
+        "creates one — the spec then requires `prompt`; a new "
         "agent starts empty, inheriting no grants, credentials, sources, or memory. A child's "
         "`scoped_to` link names the main agent it runs under. Delete is refused. Confirm before "
         "changing settings."

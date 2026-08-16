@@ -622,7 +622,7 @@ def test_page_derived_tools_are_marked_untrusted() -> None:
 
 def test_browser_profile_declares_its_output_untrusted() -> None:
     """The child's summary is page-derived, so every spawn path — browser_task, wide_browse, or a
-    generic spawn_subagent over the browser profile — returns it walled, never as instructions."""
+    generic spawn over the browser profile — returns it walled, never as instructions."""
     assert BROWSER_PROFILE.untrusted_output is True
 
 
@@ -847,7 +847,7 @@ def test_the_browser_child_runs_on_a_model_the_catalog_answers() -> None:
 def test_a_browser_session_runs_at_the_main_ceiling_and_a_narrowed_spawn_does_not() -> None:
     """The producer half of the round budget. `extended_context` rides the child's inbound payload,
     which is where the queue reads it to lift a subagent to MAIN_ROUND_LIMIT, so it has to survive
-    the input model's own serialization: on by default, so browser_task and a bare spawn_subagent
+    the input model's own serialization: on by default, so browser_task and a bare spawn
     both get a session that can page through a site, and off when a caller sends it off —
     wide_browse, which then takes the profile's declared budget."""
     assert BROWSER_PROFILE.max_rounds == SUBAGENT_ROUND_LIMIT

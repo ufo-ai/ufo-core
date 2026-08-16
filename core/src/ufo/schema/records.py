@@ -33,7 +33,7 @@ MEMBER_ADMISSION: TurnAdmissionSource = "member"
 INTERNAL_ADMISSION: TurnAdmissionSource = "internal"
 SCHEDULED_ADMISSION: TurnAdmissionSource = "scheduled"
 INTENT_ADMISSION: TurnAdmissionSource = "intent"
-SUBAGENT_RESULT_KEY_PREFIX = "subagent-result:"
+SPAWN_RESULT_KEY_PREFIX = "subagent-result:"
 SUBAGENT_SURFACE = "subagent"
 
 
@@ -197,6 +197,9 @@ class Agent(BaseModel):
     """The agent's tool allowlist, or None for the member-facing set. A name the live registry does
     not answer is absent rather than an error: an extension the deploy stopped installing leaves the
     agent short a tool, never unable to take a turn."""
+    output_schema: dict[str, object] | None = None
+    """The agent's declared output contract as raw JSON Schema, or None for the default result
+    contract. A spawned turn of this agent binds it as the finish tool's input schema."""
     internet_access_allowed: bool = True
     """Whether this agent's sandbox reaches the public internet — the per-agent narrowing the proxy
     also gates on. Governs whether the turn's sandbox is routed through the egress cache."""
@@ -258,6 +261,12 @@ class Turn(BaseModel):
     result_delivery: ResultDelivery | None = None
     sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None
+
+    @property
+    def spawned(self) -> bool:
+        """True for a turn a spawn admitted — a profile child (`subagent_profile` set) or an agent
+        child (parent linkage alone). Only the spawn path writes `parent_turn_id`."""
+        return self.parent_turn_id is not None
 
     @field_validator("created_at", "updated_at")
     @classmethod

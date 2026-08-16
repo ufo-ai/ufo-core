@@ -306,7 +306,7 @@ async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
     async def scout(name: str) -> tuple[ScoutOutput, bool]:
         scout_records = bounded_groups[name]
         result = await ctx.spawn(
-            f"sweep-{name}",
+            f"profile:sweep-{name}",
             ScoutInput(records=scout_records).model_dump(mode="json"),
             dedup_key=f"daily-brief:{member_id}:{row.local_date}/{name}",
         )

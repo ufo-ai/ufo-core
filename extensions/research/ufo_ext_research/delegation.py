@@ -1,7 +1,7 @@
 """Research delegation: fan a research objective over a list of entities in parallel.
 
 `wide_research` reads an entities file (one per line), dedupes, fans a bounded pool of `research`
-children over them through `ctx.spawn` — the same Spawn seam `spawn_subagent` uses, so each run is
+children over them through `ctx.spawn` — the same Spawn seam the `spawn` tool uses, so each run is
 scoped to the research profile's tools — and collects their summaries into a workspace JSON file.
 It mirrors the browser pack's `wide_browse`, reusing the `research` profile rather than inventing a
 third one.
@@ -69,7 +69,7 @@ async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResul
             if output_schema.strip():
                 objective = f"{objective}\n\nReturn data matching this schema:\n{output_schema}"
             result = await ctx.spawn(
-                RESEARCH_PROFILE_NAME,
+                f"profile:{RESEARCH_PROFILE_NAME}",
                 {"objective": objective},
                 dedup_key=f"{ctx.idempotency_key}/{entity}",
             )

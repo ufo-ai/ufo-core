@@ -5,7 +5,7 @@ through.
 
 `serve` sources the tools into the turn's tool set and the profile into the SubagentRegistry, so an
 agent granted these tools can build and serve a site, and `build_website` (or the generic
-`spawn_subagent("website_building", ...)`) runs a site-building child scoped to them. Its prompt
+`spawn("website_building", ...)`) runs a site-building child scoped to them. Its prompt
 section teaches the main agent to serve, validate, and hand back the hosted link. The surface and
 the object kind are the two consumers of the one `hosted_site` registry the tools write: the frame
 gates each viewer on the site's visibility and lets its creator change it in place, and the kind

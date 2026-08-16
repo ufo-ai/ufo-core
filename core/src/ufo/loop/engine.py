@@ -43,6 +43,7 @@ from ufo.balance import balance_absent
 from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
 from ufo.connectors import ConnectorRegistry
+from ufo.contracts import Contract
 from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, SourceReader
@@ -749,10 +750,10 @@ class TranscriptRepair:
         """Prior transcript plus this turn's inbound, prefixed with the <context> tag on a member
         turn — the model has no clock, so the tag carries the admission moment, the sender, and the
         source the surface named, and it persists into the transcript so each past exchange keeps
-        its moment. A subagent's inbound stays the bare schema payload its profile
+        its moment. A spawned turn's inbound stays the bare payload its target's
         contract promises."""
         inbound = self.turn.inbound
-        if self.turn.subagent_profile is None:
+        if not self.turn.spawned:
             inbound = _context_tag(self.turn.id, self.turn.context, self.turn.created_at) + inbound
         return (*await self._prior_messages(), Message(role="user", content=inbound))
 
@@ -892,13 +893,16 @@ class TurnEngine:
     requestable_credentials: CredentialRequests | None = None
     memory: MemorySearch | None = None
     public_base_url: str | None = None
+    models: tuple[str, ...] = ()
+    """The model ids this deploy serves, handed to every tool call so a write that stores a
+    model can refuse an id the registry cannot answer."""
     pricing: Pricing = CORE_PRICING
     subagents: SubagentControl | None = None
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
     skills: SkillRegistry = CORE_SKILL_REGISTRY
     preload: tuple[LoadedSkill, ...] = ()
-    output_model: type[BaseModel] | None = None
+    output_model: Contract | None = None
     adoption: AdoptionReplay = field(default_factory=AdoptionReplay)
 
     def __post_init__(self) -> None:
@@ -922,8 +926,9 @@ class TurnEngine:
 
     @property
     def profile(self) -> str:
-        """This turn's `profile` telemetry dimension — its subagent profile, or `main`."""
-        return turn_profile(self.turn.subagent_profile)
+        """This turn's `profile` telemetry dimension — its subagent profile, `agent` for a spawned
+        agent child, or `main`."""
+        return turn_profile(self.turn.subagent_profile, self.turn.spawned)
 
     @property
     def cache_ttl(self) -> PromptCacheTtl:
@@ -987,6 +992,7 @@ class TurnEngine:
             find=rank_find,
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
+            models=self.models,
         )
         try:
             if not await self._mark_running():
@@ -1003,7 +1009,7 @@ class TurnEngine:
                     self.agent,
                     self.turn.speaker_member_id,
                 )
-            pending_guard = self.turn.subagent_profile is None
+            pending_guard = not self.turn.spawned
             if inbound.denied is not None:
                 denial = await self._commit(
                     "done",
@@ -1028,7 +1034,7 @@ class TurnEngine:
                 if inbound.injected:
                     system = f"{system}\n\n{inbound.injected}"
                 messages = await self._load_messages()
-                if self.turn.subagent_profile is None:
+                if not self.turn.spawned:
                     founding = messages[-1].content
                     if not isinstance(founding, str):
                         raise RuntimeError("founding inbound did not render as text")
@@ -1148,6 +1154,7 @@ class TurnEngine:
             connectors=self.connectors,
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
+            models=self.models,
         )
         try:
             if not await self._mark_running():
@@ -1309,12 +1316,14 @@ class TurnEngine:
         truncating exhausts its rounds and fails when the forced final round truncates too. Any
         other mid-stream model error fails immediately.
 
-        A subagent turn (`output_model` set) ends only through the finish tool: a lone finish call
+        A spawned turn (`output_model` set) ends only through the finish tool: a lone finish call
         whose args validate is the terminal, and its canonical JSON — never its narration — is
         the answer the parent validates. A finish call with a bad payload or sharing its round
         with other work comes back as an error result the model corrects; a turn that stops on
         plain prose instead is closed by one forced finish round, so the terminal is schema-shaped
-        by construction."""
+        by construction — unless the prose closes a pending `ask_user`, which ends the turn with
+        its structured question on the terminal instead: the need bubbles to the spawning
+        conversation, and the answer continues this child through its next turn."""
         nudged = False
         question: AskUserInput | None = None
         credential_request: CredentialRequest | None = None
@@ -1365,7 +1374,7 @@ class TurnEngine:
             await self._publish_cost(usage_events)
             if not tool_calls:
                 if text.strip():
-                    if self.output_model is not None:
+                    if self.output_model is not None and question is None:
                         messages = (
                             *messages,
                             Message(role="assistant", content=text),
@@ -1551,7 +1560,7 @@ class TurnEngine:
                         ),
                         *(
                             (tables.inbound_message.c.admission_source == INTERNAL_ADMISSION,)
-                            if self.turn.subagent_profile is not None
+                            if self.turn.spawned
                             else ()
                         ),
                     )

@@ -1,15 +1,15 @@
-"""The one core subagent profile — the default `spawn_subagent` dispatches when no extension names
+"""The one core subagent profile — the default `spawn` dispatches when no extension names
 a more specific one.
 
 `general_purpose` is the catch-all: a focused child given a self-contained task, working in the same
 workspace. Its tool subset is the working set minus the tools a
 subagent must not hold — it never asks the user (`ask_user`), never delegates further
-(`spawn_subagent`), never messages or cancels a sibling (`message_subagent`, `cancel_subagent`),
-and never gates a member grant (`connect_account`). Every
+(`spawn`), never messages or cancels a sibling (`message_spawn`, `cancel_spawn`),
+and never gates a member grant (`connect_account`). Its input and output are the same
+task/result contract an agent target defaults to. Every
 other profile is extension-provided through the manifest; this is the floor."""
 
-from pydantic import BaseModel, Field
-
+from ufo.contracts import ResultOutput, TaskInput
 from ufo.loop.prompts.render import SKILL_INDEX_SLOT
 from ufo.loop.subagents import SubagentProfile
 
@@ -36,18 +36,6 @@ GENERAL_PURPOSE_TOOLS = (
     "call_external_tool",
     "xlsx_repl",
 )
-
-
-class GeneralPurposeInput(BaseModel):
-    task: str = Field(
-        description="Freeform task governed by the shared delivery register.",
-    )
-
-
-class GeneralPurposeOutput(BaseModel):
-    result: str = Field(
-        description="Freeform result governed by the shared delivery register.",
-    )
 
 
 _PARAGRAPHS = (
@@ -85,8 +73,8 @@ GENERAL_PURPOSE_PROFILE = SubagentProfile(
     name=GENERAL_PURPOSE,
     prompt=GENERAL_PURPOSE_PROMPT,
     tool_names=GENERAL_PURPOSE_TOOLS,
-    input_model=GeneralPurposeInput,
-    output_model=GeneralPurposeOutput,
+    input_model=TaskInput,
+    output_model=ResultOutput,
 )
 
 CORE_SUBAGENT_PROFILES: tuple[SubagentProfile, ...] = (GENERAL_PURPOSE_PROFILE,)

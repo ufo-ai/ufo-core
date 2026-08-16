@@ -76,7 +76,7 @@ Provider image/content limits (Anthropic image-count trim) live in the provider 
 `TurnEngine` grows fields as its deps land: `memory: MemoryService` with a `_recall` step (U4),
 `spend: SpendEvaluator` per step (U7). Compaction (`loop/compaction.py`: window trigger, before/after
 records, live-window swap) and typed subagents (`loop/subagents.py`: profile registry, DBOS child
-spawn foreground/background, the `spawn_subagent` builtin) are code-authoritative.
+spawn foreground/background, the `spawn` builtin) are code-authoritative.
 
 ## tools/
 
@@ -95,7 +95,7 @@ class ToolContext(Protocol):    # capability-scoped view a handler gets
     async def spawn(self, profile: str, input: BaseModel, background: bool = False) -> SpawnResult: ...
 class ToolResult(BaseModel):    content: tuple[ContentBlock, ...]; is_error: bool = False
 ```
-Builtins: `bash read write edit memory_search memory_update ask_user spawn_subagent load_skill
+Builtins: `bash read write edit memory_search memory_update ask_user spawn load_skill
 share_file`. Registry rejects a second registration of an existing name.
 Every tool schema also accepts optional `requested_by`: a visible active inbound message ref.
 Dispatch strips it before validating the declared input and binds that message's member to the

@@ -1,6 +1,6 @@
-"""The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
+"""The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn,
 ask_user, request_credentials, load_skill, connect_account,
-cancel_subagent, message_subagent.
+cancel_spawn, message_spawn.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -14,7 +14,8 @@ produced workspace file in the blob store under `artifacts/<uuid>/` — on S3 th
 itself to a presigned PUT bound to the size and sha256 a preflight measured — and returns a
 TTL-token URL core's artifact route serves: the only path that hands a file back outside the
 sandbox, with no read cap and no whole-file buffer.
-`spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `ask_user` is
+`spawn` delegates a typed subtask to a child turn through `ctx.spawn` — a subagent profile or a
+workspace agent, one verb over both. `ask_user` is
 chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
 next message — no out-of-band prompt. `request_credentials` is its secret-collecting sibling: it
@@ -23,7 +24,7 @@ values privately and fulfillment lands them in the encrypted store, never the tr
 `load_skill` mounts a skill's `SKILL.md` and assets — and those of the whole chain it `depends` on —
 into the workspace, and returns each one's workflow followed by one tree of everything mounted; the
 system prompt's `<available_skills>` block is its complete per-turn index.
-`cancel_subagent` and `message_subagent` reach `ctx.subagents`, the same
+`cancel_spawn` and `message_spawn` reach `ctx.subagents`, the same
 Subagents workflow that backs `spawn`, to cancel a running child or queue it a follow-up message
 that runs as its next turn — scoped to the children this turn
 spawned."""
@@ -61,11 +62,12 @@ from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
 from ufo.skills.runtime import loaded_context, mount_skill
 from ufo.tools.context import (
+    AmbiguousSpawnTarget,
     ImageContent,
     TextContent,
     ToolContext,
     ToolResult,
-    UnknownSubagentProfile,
+    UnknownSpawnTarget,
 )
 from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 from ufo.tools.registry import ToolDef
@@ -349,13 +351,15 @@ class ShareFileInput(BaseModel):
     )
 
 
-class SpawnSubagentInput(BaseModel):
-    profile: str = Field(
-        description="The subagent profile to run — a registered profile name that fixes the "
-        "child's prompt, tool set, and input/output schema."
+class SpawnInput(BaseModel):
+    target: str = Field(
+        description="What to run — a subagent profile or a workspace agent, by name, each fixing "
+        "the child's prompt, tool set, and input/output contract. The spawn-catalog skill lists "
+        "every target and its payload. A name both kinds hold needs its qualified form "
+        "('profile:research' or 'agent:research')."
     )
     payload: dict[str, Any] = Field(
-        default_factory=dict, description="Arguments matching the profile's input schema."
+        default_factory=dict, description="Arguments matching the target's input schema."
     )
     background: bool = Field(
         default=False,
@@ -364,7 +368,7 @@ class SpawnSubagentInput(BaseModel):
     )
     user_description: str = Field(
         description="What you are handing off, in plain language for the activity timeline — the "
-        "work itself, never the profile name."
+        "work itself, never the target name."
     )
     name: str = Field(
         default="",
@@ -426,17 +430,17 @@ class AskUserCall(AskUserInput):
     )
 
 
-class CancelSubagentInput(BaseModel):
-    subagent_id: str = Field(description="The subagent ID to cancel.")
+class CancelSpawnInput(BaseModel):
+    spawn_id: str = Field(description="The spawn ID to cancel.")
     user_description: str = Field(
         description="Brief plain-language description shown in the activity timeline."
     )
 
 
-class MessageSubagentInput(BaseModel):
-    subagent_id: str = Field(description="The subagent ID to message.")
+class MessageSpawnInput(BaseModel):
+    spawn_id: str = Field(description="The spawn ID to message.")
     message: str = Field(
-        description="The follow-up message to deliver, run as the subagent's next turn."
+        description="The follow-up message to deliver, run as the spawn's next turn."
     )
     user_description: str = Field(
         description="Brief plain-language description shown in the activity timeline."
@@ -602,7 +606,7 @@ async def _record_exec_timeout(
         reached, vitals = False, ""
     log(
         "sandbox.exec_timeout",
-        profile=turn_profile(ctx.turn.subagent_profile),
+        profile=turn_profile(ctx.turn.subagent_profile, ctx.turn.spawned),
         applied_seconds=applied_s,
         requested_seconds=requested_s,
         command=command[:EXEC_TIMEOUT_COMMAND_MAX_CHARS],
@@ -979,21 +983,36 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     )
 
 
-async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult:
+async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
     try:
         result = await ctx.spawn(
-            args.profile,
+            args.target,
             args.payload,
             args.background,
             dedup_key=ctx.idempotency_key,
             delivers_result=args.background,
             name=args.name,
         )
-    except UnknownSubagentProfile as error:
+    except (AmbiguousSpawnTarget, UnknownSpawnTarget) as error:
         return ToolResult(content=(TextContent(text=str(error)),), is_error=True)
+    if result.terminal is not None and result.terminal.question is not None:
+        return ToolResult(
+            content=(
+                TextContent(
+                    text=json.dumps(
+                        {
+                            "spawn_id": str(result.turn_id),
+                            "status": "question",
+                            "question": result.terminal.question.model_dump(exclude_none=True),
+                        }
+                    )
+                ),
+            ),
+            untrusted=result.untrusted,
+        )
     if result.output is None:
         return ToolResult(
-            content=(TextContent(text=f"spawned {args.profile} subagent (turn {result.turn_id})"),)
+            content=(TextContent(text=f"spawned {args.target} (turn {result.turn_id})"),)
         )
     return ToolResult(
         content=(TextContent(text=result.output.model_dump_json()),), untrusted=result.untrusted
@@ -1114,36 +1133,37 @@ async def request_credentials_handler(
     )
 
 
-async def cancel_subagent_handler(ctx: ToolContext, args: CancelSubagentInput) -> ToolResult:
-    """Cancel a running subagent and report its current status; a subagent that already finished is
+async def cancel_spawn_handler(ctx: ToolContext, args: CancelSpawnInput) -> ToolResult:
+    """Cancel a running spawn and report its current status; a spawn that already finished is
     a no-op whose committed terminal stands. Refuses a turn id this turn did not spawn."""
     if ctx.subagents is None:
-        raise RuntimeError("subagent control is not available in this context")
-    status = await ctx.subagents.cancel(UUID(args.subagent_id))
+        raise RuntimeError("spawn control is not available in this context")
+    status = await ctx.subagents.cancel(UUID(args.spawn_id))
     return ToolResult(
         content=(
             TextContent(
-                text=json.dumps({"subagent_id": str(status.turn_id), "status": status.status})
+                text=json.dumps({"spawn_id": str(status.turn_id), "status": status.status})
             ),
         )
     )
 
 
-async def message_subagent_handler(ctx: ToolContext, args: MessageSubagentInput) -> ToolResult:
-    """Send a running background subagent a follow-up message; it runs as the subagent's next turn
-    against its accumulated context once the turn in flight ends, and the returned id addresses that
-    follow-up for a later wait. Refuses a turn id this turn did not spawn."""
+async def message_spawn_handler(ctx: ToolContext, args: MessageSpawnInput) -> ToolResult:
+    """Send a running or asking spawn a follow-up message; it runs as the spawn's next turn
+    against its accumulated context once the turn in flight ends, and the follow-up delivers its
+    result to this conversation when it finishes — which is how a bubbled question's answer comes
+    back. Refuses a turn id this turn did not spawn."""
     if ctx.subagents is None:
-        raise RuntimeError("subagent control is not available in this context")
+        raise RuntimeError("spawn control is not available in this context")
     if ctx.idempotency_key is None:
-        raise RuntimeError("message_subagent dispatched without its idempotency key")
+        raise RuntimeError("message_spawn dispatched without its idempotency key")
     status = await ctx.subagents.message(
-        UUID(args.subagent_id), args.message, dedup_key=ctx.idempotency_key
+        UUID(args.spawn_id), args.message, dedup_key=ctx.idempotency_key, delivers_result=True
     )
     return ToolResult(
         content=(
             TextContent(
-                text=json.dumps({"subagent_id": str(status.turn_id), "status": status.status})
+                text=json.dumps({"spawn_id": str(status.turn_id), "status": status.status})
             ),
         )
     )
@@ -1242,14 +1262,17 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         handler=share_file_handler,
     ),
     ToolDef(
-        name="spawn_subagent",
+        name="spawn",
         description=(
-            "Delegate a subtask to a named subagent profile. `payload` must match the profile's "
-            "input schema; foreground (default) returns the profile's validated JSON output, "
-            "background returns the child turn id at once."
+            "Delegate a subtask to a named target — a subagent profile or a workspace agent. "
+            "`payload` must match the target's input schema; foreground (default) returns the "
+            "target's validated JSON output, background returns the child turn id at once. A "
+            "spawn that ends asking returns its structured question with status 'question' — "
+            "answer it yourself with message_spawn, or ask the member with ask_user and relay "
+            "their answer."
         ),
-        input_model=SpawnSubagentInput,
-        handler=spawn_subagent_handler,
+        input_model=SpawnInput,
+        handler=spawn_handler,
         side_effecting=True,
         parallel_safe=True,
     ),
@@ -1308,24 +1331,24 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         handler=request_credentials_handler,
     ),
     ToolDef(
-        name="cancel_subagent",
+        name="cancel_spawn",
         description=(
-            "Cancel a running subagent. Sets its status to 'cancelled'. If the subagent has "
+            "Cancel a running spawn. Sets its status to 'cancelled'. If the spawn has "
             "already finished, this is a no-op and returns its current status."
         ),
-        input_model=CancelSubagentInput,
-        handler=cancel_subagent_handler,
+        input_model=CancelSpawnInput,
+        handler=cancel_spawn_handler,
         parallel_safe=True,
     ),
     ToolDef(
-        name="message_subagent",
+        name="message_spawn",
         description=(
-            "Send a follow-up message to a background subagent. It runs as the subagent's next "
-            "turn against its accumulated context once its current turn ends; the returned id "
-            "addresses that follow-up when its result is delivered."
+            "Send a follow-up message to a spawn — a background run, or one that ended asking a "
+            "question. It runs as the spawn's next turn against its accumulated context once its "
+            "current turn ends, and delivers its result to this conversation when it finishes."
         ),
-        input_model=MessageSubagentInput,
-        handler=message_subagent_handler,
+        input_model=MessageSpawnInput,
+        handler=message_spawn_handler,
         side_effecting=True,
         parallel_safe=True,
     ),

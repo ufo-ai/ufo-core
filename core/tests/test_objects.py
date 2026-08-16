@@ -42,7 +42,6 @@ from ufo.agents import (
     AGENT_KIND,
     AGENT_OBJECT,
     AGENT_PROMPT_REQUIRED,
-    AGENT_TURN_EDIT_GATE,
     AGENT_UNDELETABLE,
     AgentObjects,
     AgentSpec,
@@ -168,6 +167,19 @@ async def _member(workspace_id: UUID, created_at: datetime) -> UUID:
     return member_id
 
 
+# The ids these tests write. `claude-opus-42` is deliberately absent: it is the typo the
+# write must refuse.
+DEPLOY_MODELS = (
+    "auto",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "m2",
+    "m3",
+)
+
+
 def _tool_context(
     workspace_id: UUID,
     speaker_member_id: UUID | None = None,
@@ -195,6 +207,7 @@ def _tool_context(
         speaker_member_id=speaker_member_id,
         audience=conversation_audience(None),
         artifact_token_secret="",
+        models=DEPLOY_MODELS,
     )
 
 
@@ -894,6 +907,8 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
             "reasoning": "high",
             "sandbox_size": "small",
             "prompt": "be brief",
+            "input_schema": None,
+            "output_schema": None,
         }
         assert datetime.fromisoformat(fetched["created_at"]).replace(tzinfo=UTC) == datetime(
             2026, 7, 1, tzinfo=UTC
@@ -1139,22 +1154,18 @@ async def test_agent_kind_reports_the_model_an_auto_agent_actually_runs(db: None
     assert "auto" not in listing["objects"][0]["summary"]
 
 
-async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: None) -> None:
-    """Create is birth, not an edit: an admin on the main agent applies a name no agent holds
-    with a prompt and gets a fresh non-main row that copies nothing; without a prompt, from a
-    non-admin, from a child agent, or under a taken name the create refuses; delete stays
-    refused."""
+async def test_agent_kind_creates_owned_by_any_speaking_member_and_refuses_delete(
+    db: None,
+) -> None:
+    """Create is birth, not an edit: any speaking member applies a name no agent holds with a
+    prompt and gets a fresh non-main row that copies nothing and is stamped theirs; without a
+    prompt, without a speaker, or under a taken name the create refuses; delete stays refused."""
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        owner = await _member(workspace_id, ADMIN_CREATED_AT)
-        outsider = await _member(workspace_id, JOINER_CREATED_AT)
+        member = await _member(workspace_id, JOINER_CREATED_AT)
         agent_id = await _agent_row(workspace_id, is_main=True)
-        ctx = _tool_context(
-            workspace_id,
-            speaker_member_id=owner,
-            agent_id=agent_id,
-        )
+        ctx = _tool_context(workspace_id, speaker_member_id=member, agent_id=agent_id)
         apply_tool = tools["object_apply"]
 
         def create_input(name: str, spec: dict, *, create_only: bool = False) -> object:
@@ -1181,10 +1192,10 @@ async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: Non
                 ),
             )
         assert str(promptless.value) == AGENT_PROMPT_REQUIRED
-        member_ctx = _tool_context(workspace_id, speaker_member_id=outsider, agent_id=agent_id)
-        with pytest.raises(AdminRequired) as member_refusal:
-            await apply_tool.handler(member_ctx, create_input("second-agent", full))
-        assert str(member_refusal.value) == AGENT_CREATE_GATE
+        speakerless_ctx = _tool_context(workspace_id, speaker_member_id=None, agent_id=agent_id)
+        with pytest.raises(ValueError) as speakerless_refusal:
+            await apply_tool.handler(speakerless_ctx, create_input("second-agent", full))
+        assert str(speakerless_refusal.value) == AGENT_CREATE_GATE
         created = json.loads(
             await _text(
                 tools,
@@ -1208,10 +1219,7 @@ async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: Non
         assert row.internet_access_allowed is False
         assert row.reasoning == "low"
         assert row.is_main is False
-        child_ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=row.id)
-        with pytest.raises(AdminRequired) as child_refusal:
-            await apply_tool.handler(child_ctx, create_input("third-agent", full))
-        assert str(child_refusal.value) == AGENT_CREATE_GATE
+        assert row.owner_member_id == member
         with pytest.raises(ValueError) as guarded_duplicate:
             await apply_tool.handler(
                 ctx,
@@ -1248,7 +1256,10 @@ async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: Non
         assert str(delete_refusal.value) == AGENT_UNDELETABLE
 
 
-async def test_main_updates_agent_prompts_and_a_child_cannot(db: None) -> None:
+async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: None) -> None:
+    """One ownership rule for every write: the owner edits their agent — prompt and settings, from
+    any agent's lane, no intent required — an admin edits any agent, and an ownerless row (the
+    main agent, a provisioned agent) answers to admins alone."""
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
@@ -1256,14 +1267,15 @@ async def test_main_updates_agent_prompts_and_a_child_cannot(db: None) -> None:
         member = await _member(workspace_id, JOINER_CREATED_AT)
         main = await _agent_row(workspace_id, name="ufo", is_main=True)
         child = await _agent_row(workspace_id, name="research")
-        sibling = await _agent_row(workspace_id, name="exec")
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.agent)
                 .values(sandbox_size="large")
                 .where(tables.agent.c.id == child)
             )
-        main_ctx = _tool_context(workspace_id, speaker_member_id=admin, agent_id=main)
+        apply_tool = tools["object_apply"]
+        admin_ctx = _tool_context(workspace_id, speaker_member_id=admin, agent_id=main)
+        member_ctx = _tool_context(workspace_id, speaker_member_id=member, agent_id=main)
         manifest = yaml.safe_dump(
             {
                 "kind": AGENT_KIND,
@@ -1276,14 +1288,7 @@ async def test_main_updates_agent_prompts_and_a_child_cannot(db: None) -> None:
                 },
             }
         )
-        result = json.loads(
-            await _text(
-                tools,
-                "object_apply",
-                main_ctx,
-                manifest=manifest,
-            )
-        )
+        result = json.loads(await _text(tools, "object_apply", admin_ctx, manifest=manifest))
         assert result["result"] == "updated"
         async with workspace_tx() as connection:
             row = (
@@ -1295,120 +1300,103 @@ async def test_main_updates_agent_prompts_and_a_child_cannot(db: None) -> None:
             ).one()
         assert tuple(row) == ("review the exact request", "large")
 
-        apply_tool = tools["object_apply"]
         unauthorized = apply_tool.input_model.model_validate(
             {
                 "manifest": manifest.replace("review the exact request", "unauthorized rewrite"),
                 "user_description": OBJECT_NARRATION,
             }
         )
-        with pytest.raises(AdminRequired) as member_refusal:
-            await apply_tool.handler(
-                _tool_context(workspace_id, speaker_member_id=member, agent_id=main),
-                unauthorized,
-            )
-        assert str(member_refusal.value) == AGENT_EDIT_GATE
-        with pytest.raises(AdminRequired) as sibling_refusal:
-            await apply_tool.handler(
-                _tool_context(workspace_id, speaker_member_id=admin, agent_id=sibling),
-                unauthorized,
-            )
-        assert str(sibling_refusal.value) == AGENT_TURN_EDIT_GATE
-        main_current = yaml.safe_load(
-            await _text(tools, "object_get", main_ctx, kind=AGENT_KIND, name="ufo")
-        )
-        main_prompt_args = apply_tool.input_model.model_validate(
-            {
-                "manifest": yaml.safe_dump(
-                    {
-                        "kind": AGENT_KIND,
-                        "name": "ufo",
-                        "spec": {**main_current["spec"], "prompt": "rewrite yourself"},
-                    }
-                ),
-                "user_description": OBJECT_NARRATION,
-            }
-        )
-        await apply_tool.handler(main_ctx, main_prompt_args)
-        child_ctx = _tool_context(workspace_id, speaker_member_id=admin, agent_id=child)
-        child_args = apply_tool.input_model.model_validate(
-            {
-                "manifest": manifest.replace(
-                    "review the exact request", "review your own exact request"
-                ),
-                "user_description": OBJECT_NARRATION,
-            }
-        )
-        with pytest.raises(AdminRequired) as child_refusal:
-            await apply_tool.handler(child_ctx, child_args)
-        assert str(child_refusal.value) == AGENT_TURN_EDIT_GATE
-        async with workspace_tx() as connection:
-            prompts = {
-                row.id: row.prompt
-                for row in (
-                    await connection.execute(
-                        sa.select(tables.agent.c.id, tables.agent.c.prompt).where(
-                            tables.agent.c.id.in_((main, child))
-                        )
-                    )
-                )
-            }
-        assert prompts == {main: "rewrite yourself", child: "review the exact request"}
+        with pytest.raises(AdminRequired) as ownerless_refusal:
+            await apply_tool.handler(member_ctx, unauthorized)
+        assert str(ownerless_refusal.value) == AGENT_EDIT_GATE
 
-
-async def test_only_an_intent_updates_agent_settings(db: None) -> None:
-    workspace_id = await _workspace()
-    tools = _object_tools()
-    with ws(workspace_id):
-        admin = await _member(workspace_id, ADMIN_CREATED_AT)
-        main = await _agent_row(workspace_id, name="ufo", is_main=True)
-        child = await _agent_row(workspace_id, name="research")
-        sibling = await _agent_row(workspace_id, name="exec")
-
-        async def set_model(ctx: ToolContext, target: str, model: str) -> None:
+        owned = {
+            "model": "m2",
+            "internet_access_allowed": True,
+            "reasoning": "low",
+            "prompt": "triage tickets",
+        }
+        await _text(
+            tools,
+            "object_apply",
+            member_ctx,
+            manifest=yaml.safe_dump({"kind": AGENT_KIND, "name": "triage", "spec": owned}),
+        )
+        edited = json.loads(
             await _text(
                 tools,
                 "object_apply",
-                ctx,
+                member_ctx,
                 manifest=yaml.safe_dump(
                     {
                         "kind": AGENT_KIND,
-                        "name": target,
-                        "spec": {
-                            "model": model,
-                            "internet_access_allowed": True,
-                            "reasoning": "high",
-                        },
+                        "name": "triage",
+                        "spec": {**owned, "model": "m3", "prompt": "triage tickets faster"},
                     }
                 ),
             )
-
-        main_ctx = _tool_context(workspace_id, speaker_member_id=admin, agent_id=main)
-        child_ctx = _tool_context(workspace_id, speaker_member_id=admin, agent_id=child)
-        intent_ctx = replace(
-            child_ctx,
-            turn=child_ctx.turn.model_copy(update={"admission_source": "intent"}),
         )
-        await set_model(intent_ctx, "research", "portal-choice")
-        with pytest.raises(AdminRequired) as settings_refusal:
-            await set_model(main_ctx, "exec", "main-choice")
-        assert str(settings_refusal.value) == AGENT_TURN_EDIT_GATE
-        with pytest.raises(AdminRequired) as child_refusal:
-            await set_model(child_ctx, "research", "child-choice")
-        assert str(child_refusal.value) == AGENT_TURN_EDIT_GATE
-
-    async with workspace_tx() as connection:
-        models = {
-            row.id: row.model
-            for row in (
+        assert edited["result"] == "updated"
+        async with workspace_tx() as connection:
+            triage = (
                 await connection.execute(
-                    sa.select(tables.agent.c.id, tables.agent.c.model).where(
-                        tables.agent.c.id.in_((child, sibling))
+                    sa.select(
+                        tables.agent.c.prompt,
+                        tables.agent.c.model,
+                        tables.agent.c.owner_member_id,
+                    ).where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.name == "triage",
                     )
                 )
+            ).one()
+        assert tuple(triage) == ("triage tickets faster", "m3", member)
+
+        stranger_ctx = _tool_context(
+            workspace_id,
+            speaker_member_id=await _member(workspace_id, JOINER_CREATED_AT),
+            agent_id=main,
+        )
+        with pytest.raises(AdminRequired) as stranger_refusal:
+            await apply_tool.handler(
+                stranger_ctx,
+                apply_tool.input_model.model_validate(
+                    {
+                        "manifest": yaml.safe_dump(
+                            {
+                                "kind": AGENT_KIND,
+                                "name": "triage",
+                                "spec": {**owned, "prompt": "stolen"},
+                            }
+                        ),
+                        "user_description": OBJECT_NARRATION,
+                    }
+                ),
             )
-        }
-    assert models == {child: "portal-choice", sibling: "claude-opus-4-8"}
+        assert str(stranger_refusal.value) == AGENT_EDIT_GATE
+
+        with pytest.raises(AdminRequired) as main_refusal:
+            await apply_tool.handler(
+                member_ctx,
+                apply_tool.input_model.model_validate(
+                    {
+                        "manifest": yaml.safe_dump(
+                            {
+                                "kind": AGENT_KIND,
+                                "name": "ufo",
+                                "spec": {
+                                    "model": "claude-opus-4-8",
+                                    "internet_access_allowed": True,
+                                    "reasoning": "high",
+                                    "prompt": "rewrite the main agent",
+                                },
+                            }
+                        ),
+                        "user_description": OBJECT_NARRATION,
+                    }
+                ),
+            )
+        assert str(main_refusal.value) == AGENT_EDIT_GATE
 
 
 ARTIFACT_TEST_SECRET = "artifact-test-secret"
@@ -3280,3 +3268,32 @@ async def test_a_status_read_rechecks_visibility_and_reports_a_removed_row_as_ab
         else:
             with pytest.raises(UnknownObject, match="boot"):
                 await store.status(ctx, "boot", expected_generation=None)
+
+
+async def test_an_agent_write_refuses_a_model_the_deploy_does_not_serve(db: None) -> None:
+    """A stored model the registry cannot answer is read at every later turn's setup, before any
+    dispatch, so the agent fails on every surface and the repair turn fails the same way. The write
+    is the last place a member can still be told, so it refuses there — on create and on update."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        good = AgentSpec(
+            model="claude-opus-4-8",
+            internet_access_allowed=False,
+            reasoning="auto",
+            prompt="be brief",
+        )
+        typo = good.model_copy(update={"model": "claude-opus-42"})
+        with pytest.raises(ValueError, match="no model named"):
+            await AgentObjects().apply(ctx, "typo-agent", typo, None, expected_generation=None)
+        await AgentObjects().apply(ctx, "typo-agent", good, None, expected_generation=None)
+        with pytest.raises(ValueError, match="no model named"):
+            await AgentObjects().apply(ctx, "typo-agent", typo, good, expected_generation=None)
+        async with workspace_tx() as connection:
+            stored = (
+                await connection.execute(
+                    sa.select(tables.agent.c.model).where(tables.agent.c.name == "typo-agent")
+                )
+            ).scalar_one()
+        assert stored == "claude-opus-4-8"

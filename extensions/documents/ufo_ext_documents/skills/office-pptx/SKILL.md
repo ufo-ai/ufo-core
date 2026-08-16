@@ -157,7 +157,7 @@ pdftoppm -jpeg -r 150 output.pdf slide
 ls slide-*.jpg   # always ls — zero-padding varies by page count
 ```
 
-2. Call `spawn_subagent` with the slide images and this prompt (use actual filenames from `ls`):
+2. Call `spawn` with the slide images and this prompt (use actual filenames from `ls`):
 
 ```
 Visually inspect these slides. Assume there are issues — find them.

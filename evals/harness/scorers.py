@@ -354,11 +354,11 @@ def lane_scorer(acceptable: frozenset[str]) -> Grader:
     """Pass iff the first delegation succeeds in an acceptable subagent lane."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        first = next((call for call in output.calls if call.name == "spawn_subagent"), None)
+        first = next((call for call in output.calls if call.name == "spawn"), None)
         if first is None:
             return CapabilityVerdict(False, "did not delegate")
-        chosen_raw = first.input.get("subagent_type") or first.input.get("profile")
-        chosen = str(chosen_raw) if chosen_raw else "subagent"
+        chosen_raw = first.input.get("subagent_type") or first.input.get("target")
+        chosen = str(chosen_raw).removeprefix("profile:") if chosen_raw else "subagent"
         if not first.has_result:
             return CapabilityVerdict(False, f"{chosen!r} delegation produced no result")
         if first.is_error:
@@ -368,7 +368,7 @@ def lane_scorer(acceptable: frozenset[str]) -> Grader:
         return CapabilityVerdict(False, f"spawned {chosen!r}, expected one of {sorted(acceptable)}")
 
     return DescribedGrader(
-        f"the first spawn_subagent delegation succeeds in one of {sorted(acceptable)}", grade
+        f"the first spawn delegation succeeds in one of {sorted(acceptable)}", grade
     )
 
 

@@ -1,7 +1,7 @@
 """The coding pack: a software-engineering child turn over the core code builtins, the `coding`
 skill the agent loads on demand, and the `code-review` agent that puts both to work.
 
-`spawn_subagent("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
+`spawn("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
 tests, and reports a result. The profile names only tool names — bash/read/write/
 edit/glob/grep to work the code, load_skill to pull a workflow, and js_repl to exercise Node
 code — so the pack is self-contained and carries no cross-extension import. Nothing in it delivers

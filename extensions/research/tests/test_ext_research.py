@@ -394,7 +394,7 @@ def test_registers_the_research_and_deep_research_profiles() -> None:
     for tool_name in ("search_web", "search_vertical", "fetch_url"):
         assert tool_name in RESEARCH_TOOL_NAMES
     assert "ask_user" not in RESEARCH_TOOL_NAMES
-    assert "spawn_subagent" not in RESEARCH_TOOL_NAMES
+    assert "spawn" not in RESEARCH_TOOL_NAMES
 
 
 def test_deep_research_lifts_its_round_budget_above_the_default() -> None:

@@ -9,7 +9,7 @@ under `.skills/<name>/` when `load_skill` resolves it. `office-docx`, `office-pp
 loading their skills at runtime to annotate. `writing-drafts` covers the prose a document carries
 rather than its format, so it composes with whichever skill owns the artifact.
 
-`spawn_subagent("writing", {"objective": ...})` hands a draft or an edit to a child that already
+`spawn("writing", {"objective": ...})` hands a draft or an edit to a child that already
 holds `writing-drafts` — the pack ships the workflow and the profile that runs on it together."""
 
 from pathlib import Path

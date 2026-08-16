@@ -27,7 +27,7 @@ Sequence every spawn that uses one checkout. The cloning child finishes before a
 
 For fan-out, the cloning child only creates and verifies the canonical checkout. End its setup with `verify the checkout, report the checked-out branch as the base, then finish without task work.` After it finishes, start every worker in local checkout mode at a distinct path. Use the branch the setup child reports as `<base>`. For one task, the cloning child may work in the checkout itself.
 
-Before calling `spawn_subagent(profile="coding", ...)`, choose exactly one setup mode and state it at the start of the objective:
+Before calling `spawn(target="coding", ...)`, choose exactly one setup mode and state it at the start of the objective:
 
 - **Clone a repo:** Use for the first spawn of the turn that needs the repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, then work inside it.` For fan-out, use: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, verify the checkout, report the checked-out branch as the base, then finish without task work.` Name that path and reuse it below. A public repository clones with no connection; a private one needs the workspace connected to GitHub (below).
 
@@ -84,12 +84,12 @@ API write uses either the installed App assignment above or the GitHub connector
 - "Fix the failing tests in this codebase"
 - "Implement this Linear/Jira ticket"
 - "Find the bug causing timeouts and fix it"
-  → Find the repo URL and gather requirements yourself, then delegate with `spawn_subagent(profile="coding", ...)` and the repo URL in the objective. Include ticket details and any relevant context.
+  → Find the repo URL and gather requirements yourself, then delegate with `spawn(target="coding", ...)` and the repo URL in the objective. Include ticket details and any relevant context.
 
-**Example spawn_subagent call (coding):**
+**Example spawn call (coding):**
 
 ```
-spawn_subagent(
+spawn(
   profile="coding",
   payload={
     "objective": "Repository setup: clone https://github.com/acme/cobbledb into /workspace/acme-cobbledb with git, then work inside it.\n\nRust codebase. Ticket LIN-1234: Add cursor-based pagination to the /query endpoint. Requirements: support `cursor` and `limit` query params, default limit 50, max 200. Write tests."

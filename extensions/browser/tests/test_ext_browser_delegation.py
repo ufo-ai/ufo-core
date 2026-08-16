@@ -160,7 +160,7 @@ async def test_browser_task_spawns_the_browser_profile_and_awaits_its_terminal(
     result = await tool.handler(ctx, args)
     assert spawn.spawned == [
         (
-            "browser",
+            "profile:browser",
             {"task": "list open roles", "url": "https://jobs.example.com", "task_name": "jobs"},
             True,
             "turn-1/browser_task/call-7",

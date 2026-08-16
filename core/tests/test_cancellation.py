@@ -200,7 +200,7 @@ async def test_the_cancelled_terminal_is_counted_once_by_the_call_that_wrote_it(
     """The turn's own execution never writes a cancelled row, and a turn cancelled before one
     started has no execution at all, so this is where a cancelled turn joins the terminal counter —
     once, from the call that made the transition. The count carries the cancelled turn's own
-    profile: `cancel_subagent` reaches this primitive with a subagent's turn, so a cancel storm
+    profile: `cancel_spawn` reaches this primitive with a subagent's turn, so a cancel storm
     inside one profile stays readable as that profile's rather than the main agent's."""
     reader = _metric_reader(monkeypatch)
     workspace_id, agent_id = await _workspace_agent()

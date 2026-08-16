@@ -640,9 +640,9 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     belongs to none of them. Each profile rides as its summary, the boot read narrowed to what a
     list shows: its own page carries the instructions and the work it did. `agents` stays the set a
     member may open and message, so the roster never reaches the chat paths. `new_agent` is the
-    create form's source — the kind's spec schema and the deploy's model ids — and is null for
-    everyone but a workspace admin, the only member the `agent` kind admits a create from, so the
-    portal draws that act exactly where the lane would honour it."""
+    create form's source — the kind's spec schema and the deploy's model ids — for every signed-in
+    member, because the `agent` kind admits a create from any speaking member and stamps them the
+    owner."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -668,11 +668,10 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 for agent in audience.agents
             ],
             "subagents": [subagent.summary().model_dump(mode="json") for subagent in ctx.subagents],
-            "new_agent": (
-                {"spec_schema": agent_create_schema(ctx.sandbox_sizes), "models": list(ctx.models)}
-                if audience.admin
-                else None
-            ),
+            "new_agent": {
+                "spec_schema": agent_create_schema(ctx.sandbox_sizes),
+                "models": list(ctx.models),
+            },
         }
     )
 
@@ -941,9 +940,12 @@ def _tool_event(block: ToolUseBlock) -> dict[str, str]:
 
 
 class SubagentNode(TypedDict):
-    """One subagent run as the conversation shows it: the display name its spawn gave it (empty
-    when it gave none — the row states the profile then), the profile and the conversation that
-    holds the whole record, the work it did, what it answered, and the runs it spawned in turn."""
+    """One spawned run as the conversation shows it: the display name its spawn gave it (empty
+    when it gave none — the row states the target then), the qualified target (`agent:<name>` for
+    an agent child, the bare profile otherwise), the conversation that holds the whole record,
+    the work it did, what it answered, and the runs it spawned in turn. A profile run links to
+    its own conversation page; an agent run has no such page — the portal derives that from the
+    target's prefix, shows its work inline, and mints no link."""
 
     profile: str
     name: str
@@ -1042,15 +1044,21 @@ def _run_answer(answer: str) -> str:
 async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> SubagentRuns:
     """The spawned turns as a tree under the turns that spawned them, each node carrying the run's
     own work. `turns` is the transitive descendant set, so a subagent that spawned its own nests
-    again rather than being lost beside its parent. The work is read from each run's conversation,
+    again rather than being lost beside its parent. An agent child carries no profile, so it is
+    named by its qualified target instead. The work is read from each run's conversation,
     bounded and concurrently, so a conversation that spawned hundreds still answers in one round
     trip; a run past the bound, and one still going, carries the conversation link that holds it."""
     spawned: list[Turn] = []
     nodes: dict[UUID, SubagentNode] = {}
+    agent_names: dict[UUID, str] | None = None
     for turn in turns:
-        profile = turn.subagent_profile
-        if turn.parent_turn_id is None or profile is None:
+        if turn.parent_turn_id is None:
             continue
+        profile = turn.subagent_profile
+        if profile is None:
+            if agent_names is None:
+                agent_names = {agent.id: agent.name for agent in await ctx.list_agents()}
+            profile = f"agent:{agent_names.get(turn.agent_id, '')}"
         spawned.append(turn)
         nodes[turn.id] = SubagentNode(
             profile=profile,

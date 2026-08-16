@@ -71,7 +71,7 @@ REPO_CLONE_SOURCES = (
 SHELL_SEPARATORS = re.compile(r"&&|\|\||;|\n")
 ROUTE_ARGUMENTS = ("command", "code", "url", "tool_name")
 FETCH_VERB = "fetch"
-SPAWN_TOOL = "spawn_subagent"
+SPAWN_TOOL = "spawn"
 DIFF_HEADER = "diff --git a/"
 PARENT_FORBIDDEN_TOOLS = ("bash", "edit", "grep", "glob")
 JUDGE_MODEL = "gpt-5.4-mini"
@@ -288,7 +288,9 @@ class LaneAndRoute:
         if not spawns:
             return CapabilityVerdict(False, "did not delegate")
         lanes = tuple(
-            str(call.input.get("profile") or call.input.get("subagent_type") or "subagent")
+            str(
+                call.input.get("target") or call.input.get("subagent_type") or "subagent"
+            ).removeprefix("profile:")
             for call in spawns
         )
         if CODING_LANE not in lanes:

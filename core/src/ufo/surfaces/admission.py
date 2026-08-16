@@ -54,12 +54,14 @@ from ufo.o11y import current_traceparent, log, span
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
+    DELIVERY_PENDING,
     INTENT_ADMISSION,
     INTERNAL_ADMISSION,
     MEMBER_ADMISSION,
     NON_TERMINAL_STATUSES,
     PARKED,
     SCHEDULED_ADMISSION,
+    SUBAGENT_SURFACE,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     WRITEBACK_PENDING,
@@ -195,6 +197,12 @@ class Admission:
         already held — a subagent hands its result back to the conversation that delegated it, and
         a turn woken to read that result must not be able to do less than the turn that spawned it,
         or the shortfall surfaces later as a refusal no member can place.
+
+        A turn founded on a spawned conversation inherits that conversation's spawn identity from
+        its founding turn — parent linkage, profile, display name, and whether it delivers — so a
+        child woken by its own grandchild's result continues under the same contract and its
+        answer still reaches the conversation that spawned it, never a contractless turn whose
+        work reaches nobody.
 
         `as_scheduled` gives the turn a scheduled fire's meaning without a scheduled row: it founds
         its own turn beside a live one instead of folding, and it is seat-gated on the member it
@@ -531,6 +539,21 @@ class Admission:
                         )
                     )
                 ).scalar_one()
+                spawned_identity = None
+                if conversation.surface == SUBAGENT_SURFACE and seq > 1:
+                    spawned_identity = (
+                        await connection.execute(
+                            sa.select(
+                                tables.turn.c.parent_turn_id,
+                                tables.turn.c.subagent_profile,
+                                tables.turn.c.subagent_name,
+                                tables.turn.c.result_delivery,
+                            ).where(
+                                tables.turn.c.conversation_id == conversation_id,
+                                tables.turn.c.seq == 1,
+                            )
+                        )
+                    ).one()
                 turn_id = turn_id_for(workspace_id, conversation_id, seq)
                 turn_seq = seq
                 opened_run = True
@@ -575,6 +598,21 @@ class Admission:
                         admission_source=admission_source,
                         speaker_member_id=speaker_member_id,
                         on_behalf_of_member_id=on_behalf_of_member_id,
+                        parent_turn_id=(
+                            None if spawned_identity is None else spawned_identity.parent_turn_id
+                        ),
+                        subagent_profile=(
+                            None if spawned_identity is None else spawned_identity.subagent_profile
+                        ),
+                        subagent_name=(
+                            None if spawned_identity is None else spawned_identity.subagent_name
+                        ),
+                        result_delivery=(
+                            DELIVERY_PENDING
+                            if spawned_identity is not None
+                            and spawned_identity.result_delivery is not None
+                            else None
+                        ),
                         context=None if context is None else context.model_dump(mode="json"),
                         terminal=None if terminal is None else terminal.model_dump(mode="json"),
                         idempotency_key=idempotency_key,

@@ -79,7 +79,7 @@ async def test_writing_cases_require_the_profile_and_semantic_judge() -> None:
     scorer = CASES[0].grader
     no_delegation = await scorer(CapabilityOutput(GOOD_TWEETS, ()))
     delegated = await scorer(
-        CapabilityOutput(GOOD_TWEETS, (_call("spawn_subagent", {"profile": "writing"}),))
+        CapabilityOutput(GOOD_TWEETS, (_call("spawn", {"target": "writing"}),))
     )
 
     assert not no_delegation.passed

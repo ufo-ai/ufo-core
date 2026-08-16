@@ -73,7 +73,7 @@ services: SQLite + filesystem blobs + in-process hub.
 
 - `loop/compaction.py` (window trigger, before/after records), `loop/subagents.py` (profiles,
   DBOS child spawn, foreground/background), skills (`load_skill`, packs layout `packs/<name>/skills/…`),
-  builtins `ask_user`, `spawn_subagent`, `share_file` (TTL token URL).
+  builtins `ask_user`, `spawn`, `share_file` (TTL token URL).
 - Core's skill — `sandbox` — lands here (workflow guidance for core builtins only; the
   skill-ships-with-what-it-teaches rule is in spec.md).
 - **Proof**: a conversation exceeding the window compacts and later turns still recall pre-compaction

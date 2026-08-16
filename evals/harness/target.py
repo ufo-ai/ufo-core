@@ -368,9 +368,9 @@ class InProcessTarget:
         self, turn_id: UUID, output: CapabilityOutput
     ) -> tuple[CapabilityOutput, tuple[UUID, ...], str]:
         """Append every terminal child conversation's calls and tool errors to the scored output —
-        a delegated capability (browser_task, wide_browse, spawn_subagent) proves itself by the
+        a delegated capability (browser_task, wide_browse, spawn) proves itself by the
         raw calls its children actually dispatched, never by the wrapper's summary, and a child's
-        errors keep web-infra exclusion truthful. Each conversation reads once (a message_subagent
+        errors keep web-infra exclusion truthful. Each conversation reads once (a message_spawn
         follow-up adds a turn to its child's conversation, not a transcript); a conversation with
         no terminal turn never informed the parent's answer and is skipped; a terminal one whose
         transcript never appears or does not decode is an infrastructure failure (third return),

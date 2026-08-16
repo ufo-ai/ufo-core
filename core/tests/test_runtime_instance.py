@@ -177,7 +177,13 @@ async def _agent(workspace_id: UUID) -> UUID:
     return agent_id
 
 
-async def _turn(workspace_id: UUID, agent_id: UUID, status: str, parent_id: UUID | None) -> UUID:
+async def _turn(
+    workspace_id: UUID,
+    agent_id: UUID,
+    status: str,
+    parent_id: UUID | None,
+    profile: str | None = "general_purpose",
+) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     terminal = None if status in ("queued", "running", "parked") else TerminalFrame(status=status)
     async with workspace_tx() as connection:
@@ -201,6 +207,7 @@ async def _turn(workspace_id: UUID, agent_id: UUID, status: str, parent_id: UUID
                 agent_id=agent_id,
                 seq=1,
                 status=status,
+                subagent_profile=None if parent_id is None else profile,
                 inbound="x",
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 parent_turn_id=parent_id,
@@ -259,3 +266,27 @@ async def test_cancel_reconciler_reaches_a_live_turn_under_a_done_intermediate(d
     assert await _turn_status(great_grandchild) == "cancelled"
     assert await _turn_status(done_child) == "done"
     assert set(client.cancelled) == {str(grandchild), str(great_grandchild)}
+
+
+async def test_cancel_never_crosses_an_agent_child_boundary(db: None) -> None:
+    """A spawned agent is an independent peer: cancelling its spawner leaves it and its own
+    subtree running, while cancelling the agent child itself still reaps what it spawned."""
+    workspace_id = await _workspace()
+    agent_id = await _agent(workspace_id)
+    cancelled_spawner = await _turn(workspace_id, agent_id, "cancelled", None)
+    peer = await _turn(workspace_id, agent_id, "running", cancelled_spawner, profile=None)
+    peer_child = await _turn(workspace_id, agent_id, "running", peer)
+    client = _RecordingClient()
+    await CancelReconciler(client=client).sweep()
+    assert await _turn_status(peer) == "running"
+    assert await _turn_status(peer_child) == "running"
+    assert client.cancelled == []
+
+    cancelled_peer = await _turn(
+        workspace_id, agent_id, "cancelled", cancelled_spawner, profile=None
+    )
+    tied = await _turn(workspace_id, agent_id, "running", cancelled_peer)
+    await CancelReconciler(client=client).sweep()
+    assert await _turn_status(tied) == "cancelled"
+    assert await _turn_status(peer) == "running"
+    assert set(client.cancelled) == {str(tied)}

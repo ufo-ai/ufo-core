@@ -415,11 +415,12 @@ async def submit_intent(
 def agent_create_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
     """The create form's field source: the whole writable spec, with `prompt` among the required
     fields. The kind takes the initial prompt at birth and refuses a create without one, so the
-    form states the requirement exactly where the kind enforces it. `sandbox_size` renders only
+    form states the requirement exactly where the kind enforces it. The I/O contract fields stay
+    with `object_apply`, where a raw schema is typed, not formed. `sandbox_size` renders only
     where the deploy's carrier offers sizes — on a single-shape backend the field would change
     nothing a member can observe, so the form never states the choice."""
     schema = AgentSpec.model_json_schema()
-    hidden = set() if sandbox_sizes else {"sandbox_size"}
+    hidden = {"input_schema", "output_schema"} | (set() if sandbox_sizes else {"sandbox_size"})
     schema["properties"] = {
         key: value for key, value in schema["properties"].items() if key not in hidden
     }
@@ -430,7 +431,9 @@ def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
     """The settings form's field source: the writable spec schema minus `prompt`, which the
     overview renders in its own multiline control."""
     schema = AgentSpec.model_json_schema()
-    hidden = {"prompt"} if sandbox_sizes else {"prompt", "sandbox_size"}
+    hidden = {"input_schema", "output_schema", "prompt"} | (
+        set() if sandbox_sizes else {"sandbox_size"}
+    )
     schema["properties"] = {
         key: value for key, value in schema["properties"].items() if key not in hidden
     }

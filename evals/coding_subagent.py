@@ -24,10 +24,12 @@ def github_app_api_scorer() -> Grader:
             if call.name == "load_skill" and call.succeeded and call.input == {"name": "coding"}:
                 loaded = True
                 continue
-            if not loaded or call.name != "spawn_subagent" or not call.succeeded:
+            if not loaded or call.name != "spawn" or not call.succeeded:
                 continue
             match call.input:
-                case {"profile": "coding", "payload": {"objective": str(objective)}}:
+                case {"target": str(target), "payload": {"objective": str(objective)}} if (
+                    target.removeprefix("profile:") == "coding"
+                ):
                     if GITHUB_APP_API_COMMAND in objective:
                         return CapabilityVerdict(True, "loaded coding and delegated App API auth")
                 case _:
@@ -45,14 +47,16 @@ def parallel_checkout_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         spawns: list[tuple[int, str, bool]] = []
         for index, call in enumerate(output.calls):
-            if call.name != "spawn_subagent" or not call.succeeded:
+            if call.name != "spawn" or not call.succeeded:
                 continue
             match call.input:
-                case {"profile": "coding", "payload": {"objective": str(objective)}, **rest}:
+                case {"target": str(target), "payload": {"objective": str(objective)}, **rest} if (
+                    target.removeprefix("profile:") == "coding"
+                ):
                     flag = rest.get("background", False)
                     background = BACKGROUND_FLAG.validate_python(flag)
                     spawns.append((index, objective, background))
-                case {"profile": "coding"}:
+                case {"target": str(target)} if target.removeprefix("profile:") == "coding":
                     return CapabilityVerdict(False, "coding spawn has no objective")
                 case _:
                     continue

@@ -136,7 +136,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import (
-    SUBAGENT_RESULT_KEY_PREFIX,
+    SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     AskQuestion,
     AskUserInput,
@@ -1745,7 +1745,7 @@ async def test_a_pending_subagent_result_is_no_member_bubble(
                 seq=1,
                 body="<subagent_result>the child answered</subagent_result>",
                 admission_source="internal",
-                idempotency_key=f"{SUBAGENT_RESULT_KEY_PREFIX}{uuid4()}",
+                idempotency_key=f"{SPAWN_RESULT_KEY_PREFIX}{uuid4()}",
                 admitted_turn_id=running,
                 created_at=sa.func.now(),
             )
@@ -1815,7 +1815,9 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert index.status_code == 200
-    assert index.json() == {
+    body = index.json()
+    assert body["new_agent"]["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
+    assert {key: value for key, value in body.items() if key != "new_agent"} == {
         "member": {"email": "outsider@example.com", "admin": False},
         "agents": [
             {"id": str(agent_id), "name": "assistant", "main": True, "model": "claude-opus-4-8"}
@@ -1824,7 +1826,6 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             {"name": "deep_research", "model": "claude-opus-4-8"},
             {"name": "general_purpose", "model": None},
         ],
-        "new_agent": None,
     }
     empty_rail = await client.get("/surface/web/api/chats", headers=cookie)
     assert empty_rail.status_code == 200
@@ -1934,13 +1935,13 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
     assert reachable.text == "conversation is required"
 
 
-async def test_boot_read_carries_the_create_form_for_an_admin_and_for_nobody_else(
+async def test_boot_read_carries_the_create_form_for_every_member(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The Agents screen draws its create act from the boot read: the `agent` kind's own spec
     schema, `prompt` among the required fields because the kind refuses a create without one, and
-    the deploy's model ids for the one field the schema cannot enumerate. A member the kind admits
-    no create from is sent none of it, so the act is drawn exactly where the lane honours it."""
+    the deploy's model ids for the one field the schema cannot enumerate. Every signed-in member
+    gets it, because any speaking member may create an agent and owns what they created."""
     client, workspace_id, _agent_id = web
     _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
@@ -1974,7 +1975,7 @@ async def test_boot_read_carries_the_create_form_for_an_admin_and_for_nobody_els
     member_view = await client.get(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
-    assert member_view.json()["new_agent"] is None
+    assert member_view.json()["new_agent"] == form
 
 
 async def _seed_connection(
@@ -7310,6 +7311,8 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
         "model": "claude-opus-4-8",
         "internet_access_allowed": True,
         "reasoning": "high",
+        "input_schema": None,
+        "output_schema": None,
     }
     assert set(data["spec_schema"]["properties"]) == {
         "model",
@@ -7723,13 +7726,13 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """The administration view's create rides the same lane as every panel mutation: an admin's
-    create intent on the main agent's lane lands a fresh non-main row with exactly the submitted
-    configuration. A taken name refuses without changing its row. Without a prompt or from a
-    non-admin, the kind refuses and nothing is created."""
+    """The administration view's create rides the same lane as every panel mutation: a create
+    intent lands a fresh non-main row with exactly the submitted configuration, stamped with the
+    submitting member as owner. A taken name refuses without changing its row; without a prompt
+    the kind refuses and nothing is created."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    member_id, member_token = await _seed_member(workspace_id, "member@example.com")
     envelope = {
         "verb": "apply",
         "create_only": True,
@@ -7809,26 +7812,27 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
     )
     assert promptless.json()["applied"] is False
     assert "requires a prompt" in promptless.json()["message"]
-    outsider = await client.post(
+    member_created = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={**envelope, "name": "third"},
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
-    assert outsider.json()["applied"] is False
-    assert "admin" in outsider.json()["message"]
+    assert member_created.json()["applied"] is True
     async with workspace_tx() as connection:
-        names = (
-            (
-                await connection.execute(
-                    sa.select(tables.agent.c.name).where(
-                        tables.agent.c.workspace_id == workspace_id
-                    )
+        rows = (
+            await connection.execute(
+                sa.select(tables.agent.c.name, tables.agent.c.owner_member_id).where(
+                    tables.agent.c.workspace_id == workspace_id
                 )
             )
-            .scalars()
-            .all()
-        )
-    assert sorted(names) == ["assistant", "research"]
+        ).all()
+    owners = {row.name: row.owner_member_id for row in rows}
+    assert sorted(owners) == ["assistant", "research", "third"]
+    assert owners["third"] == member_id
+    owner_view = await client.get(
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
+    )
+    assert "third" in [agent["name"] for agent in owner_view.json()["agents"]]
 
 
 async def test_member_seat_and_role_ride_the_intent_lane(

@@ -246,65 +246,65 @@ class StandInModel:
         nudged = contents[-1] == EMPTY_RESPONSE_NUDGE
         inbound = contents[-2] if nudged else contents[-1]
         if isinstance(inbound, str) and "spawn-subagent" in inbound:
-            yield ToolCallStart(id="s1", name="spawn_subagent")
+            yield ToolCallStart(id="s1", name="spawn")
             yield ToolCallDelta(
                 id="s1",
-                partial_json='{"profile": "roundtrip", "payload": {"value": 21}, '
+                partial_json='{"target": "roundtrip", "payload": {"value": 21}, '
                 '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-exhaust" in inbound:
-            yield ToolCallStart(id="s2", name="spawn_subagent")
+            yield ToolCallStart(id="s2", name="spawn")
             yield ToolCallDelta(
                 id="s2",
-                partial_json='{"profile": "exhaust", "payload": {"value": 99}, '
+                partial_json='{"target": "exhaust", "payload": {"value": 99}, '
                 '"user_description": "handing off the research", "name": "Fixture check"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-pinned" in inbound:
-            yield ToolCallStart(id="s3", name="spawn_subagent")
+            yield ToolCallStart(id="s3", name="spawn")
             yield ToolCallDelta(
                 id="s3",
-                partial_json='{"profile": "pinned", "payload": {"value": 7}, '
+                partial_json='{"target": "pinned", "payload": {"value": 7}, '
                 '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-extended" in inbound:
-            yield ToolCallStart(id="s4", name="spawn_subagent")
+            yield ToolCallStart(id="s4", name="spawn")
             yield ToolCallDelta(
                 id="s4",
-                partial_json='{"profile": "extend", "payload": '
+                partial_json='{"target": "extend", "payload": '
                 '{"value": 42, "extended_context": true}, '
                 '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-capped" in inbound:
-            yield ToolCallStart(id="s5", name="spawn_subagent")
+            yield ToolCallStart(id="s5", name="spawn")
             yield ToolCallDelta(
                 id="s5",
-                partial_json='{"profile": "extend", "payload": {"value": 42}, '
+                partial_json='{"target": "extend", "payload": {"value": 42}, '
                 '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-background" in inbound:
-            yield ToolCallStart(id="s7", name="spawn_subagent")
+            yield ToolCallStart(id="s7", name="spawn")
             yield ToolCallDelta(
                 id="s7",
-                partial_json='{"profile": "roundtrip", "payload": {"value": 21}, '
+                partial_json='{"target": "roundtrip", "payload": {"value": 21}, '
                 '"background": true, "user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-preload" in inbound:
-            yield ToolCallStart(id="s6", name="spawn_subagent")
+            yield ToolCallStart(id="s6", name="spawn")
             yield ToolCallDelta(
                 id="s6",
-                partial_json='{"profile": "preload", "payload": '
+                partial_json='{"target": "preload", "payload": '
                 '{"value": 5, "preload_skills": ["sandbox"]}, '
                 '"user_description": "handing off the research"}',
             )
@@ -1229,7 +1229,7 @@ async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(
     db: None, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
 ) -> None:
     """The latency record is the driver reading DBOS's durable step log: the evaluated turn's rounds
-    and its `spawn_subagent` dispatch, the delegated child's own rounds, and each turn's spend from
+    and its `spawn` dispatch, the delegated child's own rounds, and each turn's spend from
     its terminal row. The step names and the tool-use id on a dispatch step's memoized output are
     the engine's, so this is what pins `_stream_once`, `_dispatch_step` and the call-id join."""
     _, _, blob = dbos_runtime
@@ -1300,8 +1300,8 @@ async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(
     assert evaluated.tool_calls == 1
     assert evaluated.tool_call_ms > 0
     assert evaluated.span_ms >= evaluated.tool_call_ms
-    assert "spawn_subagent" in [step.name for step in evaluated.steps]
-    assert "spawn_subagent" in [step.name for step in timing.slowest]
+    assert "spawn" in [step.name for step in evaluated.steps]
+    assert "spawn" in [step.name for step in timing.slowest]
     assert UNNAMED_TOOL not in [step.name for step in timing.slowest]
 
 
@@ -1556,6 +1556,8 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: 
         seq=parent_row.seq,
         status=parent_row.status,
         inbound=parent_row.inbound,
+        speaker_member_id=parent_row.speaker_member_id,
+        on_behalf_of_member_id=parent_row.on_behalf_of_member_id,
         created_at=parent_row.created_at,
         terminal=TerminalFrame.model_validate(parent_row.terminal),
     )
@@ -1594,7 +1596,7 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: 
         woken = await _woken()
     assert [row.seq for row in woken] == [2]
     assert woken[0].admission_source == "internal"
-    assert f'subagent_id="{child_id}"' in woken[0].inbound
+    assert f'spawn_id="{child_id}"' in woken[0].inbound
     assert '{"echoed":21}' in woken[0].inbound
 
 
@@ -1907,7 +1909,7 @@ async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Tur
 async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
     surface: Turns,
 ) -> None:
-    """`message_subagent` stores free text as the follow-up turn's inbound — only the child's
+    """`message_spawn` stores free text as the follow-up turn's inbound — only the child's
     spawn turn (seq 1) carries the JSON payload, so the follow-up must run to its own terminal
     without parsing one."""
     runtime = loop_queue._runtime
@@ -1935,6 +1937,8 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         seq=parent_row.seq,
         status=parent_row.status,
         inbound=parent_row.inbound,
+        speaker_member_id=parent_row.speaker_member_id,
+        on_behalf_of_member_id=parent_row.on_behalf_of_member_id,
         created_at=parent_row.created_at,
         terminal=TerminalFrame.model_validate(parent_row.terminal),
     )
@@ -1945,7 +1949,7 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         audience=conversation_audience(None),
     )
     queued = await subagents.message(
-        child_id, FOLLOWUP_INBOUND, dedup_key="turn-1/message_subagent/call-1"
+        child_id, FOLLOWUP_INBOUND, dedup_key="turn-1/message_spawn/call-1"
     )
     (followup,) = await subagents.wait((queued.turn_id,))
     assert followup.status == "done"
@@ -1960,9 +1964,9 @@ async def test_profile_only_tools_stay_out_of_main_agent_turns(surface: Turns) -
     parent = await surface.admit(seed, "spawn-subagent")
     _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
-    main_offers = [names for names in SEEN_TOOLS if "spawn_subagent" in names]
+    main_offers = [names for names in SEEN_TOOLS if "spawn" in names]
     child_offers = [names for names in SEEN_TOOLS if "hidden_probe" in names]
     assert main_offers
     assert all("hidden_probe" not in names for names in main_offers)
     assert child_offers
-    assert all("spawn_subagent" not in names for names in child_offers)
+    assert all("spawn" not in names for names in child_offers)

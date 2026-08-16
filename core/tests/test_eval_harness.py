@@ -2500,8 +2500,8 @@ async def test_required_tools_scorer_rejects_error_and_missing_result() -> None:
 
 async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
     unrelated = ToolInvocation(
-        "spawn_subagent",
-        {"profile": "general_purpose", "payload": {"task": "Find the repository URL."}},
+        "spawn",
+        {"target": "general_purpose", "payload": {"task": "Find the repository URL."}},
         "done",
         True,
     )
@@ -2511,16 +2511,16 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
         "as the base, then finish without task work."
     )
     setup = ToolInvocation(
-        "spawn_subagent",
-        {"profile": "coding", "payload": {"objective": setup_objective}},
+        "spawn",
+        {"target": "coding", "payload": {"objective": setup_objective}},
         "done",
         True,
     )
     worker = "Repository setup: copy the committed tree at /workspace/hello-canonical to "
     first = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "coding",
+            "target": "coding",
             "payload": {
                 "objective": worker
                 + "/workspace/hello-files with git, base the work on main, keep the source as "
@@ -2531,9 +2531,9 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
         True,
     )
     second = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "coding",
+            "target": "coding",
             "payload": {
                 "objective": worker
                 + "/workspace/hello-commit with git, base the work on main, keep the source as "
@@ -2544,13 +2544,13 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
         True,
     )
     background_setup = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {**setup.input, "background": True},
         "done",
         True,
     )
     coerced_background_setup = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {**setup.input, "background": "true"},
         "done",
         True,
@@ -2564,7 +2564,7 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
     ).passed
     for truthy in (1, "yes", "on", "1"):
         truthy_setup = ToolInvocation(
-            "spawn_subagent",
+            "spawn",
             {**setup.input, "background": truthy},
             "done",
             True,
@@ -2572,21 +2572,19 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
         assert not (await grader(CapabilityOutput("done", (truthy_setup, first, second)))).passed
     for falsey in (0, "false", "no", "off", "0"):
         falsey_setup = ToolInvocation(
-            "spawn_subagent",
+            "spawn",
             {**setup.input, "background": falsey},
             "done",
             True,
         )
         assert (await grader(CapabilityOutput("done", (falsey_setup, first, second)))).passed
-    missing_objective = ToolInvocation(
-        "spawn_subagent", {"profile": "coding", "payload": {}}, "done", True
-    )
+    missing_objective = ToolInvocation("spawn", {"target": "coding", "payload": {}}, "done", True)
     assert not (await grader(CapabilityOutput("done", (missing_objective,)))).passed
     assert not (await grader(CapabilityOutput("done", (first, second)))).passed
     setup_with_work = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "coding",
+            "target": "coding",
             "payload": {"objective": setup_objective.replace(", verify the checkout", "")},
         },
         "done",
@@ -2594,9 +2592,9 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
     )
     assert not (await grader(CapabilityOutput("done", (setup_with_work, first, second)))).passed
     unterminated_setup = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "coding",
+            "target": "coding",
             "payload": {"objective": setup_objective.replace(" with git", "")},
         },
         "done",
@@ -2605,9 +2603,9 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
     assert not (await grader(CapabilityOutput("done", (unterminated_setup, first, second)))).passed
     assert not (await grader(CapabilityOutput("done", (setup, first)))).passed
     unterminated_worker = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "coding",
+            "target": "coding",
             "payload": {
                 "objective": worker + "/workspace/hello-commit, keep the source as workspace."
             },
@@ -2618,9 +2616,9 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
     assert not (await grader(CapabilityOutput("done", (setup, first, unterminated_worker)))).passed
     assert not (await grader(CapabilityOutput("done", (setup, first, first)))).passed
     missing_base = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "coding",
+            "target": "coding",
             "payload": {
                 "objective": worker
                 + "/workspace/hello-other with git, keep the source as workspace."
@@ -2631,9 +2629,9 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
     )
     assert not (await grader(CapabilityOutput("done", (setup, first, missing_base)))).passed
     missing_remote = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "coding",
+            "target": "coding",
             "payload": {
                 "objective": worker + "/workspace/hello-other with git, base the work on main."
             },
@@ -2647,9 +2645,9 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
 async def test_github_app_api_scorer_requires_the_skill_command_and_no_connector() -> None:
     coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
     spawn = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "coding",
+            "target": "coding",
             "payload": {
                 "objective": "Repository setup: no repository clone is needed. Use "
                 + coding_subagent.GITHUB_APP_API_COMMAND
@@ -2743,7 +2741,7 @@ async def test_github_connection_graders_require_the_parent_to_load_coding_first
                     "",
                     (
                         coding,
-                        ToolInvocation("spawn_subagent", {"profile": "coding"}, "done", True),
+                        ToolInvocation("spawn", {"target": "coding"}, "done", True),
                         *calls,
                     ),
                 )
@@ -2759,11 +2757,11 @@ def test_github_connection_grading_statements_pin_inputs_order_and_restraint() -
         skill
         + "attempts connect_github matching {}, connect_account matching {'provider': 'github'}; "
         "load_skill before connect_github, load_skill before connect_account; "
-        "never attempts spawn_subagent",
+        "never attempts spawn",
         skill + "attempts connect_github matching {}; load_skill before connect_github; "
-        "never attempts connect_account, spawn_subagent",
+        "never attempts connect_account, spawn",
         skill + "attempts connect_account matching {'provider': 'github'}; "
-        "load_skill before connect_account; never attempts connect_github, spawn_subagent",
+        "load_skill before connect_account; never attempts connect_github, spawn",
     )
 
 
@@ -2909,11 +2907,11 @@ async def test_lane_scorer_requires_a_successful_completed_spawn() -> None:
     grader = lane_scorer(frozenset({"coding"}))
     errored = CapabilityOutput(
         "",
-        (ToolInvocation("spawn_subagent", {"profile": "coding"}, "child failed", True, True),),
+        (ToolInvocation("spawn", {"target": "coding"}, "child failed", True, True),),
     )
-    unfinished = CapabilityOutput("", (ToolInvocation("spawn_subagent", {"profile": "coding"}),))
+    unfinished = CapabilityOutput("", (ToolInvocation("spawn", {"target": "coding"}),))
     successful = CapabilityOutput(
-        "", (ToolInvocation("spawn_subagent", {"profile": "coding"}, "done", True),)
+        "", (ToolInvocation("spawn", {"target": "coding"}, "done", True),)
     )
 
     assert not (await grader(errored)).passed
@@ -3330,9 +3328,9 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
     )
     child = dumps({"result": child_summary})
     spawn = ToolInvocation(
-        "spawn_subagent",
+        "spawn",
         {
-            "profile": "general_purpose",
+            "target": "general_purpose",
             "payload": {"task": task},
         },
         child,
@@ -5973,7 +5971,7 @@ async def test_capability_merge_appends_child_calls_and_errors(db: None, tmp_pat
 async def test_capability_merge_reads_a_followed_up_child_conversation_once(
     db: None, tmp_path
 ) -> None:
-    """message_subagent follow-ups add turns to the same child conversation; the conversation is
+    """message_spawn follow-ups add turns to the same child conversation; the conversation is
     the merge unit, so its trajectory counts once, never once per turn."""
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)

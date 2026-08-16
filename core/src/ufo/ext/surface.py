@@ -111,7 +111,7 @@ from ufo.schema import tables
 from ufo.schema.records import (
     MEMBER_ADMISSION,
     SCHEDULED_ADMISSION,
-    SUBAGENT_RESULT_KEY_PREFIX,
+    SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
@@ -482,13 +482,16 @@ class AgentSummary(BaseModel):
     """One workspace agent as a surface lists it — the read a surface whose member picks an agent
     (the web portal's switcher) filters through its own audience authority.
     `internet_access_allowed` is the agent's narrowing of the deploy's sandbox public-internet
-    capability, carried for the administration view."""
+    capability, carried for the administration view. `owner_member_id` is the member who created
+    the row (None for the main agent and provisioned rows), so an audience can give an owner
+    their own agent without a separate grant."""
 
     id: UUID
     name: str
     main: bool
     model: str
     internet_access_allowed: bool
+    owner_member_id: UUID | None = None
 
 
 class InstallationSummary(BaseModel):
@@ -1095,7 +1098,7 @@ class SurfaceContext:
     def subagents(self) -> tuple[SubagentDetail, ...]:
         """The typed subagent profiles this deploy's agents delegate to, by name — the roster a
         portal lists beside the workspace's agents and the page each row opens, fixed at boot from
-        the same registry `spawn_subagent` dispatches against."""
+        the same registry `spawn` dispatches against."""
         return self._subagents
 
     def subagent(self, name: str) -> SubagentDetail | None:
@@ -1811,6 +1814,7 @@ class SurfaceContext:
                         tables.agent.c.is_main,
                         tables.agent.c.model,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.owner_member_id,
                     )
                     .where(tables.agent.c.workspace_id == self.workspace_id)
                     .order_by(tables.agent.c.is_main.desc(), tables.agent.c.name)
@@ -1823,6 +1827,7 @@ class SurfaceContext:
                 main=row.is_main,
                 model=row.model,
                 internet_access_allowed=row.internet_access_allowed,
+                owner_member_id=row.owner_member_id,
             )
             for row in rows
         )
@@ -3370,7 +3375,7 @@ class SurfaceContext:
         the turn and a drained arrival by its queue row."""
         machine = sa.or_(
             tables.turn.c.admission_source == SCHEDULED_ADMISSION,
-            tables.turn.c.idempotency_key.startswith(SUBAGENT_RESULT_KEY_PREFIX),
+            tables.turn.c.idempotency_key.startswith(SPAWN_RESULT_KEY_PREFIX),
         )
         async with workspace_tx() as connection:
             refs = (
@@ -3385,7 +3390,7 @@ class SurfaceContext:
                             tables.inbound_message.c.workspace_id == self.workspace_id,
                             tables.inbound_message.c.conversation_id == conversation_id,
                             tables.inbound_message.c.idempotency_key.startswith(
-                                SUBAGENT_RESULT_KEY_PREFIX
+                                SPAWN_RESULT_KEY_PREFIX
                             ),
                         ),
                     )

@@ -6,7 +6,7 @@ summary; the child runs in the background while the tool awaits it under the cal
 automation loop never holds the parent turn open. `wide_browse` reads an entities file (one per
 line), fans a bounded pool of `browser` children out over them in parallel, and collects their
 summaries into a workspace JSON file. Both reach the child through `ctx.spawn` — the same Spawn
-seam `spawn_subagent` uses — so a delegated browser run is scoped to the browser profile's tools,
+seam the `spawn` tool uses — so a delegated browser run is scoped to the browser profile's tools,
 never a raw browser handle.
 
 A budget is bounded at both ends: below so a wedged site gets a fair run, above because the browser
@@ -99,7 +99,7 @@ async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:
     if ctx.subagents is None:
         raise RuntimeError("subagent control is not available in this context")
     spawned = await ctx.spawn(
-        BROWSER_PROFILE_NAME,
+        f"profile:{BROWSER_PROFILE_NAME}",
         {"task": args.task, "url": args.url, "task_name": args.task_name},
         background=True,
         dedup_key=ctx.idempotency_key,
@@ -157,7 +157,7 @@ async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult:
             if output_schema.strip():
                 task = f"{task}\n\nReturn data matching this schema:\n{output_schema}"
             result = await ctx.spawn(
-                BROWSER_PROFILE_NAME,
+                f"profile:{BROWSER_PROFILE_NAME}",
                 {"task": task, "task_name": entity, "extended_context": False},
                 dedup_key=f"{ctx.idempotency_key}/{entity}",
             )

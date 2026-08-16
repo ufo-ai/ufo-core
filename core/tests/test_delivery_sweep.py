@@ -208,7 +208,7 @@ async def test_the_sweep_hands_a_cancelled_child_back_to_its_parent(db: None) ->
     turns = await _conversation_turns(parent_conversation)
     assert [seq for seq, _ in turns] == [1, 2]
     body = turns[1][1]
-    assert f'subagent_id="{child_id}"' in body
+    assert f'spawn_id="{child_id}"' in body
     assert 'status="cancelled"' in body
     assert "TurnCancelled" in body
     assert await _delivery_state(child_id) == "delivered"
@@ -236,7 +236,7 @@ async def test_a_fan_out_landing_together_wakes_the_conversation_once(db: None) 
     folded = await _arrival_bodies(parent_conversation)
     assert len(folded) == 2
     named = "".join([turns[1][1], *folded])
-    assert all(f'subagent_id="{child}"' in named for child in children)
+    assert all(f'spawn_id="{child}"' in named for child in children)
     assert [await _delivery_state(child) for child in children] == ["delivered"] * 3
 
 
@@ -270,7 +270,7 @@ async def test_a_conversation_woken_this_moment_keeps_its_children_for_the_next_
         await _sweep(workspace_id).run()
     turns = await _conversation_turns(parent_conversation)
     assert [seq for seq, _ in turns] == [1, 2]
-    assert f'subagent_id="{late}"' in turns[1][1]
+    assert f'spawn_id="{late}"' in turns[1][1]
     assert await _delivery_state(late) == "delivered"
 
 

@@ -17,6 +17,7 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
 from ufo.connectors import CliCredential, ConnectorRegistry
+from ufo.contracts import Contract, output_contract
 from ufo.credentials import (
     CredentialRequests,
     CredentialStore,
@@ -47,7 +48,9 @@ from ufo.loop.engine import (
     _claim_turn_with_handoff,
 )
 from ufo.loop.prompts.render import render_system_prompt, rendered_prompt
+from ufo.loop.spawn_catalog import spawn_catalog_skill
 from ufo.loop.subagents import (
+    FINISH_CONTRACT,
     SubagentRegistry,
     SubagentResult,
     Subagents,
@@ -55,6 +58,7 @@ from ufo.loop.subagents import (
 )
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
+from ufo.models.interface import AUTO_MODEL
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import (
     emit_metric,
@@ -425,8 +429,14 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 public_base_url=runtime.config.connect.public_base_url,
             )
             skills = runtime.skills.merged_with(
-                await turn_runtime_skills(
-                    runtime.manifests, runtime.credentials, runtime.index, runtime.embed
+                (
+                    *await turn_runtime_skills(
+                        runtime.manifests, runtime.credentials, runtime.index, runtime.embed
+                    ),
+                    await spawn_catalog_skill(
+                        runtime.subagents,
+                        turn.speaker_member_id or turn.on_behalf_of_member_id,
+                    ),
                 )
             )
             sections = tuple(
@@ -450,7 +460,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 knowledge_cutoff=runtime.registry.spec(resolved.model).knowledge_cutoff,
             )
             max_rounds = MAIN_ROUND_LIMIT
-            output_model = None
+            output_model: Contract | None = None
+            if turn.spawned:
+                output_model = output_contract(agent.output_schema)
+                system_prompt = rendered_prompt(f"{system_prompt.content}\n\n{FINISH_CONTRACT}")
         else:
             profile = _resolve_profile(runtime.subagents, turn_id, turn.subagent_profile)
             payload = json.loads(turn.inbound) if turn.seq == 1 else {}
@@ -544,6 +557,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     ),
                 )
             ),
+            models=(AUTO_MODEL, *sorted(runtime.registry.specs)),
             public_base_url=runtime.config.connect.public_base_url,
             hooks=hooks,
             blob=runtime.blob,
@@ -562,7 +576,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             output_model=output_model,
             adoption=AdoptionReplay(
                 replaying=claim == ADOPTED_CLAIM
-                and turn.subagent_profile is None
+                and not turn.spawned
                 and turn.admission_source != INTENT_ADMISSION
             ),
         )
@@ -611,7 +625,7 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
                             tables.turn.c.id == turn_id,
                             tables.turn.c.status.in_(("queued", "running")),
                         )
-                        .returning(tables.turn.c.subagent_profile)
+                        .returning(tables.turn.c.subagent_profile, tables.turn.c.parent_turn_id)
                     )
                 ).one_or_none()
             if transitioned is not None:
@@ -619,7 +633,10 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
                     "turn_terminal_total",
                     status="failed",
                     error_class=type(error).__name__,
-                    profile=turn_profile(transitioned.subagent_profile),
+                    profile=turn_profile(
+                        transitioned.subagent_profile,
+                        spawned=transitioned.parent_turn_id is not None,
+                    ),
                 )
                 log_error(
                     "turn.setup_failed",
@@ -675,6 +692,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.agent.c.reasoning,
                     tables.agent.c.is_main,
                     tables.agent.c.tools,
+                    tables.agent.c.output_schema,
                     tables.agent.c.internet_access_allowed,
                     tables.conversation.c.audience,
                 )
@@ -719,6 +737,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
             reasoning=row.reasoning,
             is_main=row.is_main,
             tools=None if row.tools is None else tuple(row.tools),
+            output_schema=row.output_schema,
             internet_access_allowed=row.internet_access_allowed,
         ),
         parse_audience(row.audience),
@@ -726,10 +745,11 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
 
 
 async def _run_lineage(turn: Turn) -> RunLineage | None:
-    """Where a subagent turn's live activity publishes: the admitted ancestor whose stream every
-    surface tails, found by following parent links to the turn that has none. None for a turn that
-    is not a subagent's — its own stream is the tailed one."""
-    if turn.subagent_profile is None or turn.parent_turn_id is None:
+    """Where a spawned turn's live activity publishes: the admitted ancestor whose stream every
+    surface tails, found by following parent links to the turn that has none. None for a turn no
+    spawn admitted — its own stream is the tailed one. An agent child publishes under its
+    qualified target so the surface names which agent ran."""
+    if turn.parent_turn_id is None:
         return None
     root = turn.parent_turn_id
     async with workspace_tx() as connection:
@@ -742,10 +762,18 @@ async def _run_lineage(turn: Turn) -> RunLineage | None:
             if parent is None:
                 break
             root = parent
+        profile = turn.subagent_profile
+        if profile is None:
+            agent_name = (
+                await connection.execute(
+                    sa.select(tables.agent.c.name).where(tables.agent.c.id == turn.agent_id)
+                )
+            ).scalar_one()
+            profile = f"agent:{agent_name}"
     return RunLineage(
         root_turn_id=root,
         parent_turn_id=turn.parent_turn_id,
-        profile=turn.subagent_profile,
+        profile=profile,
         name=turn.subagent_name or "",
     )
 

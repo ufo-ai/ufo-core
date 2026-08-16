@@ -120,7 +120,7 @@ async def test_wide_research_fans_the_research_profile_over_deduped_entities(
             }
         ),
     )
-    assert {profile for profile, _, _ in spawn.spawned} == {"research"}
+    assert {profile for profile, _, _ in spawn.spawned} == {"profile:research"}
     objectives = [payload["objective"] for _, payload, _ in spawn.spawned]
     assert objectives[0].startswith("research acme.com")
     assert objectives[1].startswith("research beta.io")

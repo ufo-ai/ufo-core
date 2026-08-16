@@ -36,7 +36,7 @@ OUTPUTS = {
     "out/gamma.txt": "NONCE-GAMMA-1f90",
 }
 DISPATCH_TOOL = "run_independent_steps"
-SPAWN_TOOL = "spawn_subagent"
+SPAWN_TOOL = "spawn"
 CONCURRENT_WITHIN_SECONDS = 20.0
 MIN_WORKERS = 3
 PLAN_TOOL = "plan_objective"

@@ -170,7 +170,7 @@ format.
 
 ## Delegating a draft
 
-For a whole draft or a full-pass edit, `spawn_subagent("writing", {"objective": ...})` runs a child
+For a whole draft or a full-pass edit, `spawn("writing", {"objective": ...})` runs a child
 that already holds this workflow. Put the draft's path, the audience, the venue, and every fact it
 may use in the objective: the child has no conversation history, cannot ask, and will not invent a
 missing fact. It saves the draft in the workspace and reports the path, and you deliver it. Keep a
