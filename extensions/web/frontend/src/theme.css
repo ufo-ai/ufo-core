@@ -575,11 +575,14 @@
     position: absolute;
     top: 50%;
     left: 50%;
-    width: calc(var(--s) * 0.155);
-    height: calc(var(--s) * 0.155);
-    margin: calc(var(--s) * -0.0775) 0 0 calc(var(--s) * -0.0775);
+    /* A light is a quarter of the mark and holds its colour most of the way out. At the cap height
+       this sits at, the earlier eighth faded to nothing before it covered a whole pixel, so three
+       lights beside a line of type read as dirt on the screen rather than as a mark. */
+    width: calc(var(--s) * 0.24);
+    height: calc(var(--s) * 0.24);
+    margin: calc(var(--s) * -0.12) 0 0 calc(var(--s) * -0.12);
     border-radius: 50%;
-    background: radial-gradient(circle, var(--orbit-core) 0%, var(--orbit-mid) 42%, transparent 72%);
+    background: radial-gradient(circle, var(--orbit-core) 0%, var(--orbit-mid) 62%, transparent 88%);
     filter: brightness(1.1);
     /* Longhands, because the name is granted below and a shorthand carrying everything but the name
        means `animation: none` — which a minifier is right to collapse to exactly that, taking the
