@@ -34,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       deploy: ${{ steps.select.outputs.deploy }}
+      client_build: ${{ steps.client.outputs.build }}
+      client_tree: ${{ steps.client.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,9 +57,32 @@ jobs:
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.select.outputs.deploy == 'true'
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # The binaries of a client tree are pushed once as ufo-clientbin:<git tree hash of client/>;
+      # a tag hit means this client source already built, so the five-target build is skipped and
+      # rollout copies the pushed set into the gateway build context. The hash names the content,
+      # so different client source is always a miss and the immutable tag is never contested.
+      - name: Select client work
+        id: client
+        if: steps.select.outputs.deploy == 'true'
+        run: |
+          CLIENT_TREE=$(git rev-parse HEAD:client)
+          echo "tree=$CLIENT_TREE" >> "$GITHUB_OUTPUT"
+          if aws ecr describe-images --repository-name ufo-clientbin --image-ids imageTag="$CLIENT_TREE" >/dev/null 2>&1; then
+            echo "ufo-clientbin:$CLIENT_TREE already pushed — skipping client builds"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   client:
     needs: changes
-    if: needs.changes.outputs.deploy == 'true'
+    if: needs.changes.outputs.client_build == 'true'
     strategy:
       matrix:
         include:
@@ -107,7 +132,7 @@ jobs:
 
   rollout:
     needs: [changes, client]
-    if: needs.changes.outputs.deploy == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -176,11 +201,20 @@ jobs:
       # The five client binaries land as clientbin/<target>/<binary> in the gateway build
       # context, where the Dockerfile copies them under UFO_CLIENT_BIN_DIR.
       - uses: actions/download-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs.client.result == 'success'
         with:
           pattern: clientbin-*
           merge-multiple: true
           path: control/clientbin
+
+      - name: Reuse the pushed client binaries
+        if: github.event_name != 'pull_request' && needs.client.result == 'skipped'
+        env:
+          CLIENT_TREE: ${{ needs.changes.outputs.client_tree }}
+        run: |
+          docker create --name clientbin "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE" noop
+          docker cp clientbin:/clientbin/. control/clientbin
+          docker rm clientbin
 
       - name: Build + push gateway image
         if: github.event_name != 'pull_request'
@@ -240,6 +274,19 @@ jobs:
         if: github.event_name != 'pull_request'
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false "$RUNNER_TEMP/testing.tfplan"
+
+      # After the apply so a first run creates the ufo-clientbin repository before the push.
+      - name: Push the client binaries for this tree
+        if: github.event_name != 'pull_request' && needs.client.result == 'success'
+        env:
+          CLIENT_TREE: ${{ needs.changes.outputs.client_tree }}
+        run: |
+          if aws ecr describe-images --repository-name ufo-clientbin --image-ids imageTag="$CLIENT_TREE" >/dev/null 2>&1; then
+            echo "ufo-clientbin:$CLIENT_TREE already pushed — skipping"
+          else
+            printf 'FROM scratch\nCOPY . /clientbin\n' | docker build -t "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE" -f - control/clientbin
+            docker push "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE"
+          fi
 
       - name: Wait for runtime rollout
         if: github.event_name != 'pull_request'

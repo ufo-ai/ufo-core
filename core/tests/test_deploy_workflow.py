@@ -931,12 +931,15 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     client = jobs["client"]
     assert isinstance(client, dict)
     assert client["needs"] == "changes"
-    assert client["if"] == "needs.changes.outputs.deploy == 'true'"
+    assert client["if"] == "needs.changes.outputs.client_build == 'true'"
 
     rollout = jobs["rollout"]
     assert isinstance(rollout, dict)
     assert rollout["needs"] == ["changes", "client"]
-    assert rollout["if"] == "needs.changes.outputs.deploy == 'true'"
+    assert rollout["if"] == (
+        "${{ !cancelled() && needs.changes.outputs.deploy == 'true' && "
+        "(needs.client.result == 'success' || needs.client.result == 'skipped') }}"
+    )
 
     edge = jobs["edge"]
     assert isinstance(edge, dict)
@@ -977,6 +980,110 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
             if isinstance(step, dict) and step.get("name") == "Terraform apply":
                 assert job_environment.get("TF_DIR") != "infra/envs/prod"
                 assert step.get("working-directory") != "infra/production-access"
+
+
+def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    changes = jobs["changes"]
+    assert isinstance(changes, dict)
+    assert changes["outputs"] == {
+        "deploy": "${{ steps.select.outputs.deploy }}",
+        "client_build": "${{ steps.client.outputs.build }}",
+        "client_tree": "${{ steps.client.outputs.tree }}",
+    }
+    changes_steps = changes["steps"]
+    assert isinstance(changes_steps, list)
+    credentials = next(
+        step
+        for step in changes_steps
+        if step.get("uses") == "aws-actions/configure-aws-credentials@v4"
+    )
+    assert credentials["if"] == "steps.select.outputs.deploy == 'true'"
+    probe = _step("changes", "Select client work")
+    assert probe["if"] == "steps.select.outputs.deploy == 'true'"
+    assert changes_steps.index(credentials) < changes_steps.index(probe)
+
+    rollout = jobs["rollout"]
+    assert isinstance(rollout, dict)
+    rollout_steps = rollout["steps"]
+    assert isinstance(rollout_steps, list)
+    download = next(
+        step for step in rollout_steps if step.get("uses") == "actions/download-artifact@v4"
+    )
+    assert download["if"] == (
+        "github.event_name != 'pull_request' && needs.client.result == 'success'"
+    )
+    assert download["with"]["path"] == "control/clientbin"
+    reuse = _step("rollout", "Reuse the pushed client binaries")
+    assert reuse["if"] == "github.event_name != 'pull_request' && needs.client.result == 'skipped'"
+    assert reuse["env"] == {"CLIENT_TREE": "${{ needs.changes.outputs.client_tree }}"}
+    assert "docker cp clientbin:/clientbin/. control/clientbin" in reuse["run"]
+    push = _step("rollout", "Push the client binaries for this tree")
+    assert push["if"] == "github.event_name != 'pull_request' && needs.client.result == 'success'"
+    assert push["env"] == {"CLIENT_TREE": "${{ needs.changes.outputs.client_tree }}"}
+    assert 'docker push "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE"' in push["run"]
+    gateway = _step("rollout", "Build + push gateway image")
+    apply = _step("rollout", "Terraform apply")
+    assert rollout_steps.index(download) < rollout_steps.index(reuse) < rollout_steps.index(gateway)
+    assert rollout_steps.index(apply) < rollout_steps.index(push)
+
+    script = probe["run"]
+    assert isinstance(script, str)
+    aws = tmp_path / "aws"
+    aws.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$AWS_CALLS"\nexit "$AWS_DESCRIBE_EXIT"\n')
+    aws.chmod(0o755)
+
+    def select(describe_exit: str, cwd: Path) -> tuple[str, list[str]]:
+        output = tmp_path / "github-output"
+        output.write_text("")
+        calls = tmp_path / "aws-calls"
+        calls.write_text("")
+        subprocess.run(
+            ["bash", "-e", "-c", script],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            env={
+                "HOME": str(tmp_path),
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "GITHUB_OUTPUT": str(output),
+                "AWS_CALLS": str(calls),
+                "AWS_DESCRIBE_EXIT": describe_exit,
+            },
+        )
+        prefix = "ecr describe-images --repository-name ufo-clientbin --image-ids imageTag="
+        call = calls.read_text().splitlines()
+        assert len(call) == 1
+        assert call[0].startswith(prefix)
+        return call[0].removeprefix(prefix), output.read_text().splitlines()
+
+    listing = subprocess.run(
+        ["git", "ls-tree", "HEAD", "--", "client"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert listing[:2] == ["040000", "tree"]
+    tree = listing[2]
+    assert select("0", ROOT) == (tree, [f"tree={tree}", "build=false"])
+    assert select("1", ROOT) == (tree, [f"tree={tree}", "build=true"])
+
+    scratch = tmp_path / "scratch"
+    (scratch / "client").mkdir(parents=True)
+    git = ["git", "-c", "user.email=deploy@example.com", "-c", "user.name=deploy"]
+    subprocess.run([*git, "init", "-q", "-b", "main"], cwd=scratch, check=True)
+
+    def tag_of(source: str) -> str:
+        (scratch / "client" / "main.rs").write_text(source)
+        subprocess.run([*git, "add", "-A"], cwd=scratch, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "client"], cwd=scratch, check=True)
+        return select("1", scratch)[0]
+
+    first = tag_of("fn main() {}\n")
+    assert tag_of("fn main() { install() }\n") != first
+    assert tag_of("fn main() {}\n") == first
 
 
 @pytest.mark.parametrize(
