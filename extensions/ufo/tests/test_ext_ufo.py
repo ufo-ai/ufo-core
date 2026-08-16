@@ -1921,6 +1921,102 @@ def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> 
     )
 
 
+def test_history_states_a_turns_steps_over_the_reply_they_produced() -> None:
+    from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+    from ufo.transcript import Conversation
+
+    marker = "00aabbcc"
+    fenced = f"<member_message_{marker}>\nwhen is the meeting\n</member_message_{marker}>"
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content=fenced),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="Reading the notes first."),
+                    ToolUseBlock(id="call-1", name="read", input={}),
+                    ToolUseBlock(id="call-2", name="load_skill", input={"name": "office/pptx"}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(tool_use_id="call-1", content="notes", activity=True),
+                    ToolResultBlock(tool_use_id="call-2", content="loaded", activity=True),
+                ),
+            ),
+            Message(role="assistant", content=(TextBlock(text="The meeting is at four."),)),
+            Message(role="user", content=(TextBlock(text="thanks"),)),
+        ),
+    )
+    lines = history_directives(conversation)
+    assert lines == (
+        b"you\twhen is the meeting\n",
+        b"note\tCompleted 3 steps\n",
+        b"say\tThe meeting is at four.\n",
+        b"you\tthanks\n",
+    )
+
+
+def test_history_says_no_words_for_a_turn_cut_after_its_narration() -> None:
+    from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+    from ufo.transcript import Conversation
+
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content="read the notes"),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="Reading the notes first."),
+                    ToolUseBlock(id="call-1", name="read", input={}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(ToolResultBlock(tool_use_id="call-1", content="notes", activity=True),),
+            ),
+            Message(role="user", content="and again"),
+        ),
+    )
+    lines = history_directives(conversation)
+    assert lines == (
+        b"you\tread the notes\n",
+        b"note\tCompleted 2 steps\n",
+        b"you\tand again\n",
+    )
+
+
+def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
+    from ufo.models.interface import Message, TextBlock, ToolUseBlock
+    from ufo.transcript import Conversation
+
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content="try it"),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="I cannot run that."),
+                    ToolUseBlock(id="call-1", name="bash", input={}),
+                ),
+            ),
+            Message(role="assistant", content=(TextBlock(text="Nothing ran."),)),
+            Message(role="user", content="understood"),
+        ),
+    )
+    lines = history_directives(conversation)
+    assert lines == (
+        b"you\ttry it\n",
+        b"note\tCompleted 1 step\n",
+        b"say\tNothing ran.\n",
+        b"you\tunderstood\n",
+    )
+
+
 def test_history_budget_keeps_the_newest_messages() -> None:
     from ufo.models.interface import Message
     from ufo.transcript import Conversation

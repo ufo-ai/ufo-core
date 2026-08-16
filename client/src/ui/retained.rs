@@ -12,6 +12,8 @@ pub const ENTRY_MAX: usize = 2000;
 const ECHO_INDENT: &str = "  ";
 const KEEP_DRAWN: usize = 16;
 const SCHEMES: [&str; 2] = ["https://", "http://"];
+const FOLD_ROLLED: &str = "▸";
+const FOLD_OPENED: &str = "▾";
 
 /// One retained transcript element, held as its source.
 pub enum Entry {
@@ -21,8 +23,46 @@ pub enum Entry {
     Markdown(String),
     /// A muted single line.
     Note(String),
+    /// One turn's steps, ranked as they happened.
+    Steps { steps: Vec<Step>, fold: Fold },
     /// Pre-rendered lines that re-wrap by clipping only (image markers, raw spans).
     Raw(Vec<Line<'static>>),
+}
+
+/// One step of a turn: a thought the agent wrote between its calls, or the one line a call or a
+/// skill load narrated.
+pub enum Step {
+    Thought(String),
+    Note(String),
+    /// A dispatch of a subagent run that already stands as a step: its own row, counted with the
+    /// run it belongs to, so one run is one step however much it did — the count the web states.
+    Under(String),
+}
+
+/// How a turn's steps stand: written into while the turn runs, rolled up behind
+/// `Completed N steps` once the answer lands, or opened again by the member.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Fold {
+    Live,
+    Rolled,
+    Opened,
+}
+
+/// The line a rolled-up turn states. The web's fold states the same words.
+pub fn rollup_line(steps: usize) -> String {
+    match steps {
+        1 => "Completed 1 step".to_string(),
+        count => format!("Completed {count} steps"),
+    }
+}
+
+/// How many steps a turn's rows count as: a run's further dispatches ride with the run, so the
+/// count does not grow with what a child did inside its own turn.
+fn counted(steps: &[Step]) -> usize {
+    steps
+        .iter()
+        .filter(|step| !matches!(step, Step::Under(_)))
+        .count()
 }
 
 /// What one paint of the transcript region shows.
@@ -71,6 +111,7 @@ pub struct Retained {
     scroll_back: usize,
     grew: bool,
     dirty: bool,
+    live_steps: Option<usize>,
 }
 
 impl Retained {
@@ -86,6 +127,7 @@ impl Retained {
             scroll_back: 0,
             grew: false,
             dirty: false,
+            live_steps: None,
         }
     }
 
@@ -97,8 +139,82 @@ impl Retained {
             self.entries.remove(0);
             self.drawn.remove(0);
             self.shapes.remove(0);
+            self.live_steps = match self.live_steps {
+                Some(at) if at > 0 => Some(at - 1),
+                _ => None,
+            };
         }
         self.grew = true;
+        self.dirty = true;
+    }
+
+    /// One step of the running turn joins its rollup, opening one where the turn has none yet. A
+    /// live rollup stands open, so the steps are read where they happened.
+    pub fn push_step(&mut self, step: Step) {
+        let Some(at) = self.live_steps else {
+            self.push(Entry::Steps {
+                steps: vec![step],
+                fold: Fold::Live,
+            });
+            self.live_steps = Some(self.entries.len() - 1);
+            return;
+        };
+        if let Entry::Steps { steps, .. } = &mut self.entries[at] {
+            steps.push(step);
+        }
+        self.invalidate(at);
+        self.grew = true;
+    }
+
+    /// The open reply's source, taken off the transcript with the entry it grew in — so words the
+    /// turn wrote before a call can be held as the step they are.
+    pub fn take_reply(&mut self) -> Option<String> {
+        if !matches!(self.entries.last(), Some(Entry::Markdown(_))) {
+            return None;
+        }
+        let Some(Entry::Markdown(source)) = self.entries.pop() else {
+            return None;
+        };
+        self.drawn.pop();
+        self.shapes.pop();
+        self.dirty = true;
+        Some(source)
+    }
+
+    /// The turn ended: its steps roll up behind the one line that counts them, and the next turn
+    /// opens a rollup of its own.
+    pub fn roll_up_steps(&mut self) {
+        let Some(at) = self.live_steps.take() else {
+            return;
+        };
+        if let Entry::Steps { fold, .. } = &mut self.entries[at] {
+            *fold = Fold::Rolled;
+        }
+        self.invalidate(at);
+    }
+
+    /// Open or close the newest rolled-up turn — the member's own toggle, which is the only thing
+    /// that opens a settled rollup. The turn still writing into its steps keeps them open.
+    pub fn toggle_steps(&mut self) {
+        let found = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Steps { fold, .. } if *fold != Fold::Live));
+        let Some(at) = found else {
+            return;
+        };
+        if let Entry::Steps { fold, .. } = &mut self.entries[at] {
+            *fold = match fold {
+                Fold::Opened => Fold::Rolled,
+                _ => Fold::Opened,
+            };
+        }
+        self.invalidate(at);
+    }
+
+    fn invalidate(&mut self, at: usize) {
+        self.drawn[at] = None;
+        self.shapes[at] = None;
         self.dirty = true;
     }
 
@@ -333,8 +449,34 @@ fn render(entry: &Entry, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         Entry::Member(text) => member_lines(text, theme),
         Entry::Markdown(source) => markdown::render(source, theme, width),
         Entry::Note(text) => vec![Line::styled(text.clone(), theme.muted)],
+        Entry::Steps { steps, fold } => steps_lines(steps, *fold, theme, width),
         Entry::Raw(lines) => lines.clone(),
     }
+}
+
+/// A turn's steps: the rows alone while the turn writes them, the count alone once it rolled up,
+/// and the count over the rows the member opened again.
+fn steps_lines(steps: &[Step], fold: Fold, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    let summary = |mark: &str| {
+        Line::styled(
+            format!("{mark} {}", rollup_line(counted(steps))),
+            theme.muted,
+        )
+    };
+    let mut lines = match fold {
+        Fold::Live => Vec::new(),
+        Fold::Rolled => return vec![summary(FOLD_ROLLED)],
+        Fold::Opened => vec![summary(FOLD_OPENED)],
+    };
+    for step in steps {
+        match step {
+            Step::Thought(source) => lines.extend(markdown::render(source, theme, width)),
+            Step::Note(text) | Step::Under(text) => {
+                lines.push(Line::styled(text.clone(), theme.muted))
+            }
+        }
+    }
+    lines
 }
 
 fn member_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
@@ -718,6 +860,129 @@ mod tests {
         assert_eq!(
             texts(&retained.document(&theme)),
             ["a line wider than the width"]
+        );
+    }
+
+    #[test]
+    fn a_running_turns_steps_stand_open_in_the_order_they_happened() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push_step(Step::Thought("reading the calendar next".into()));
+        retained.push_step(Step::Note("running read: the calendar".into()));
+        retained.push_step(Step::Note("loading skill: office/pptx".into()));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "reading the calendar next",
+                "running read: the calendar",
+                "loading skill: office/pptx",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_turns_end_rolls_its_steps_up_and_the_member_opens_them_again() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push_step(Step::Thought("first the calendar".into()));
+        retained.push_step(Step::Note("running read: the calendar".into()));
+        retained.push(Entry::Markdown("the answer".into()));
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["▸ Completed 2 steps", "the answer"]
+        );
+        retained.toggle_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "▾ Completed 2 steps",
+                "first the calendar",
+                "running read: the calendar",
+                "the answer",
+            ]
+        );
+        retained.toggle_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["▸ Completed 2 steps", "the answer"]
+        );
+    }
+
+    #[test]
+    fn one_step_is_said_in_the_singular_and_the_next_turn_rolls_up_on_its_own() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push_step(Step::Note("running bash: ls".into()));
+        retained.roll_up_steps();
+        retained.push(Entry::Member("and again".into()));
+        retained.push_step(Step::Note("running bash: ls".into()));
+        retained.push_step(Step::Note("running read: notes".into()));
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "▸ Completed 1 step",
+                "",
+                "› and again",
+                "",
+                "▸ Completed 2 steps",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_counts_as_one_step_however_many_calls_it_states() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push_step(Step::Note("running spawn: reviewer".into()));
+        retained.push_step(Step::Note("reviewer: running read: the diff".into()));
+        retained.push_step(Step::Under("reviewer: running bash: cargo test".into()));
+        retained.roll_up_steps();
+        assert_eq!(texts(&retained.document(&theme)), ["▸ Completed 2 steps"]);
+        retained.toggle_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "▾ Completed 2 steps",
+                "running spawn: reviewer",
+                "reviewer: running read: the diff",
+                "reviewer: running bash: cargo test",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_toggle_leaves_the_turn_still_writing_its_steps_open() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push_step(Step::Note("running read: notes".into()));
+        retained.roll_up_steps();
+        retained.push_step(Step::Note("running bash: ls".into()));
+        retained.toggle_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "▾ Completed 1 step",
+                "running read: notes",
+                "running bash: ls"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_open_reply_leaves_the_transcript_to_become_a_step() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.extend_markdown("a thought");
+        let held = retained.take_reply();
+        assert_eq!(held.as_deref(), Some("a thought"));
+        assert_eq!(retained.take_reply(), None);
+        retained.push_step(Step::Thought(held.expect("the reply was open")));
+        retained.push_step(Step::Note("running bash: ls".into()));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["a thought", "running bash: ls"]
         );
     }
 

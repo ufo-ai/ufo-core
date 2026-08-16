@@ -1116,7 +1116,17 @@ def _rendered_messages(
 
     `files` names what each turn shared, keyed like `questions`: the reply carries its own, so a
     file stands on the words that shared it and stays there when later turns run. A turn that
-    shared and wrote nothing still renders its reply — the file needs the reply it belongs to."""
+    shared and wrote nothing still renders its reply — the file needs the reply it belongs to.
+
+    A round that called a tool still narrated, and that narration is a step of the work: every
+    assistant text but the turn's last becomes a `note` event in the place it was written — before
+    the calls the round dispatched — and the last one is the answer the reply states. The notes are
+    bounded like a child run's, so a turn of many rounds cannot grow the projection without
+    limit. A reply another message closes states an answer only when its last text stands after the
+    work: a round that wrote its text and then dispatched work was cut there — a drain, or a stop —
+    so that text is a step of the work too and the reply states no words, which is the shape the
+    live view settles into. The rule reaches a turn's own reply and no further: a run's transcript
+    closes on the message it stored last, and that message is the answer its page states."""
     subagents = subagents or {}
     questions = questions or {}
     asked = asked or {}
@@ -1124,10 +1134,19 @@ def _rendered_messages(
     rendered: list[dict[str, object]] = []
     pending: list[dict[str, str]] = []
     answer = ""
+    answer_at = 0
+    notes = 0
     current_turn_id: str | None = None
 
+    def note_answer() -> None:
+        nonlocal answer, notes
+        if answer and notes < SUBAGENT_EVENT_LIMIT:
+            pending.insert(answer_at, {"kind": "note", "text": answer})
+            notes += 1
+        answer = ""
+
     def flush_reply(include_subagents: bool) -> None:
-        nonlocal answer, pending
+        nonlocal answer, answer_at, notes, pending
         closing = current_turn_id if include_subagents else None
         runs = [] if closing is None else subagents.get(closing, [])
         asked = None if closing is None else questions.get(closing)
@@ -1146,6 +1165,8 @@ def _rendered_messages(
         rendered.append(reply)
         pending = []
         answer = ""
+        answer_at = 0
+        notes = 0
 
     active = {
         block.tool_use_id
@@ -1155,22 +1176,26 @@ def _rendered_messages(
         if isinstance(block, ToolResultBlock) and block.activity
     }
     for message in messages:
-        if message.role == "assistant" and not isinstance(message.content, str):
-            pending.extend(
-                _tool_event(block)
-                for block in message.content
-                if isinstance(block, ToolUseBlock) and block.id in active
-            )
         text = _rendered_text(message)
-        if not text:
-            continue
         if message.role == "assistant":
-            answer = text
+            if text:
+                note_answer()
+                answer, answer_at = text, len(pending)
+            if not isinstance(message.content, str):
+                pending.extend(
+                    _tool_event(block)
+                    for block in message.content
+                    if isinstance(block, ToolUseBlock) and block.id in active
+                )
+            continue
+        if not text:
             continue
         if not isinstance(message.content, str) or CONTEXT_TAG.match(message.content) is None:
             continue
         match = MESSAGE_REF.match(message.content)
         turn_id = None if match is None else match.group("ref").strip()
+        if answer_at < len(pending):
+            note_answer()
         if turn_id in turn_ids and turn_id != current_turn_id:
             flush_reply(True)
             current_turn_id = turn_id

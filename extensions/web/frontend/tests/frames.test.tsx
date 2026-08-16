@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -14,6 +14,7 @@ import {
   StreamFake,
   TURN_ID,
   json,
+  saying,
   useStreamFake,
   wire,
 } from "./harness";
@@ -30,6 +31,11 @@ async function streaming() {
   return StreamFake.last();
 }
 
+/** A browser queues the `toggle` for an `open` a render wrote in a task of its own; awaiting a timer
+ *  of the same kind lets it land before the next frame is emitted. */
+const delivered = () =>
+  act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
+
 beforeEach(() => {
   useStreamFake();
 });
@@ -37,7 +43,8 @@ beforeEach(() => {
 test("a tool frame decodes its complete description, and uses its tool and preview when absent", async () => {
   const stream = await streaming();
   stream.emit("tool", { description: "Reading the calendar", tool: "cal", preview: "list" });
-  const dock = await screen.findByText("Reading the calendar");
+  // The open fold states the step too, so the line is the one reading it out.
+  const dock = await screen.findByText("Reading the calendar", { selector: ".sr-only" });
   const decoded = dock.parentElement!.querySelector("[data-slot=decode-text]")!;
   expect(decoded.textContent).toHaveLength("Reading the calendar".length);
   expect(decoded.textContent).not.toBe("Reading the calendar");
@@ -50,7 +57,7 @@ test("a tool frame decodes its complete description, and uses its tool and previ
     "w-(--size-decode-cell)",
   );
   stream.emit("tool", { tool: "bash", preview: "ls -la" });
-  expect(await screen.findByText("bash ls -la")).toBeTruthy();
+  expect(await screen.findByText("bash ls -la", { selector: ".sr-only" })).toBeTruthy();
 });
 
 test("a skill frame names the skill being loaded", async () => {
@@ -99,6 +106,241 @@ test("one tool call states itself, with nothing more behind it", async () => {
 
   await userEvent.click(summary);
   expect(screen.getByText("bash ls")).toBeTruthy();
+});
+
+test("a thought a tool call interrupted becomes a step, in the order it was written", async () => {
+  const stream = await streaming();
+  stream.emit("message", { text: "Reading the changelog first." });
+  expect(await screen.findByText(saying("Reading the changelog first."))).toBeTruthy();
+
+  stream.emit("tool", { tool: "read", preview: "CHANGELOG.md" });
+  stream.emit("message", { text: "It shipped Tuesday." });
+  stream.emit("terminal", {
+    status: "done",
+    text: "It shipped Tuesday.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+
+  const summary = await screen.findByText("Completed 2 steps");
+  expect(screen.queryByText("Reading the changelog first.")).toBeNull();
+  expect(screen.getByText("It shipped Tuesday.")).toBeTruthy();
+
+  await userEvent.click(summary);
+  const rows = summary.closest("details")!.querySelectorAll("li");
+  expect([...rows].map((row) => row.textContent)).toEqual([
+    "Reading the changelog first.",
+    "read CHANGELOG.md",
+  ]);
+});
+
+test("the fold a running turn writes into stands open on its thoughts among its calls", async () => {
+  const stream = await streaming();
+  stream.emit("message", { text: "Reading the changelog first." });
+  stream.emit("tool", { tool: "read", preview: "CHANGELOG.md" });
+  await waitFor(() =>
+    expect(screen.queryByText(saying("Reading the changelog first."))).toBeNull(),
+  );
+
+  const fold = document.querySelector("details") as HTMLDetailsElement;
+  await waitFor(() => expect(fold.open).toBe(true));
+
+  stream.emit("message", { text: "Checking the tags now." });
+  stream.emit("tool", { tool: "bash", preview: "git tag" });
+  await waitFor(() =>
+    expect([...fold.querySelectorAll("li")].map((row) => row.textContent)).toEqual([
+      "Reading the changelog first.",
+      "read CHANGELOG.md",
+      "Checking the tags now.",
+      "bash git tag",
+    ]),
+  );
+});
+
+// The step and the terminal frame land in renders of their own, which is what a turn does over the
+// wire: the fold is written open while the turn runs, and the browser answers that write with a
+// `toggle` event of its own. A test that emits both frames in one batch renders once and never
+// opens the fold, so it cannot see what that event leaves behind.
+test("the fold the running turn stood open folds when the turn settles", async () => {
+  const stream = await streaming();
+  stream.emit("tool", { tool: "bash", preview: "ls" });
+  const fold = (await waitFor(() => document.querySelector("details")!)) as HTMLDetailsElement;
+  await waitFor(() => expect(fold.open).toBe(true));
+
+  stream.emit("terminal", {
+    status: "done",
+    text: "Done.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+
+  expect(await screen.findByText("Completed 1 step")).toBeTruthy();
+  await waitFor(() => expect(document.querySelector("details")!.open).toBe(false));
+  expect(screen.queryByText("bash ls")).toBeNull();
+});
+
+// The member's own toggle is the one state that outlives the default, so the frames a running turn
+// keeps emitting must not open the fold again behind the member who folded it away.
+test("a member who folds a running turn away keeps it away over the frames after it", async () => {
+  const stream = await streaming();
+  stream.emit("tool", { tool: "read", preview: "CHANGELOG.md" });
+
+  const fold = document.querySelector("details") as HTMLDetailsElement;
+  await waitFor(() => expect(fold.open).toBe(true));
+  await delivered();
+
+  await userEvent.click(fold.querySelector("summary")!);
+  await delivered();
+  expect(fold.open).toBe(false);
+
+  stream.emit("skill", { skill: "calendar-triage" });
+  expect(await screen.findByText("Loading skill · calendar-triage")).toBeTruthy();
+  await delivered();
+  expect(fold.open).toBe(false);
+});
+
+test("a thought a skill load interrupted stays a step when the turn is stopped", async () => {
+  const stream = await streaming();
+  stream.emit("message", { text: "Loading the triage skill." });
+  stream.emit("skill", { skill: "calendar-triage" });
+  stream.emit("terminal", { status: "cancelled" });
+
+  const summary = await screen.findByText("Completed 2 steps");
+  expect(screen.getByText("Stopped.")).toBeTruthy();
+
+  await userEvent.click(summary);
+  expect(screen.getByText("Loading the triage skill.")).toBeTruthy();
+  expect(screen.getByText("Loaded skill · calendar-triage")).toBeTruthy();
+});
+
+test("a thought a subagent's dispatch interrupted stands ahead of the run's row", async () => {
+  const stream = await streaming();
+  stream.emit("message", { text: "Handing the research off." });
+  stream.emit("tool", { tool: "spawn_subagent", preview: "general_purpose" });
+  stream.emit("subagent_activity", {
+    turn_id: "88888888-8888-4888-8888-888888888888",
+    parent_turn_id: TURN_ID,
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    profile: "general_purpose",
+    name: "",
+    tool: "",
+    description: "",
+    preview: "",
+    skill: "",
+    status: "done",
+  });
+  stream.emit("terminal", {
+    status: "done",
+    text: "It shipped Tuesday.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+
+  const summary = await screen.findByText("Completed 3 steps");
+  await userEvent.click(summary);
+  const log = document.body.textContent ?? "";
+  expect(log.indexOf("Handing the research off.")).toBeLessThan(
+    log.indexOf("spawn_subagent general_purpose"),
+  );
+  expect(log.indexOf("spawn_subagent general_purpose")).toBeLessThan(
+    log.indexOf("Subagent · general_purpose"),
+  );
+});
+
+test("a run's frame leaves the answer the turn has already streamed where it stands", async () => {
+  const stream = await streaming();
+  const answer = "The research runs on; I will say what it finds.";
+  stream.emit("tool", { tool: "spawn_subagent", preview: "general_purpose" });
+  stream.emit("message", { text: answer });
+  expect(await screen.findByText(saying(answer))).toBeTruthy();
+
+  // A background run publishes onto this stream while the parent writes its closing answer.
+  stream.emit("subagent_activity", {
+    turn_id: "88888888-8888-4888-8888-888888888888",
+    parent_turn_id: TURN_ID,
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    profile: "general_purpose",
+    name: "",
+    tool: "",
+    description: "",
+    preview: "",
+    skill: "",
+    status: "",
+  });
+  expect(screen.getByText(saying(answer))).toBeTruthy();
+
+  stream.emit("terminal", {
+    status: "done",
+    text: answer,
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+
+  const summary = await screen.findByText("Completed 2 steps");
+  await userEvent.click(summary);
+  const rows = summary.closest("details")!.querySelectorAll(":scope > ul > li");
+  expect([...rows].map((row) => row.textContent)).toEqual([
+    "spawn_subagent general_purpose",
+    "Subagent · general_purpose",
+  ]);
+  expect(screen.getByText(saying(answer))).toBeTruthy();
+});
+
+test("a thought flushed to a step survives the drain that ends its round", async () => {
+  const stream = await streaming();
+  stream.emit("message", { text: "Reading the changelog first." });
+  stream.emit("tool", { tool: "read", preview: "CHANGELOG.md" });
+  stream.emit("absorbed", { arrivals: [ARRIVAL_ID] });
+  stream.emit("message", { text: "It shipped Tuesday." });
+  stream.emit("terminal", {
+    status: "done",
+    text: "It shipped Tuesday.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+
+  // The round the drain closed wrote a thought and dispatched a call. Both are the work behind the
+  // reply it settled as, and a drain is not a reason to lose them.
+  const summary = await screen.findByText("Completed 2 steps");
+  await userEvent.click(summary);
+  const rows = summary.closest("details")!.querySelectorAll("li");
+  expect([...rows].map((row) => row.textContent)).toEqual([
+    "Reading the changelog first.",
+    "read CHANGELOG.md",
+  ]);
+  expect(screen.getByText("It shipped Tuesday.")).toBeTruthy();
+});
+
+test("a reloaded turn draws the thought it settled into as a step", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    "/transcript": () =>
+      json({
+        messages: [
+          { role: "user", text: "What shipped?" },
+          {
+            role: "assistant",
+            text: "It shipped Tuesday.",
+            events: [{ kind: "note", text: "Reading the changelog first." }],
+          },
+        ],
+      }),
+    "/slots": () => json({ slots: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const summary = await screen.findByText("Completed 1 step");
+  expect(screen.queryByText("Reading the changelog first.")).toBeNull();
+
+  await userEvent.click(summary);
+  expect(screen.getByText("Reading the changelog first.")).toBeTruthy();
+  expect(screen.getByText("It shipped Tuesday.")).toBeTruthy();
 });
 
 test("a terminal subagent event nests its work under the reply", async () => {

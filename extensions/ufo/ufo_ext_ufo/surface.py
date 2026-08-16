@@ -46,6 +46,7 @@ from ufo.sdk.hub import (
     TextDelta,
     ToolCall,
 )
+from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
@@ -141,27 +142,76 @@ HISTORY_CHAR_BUDGET = 20_000
 def history_directives(conversation: Conversation) -> tuple[bytes, ...]:
     """The conversation so far, rendered for a fresh resume: the member's messages as `you`, the
     agent's replies as `say`. Trailing replies are left off — the tail replays the latest turn's
-    frames, and a reply said here too would print twice. The newest messages win the budget."""
-    said: list[tuple[bool, str]] = []
+    frames, and a reply said here too would print twice. The newest messages win the budget.
+
+    A turn's steps stand over the reply they produced, as the one `note` line that counts them:
+    every text but the turn's last was written between calls, so it is a step of the work rather
+    than a reply of its own, and a round that wrote its text and then dispatched work was cut there
+    — its text is a step too and the turn states no words. This is the shape the live turn rolled
+    up into, so a resume re-reads what the session showed."""
+    active = {
+        block.tool_use_id
+        for message in conversation.messages
+        if not isinstance(message.content, str)
+        for block in message.content
+        if isinstance(block, ToolResultBlock) and block.activity
+    }
+    said: list[tuple[bool, str, int]] = []
+    answer = ""
+    steps = 0
     for message in conversation.messages:
         text = _history_text(message)
+        if message.role == "assistant":
+            calls = _dispatched(message, active)
+            if text.strip():
+                steps += int(bool(answer))
+                answer = "" if calls else text
+                steps += int(bool(calls))
+            steps += calls
+            continue
         if not text.strip():
             continue
-        said.append((message.role == "user", text))
+        if answer or steps:
+            said.append((False, answer, steps))
+        answer, steps = "", 0
+        said.append((True, text, 0))
+    if answer or steps:
+        said.append((False, answer, steps))
     while said and not said[-1][0]:
         said.pop()
-    kept: list[tuple[bool, str]] = []
+    kept: list[tuple[bool, str, int]] = []
     budget = HISTORY_CHAR_BUDGET
-    for member, text in reversed(said):
+    for member, text, rolled in reversed(said):
         budget -= len(text)
         if budget < 0 and kept:
             break
-        kept.append((member, text))
+        kept.append((member, text, rolled))
     kept.reverse()
-    return tuple(directive("you" if member else "say", text) for member, text in kept)
+    lines: list[bytes] = []
+    for member, text, rolled in kept:
+        if member:
+            lines.append(directive("you", text))
+            continue
+        if rolled:
+            # The web's fold states the same words.
+            plural = "" if rolled == 1 else "s"
+            lines.append(directive("note", f"Completed {rolled} step{plural}"))
+        if text:
+            lines.append(directive("say", text))
+    return tuple(lines)
 
 
-def _history_text(message) -> str:
+def _dispatched(message: Message, active: set[str]) -> int:
+    """How many calls a round dispatched: a call the model wrote but that never entered dispatch
+    narrated nothing live either, so it is no step here."""
+    if isinstance(message.content, str):
+        return 0
+    return sum(
+        1 for block in message.content if isinstance(block, ToolUseBlock) and block.id in active
+    )
+
+
+def _history_text(message: Message) -> str:
     if isinstance(message.content, str):
         raw = message.content
     else:

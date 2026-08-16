@@ -121,6 +121,17 @@ function runEvent(frame: RunFrame): ActivityEvent | null {
   return null;
 }
 
+/** The narration a round wrote before it dispatched work, taken into the activity list as the step
+ *  it is: the row stands where the text was written, between the calls it sits among, and the live
+ *  bubble starts the next round clean so the closing answer is the only text it ever states. Only
+ *  this turn's own dispatch cuts the text that way — a child's frame arrives on this stream at the
+ *  child's pace, so it says nothing about where this turn's words end. */
+function noted(live: LiveTurn): LiveTurn {
+  const text = live.text.trim();
+  if (!text) return live;
+  return { ...live, text: "", events: live.events.concat({ kind: "note", text }) };
+}
+
 function holdsRun(runs: SubagentRun[], turnId: string): boolean {
   return runs.some((run) => run.turn_id === turnId || holdsRun(run.subagents, turnId));
 }
@@ -308,14 +319,18 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
    *  marker left behind would anchor the next drain's reply above a message already answered. The
    *  live bubble then starts the next round empty. A frame whose ids were all seen is a replay of a
    *  round already recorded: it still ends the round, and recording it again would state the reply
-   *  twice. */
+   *  twice.
+   *
+   *  Steps settle a reply of their own even when no text is left to state: a round that narrated and
+   *  then dispatched work already took that narration into its step list, and the live bubble the
+   *  drain restarts is the last place those steps exist. */
   source.addEventListener("absorbed", (event) => {
     const arrivals = JSON.parse((event as MessageEvent).data).arrivals as string[];
     updateChat(chatKey, (state) => {
       const fresh = arrivals.filter((id) => !state.absorbed.includes(id));
       const live = state.live;
       const reply: Bubble[] =
-        fresh.length && live && live.text
+        fresh.length && live && (live.text || live.events.length)
           ? [
               {
                 role: "assistant",
@@ -374,23 +389,33 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       preview: frame.preview ?? "",
       description: frame.description ?? "",
     };
-    onLive((live) => ({
-      ...live,
-      events: live.events.concat(entry),
-      activity: eventLabel(entry, "active"),
-    }));
+    onLive((streamed) => {
+      const live = noted(streamed);
+      return {
+        ...live,
+        events: live.events.concat(entry),
+        activity: eventLabel(entry, "active"),
+      };
+    });
   });
 
   source.addEventListener("skill", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
     const entry: ActivityEvent = { kind: "skill", name: frame.skill, preview: "", description: "" };
-    onLive((live) => ({
-      ...live,
-      events: live.events.concat(entry),
-      activity: eventLabel(entry, "active"),
-    }));
+    onLive((streamed) => {
+      const live = noted(streamed);
+      return {
+        ...live,
+        events: live.events.concat(entry),
+        activity: eventLabel(entry, "active"),
+      };
+    });
   });
 
+  /** A run's frame folds in without touching the text this turn has streamed. A background run
+   *  publishes onto this stream while the parent writes its closing answer, and taking that answer
+   *  into a step would leave the reply wordless until the terminal frame restored it. The round
+   *  that dispatched the run already noted the narration it wrote, on its own `tool` frame. */
   source.addEventListener("subagent_activity", (event) => {
     const frame = JSON.parse((event as MessageEvent).data) as RunFrame;
     onLive((live) => ({

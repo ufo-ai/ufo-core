@@ -360,9 +360,10 @@ export function Meta({ children }: { children: ReactNode }) {
 
 /** The reply's activity disclosure, and while the turn runs the one line saying what the agent is
  *  doing. Live it leads with what is happening — `Awaiting N subagents` while runs are open, else
- *  the current step — and opens itself the moment a run appears, so the member watches the rows
- *  work; settled it collapses to `Completed N steps`: the reply's own steps, a run counting as one
- *  however much it did inside. A member's own toggle wins over the default from then on.
+ *  the current step — and stands open while the turn runs, so the member reads the thoughts and the
+ *  calls where they happened; settled it collapses to `Completed N steps`: the reply's own steps, a
+ *  run counting as one however much it did inside. A member's own toggle wins over the default from
+ *  then on.
  *
  *  A turn opens on this line with nothing yet behind it, and the first tool call arrives into the
  *  same line rather than replacing it. That is why the disclosure is drawn whether or not it has
@@ -395,12 +396,18 @@ function Activity({
       ? "Awaiting " + openRuns + " subagent" + (openRuns === 1 ? "" : "s")
       : (working ?? latestActivity(events, runs))
     : "Completed " + steps + " step" + (steps === 1 ? "" : "s");
-  const shown = steps > 0 && (open ?? (live && openRuns > 0));
+  const shown = steps > 0 && (open ?? live);
   return (
     <details
       className="group/activity mt-2xs font-mono text-small text-ink-soft"
       open={shown}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
+      // A browser fires `toggle` for the `open` this render writes as well as for a member's own
+      // click, so only a state the fold was not already drawn in came from the member. Recording
+      // the render's own open would read as a member holding the fold open, and the reply would
+      // never roll up to `Completed N steps` once the turn settled.
+      onToggle={(event) => {
+        if (event.currentTarget.open !== shown) setOpen(event.currentTarget.open);
+      }}
     >
       <Marker
         render={

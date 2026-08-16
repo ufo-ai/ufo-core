@@ -16,7 +16,7 @@ pub mod theme;
 pub mod toolrender;
 mod wrap;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -36,7 +36,7 @@ use crate::ui::editor::{AskState, Key, Outcome};
 use crate::ui::history::History;
 use crate::ui::osc::{Caps, ImageProtocol};
 use crate::ui::picker::{PickKey, PickOutcome, Picker};
-use crate::ui::retained::{Entry, Retained};
+use crate::ui::retained::{Entry, Retained, Step};
 use crate::ui::select::{ClickTracker, Grain, Selection};
 use crate::ui::status::{Activity, Progress, Signals, StatusRow};
 use crate::ui::term::AltScreen;
@@ -55,6 +55,23 @@ const IMAGE_BYTES_MAX: usize = 2 * 1024 * 1024;
 const KEY_COL: usize = 26;
 const FLASH_SECONDS: u64 = 2;
 const EARLY_ABSORBED_MAX: usize = 64;
+
+/// Whether a server note narrates the agent's work: a call or a skill load, the agent's own or one
+/// a subagent made under its label. Such a note is a step of the turn; a note the client writes
+/// about itself, and the line a rolled-up turn states, are not.
+pub fn narrates_activity(text: &str) -> bool {
+    let under_a_label = text.split_once(": ").map_or(text, |(_, rest)| rest);
+    [text, under_a_label]
+        .iter()
+        .any(|said| said.starts_with("running ") || said.starts_with("loading skill"))
+}
+
+/// The run a note narrates under: a subagent's dispatch states the run's name before the call it
+/// made, and the agent's own dispatch states no name.
+pub fn run_label(text: &str) -> Option<&str> {
+    let (label, made) = text.split_once(": ")?;
+    narrates_activity(made).then_some(label)
+}
 
 /// Whether the fancy renderer runs: a TTY, a real TERM, and no `UFO_PLAIN`.
 pub fn wants_fx() -> bool {
@@ -199,6 +216,7 @@ pub struct App {
     running_op: Option<OpView>,
     running_desc: Option<String>,
     narration: Option<(String, String)>,
+    runs_counted: HashSet<String>,
     last_reply: String,
     host: String,
     channel: String,
@@ -245,6 +263,7 @@ impl App {
             running_op: None,
             running_desc: None,
             narration: None,
+            runs_counted: HashSet::new(),
             last_reply: String::new(),
             host,
             channel,
@@ -296,21 +315,52 @@ impl App {
     }
 
     /// A server note. Tool narration — the activity the client also states for its own ops —
-    /// stays in the activity row; everything else joins the transcript.
+    /// states the current step in the activity row and is a step of the turn's rollup, ranked with
+    /// the thoughts written between the calls. A run the turn already counted narrates its further
+    /// dispatches as rows of that one step, so a run counts once however much it did. A note the
+    /// client writes about itself is no step of the agent's work and joins the transcript on its
+    /// own.
     pub fn note(&mut self, text: &str) {
         if let Some(rest) = text.strip_prefix("running ") {
             if let Some((tool, detail)) = rest.split_once(": ") {
                 self.narration = Some((tool.to_string(), detail.to_string()));
             }
             self.status_text(text);
-            return;
-        }
-        if text.starts_with("loading skill") {
+        } else if text.starts_with("loading skill") {
             self.status_text(text);
+        }
+        if narrates_activity(text) {
+            let Some(label) = run_label(text) else {
+                self.step(Step::Note(text.to_string()), true);
+                return;
+            };
+            let step = match self.runs_counted.insert(label.to_string()) {
+                true => Step::Note(text.to_string()),
+                false => Step::Under(text.to_string()),
+            };
+            self.step(step, false);
             return;
         }
         self.flush_stream();
         self.retained.push(Entry::Note(text.to_string()));
+    }
+
+    /// One step of the running turn, `own` for a dispatch the turn made itself. Its own dispatch
+    /// stands the open reply before it as the thought it is — text a round wrote before it
+    /// dispatched work is intermediate by definition — so the reply the turn closes on is the
+    /// answer, and the steps behind it are what its end rolls up. A run narrates at its own pace: a
+    /// background run states its calls while the parent writes that closing answer, so a row of the
+    /// run says nothing about where the parent's words end and takes none of them.
+    fn step(&mut self, step: Step, own: bool) {
+        self.flush_stream();
+        if own && self.reply_open {
+            if let Some(thought) = self.retained.take_reply() {
+                self.retained.push_step(Step::Thought(thought));
+                self.last_reply.clear();
+            }
+            self.reply_open = false;
+        }
+        self.retained.push_step(step);
     }
 
     pub fn status_text(&mut self, text: &str) {
@@ -408,6 +458,8 @@ impl App {
         self.running_op = None;
         self.flush_stream();
         self.reply_open = false;
+        self.retained.roll_up_steps();
+        self.runs_counted.clear();
         self.status.activity = if waiting {
             Activity::WaitingInput
         } else {
@@ -645,6 +697,10 @@ impl App {
             }
             KeyCode::End if self.retained.scrolled() > 0 => {
                 self.retained.scroll_to_end();
+                return Reply::None;
+            }
+            KeyCode::Char('t') if ctrl => {
+                self.retained.toggle_steps();
                 return Reply::None;
             }
             _ => {}
@@ -1233,9 +1289,11 @@ impl App {
     }
 
     /// Leave the alternate screen and print the whole conversation into the terminal's own
-    /// scrollback, images last — the session ends, the transcript stays at its final width.
+    /// scrollback, images last — the session ends, the transcript stays at its final width. The
+    /// session's end caps its last turn, so a rollup the member never saw settle rolls up here.
     pub fn close(&mut self) {
         self.flush_stream();
+        self.retained.roll_up_steps();
         let document = self.retained.document(&self.theme);
         let _ = self.screen.leave();
         let _ = self.screen.print_document(&document);
@@ -1383,6 +1441,35 @@ mod tests {
             .filter(|(_, step)| *step > 0)
             .map(|(unit, _)| unit)
             .collect()
+    }
+
+    #[test]
+    fn only_the_agents_own_work_narrates_a_step() {
+        assert!(narrates_activity("running bash: ls"));
+        assert!(narrates_activity("loading skill: office/pptx"));
+        assert!(narrates_activity("reviewer: running read: the diff"));
+        assert!(narrates_activity("reviewer: loading skill: coding"));
+        assert!(!narrates_activity("Completed 3 steps"));
+        assert!(!narrates_activity("Copied the last reply."));
+        assert!(!narrates_activity("Not stopped: the turn had ended"));
+        assert!(!narrates_activity(
+            "Detached; the turn continues, and a new message rejoins it."
+        ));
+    }
+
+    #[test]
+    fn a_run_names_itself_before_the_call_it_made() {
+        assert_eq!(
+            run_label("reviewer: running read: the diff"),
+            Some("reviewer")
+        );
+        assert_eq!(
+            run_label("reviewer: loading skill: coding"),
+            Some("reviewer")
+        );
+        assert_eq!(run_label("running read: the diff"), None);
+        assert_eq!(run_label("loading skill: office/pptx"), None);
+        assert_eq!(run_label("Copied the last reply."), None);
     }
 
     #[test]

@@ -55,6 +55,7 @@ from ufo_ext_web.surface import (
     PORTAL_HTML,
     SESSION_COOKIE,
     SESSION_FAULT_HEADER,
+    SUBAGENT_EVENT_LIMIT,
     SubagentNode,
     _rendered_messages,
     _run_answer,
@@ -328,6 +329,7 @@ def test_transcript_projection_keeps_tool_activity_and_elides_results() -> None:
             "role": "assistant",
             "text": "The tests pass.",
             "events": [
+                {"kind": "note", "text": "Let me check."},
                 {
                     "kind": "tool",
                     "name": "bash",
@@ -464,6 +466,135 @@ def test_transcript_projection_does_not_move_activity_between_turns() -> None:
         {"role": "user", "text": "Try something else."},
         {"role": "assistant", "text": "Done."},
     ]
+
+
+def test_transcript_projection_keeps_mid_turn_narration_as_steps_of_the_reply() -> None:
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content="<context>source: web</context>\nWhat shipped?"),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="Reading the changelog first.\n"),
+                    ToolUseBlock(id="call-1", name="read", input={"file_path": "CHANGELOG.md"}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+            ),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="Checking the tags now."),
+                    ToolUseBlock(id="call-2", name="bash", input={"command": "git tag"}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(ToolResultBlock(tool_use_id="call-2", content="v1", activity=True),),
+            ),
+            Message(role="assistant", content=(TextBlock(text="It shipped Tuesday."),)),
+        )
+    )
+
+    assert rendered == [
+        {"role": "user", "text": "What shipped?"},
+        {
+            "role": "assistant",
+            "text": "It shipped Tuesday.",
+            "events": [
+                {"kind": "note", "text": "Reading the changelog first."},
+                {
+                    "kind": "tool",
+                    "name": "read",
+                    "preview": '{"file_path":"CHANGELOG.md"}',
+                    "description": "",
+                },
+                {"kind": "note", "text": "Checking the tags now."},
+                {
+                    "kind": "tool",
+                    "name": "bash",
+                    "preview": '{"command":"git tag"}',
+                    "description": "",
+                },
+            ],
+        },
+    ]
+
+
+def test_transcript_projection_states_a_drained_round_as_the_steps_it_wrote() -> None:
+    """A drain cuts a round that narrated and then dispatched work, so that round answered nothing:
+    the reply behind the folded message states its thought and its call as steps and no words — the
+    shape the live view settles into, which a reload has to draw the same way."""
+    turn_id = "55555555-5555-5555-5555-555555555555"
+    drained = "66666666-6666-6666-6666-666666666666"
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {turn_id}\n</context>\nWhat shipped?",
+            ),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="Reading the changelog first."),
+                    ToolUseBlock(id="call-1", name="read", input={"file_path": "CHANGELOG.md"}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+            ),
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {drained}\n</context>\nAny news?",
+            ),
+            Message(role="assistant", content=(TextBlock(text="It shipped Tuesday."),)),
+        ),
+        None,
+        frozenset({turn_id}),
+    )
+
+    assert rendered == [
+        {"role": "user", "text": "What shipped?"},
+        {
+            "role": "assistant",
+            "text": "",
+            "events": [
+                {"kind": "note", "text": "Reading the changelog first."},
+                {
+                    "kind": "tool",
+                    "name": "read",
+                    "preview": '{"file_path":"CHANGELOG.md"}',
+                    "description": "",
+                },
+            ],
+        },
+        {"role": "user", "text": "Any news?"},
+        {"role": "assistant", "text": "It shipped Tuesday."},
+    ]
+
+
+def test_transcript_projection_bounds_the_narration_it_keeps() -> None:
+    rounds = SUBAGENT_EVENT_LIMIT + 5
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content="<context>source: web</context>\nRun it."),
+            *(
+                Message(role="assistant", content=(TextBlock(text=f"Step {number}."),))
+                for number in range(rounds)
+            ),
+            Message(role="assistant", content=(TextBlock(text="Done."),)),
+        )
+    )
+
+    reply = rendered[-1]
+    assert reply["text"] == "Done."
+    events = cast(list[dict[str, str]], reply["events"])
+    assert len(events) == SUBAGENT_EVENT_LIMIT
+    assert events[0] == {"kind": "note", "text": "Step 0."}
+    assert events[-1] == {"kind": "note", "text": f"Step {SUBAGENT_EVENT_LIMIT - 1}."}
 
 
 def test_transcript_projection_flushes_activity_for_an_empty_answer() -> None:

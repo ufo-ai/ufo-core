@@ -1202,6 +1202,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
             WireEvent::Sendable(_) | WireEvent::Sent { .. } | WireEvent::Retracted { .. } => {}
             WireEvent::StreamEnd { continues } => {
                 if let Some(code) = gate.exit.take() {
+                    out.end_stream();
                     break code;
                 }
                 if continues {

@@ -1,16 +1,30 @@
 //! The line printer behind pipes, `TERM=dumb`, and `UFO_PLAIN`: every directive is plain lines
 //! on stdout, prompts read stdin, nothing repaints.
 
+use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 
-/// Plain output state: whether a streamed line is still open.
+use crate::ui::retained::rollup_line;
+use crate::ui::{narrates_activity, run_label};
+
+/// Plain output state: whether a streamed line is still open, and the steps the running turn has
+/// taken — a piped session is a log, so every step prints where it happened and the turn's end
+/// states the count rather than collapsing anything.
 pub struct Plain {
     open: bool,
+    steps: usize,
+    runs_counted: HashSet<String>,
+    thinking: bool,
 }
 
 impl Plain {
     pub fn new() -> Plain {
-        Plain { open: false }
+        Plain {
+            open: false,
+            steps: 0,
+            runs_counted: HashSet::new(),
+            thinking: false,
+        }
     }
 
     pub fn say(&mut self, text: &str) {
@@ -18,7 +32,23 @@ impl Plain {
         println!("{text}");
     }
 
+    /// A note the agent's work narrates counts as a step. Text the turn wrote before its own
+    /// dispatch counts as the thought it was; a run narrates at its own pace, and a background run
+    /// states its calls while the parent writes its closing answer, so a run's note leaves that
+    /// text as the answer it is. A run counts once however many dispatches it narrates, which is
+    /// the count the web states.
     pub fn note(&mut self, text: &str) {
+        if narrates_activity(text) {
+            match run_label(text) {
+                None => {
+                    self.steps += usize::from(self.thinking) + 1;
+                    self.thinking = false;
+                }
+                Some(label) => {
+                    self.steps += usize::from(self.runs_counted.insert(label.to_string()));
+                }
+            }
+        }
         self.say(text);
     }
 
@@ -39,6 +69,7 @@ impl Plain {
         let _ = io::stdout().flush();
         if !chunk.is_empty() {
             self.open = !chunk.ends_with('\n');
+            self.thinking |= !chunk.trim().is_empty();
         }
     }
 
@@ -57,6 +88,12 @@ impl Plain {
 
     pub fn end_stream(&mut self) {
         self.line_break();
+        let steps = std::mem::take(&mut self.steps);
+        self.runs_counted.clear();
+        self.thinking = false;
+        if steps > 0 {
+            println!("{}", rollup_line(steps));
+        }
     }
 
     /// Read one line under `prompt`; None on EOF.

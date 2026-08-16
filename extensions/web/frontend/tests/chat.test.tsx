@@ -213,7 +213,8 @@ test("a conversation reloaded while its turn runs shows the prompt, says so, and
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
 
   StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
-  expect(await screen.findByText("bash gh pr view")).toBeTruthy();
+  // The line states the step, and the fold it opens onto stands it as a row while the turn runs.
+  expect(await screen.findAllByText("bash gh pr view")).toHaveLength(2);
   expect(screen.queryByText("Thinking…")).toBeNull();
 
   StreamFake.last().emit("terminal", {
@@ -239,14 +240,14 @@ test("the working mark is not taken down when the turn's first step lands", asyn
   expect(opening.closest("[data-slot=marker]")!.querySelector("svg")).toBeNull();
 
   StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
-  expect(await screen.findByText("bash gh pr view")).toBeTruthy();
+  expect(await screen.findAllByText("bash gh pr view")).toHaveLength(2);
 
   // The same element, not one that replaced it: a remount here restarts the orbit mid-turn.
   expect(document.querySelector("[data-slot=orbit]")).toBe(mark);
   expect(document.querySelector("[data-slot=marker] svg")).toBeTruthy();
 });
 
-test("a running turn opens onto the calls behind its latest, and keeps working", async () => {
+test("a running turn stands the calls behind its latest open, until the member closes them", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();
 
@@ -255,11 +256,11 @@ test("a running turn opens onto the calls behind its latest, and keeps working",
   StreamFake.last().emit("skill", { skill: "coding" });
 
   const summary = await screen.findByText("Loading skill · coding");
-  expect(screen.queryByText("bash gh pr view")).toBeNull();
-
-  await userEvent.click(summary);
   expect(screen.getByText("bash gh pr view")).toBeTruthy();
   expect(document.querySelector("[data-slot=decode-text]")).toBeTruthy();
+
+  await userEvent.click(summary);
+  expect(screen.queryByText("bash gh pr view")).toBeNull();
 
   StreamFake.last().emit("terminal", {
     status: "done",

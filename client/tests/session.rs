@@ -1651,3 +1651,235 @@ fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// The turn's steps stand among the calls that made them while it runs, roll up behind one line
+/// when the answer lands, and open again on the member's own key.
+#[cfg(unix)]
+#[test]
+fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "txt\tReading the notes first.",
+                "note\trunning read: the notes",
+                "txt\tNow the calendar.",
+                "note\trunning read: the calendar",
+                "poll\t1",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["txt\tThe meeting is at four.", "ask\t>"],
+        },
+    ]);
+    let home = scratch_home("tty-rollup");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the turn's own post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+
+    let live = session.screen();
+    let mut at = 0;
+    for step in [
+        "Reading the notes first.",
+        "running read: the notes",
+        "Now the calendar.",
+        "running read: the calendar",
+    ] {
+        let found = live[at..]
+            .find(step)
+            .unwrap_or_else(|| panic!("the running turn shows {step} in its place: {live}"));
+        at += found + step.len();
+    }
+    assert!(
+        !live.contains("Completed"),
+        "a running turn rolls nothing up: {live}"
+    );
+
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the poll reconnects for the answer");
+    thread::sleep(Duration::from_millis(800));
+
+    let settled = session.screen();
+    assert!(
+        settled.contains("\u{25b8} Completed 4 steps"),
+        "the answer rolls two thoughts and two calls up: {settled}"
+    );
+    let line = settled.find("Completed 4 steps").expect("the rollup line");
+    let answer = settled
+        .find("The meeting is at four.")
+        .expect("the answer stands under it");
+    assert!(line < answer, "{settled}");
+    assert!(
+        !settled.contains("running read: the notes"),
+        "the steps stand behind the line, not beside it: {settled}"
+    );
+
+    session.press(b"\x14");
+    let opened = session.screen();
+    assert!(
+        opened.contains("\u{25be} Completed 4 steps"),
+        "Ctrl+T opens the rollup: {opened}"
+    );
+    assert!(
+        opened.contains("running read: the notes"),
+        "the opened rollup states every step: {opened}"
+    );
+
+    session.press(b"\x03");
+    assert!(session.ended(), "Ctrl+C ends the session");
+    let _ = served.handle.join();
+    let _ = session.child.wait();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A background run narrates while the parent writes its closing answer. The answer is the
+/// reply — the run's row never takes it into the rollup.
+#[cfg(unix)]
+#[test]
+fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &[
+            "note\trunning spawn: reviewer",
+            "txt\tThe reviewer is on it.",
+            "note\treviewer: running read: the diff",
+            "ask\t>",
+        ],
+    }]);
+    let home = scratch_home("tty-background-run");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the turn's own post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+
+    let settled = session.screen();
+    assert!(
+        settled.contains("\u{25b8} Completed 2 steps"),
+        "the spawn and the run are the two steps: {settled}"
+    );
+    let line = settled.find("Completed 2 steps").expect("the rollup line");
+    let answer = settled
+        .find("The reviewer is on it.")
+        .expect("the answer the turn streamed stays on the transcript");
+    assert!(line < answer, "{settled}");
+
+    session.press(b"\x14");
+    let opened = session.screen();
+    assert!(
+        opened.contains("reviewer: running read: the diff"),
+        "the run's call is a step of the rollup: {opened}"
+    );
+    assert!(
+        opened.contains("The reviewer is on it."),
+        "the answer is no step of it: {opened}"
+    );
+
+    session.press(b"\x03");
+    assert!(session.ended(), "Ctrl+C ends the session");
+    let _ = served.handle.join();
+    let _ = session.child.wait();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_piped_session_logs_every_step_and_counts_them() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &[
+            "txt\tReading the notes first.\n",
+            "note\trunning read: the notes",
+            "note\tloading skill: office/pptx",
+            "txt\tThe meeting is at four.\n",
+            "exit\t0",
+        ],
+    }]);
+    let home = scratch_home("plain-rollup");
+    let (stdout, code) = run_client(&served.url, &["go"], "", &home);
+    let _ = served.handle.join().unwrap();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    let thought = stdout
+        .find("Reading the notes first.")
+        .expect("a piped session keeps the narration");
+    let call = stdout.find("running read: the notes").expect("the call");
+    let skill = stdout
+        .find("loading skill: office/pptx")
+        .expect("the skill");
+    let answer = stdout.find("The meeting is at four.").expect("the answer");
+    let rollup = stdout
+        .find("Completed 3 steps")
+        .expect("the turn's end counts the steps");
+    assert!(
+        thought < call && call < skill && skill < answer && answer < rollup,
+        "a log stays in order and states the count at the end: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A background run's call reaches a piped session after the parent wrote its answer. The answer
+/// is the reply, so the count states the work and not the words.
+#[test]
+fn a_piped_session_counts_no_step_for_an_answer_a_run_narrated_over() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &[
+            "note\trunning spawn: reviewer",
+            "txt\tThe reviewer is on it.\n",
+            "note\treviewer: running read: the diff",
+            "exit\t0",
+        ],
+    }]);
+    let home = scratch_home("plain-background-run");
+    let (stdout, code) = run_client(&served.url, &["go"], "", &home);
+    let _ = served.handle.join().unwrap();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(
+        stdout.contains("Completed 2 steps"),
+        "the spawn and the run are the two steps: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A run states every call it made, and counts as the one step the web counts it as.
+#[test]
+fn a_piped_session_counts_a_run_once_however_much_it_did() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &[
+            "note\trunning spawn: reviewer",
+            "note\treviewer: running read: the diff",
+            "note\treviewer: running bash: cargo test",
+            "txt\tThe reviewer found nothing.\n",
+            "exit\t0",
+        ],
+    }]);
+    let home = scratch_home("plain-run-rollup");
+    let (stdout, code) = run_client(&served.url, &["go"], "", &home);
+    let _ = served.handle.join().unwrap();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    for step in [
+        "running spawn: reviewer",
+        "reviewer: running read: the diff",
+        "reviewer: running bash: cargo test",
+    ] {
+        assert!(stdout.contains(step), "a log keeps {step}: {stdout}");
+    }
+    assert!(
+        stdout.contains("Completed 2 steps"),
+        "the spawn and the run it opened are two steps: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}

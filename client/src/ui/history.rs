@@ -172,6 +172,7 @@ pub fn hotkeys() -> Vec<(&'static str, &'static str)> {
             "History (filtered by what you typed) or cursor; Up recalls the newest queued message",
         ),
         ("Ctrl+Up / Ctrl+Down", "Jump between your messages"),
+        ("Ctrl+T", "Open or close the steps behind the last reply"),
         ("Ctrl+A / Ctrl+E", "Line start / end"),
         ("Ctrl+U / Ctrl+K / Ctrl+W", "Kill to start / end / word"),
         ("Ctrl+Y", "Yank"),
