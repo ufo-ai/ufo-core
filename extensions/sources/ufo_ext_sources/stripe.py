@@ -6,6 +6,9 @@ Stripe has one list shape across every top-level stream: `{data: [...], has_more
 stream's cursor is `created`. Substreams fan out: `paginate` walks the parent collection, then for
 each parent record fetches the child collection either by path (`/customers/{id}/payment_methods`)
 or by query param (`/subscription_items?subscription=<id>`), stamping the parent id onto each row.
+A parent that is itself a query substream is enumerated through that same fan-out, so
+`usage_records` walks two levels: `/subscriptions` → `/subscription_items?subscription=<id>` →
+`/subscription_items/{id}/usage_record_summaries`.
 The `external_account_*` streams fan over accounts with an `object=<type>` filter. The pinned API
 version rides the `Stripe-Version` header. Records arrive flat, so `flatten` is the identity
 passthrough. A refusal (401/403) raises `StreamSkipped`. The credential is resolved through the auth
@@ -289,9 +292,8 @@ class StripeConnector(RestConnector):
     ) -> AsyncIterator[list[dict[str, Any]]]:
         parent_stream = self._stream_spec(_SUBSTREAM_PARENTS[stream.name])
         child_path_template = _SUBSTREAM_CHILD_PATHS[stream.name]
-        parent_path = self._list_path(parent_stream)
         stamp_key = _SUBSTREAM_PARENT_STAMP.get(stream.name)
-        async for parent_page in self._page_loop(client, parent_path, parent_stream, cursor=None):
+        async for parent_page in self._parent_pages(client, parent_stream):
             for parent in parent_page:
                 pid = parent.get("id")
                 if not pid:
@@ -308,6 +310,13 @@ class StripeConnector(RestConnector):
                         yield [{**row, **parent_fields} for row in child_page]
                     else:
                         yield child_page
+
+    def _parent_pages(
+        self, client: httpx.AsyncClient, parent_stream: StreamSpec
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        if parent_stream.name in _SUBSTREAM_QUERY_PARENTS:
+            return self._paginate_substream_query(client, parent_stream)
+        return self._page_loop(client, self._list_path(parent_stream), parent_stream, cursor=None)
 
     async def _paginate_substream_query(
         self, client: httpx.AsyncClient, stream: StreamSpec

@@ -1,9 +1,11 @@
 """The Stripe connector over a mock transport: the `has_more`/`starting_after` cursor walk, the
 `?created[gte]` incremental filter, the `events` stream (which ufo syncs as plain records — it
-does not route Stripe's cross-object `*.deleted` events to other streams), and a refusal as
-`StreamSkipped`. Stripe's `created` cursor is a unix integer, which the adapter's string watermark
-does not advance, so an incremental stream full-refreshes each run (correct: `snapshot=False` +
-digest-skip). Offline — a canned transport, no DB, no token."""
+does not route Stripe's cross-object `*.deleted` events to other streams), the two-level
+`usage_records` fan-out asserted request by request with its parameters (Stripe rejects
+`/v1/subscription_items` without `subscription`), and a refusal as `StreamSkipped`. Stripe's
+`created` cursor is a unix integer, which the adapter's string watermark does not advance, so an
+incremental stream full-refreshes each run (correct: `snapshot=False` + digest-skip). Offline — a
+canned transport, no DB, no token."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -17,6 +19,13 @@ from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
+MISSING_SUBSCRIPTION = {
+    "error": {
+        "code": "parameter_missing",
+        "message": "Missing required param: subscription.",
+        "type": "invalid_request_error",
+    }
+}
 
 
 class _MockProxy:
@@ -90,11 +99,11 @@ async def test_events_sync_as_plain_records() -> None:
 
 
 @pytest.mark.parametrize(
-    ("stream", "parent_path", "child_path", "record", "created_at", "updated_at"),
+    ("stream", "parents", "child_path", "record", "created_at", "updated_at"),
     [
         (
             "usage_records",
-            "/v1/subscription_items",
+            {"/v1/subscriptions": "sub_1", "/v1/subscription_items": "si_1"},
             "/v1/subscription_items/si_1/usage_record_summaries",
             {"id": "ur_1", "timestamp": 100},
             "1970-01-01T00:01:40.000000+00:00",
@@ -102,7 +111,7 @@ async def test_events_sync_as_plain_records() -> None:
         ),
         (
             "checkout_sessions_line_items",
-            "/v1/checkout/sessions",
+            {"/v1/checkout/sessions": "cs_1"},
             "/v1/checkout/sessions/cs_1/line_items",
             {"id": "li_1"},
             "1970-01-01T00:01:40.000000+00:00",
@@ -110,7 +119,7 @@ async def test_events_sync_as_plain_records() -> None:
         ),
         (
             "invoice_line_items",
-            "/v1/invoices",
+            {"/v1/invoices": "in_1"},
             "/v1/invoices/in_1/lines",
             {"id": "il_1"},
             "1970-01-01T00:01:40.000000+00:00",
@@ -120,18 +129,15 @@ async def test_events_sync_as_plain_records() -> None:
 )
 async def test_substream_record_timestamps(
     stream: str,
-    parent_path: str,
+    parents: dict[str, str],
     child_path: str,
     record: dict,
     created_at: str,
     updated_at: str | None,
 ) -> None:
-    parent_id = {"usage_records": "si_1", "checkout_sessions_line_items": "cs_1"}.get(
-        stream, "in_1"
-    )
-
     def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == parent_path:
+        parent_id = parents.get(request.url.path)
+        if parent_id is not None:
             return httpx.Response(
                 200,
                 json={
@@ -145,6 +151,46 @@ async def test_substream_record_timestamps(
     result = await _fetch(stream, handle)
     assert result.pages[0].created_at == created_at
     assert result.pages[0].updated_at == updated_at
+
+
+async def test_usage_records_fan_out_lists_items_per_subscription() -> None:
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, dict(request.url.params)))
+        match request.url.path:
+            case "/v1/subscriptions":
+                return httpx.Response(200, json={"data": [{"id": "sub_1"}], "has_more": False})
+            case "/v1/subscription_items":
+                if "subscription" not in request.url.params:
+                    return httpx.Response(400, json=MISSING_SUBSCRIPTION)
+                if request.url.params.get("starting_after") == "si_1":
+                    return httpx.Response(200, json={"data": [{"id": "si_2"}], "has_more": False})
+                return httpx.Response(200, json={"data": [{"id": "si_1"}], "has_more": True})
+            case "/v1/subscription_items/si_1/usage_record_summaries":
+                return httpx.Response(
+                    200, json={"data": [{"id": "ur_1", "timestamp": 100}], "has_more": False}
+                )
+            case _:
+                assert request.url.path == "/v1/subscription_items/si_2/usage_record_summaries"
+                return httpx.Response(
+                    200, json={"data": [{"id": "ur_2", "timestamp": 200}], "has_more": False}
+                )
+
+    result = await _fetch("usage_records", handle)
+    assert _refs(result) == {"usage_records/ur_1", "usage_records/ur_2"}
+    assert seen == [
+        ("/v1/subscriptions", {"limit": "100", "status": "all"}),
+        ("/v1/subscription_items", {"limit": "100", "subscription": "sub_1"}),
+        ("/v1/subscription_items/si_1/usage_record_summaries", {"limit": "100"}),
+        (
+            "/v1/subscription_items",
+            {"limit": "100", "starting_after": "si_1", "subscription": "sub_1"},
+        ),
+        ("/v1/subscription_items/si_2/usage_record_summaries", {"limit": "100"}),
+    ]
+    assert '"subscription_item_id": "si_1"' in result.pages[0].body
+    assert '"subscription_item_id": "si_2"' in result.pages[1].body
 
 
 async def test_stream_skipped_on_refusal() -> None:
