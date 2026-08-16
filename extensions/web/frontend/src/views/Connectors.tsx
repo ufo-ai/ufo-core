@@ -44,8 +44,8 @@ type Connection = {
 };
 
 type ConnectionsPayload = { connections: Connection[] };
-type PoolConnection = Connection & { agents: { id: string; name: string }[] };
-type PoolPayload = { connections: PoolConnection[] };
+export type PoolConnection = Connection & { agents: { id: string; name: string }[] };
+export type PoolPayload = { connections: PoolConnection[] };
 type GithubCoverage = { api: boolean; git_push: boolean; sources: boolean };
 
 const PROVIDER = { label: "Provider", fact: true };

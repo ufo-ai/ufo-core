@@ -3,7 +3,7 @@ import { IconRefresh } from "@tabler/icons-react";
 
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
-import { Filter } from "@/components/ui/filter";
+import { Filter, Segmented } from "@/components/ui/filter";
 import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -15,6 +15,7 @@ import { outcomeNotice, type NoticeState } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
+import { AgentGraph } from "@/views/AgentGraph";
 import type { Agent, NewAgentForm, Subagent } from "@/lib/types";
 
 export type AgentsProps = {
@@ -46,6 +47,15 @@ const FAMILIES = [
 ];
 const SUBAGENT_PILL = "Subagent";
 const SUBAGENT_HINT = "An agent starts one to do a single task and report back.";
+/** The held answer to how this member reads the page: rows to compare, or the topology the rows
+ *  sit in. The graph is a read of more than this payload, so it earns its reads only when picked. */
+const VIEW_KEY = "agents-view";
+const GRAPH = "graph";
+const LIST = "list";
+const VIEWS = [
+  { label: "List", value: LIST },
+  { label: "Graph", value: GRAPH },
+];
 const PILL = cn(
   "ml-xs inline-flex items-center rounded-full border-0 bg-fill px-sm py-hair",
   "align-middle font-sans text-small text-inherit",
@@ -116,8 +126,15 @@ export function Agents({
   const mainAgent = useMainAgent();
   const [query, setQuery] = useState("");
   const [family, setFamily] = useState("");
+  const [view, setView] = useState(() => (localStorage.getItem(VIEW_KEY) === GRAPH ? GRAPH : LIST));
+  const [reloads, setReloads] = useState(0);
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState<ToastState>(SILENT);
+
+  function pickView(next: string) {
+    setView(next);
+    localStorage.setItem(VIEW_KEY, next);
+  }
 
   const rows: AgentRow[] = [
     ...agents.map((agent) => ({
@@ -191,37 +208,57 @@ export function Agents({
         }
       />
       <PageToolbar>
-        <Filter options={FAMILIES} value={family} onChange={setFamily} />
-        <Button size="icon" aria-label="Refresh" className="ml-auto" onClick={onAgents}>
+        <Segmented label="View" segments={VIEWS} value={view} onPick={pickView} />
+        {view === LIST ? <Filter options={FAMILIES} value={family} onChange={setFamily} /> : null}
+        <Button
+          size="icon"
+          aria-label="Refresh"
+          className="ml-auto"
+          onClick={() => {
+            onAgents();
+            setReloads((count) => count + 1);
+          }}
+        >
           <IconRefresh className="size-icon" aria-hidden />
         </Button>
       </PageToolbar>
-      <DataTable
-        columns={COLUMNS}
-        rows={found}
-        rowKey={(row) => row.key}
-        empty="No agent is visible to you."
-        note={
-          rows.length
-            ? query
-              ? "No agent matches this search."
-              : "This deploy declares no subagents."
-            : undefined
-        }
-        open={(row) => row.open}
-        act={() => MANAGE}
-      >
-        {(row) => (
-          <>
-            <Td>
-              {row.name}
-              {row.family === SUBAGENT_FAMILY ? <SubagentPill /> : null}
-            </Td>
-            <Td>{row.details}</Td>
-            <TdFact>{row.model}</TdFact>
-          </>
-        )}
-      </DataTable>
+      {view === GRAPH ? (
+        <AgentGraph
+          agents={agents}
+          subagents={subagents}
+          query={query}
+          reloads={reloads}
+          onOpen={onOpen}
+          onOpenSubagent={onOpenSubagent}
+        />
+      ) : (
+        <DataTable
+          columns={COLUMNS}
+          rows={found}
+          rowKey={(row) => row.key}
+          empty="No agent is visible to you."
+          note={
+            rows.length
+              ? query
+                ? "No agent matches this search."
+                : "This deploy declares no subagents."
+              : undefined
+          }
+          open={(row) => row.open}
+          act={() => MANAGE}
+        >
+          {(row) => (
+            <>
+              <Td>
+                {row.name}
+                {row.family === SUBAGENT_FAMILY ? <SubagentPill /> : null}
+              </Td>
+              <Td>{row.details}</Td>
+              <TdFact>{row.model}</TdFact>
+            </>
+          )}
+        </DataTable>
+      )}
       {beside}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </Page>

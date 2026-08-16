@@ -4,7 +4,7 @@ import type { ListingSpec } from "@/kernel/listing";
 import { ownerLabel } from "@/lib/audience";
 import { day } from "@/lib/moments";
 
-type Source = {
+export type Source = {
   name: string | null;
   backend: string;
   stream: string;
@@ -18,7 +18,7 @@ type Source = {
   next_sync_at: string;
 };
 
-type SourcesPayload = { sources: Source[] };
+export type SourcesPayload = { sources: Source[] };
 
 function access(shared: boolean): string {
   return shared ? "Workspace" : "Only you";

@@ -2234,6 +2234,62 @@ async def test_sources_panel_gates_on_subject(web: tuple[AsyncClient, UUID, UUID
     assert anonymous.status_code == 401
 
 
+async def test_workspace_surfaces_names_each_installed_surface_inside_the_audience(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The workspace surfaces view behind the agents topology graph: every surface installation
+    with the agent its conversations land on, narrowed to the reader's web audience — an agent no
+    grant admits names neither its id nor its bound surface, an admin reads every binding — and
+    refused without a session."""
+    client, workspace_id, agent_id = web
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-sonnet-5",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        for surface, installation, holder in (
+            ("slack", "team:T42", agent_id),
+            ("teams", "tenant:T99", second_agent),
+        ):
+            await connection.execute(
+                sa.insert(tables.surface_installation).values(
+                    workspace_id=workspace_id,
+                    surface=surface,
+                    installation_id=installation,
+                    agent_id=holder,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    path = "/surface/web/workspace/surfaces"
+    view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    assert view.status_code == 200
+    assert view.json() == {"installations": [{"surface": "slack", "agent_id": str(agent_id)}]}
+    assert str(second_agent) not in view.text
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"})
+    assert admin_view.json() == {
+        "installations": [
+            {"surface": "slack", "agent_id": str(agent_id)},
+            {"surface": "teams", "agent_id": str(second_agent)},
+        ]
+    }
+    await _grant_web_access(workspace_id, second_agent, "m@example.com")
+    widened = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    assert widened.json() == admin_view.json()
+    anonymous = await client.get(path)
+    assert anonymous.status_code == 401
+
+
 async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

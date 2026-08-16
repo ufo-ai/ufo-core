@@ -2419,6 +2419,20 @@ async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"sources": [entry.model_dump(mode="json") for entry in listed]})
 
 
+async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
+    """The surface installations bound to the agents this member's web audience holds, each with
+    the agent its conversations land on — the edges the agents topology graph draws between
+    surfaces and agents. An agent outside that audience is named nowhere here, as on every other
+    portal route; the whole workspace's bindings are the administration read's."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, _email, audience = resolved
+    installations = await ctx.list_installations()
+    visible = (entry for entry in installations if audience.allows(entry.agent_id))
+    return JSONResponse({"installations": [entry.model_dump(mode="json") for entry in visible]})
+
+
 async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response:
     """One searchable, filterable keyset page of the files turns have shared with this member."""
     resolved = await _audience_for(ctx, request)
@@ -3149,6 +3163,7 @@ ROUTES = (
     ),
     SurfaceRoute(method="GET", path="workspace/team", handler=workspace_team),
     SurfaceRoute(method="GET", path="workspace/sources", handler=workspace_sources),
+    SurfaceRoute(method="GET", path="workspace/surfaces", handler=workspace_surfaces),
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
