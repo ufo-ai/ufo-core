@@ -10,9 +10,11 @@ an assertion that refuses on mismatch — a turn can never switch its conversati
 
 A message arriving while the conversation's newest turn is still live — queued, running, or
 parked — lands on the conversation's `inbound_message` queue instead of spawning a turn of its
-own, whoever spoke it. The engine drains that queue into the live
-turn at each round boundary as separate <context>-tagged messages, and the terminal commit
-refuses to close over a non-empty queue, so one reply answers everything that arrived. Each
+own, whoever spoke it. Each fold is logged against the turn it landed on. The engine drains that
+queue into the live turn at each round boundary as separate <context>-tagged messages, and the
+terminal commit refuses to close over a non-empty queue, so no reply closes over an unread message.
+The running turn can answer a folded message before it ends, by marking that answer in its own
+output; the closing reply then carries what it has not already sent. Each
 queue row carries its own idempotency key, so a redelivery joins the turn that consumed it.
 Member admission returns which of the two it did, so a surface's per-turn side channel starts once
 per run rather than once per delivery, and it names the queue row a fold landed on — the id the
@@ -493,6 +495,7 @@ class Admission:
                         )
                     ).scalar_one()
                     arrival_id = uuid4()
+                    arrival_source = MEMBER_ADMISSION if member_admission else INTERNAL_ADMISSION
                     await connection.execute(
                         sa.insert(tables.inbound_message).values(
                             id=arrival_id,
@@ -500,15 +503,21 @@ class Admission:
                             conversation_id=conversation_id,
                             seq=message_seq,
                             body=body,
-                            admission_source=(
-                                MEMBER_ADMISSION if member_admission else INTERNAL_ADMISSION
-                            ),
+                            admission_source=arrival_source,
                             context=None if context is None else context.model_dump(mode="json"),
                             speaker_member_id=speaker_member_id,
                             idempotency_key=idempotency_key,
                             admitted_turn_id=live_turn.id,
                             created_at=admitted_at if admitted_at is not None else sa.func.now(),
                         )
+                    )
+                    log(
+                        "arrival.queued",
+                        turn_id=str(live_turn.id),
+                        arrival_id=str(arrival_id),
+                        conversation_id=str(conversation_id),
+                        admission_source=arrival_source,
+                        turn_status=live_turn.status,
                     )
                     if live_turn.status != PARKED:
                         return Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id)

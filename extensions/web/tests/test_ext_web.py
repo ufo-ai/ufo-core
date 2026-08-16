@@ -109,6 +109,7 @@ from ufo.hub import (
     InProcessHub,
     LiveFrame,
     Parked,
+    Reply,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -259,6 +260,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
         ToolCall: ToolCall(tool="bash", preview="ls"),
         SkillLoad: SkillLoad(skill="s"),
         Absorbed: Absorbed(arrivals=()),
+        Reply: Reply(id=uuid4(), text="sent"),
         SubagentActivity: SubagentActivity(
             turn_id=uuid4(),
             parent_turn_id=uuid4(),
@@ -274,6 +276,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
         ToolCall: b"event: tool\n",
         SkillLoad: b"event: skill\n",
         Absorbed: b"event: absorbed\n",
+        Reply: b"event: reply\n",
         SubagentActivity: b"event: subagent_activity\n",
     }
     for kind, frame in frames.items():

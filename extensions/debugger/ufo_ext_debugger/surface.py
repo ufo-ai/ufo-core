@@ -31,6 +31,7 @@ from ufo.sdk.hub import (
     CostTick,
     LiveFrame,
     Parked,
+    Reply,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -178,6 +179,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             kind, payload = b"subagent_activity", frame.model_dump_json()
         case Absorbed():
             kind, payload = b"absorbed", frame.model_dump_json()
+        case Reply():
+            kind, payload = b"reply", frame.model_dump_json()
         case TextDelta():
             kind, payload = b"text", frame.model_dump_json()
         case _:

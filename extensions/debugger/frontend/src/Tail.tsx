@@ -9,6 +9,7 @@ const EVENT_KINDS = [
   "subagent_activity",
   "cost",
   "absorbed",
+  "reply",
   "parked",
   "terminal",
 ] as const;

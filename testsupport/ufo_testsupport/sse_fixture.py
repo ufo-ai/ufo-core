@@ -17,6 +17,7 @@ from ufo.hub import (
     CostTick,
     LiveFrame,
     Parked,
+    Reply,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -35,6 +36,7 @@ SSE_FIXTURE_PATH = (
     / "sse.json"
 )
 ARRIVAL_ID = UUID("88888888-8888-4888-8888-888888888888")
+REPLY_ID = UUID("66666666-6666-4666-8666-666666666666")
 CONVERSATION_ID = "55555555-5555-4555-8555-555555555555"
 
 
@@ -54,6 +56,11 @@ def sse_frames() -> dict[type, LiveFrame]:
         ),
         CostTick: CostTick(cost_micro_usd=110, tokens=12),
         Absorbed: Absorbed(arrivals=(ARRIVAL_ID,)),
+        Reply: Reply(
+            id=REPLY_ID,
+            message_ref=ARRIVAL_ID,
+            text="Filed the launch issue as metalcraftai/ufo#1801.",
+        ),
         Terminal: Terminal(
             frame=TerminalFrame(
                 status="done",
@@ -131,6 +138,7 @@ def sse_rows() -> list[dict[str, str]]:
         frames[SkillLoad],
         frames[SubagentActivity],
         frames[CostTick],
+        frames[Reply],
         frames[Absorbed],
     ]
     rows = [_row(_sse("", frame)) for frame in live]

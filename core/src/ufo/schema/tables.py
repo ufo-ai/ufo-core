@@ -478,6 +478,35 @@ writeback = sa.Table(
     ),
 )
 
+mid_turn_reply = sa.Table(
+    "mid_turn_reply",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=False),
+    sa.Column("round_index", sa.Integer, nullable=False),
+    sa.Column("span_index", sa.Integer, nullable=False),
+    sa.Column("message_ref", sa.Uuid, nullable=True),
+    sa.Column("text", sa.Text, nullable=False),
+    sa.Column("status", sa.Text, nullable=False),
+    sa.Column("reply_ref", sa.Text, nullable=True),
+    sa.Column("claimed_by", sa.Text, nullable=True),
+    sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("last_error", sa.Text, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "status in ('pending', 'claimed', 'delivered', 'failed')", name="mid_turn_reply_status"
+    ),
+    sa.Index(
+        "mid_turn_reply_due",
+        "workspace_id",
+        "created_at",
+        postgresql_where=sa.text("status in ('pending', 'claimed')"),
+        sqlite_where=sa.text("status in ('pending', 'claimed')"),
+    ),
+)
+
 shared_artifact = sa.Table(
     "shared_artifact",
     metadata,

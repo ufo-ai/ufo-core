@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
@@ -225,6 +226,27 @@ async def test_idempotency_key_keeps_the_first_body(db: None) -> None:
             )
         ).scalar_one()
     assert inbound == "hi"
+
+
+async def test_a_fold_logs_the_turn_and_the_row_it_landed_on(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The fold is where a message stops being a turn of its own: an operator tracing what a turn
+    was asked, and whether the turn answered it, starts from this line."""
+    workspace_id, member_id, _, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        folded = await admission.admit_member(
+            workspace_id, conversation_id, "two", member_id, "C:2"
+        )
+    (queued,) = [record.ufo for record in caplog.records if record.getMessage() == "arrival.queued"]
+    assert (
+        queued["turn_id"],
+        queued["arrival_id"],
+        queued["admission_source"],
+        queued["turn_status"],
+    ) == (str(first.turn_id), str(folded.arrival_id), "member", "queued")
 
 
 async def test_message_while_a_turn_is_queued_joins_its_inbound_queue(db: None) -> None:

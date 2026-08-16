@@ -78,6 +78,22 @@ class Absorbed(BaseModel):
     arrivals: tuple[UUID, ...]
 
 
+class Reply(BaseModel):
+    """One reply a running turn already delivered to a member: the whole text of a span the model
+    marked for delivery, and the `message_ref` it answers when the tag named a readable one.
+    Non-terminal, and distinguished from a TextDelta by carrying text the member has been sent
+    rather than a chunk in flight — a span's words never ride the delta stream, so this frame is the
+    only place a live surface reads them.
+
+    `id` is the span's durable identity, the same id its delivery record carries, so a surface draws
+    one bubble per span: the hub replays frames after a cursor, and a recovered turn republishes the
+    spans its recorded rounds produced. A surface acting on the frame acts idempotently."""
+
+    id: UUID
+    message_ref: UUID | None = None
+    text: str = ""
+
+
 class SubagentActivity(BaseModel):
     """One subagent run's member-facing progress, published on the stream of the root turn its
     lineage serves — the turn a surface tails — so a page draws the child working while the parent
@@ -101,7 +117,15 @@ class SubagentActivity(BaseModel):
 
 
 LiveFrame = (
-    TextDelta | Terminal | Parked | CostTick | ToolCall | SkillLoad | Absorbed | SubagentActivity
+    TextDelta
+    | Terminal
+    | Parked
+    | CostTick
+    | ToolCall
+    | SkillLoad
+    | Absorbed
+    | Reply
+    | SubagentActivity
 )
 
 

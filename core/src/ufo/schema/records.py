@@ -86,6 +86,20 @@ def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str, attempt: st
     return uuid5(NAMESPACE_URL, f"{workspace_id}/turn/{turn_id}/{dimension}/{attempt}")
 
 
+def mid_turn_reply_id_for(
+    turn_id: UUID, round_index: int, span_index: int, attempt: str = ""
+) -> UUID:
+    """The identity of one reply a turn speaks before it ends: the turn, the run attempt that wrote
+    it (the DBOS workflow id of that run), the round, and the span's position in that round. A
+    recovered workflow replays its recorded rounds under the same attempt and derives the same id
+    for the same span, so the delivery record it writes again is the one already delivered and the
+    member reads that reply once. A resumed run is a distinct attempt: its step log is empty, it
+    rebuilds the window and counts its rounds from one again, so the spans it marks are new words
+    under round and span numbers the parked attempt already used — they take ids of their own rather
+    than collapsing onto replies the member has read."""
+    return uuid5(NAMESPACE_URL, f"{turn_id}/reply/{attempt}/{round_index}/{span_index}")
+
+
 class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0

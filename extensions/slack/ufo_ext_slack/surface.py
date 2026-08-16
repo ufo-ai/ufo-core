@@ -135,6 +135,7 @@ from ufo.sdk.surfaces import (
     CredentialRequestInvalid,
     CredentialRequestState,
     CredentialSlotUnset,
+    MidTurnReply,
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
@@ -3378,8 +3379,12 @@ class _SlackReplyProgress(BaseModel):
     complete: bool = False
 
 
-def _slack_reply_progress_key(turn_id: UUID) -> str:
-    return f"{SLACK_REPLY_PROGRESS_PREFIX}{turn_id}"
+def _slack_reply_progress_key(turn_id: UUID, reply_id: UUID | None = None) -> str:
+    """The delivery record of one turn's reply: the terminal reply under the turn alone, a reply the
+    turn spoke mid-flight under the span's id beneath it — so `attach` drops every record a turn
+    made by reading its one prefix."""
+    span = "" if reply_id is None else f"/{reply_id}"
+    return f"{SLACK_REPLY_PROGRESS_PREFIX}{turn_id}{span}"
 
 
 async def _slack_reply_progress(
@@ -3664,6 +3669,89 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     return f"{channel}:{first_ts}"
 
 
+async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
+    """Post one reply the turn produced before it ended and return its message ref
+    (`channel:ts`) — a plain thread message, split at markdown boundaries when it is long.
+
+    It carries no footer, no ask or connect buttons and no files: this is not the turn's outcome, so
+    it has no settled accounting to state and nothing to attach, and the terminal reply that follows
+    carries all three. What makes it exactly-once is the delivery record keyed by the span's own id:
+    a completed record answers with the message it already posted, an accepted part is checkpointed
+    before the next, and an uncertain request's delivery id rides as Slack message metadata so a
+    retry reads it back from the thread rather than posting twice. That closes the one window core's
+    claim leaves open, a claim that expires while this post is in flight.
+
+    Every record of a turn's replies is dropped in `attach`, once core has recorded the ref of the
+    terminal reply that ends the turn."""
+    channel, separator, thread_ts = reply.queue_key.partition(":")
+    thread = thread_ts if separator else None
+    bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+    parts = slack_reply_parts(reply.text)
+    store = ScopedStore(SLACK_EXTENSION)
+    progress_key = _slack_reply_progress_key(reply.turn_id, reply.id)
+    progress, stored = await _slack_reply_progress(store, progress_key)
+    if progress.complete:
+        if not progress.deliveries:
+            raise SlackApiError("Completed Slack reply has no deliveries")
+        return f"{channel}:{progress.deliveries[0].ts}"
+    first_ts: str | None = None
+    async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
+        if progress.pending is not None:
+            reconciled_ts = await _reconcile_slack_reply(
+                client, bot_token, channel, thread, progress.pending
+            )
+            deliveries = progress.deliveries
+            if reconciled_ts is not None:
+                deliveries = (
+                    *deliveries,
+                    _SlackReplyDelivery(id=progress.pending, ts=reconciled_ts),
+                )
+            progress, stored = await _checkpoint_slack_reply(
+                store,
+                progress_key,
+                stored,
+                progress.model_copy(update={"deliveries": deliveries, "pending": None}),
+            )
+        for index, part in enumerate(parts):
+            delivery_id = f"{reply.id}:{index}:markdown"
+            progress, stored, payload = await _deliver_slack_reply(
+                client,
+                bot_token,
+                store,
+                progress_key,
+                progress,
+                stored,
+                delivery_id,
+                slack_reply_body(channel, thread, part, None, delivery_id=delivery_id),
+            )
+            if payload.get("error") == SLACK_INVALID_BLOCKS_ERROR:
+                _LOG.warning("slack rejected blocks for %s; re-posting conservatively", channel)
+                progress, stored, payload = await _deliver_slack_reply(
+                    client,
+                    bot_token,
+                    store,
+                    progress_key,
+                    progress,
+                    stored,
+                    delivery_id,
+                    slack_reply_body(
+                        channel, thread, part, None, delivery_id=delivery_id, blocks=False
+                    ),
+                )
+            ts = _posted_message_ts(payload)
+            if first_ts is None:
+                first_ts = ts
+    if first_ts is None:
+        raise SlackApiError("Slack response missing ts")
+    await _checkpoint_slack_reply(
+        store,
+        progress_key,
+        stored,
+        progress.model_copy(update={"complete": True}),
+    )
+    return f"{channel}:{first_ts}"
+
+
 async def _chat_post(
     client: httpx.AsyncClient, bot_token: str, body: bytes
 ) -> Mapping[str, object]:
@@ -3722,8 +3810,14 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
     queue key — the member's thread in a channel, the channel itself in a DM — because Slack forbids
     threading on a reply's ts, and the bot reply is itself a thread reply in a channel. Best effort:
     a rejected file is logged and the rest still deliver, so an upload never re-posts the reply or
-    blocks its siblings."""
-    await ScopedStore(SLACK_EXTENSION).delete(_slack_reply_progress_key(writeback.turn_id))
+    blocks its siblings.
+
+    Every delivery record the turn made is dropped first — the terminal reply's and one per reply it
+    spoke mid-flight — because core has now durably recorded the terminal ref and every span row
+    carries the ref of the message it posted, so no attempt can arrive that needs them."""
+    store = ScopedStore(SLACK_EXTENSION)
+    for key, _value in await store.list(_slack_reply_progress_key(writeback.turn_id)):
+        await store.delete(key)
     inline = tuple(a for a in writeback.artifacts if a.size_bytes <= SLACK_UPLOAD_MAX_BYTES)
     if not inline:
         return

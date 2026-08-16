@@ -53,6 +53,7 @@ from ufo.ext.surface import (
     WRITEBACK_FAILED,
     WRITEBACK_MAX_AGE_SECONDS,
     WRITEBACK_WORKSPACE_BATCH,
+    MidTurnReply,
     SharedArtifact,
     SurfaceContext,
     SurfaceDeliveryError,
@@ -130,11 +131,19 @@ class RecordingSurface:
 
     ref: str = "posted-ref"
     fail_post: bool = False
+    fail_speak: bool = False
     fail_attach_attempts: int = 0
     posted: list[UUID] = field(default_factory=list)
+    spoken: list[tuple[UUID, UUID | None, str]] = field(default_factory=list)
     targets: list[tuple[UUID, UUID]] = field(default_factory=list)
     attach_attempts: int = 0
     attached: list[tuple[UUID, str, tuple[str, ...]]] = field(default_factory=list)
+
+    async def speak(self, ctx: SurfaceContext, reply: MidTurnReply) -> str:
+        self.spoken.append((reply.id, reply.message_ref, reply.text))
+        if self.fail_speak:
+            raise RuntimeError("speak failed")
+        return f"{self.ref}:{len(self.spoken)}"
 
     async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str:
         self.posted.append(writeback.turn_id)

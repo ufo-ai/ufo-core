@@ -56,6 +56,9 @@ export type ChatState = {
    *  admitted the row has its response back, so the ids are kept rather than only cleared off the
    *  bubbles they name: a message whose id is already here never states a wait it will not leave. */
   absorbed: string[];
+  /** The ids of the replies the turn has already delivered mid-flight, so a frame replayed after a
+   *  reconnect — or republished by a recovered turn — states its reply once. */
+  spoken: string[];
   handoffs: Handoffs;
   fault: ToastState | null;
 };
@@ -66,6 +69,7 @@ const EMPTY: ChatState = {
   live: null,
   turn: null,
   absorbed: [],
+  spoken: [],
   handoffs: {},
   fault: null,
 };

@@ -83,12 +83,14 @@ from ufo.ext.manifest import (
 )
 from ufo.ext.surface import (
     DeployExtensionView,
+    MidTurnReplyPoller,
     SubagentDetail,
     SurfaceAuth,
     SurfaceContext,
     SurfaceIdentityContext,
     SurfaceSpec,
     WritebackPoller,
+    mid_turn_reply_workspaces,
     writeback_workspaces,
 )
 from ufo.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
@@ -300,6 +302,7 @@ def run() -> None:
     app.state.instance_id = instance_id
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
+    app.state.mid_turn_reply_poller = None
     app.state.blob = blob
     app.state.artifact_token_secret = artifact_secret
     app.include_router(callback_router)
@@ -1021,11 +1024,18 @@ def _mount_shared_surfaces(
             log("serve.shared_surface.mounted", surface=spec.name)
     _mount_home(app, manifests)
     if registered:
+        worker_id = uuid4().hex
         app.state.writeback_poller = WritebackPoller(
-            worker_id=uuid4().hex,
+            worker_id=worker_id,
             surfaces=registered,
             context_for=context_for,
             candidates=writeback_workspaces(),
+        )
+        app.state.mid_turn_reply_poller = MidTurnReplyPoller(
+            worker_id=worker_id,
+            surfaces=registered,
+            context_for=context_for,
+            candidates=mid_turn_reply_workspaces(),
         )
 
 
@@ -1071,9 +1081,9 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
             group.create_task(ExecutorRecovery().run()),
             group.create_task(CancelReconciler(client=app.state.dbos).run()),
         ]
-        poller = app.state.writeback_poller
-        if poller is not None:
-            tasks.append(group.create_task(poller.run()))
+        for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
+            if poller is not None:
+                tasks.append(group.create_task(poller.run()))
         try:
             yield
         finally:

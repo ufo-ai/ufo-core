@@ -309,34 +309,54 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     }));
   });
 
-  /** A drain is a round boundary: the text streamed before it is a finished reply the engine keeps
-   *  in the window ahead of the messages it folded — not narration for the closing answer to
-   *  replace — so it settles here, ahead of the bubble whose id the frame names, which is where the
-   *  durable transcript will state it. A drain that beats the send's response names a row no bubble
-   *  is stamped with yet, so a bubble still `sending` anchors the cut the same way — the queue row
-   *  it committed is the fold's target whether or not the response is back — and the drain consumes
-   *  one marker per such row, in order, since rows fold in the order the sends appended them: a
-   *  marker left behind would anchor the next drain's reply above a message already answered. The
-   *  live bubble then starts the next round empty. A frame whose ids were all seen is a replay of a
-   *  round already recorded: it still ends the round, and recording it again would state the reply
-   *  twice.
+  /** A reply the turn delivered while it runs: the member has been sent exactly this text, so it
+   *  settles as its own bubble, above any message still waiting to be taken up. The span never rode
+   *  the token stream, so nothing here replaces the live bubble — the round goes on narrating. A
+   *  frame whose id was already drawn is a replay after a reconnect, or a recovered turn
+   *  republishing a round it recorded, and states its reply once. */
+  source.addEventListener("reply", (event) => {
+    const frame = JSON.parse((event as MessageEvent).data) as { id: string; text: string };
+    updateChat(chatKey, (state) => {
+      if (state.spoken.includes(frame.id) || !frame.text) return state;
+      const messages = state.messages ?? [];
+      const cut = messages.findIndex(
+        (message) => message.arrival_id !== undefined || message.queued === true,
+      );
+      const at = cut === -1 ? messages.length : cut;
+      const bubble: Bubble = { role: "assistant", text: frame.text };
+      return {
+        ...state,
+        spoken: state.spoken.concat(frame.id),
+        messages: [...messages.slice(0, at), bubble, ...messages.slice(at)],
+      };
+    });
+  });
+
+  /** A drain is a round boundary: the text streamed before it is working prose the member was never
+   *  sent — a reply is delivered by its own tag, as the `reply` frame above — so nothing settles
+   *  here and the live bubble starts the next round empty. The frame's ids clear the wait each
+   *  message it folded is drawn under: a drain that beats the send's response names a row no bubble
+   *  is stamped with yet, so a bubble still `sending` clears the same way — the queue row it
+   *  committed is the fold's target whether or not the response is back — and the drain consumes one
+   *  marker per such row, in order, since rows fold in the order the sends appended them. A frame
+   *  whose ids were all seen is a replay of a round already recorded.
    *
-   *  Steps settle a reply of their own even when no text is left to state: a round that narrated and
-   *  then dispatched work already took that narration into its step list, and the live bubble the
-   *  drain restarts is the last place those steps exist. */
+   *  The steps the round did take do settle, wordless, ahead of the bubble whose id the frame names:
+   *  a round that narrated and then dispatched work already took that narration into its step list,
+   *  and the live bubble the drain restarts is the last place those steps exist. */
   source.addEventListener("absorbed", (event) => {
     const arrivals = JSON.parse((event as MessageEvent).data).arrivals as string[];
     updateChat(chatKey, (state) => {
       const fresh = arrivals.filter((id) => !state.absorbed.includes(id));
       const live = state.live;
-      const reply: Bubble[] =
-        fresh.length && live && (live.text || live.events.length)
+      const steps: Bubble[] =
+        fresh.length && live && live.events.length
           ? [
               {
                 role: "assistant",
-                text: live.text,
+                text: "",
                 ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
-                ...(live.events.length ? { events: live.events } : {}),
+                events: live.events,
               },
             ]
           : [];
@@ -363,7 +383,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       return {
         ...state,
         absorbed: state.absorbed.concat(fresh),
-        messages: [...messages.slice(0, at), ...reply, ...messages.slice(at).map(folded)],
+        messages: [...messages.slice(0, at), ...steps, ...messages.slice(at).map(folded)],
         live:
           live === null
             ? null

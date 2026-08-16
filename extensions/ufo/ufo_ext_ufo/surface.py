@@ -40,6 +40,7 @@ from ufo.sdk.hub import (
     CostTick,
     LiveFrame,
     Parked,
+    Reply,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -231,7 +232,8 @@ def directives_for(
     caps the turn (`streamed` says the answer already reached the transcript as `txt`, `collect`
     names the credential prompts still awaiting values, `files` the ones it shared). A drain names
     the member arrivals it folded (`absorbed`), which is how a client holding a message it sent
-    mid-turn learns the agent has taken that message up."""
+    mid-turn learns the agent has taken that message up. A reply the turn delivered mid-flight says
+    itself (`say`): the member has been sent those words, and they never rode the token stream."""
     match frame:
         case TextDelta():
             return (directive("txt", frame.text),) if frame.text else ()
@@ -251,6 +253,8 @@ def directives_for(
         case Absorbed():
             arrivals = tuple(str(arrival) for arrival in frame.arrivals)
             return (directive("absorbed", *arrivals),) if arrivals else ()
+        case Reply():
+            return (directive("say", frame.text),) if frame.text else ()
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
 
 

@@ -451,6 +451,26 @@ class Writeback:
     artifacts: tuple[SharedArtifact, ...]
 
 
+@dataclass(frozen=True)
+class MidTurnReply:
+    """One reply a still-running turn already produced for a member: the words the model marked for
+    delivery and the `message_ref` they answer. `id` is the span's durable identity — derived from
+    the turn, the round, and the position in that round — so a surface that keys its own
+    idempotency record on it posts one span once however often it is handed the row.
+
+    It carries no terminal frame: a mid-turn reply is not the turn's outcome, so it has no settled
+    accounting to footer, no question to attach buttons for, and no shared files. Those ride the
+    terminal writeback that follows it."""
+
+    id: UUID
+    turn_id: UUID
+    conversation_id: UUID
+    agent_id: UUID
+    queue_key: str
+    message_ref: UUID | None
+    text: str
+
+
 AMBIENT_REPLY_TIMEOUT_SECONDS = 5.0
 LIST_CONVERSATIONS_LIMIT = 200
 LIST_TURNS_LIMIT = 500
@@ -3855,6 +3875,7 @@ class SurfaceAuth:
 RouteHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
 PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str]]
 AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
+SpeakHandler = Callable[[SurfaceContext, MidTurnReply], Awaitable[str]]
 WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | Response | None]]
 SurfaceContextFactory = Callable[[UUID, str], SurfaceContext]
 
@@ -3902,6 +3923,10 @@ class SurfaceSpec:
     that reply. Recovery repeats `attach`: attachment delivery is at-least-once because a crash
     after upload but before the delivered commit cannot distinguish the completed upload. A
     surface may make individual files best effort so one rejection does not block its siblings.
+    `speak` is the same contract for a reply the turn produced before it ended: one message per
+    marked span, sent while the turn still runs, returning that message's durable reference. A
+    durable surface that declares none delivers at the terminal alone, so its members read a long
+    turn's replies only once it ends.
     The poller drives these for every turn its ingest admitted with writeback. A **live**
     surface omits them (`post=attach=None`): it admits without writeback and delivers by tailing the
     hub in its own route, so the poller never sees its turns. `self_user_id` resolves the surface's
@@ -3918,6 +3943,7 @@ class SurfaceSpec:
     must resolve its workspace before touching any data — a surface cannot mount without it."""
     post: PostHandler | None = None
     attach: AttachHandler | None = None
+    speak: SpeakHandler | None = None
     self_user_id: SurfaceIdentityResolver | None = None
     home: bool = False
     """Whether a browser arriving at the deploy's root belongs on this surface. Core answers `GET /`
@@ -3926,8 +3952,16 @@ class SurfaceSpec:
 
 
 def _writeback_due(now: datetime) -> sa.ColumnElement[bool]:
+    """A terminal turn whose delivery row is claimable and whose mid-turn replies have all left, so
+    the closing reply lands after the replies the turn already spoke rather than over them. A span
+    that aged out to `failed` releases the terminal: one undeliverable reply must not silence the
+    turn."""
     return sa.and_(
         tables.turn.c.status.in_(TERMINAL_TURN_STATUSES),
+        ~sa.exists().where(
+            tables.mid_turn_reply.c.turn_id == tables.turn.c.id,
+            tables.mid_turn_reply.c.status.in_((WRITEBACK_PENDING, WRITEBACK_CLAIMED)),
+        ),
         sa.or_(
             sa.and_(
                 tables.writeback.c.status == WRITEBACK_PENDING,
@@ -4357,6 +4391,280 @@ class WritebackPoller:
                         updated_at=sa.func.now(),
                     )
                     .returning(tables.writeback.c.status, tables.writeback.c.claim_expires_at)
+                )
+            ).one_or_none()
+        outcome = (
+            "claim_lost" if row is None else "failed" if row.status == WRITEBACK_FAILED else "retry"
+        )
+        return outcome, last_error, None if row is None else row.claim_expires_at
+
+
+def mid_turn_reply_workspaces() -> WorkspaceCandidates:
+    """A rotating bounded page of workspace ids holding deliverable mid-turn replies. Nothing here
+    waits on a terminal status: the turn is still running, which is the whole point of the row."""
+
+    cursor: UUID | None = None
+
+    def due() -> sa.Select[tuple[UUID]]:
+        now = datetime.now(UTC)
+        query = (
+            sa.select(tables.mid_turn_reply.c.workspace_id)
+            .where(_mid_turn_reply_due(now))
+            .group_by(tables.mid_turn_reply.c.workspace_id)
+            .order_by(tables.mid_turn_reply.c.workspace_id)
+            .limit(WRITEBACK_WORKSPACE_BATCH)
+        )
+        if cursor is not None:
+            query = query.where(tables.mid_turn_reply.c.workspace_id > cursor)
+        return query
+
+    read_due = owner_candidates(due)
+
+    async def candidates() -> tuple[UUID, ...]:
+        nonlocal cursor
+        workspace_ids = await read_due()
+        if not workspace_ids and cursor is not None:
+            cursor = None
+            workspace_ids = await read_due()
+        if workspace_ids:
+            cursor = workspace_ids[-1]
+        return workspace_ids
+
+    return candidates
+
+
+def _mid_turn_reply_due(now: datetime) -> sa.ColumnElement[bool]:
+    return sa.or_(
+        sa.and_(
+            tables.mid_turn_reply.c.status == WRITEBACK_PENDING,
+            sa.or_(
+                tables.mid_turn_reply.c.claim_expires_at.is_(None),
+                tables.mid_turn_reply.c.claim_expires_at <= now,
+            ),
+        ),
+        sa.and_(
+            tables.mid_turn_reply.c.status == WRITEBACK_CLAIMED,
+            tables.mid_turn_reply.c.claim_expires_at <= now,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class MidTurnReplyPoller:
+    """Exactly-once delivery of the replies a turn speaks before it ends.
+
+    Three independent guards, because all three failures are real. The engine writes one row per
+    span under the span's own identity, so a workflow replay after a pod roll re-derives that id and
+    inserts nothing. This poller claims a row with its worker id and an expiry and advances it only
+    while it still holds the claim, so a second replica never delivers the row this one has. The
+    surface keys its own delivery record on `reply.id`, which closes the one window where two
+    workers can both call out — a claim that expires while a post is in flight.
+
+    Order is the model's: rows are claimed and delivered oldest first and, within one moment, in
+    span order — a resumed run counts its rounds from one again, so the round and the span alone
+    would rank its spans against a parked attempt's by nothing at all. A turn's terminal writeback
+    waits behind every span of its own. A surface that declares no `speak` marks its rows delivered
+    untouched, because a live surface's member read the reply off the hub as the round produced it
+    and there is nothing left to send."""
+
+    worker_id: str
+    surfaces: Mapping[str, SurfaceSpec]
+    context_for: SurfaceContextFactory
+    candidates: WorkspaceCandidates
+
+    async def run(self) -> None:
+        while True:
+            try:
+                await self.drain()
+            except Exception as error:
+                log("surface.mid_turn_reply_drain_failed", error_class=type(error).__name__)
+            await asyncio.sleep(WRITEBACK_POLL_SECONDS)
+
+    async def drain(self) -> None:
+        for workspace_id in await self.candidates():
+            with ws(workspace_id):
+                for row in await self._claim(workspace_id):
+                    if row.last_error is not None:
+                        log(
+                            "surface.mid_turn_reply_retry",
+                            reply_id=str(row.id),
+                            last_error=row.last_error,
+                        )
+                    await self._deliver(workspace_id, row)
+
+    async def _claim(self, workspace_id: UUID) -> Sequence[sa.Row]:
+        now = datetime.now(UTC)
+        claimable = (
+            sa.select(tables.mid_turn_reply.c.id)
+            .where(
+                tables.mid_turn_reply.c.workspace_id == workspace_id,
+                _mid_turn_reply_due(now),
+            )
+            .order_by(
+                tables.mid_turn_reply.c.created_at,
+                tables.mid_turn_reply.c.round_index,
+                tables.mid_turn_reply.c.span_index,
+            )
+            .limit(WRITEBACK_CLAIM_BATCH)
+            .with_for_update(skip_locked=True, of=tables.mid_turn_reply)
+            .cte("claimable")
+        )
+        async with workspace_tx() as connection:
+            claimed = (
+                await connection.execute(
+                    sa.update(tables.mid_turn_reply)
+                    .where(tables.mid_turn_reply.c.id == claimable.c.id)
+                    .values(
+                        status=WRITEBACK_CLAIMED,
+                        claimed_by=self.worker_id,
+                        claim_expires_at=now + timedelta(seconds=WRITEBACK_CLAIM_SECONDS),
+                        updated_at=sa.func.now(),
+                    )
+                    .returning(
+                        tables.mid_turn_reply.c.id,
+                        tables.mid_turn_reply.c.turn_id,
+                        tables.mid_turn_reply.c.round_index,
+                        tables.mid_turn_reply.c.span_index,
+                        tables.mid_turn_reply.c.message_ref,
+                        tables.mid_turn_reply.c.text,
+                        tables.mid_turn_reply.c.reply_ref,
+                        tables.mid_turn_reply.c.last_error,
+                        tables.mid_turn_reply.c.created_at,
+                    )
+                )
+            ).all()
+        return sorted(claimed, key=lambda row: (row.created_at, row.round_index, row.span_index))
+
+    async def _deliver(self, workspace_id: UUID, row: sa.Row) -> None:
+        started_at = datetime.now(UTC)
+        try:
+            reply_ref = await self._speak(workspace_id, row)
+        except Exception as error:
+            outcome, last_error, next_attempt_at = await self._fail_or_retry(row.id, error)
+            log(
+                "surface.mid_turn_reply_failed",
+                reply_id=str(row.id),
+                turn_id=str(row.turn_id),
+                outcome=outcome,
+                error_class=type(error).__name__,
+                last_error=last_error,
+                next_attempt_at=next_attempt_at,
+            )
+            return
+        await self._mark_delivered(row.id, reply_ref)
+        log(
+            "surface.mid_turn_reply_delivered",
+            reply_id=str(row.id),
+            turn_id=str(row.turn_id),
+            message_ref=str(row.message_ref or ""),
+            elapsed_ms=int((datetime.now(UTC) - started_at).total_seconds() * 1_000),
+        )
+
+    async def _speak(self, workspace_id: UUID, row: sa.Row) -> str | None:
+        """The surface's own send, or None when this deploy has nothing to send it with. A recorded
+        `reply_ref` means an earlier attempt's post landed and only the commit closing it was lost,
+        so the row completes on that reference rather than posting a second message."""
+        if row.reply_ref is not None:
+            return str(row.reply_ref)
+        async with workspace_tx() as connection:
+            turn = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.agent_id,
+                        tables.conversation.c.queue_key,
+                        tables.conversation.c.surface,
+                    )
+                    .select_from(
+                        tables.turn.join(
+                            tables.conversation,
+                            tables.conversation.c.id == tables.turn.c.conversation_id,
+                        )
+                    )
+                    .where(tables.turn.c.id == row.turn_id)
+                )
+            ).one()
+        spec = self.surfaces.get(turn.surface)
+        if spec is None:
+            log("surface.mid_turn_reply_no_surface", reply_id=str(row.id), surface=turn.surface)
+            return None
+        if spec.speak is None:
+            return None
+        return await spec.speak(
+            self.context_for(workspace_id, turn.surface),
+            MidTurnReply(
+                id=row.id,
+                turn_id=row.turn_id,
+                conversation_id=turn.conversation_id,
+                agent_id=turn.agent_id,
+                queue_key=turn.queue_key,
+                message_ref=row.message_ref,
+                text=row.text,
+            ),
+        )
+
+    async def _mark_delivered(self, reply_id: UUID, reply_ref: str | None) -> None:
+        async with workspace_tx() as connection:
+            updated = await connection.execute(
+                sa.update(tables.mid_turn_reply)
+                .where(
+                    tables.mid_turn_reply.c.id == reply_id,
+                    tables.mid_turn_reply.c.status == WRITEBACK_CLAIMED,
+                    tables.mid_turn_reply.c.claimed_by == self.worker_id,
+                )
+                .values(
+                    status=WRITEBACK_DELIVERED,
+                    reply_ref=reply_ref,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    updated_at=sa.func.now(),
+                )
+            )
+        if updated.rowcount != 1:
+            log("surface.mid_turn_reply_claim_lost", reply_id=str(reply_id))
+
+    async def _fail_or_retry(
+        self, reply_id: UUID, error: Exception
+    ) -> tuple[str, str, datetime | None]:
+        """Release the row for its next attempt — at the provider's Retry-After when the failure
+        carried one, else the fixed backoff — or fail it once it outlives the delivery window. A
+        failed span stops holding the turn's terminal reply back."""
+        now = datetime.now(UTC)
+        give_up_before = now - timedelta(seconds=WRITEBACK_MAX_AGE_SECONDS)
+        match error:
+            case SurfaceDeliveryError() as delivery_error:
+                retry_after_seconds = delivery_error.retry_after_seconds
+            case _:
+                retry_after_seconds = None
+        retry_seconds = min(
+            retry_after_seconds
+            if retry_after_seconds is not None
+            else WRITEBACK_RETRY_BACKOFF_SECONDS,
+            WRITEBACK_MAX_AGE_SECONDS,
+        )
+        last_error = (str(error) or type(error).__name__)[:MAX_WRITEBACK_ERROR_CHARS]
+        aged_out = tables.mid_turn_reply.c.created_at <= give_up_before
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.update(tables.mid_turn_reply)
+                    .where(
+                        tables.mid_turn_reply.c.id == reply_id,
+                        tables.mid_turn_reply.c.claimed_by == self.worker_id,
+                    )
+                    .values(
+                        status=sa.case((aged_out, WRITEBACK_FAILED), else_=WRITEBACK_PENDING),
+                        claim_expires_at=sa.case(
+                            (aged_out, None), else_=now + timedelta(seconds=retry_seconds)
+                        ),
+                        claimed_by=None,
+                        last_error=last_error,
+                        updated_at=sa.func.now(),
+                    )
+                    .returning(
+                        tables.mid_turn_reply.c.status,
+                        tables.mid_turn_reply.c.claim_expires_at,
+                    )
                 )
             ).one_or_none()
         outcome = (

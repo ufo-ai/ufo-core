@@ -94,6 +94,7 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
     TerminalStatus,
+    mid_turn_reply_id_for,
 )
 from ufo.sdk.audience import (
     SHARED_AUDIENCE,
@@ -4121,6 +4122,140 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
         ).one()
     assert row.status == WRITEBACK_DELIVERED
     assert row.reply_ref == "C5:999.100"
+
+
+async def _seed_spoken_reply(
+    workspace_id: UUID,
+    turn_id: UUID,
+    text: str,
+    round_index: int = 1,
+    span_index: int = 0,
+) -> UUID:
+    reply_id = mid_turn_reply_id_for(turn_id, round_index, span_index)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.mid_turn_reply).values(
+                id=reply_id,
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                round_index=round_index,
+                span_index=span_index,
+                message_ref=uuid4(),
+                text=text,
+                status=WRITEBACK_PENDING,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return reply_id
+
+
+async def test_a_reply_the_turn_spoke_posts_in_the_thread_without_the_terminal_footer(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A mid-turn reply is not the turn's outcome: it posts as one thread message with the model's
+    words and no accounting context block, because the turn has spent nothing final to state."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "closing", blob, artifact=False)
+    reply_id = await _seed_spoken_reply(workspace_id, turn_id, "Filed it as **#1801**.")
+
+    await app.state.mid_turn_reply_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in recorder
+        if str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+    ]
+    assert len(posts) == 1
+    assert (posts[0]["channel"], posts[0]["thread_ts"]) == ("C5", "200.0")
+    assert posts[0]["blocks"] == [{"type": "markdown", "text": "Filed it as **#1801**."}]
+    assert posts[0]["metadata"]["event_payload"]["id"] == f"{reply_id}:0:markdown"
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.mid_turn_reply.c.status, tables.mid_turn_reply.c.reply_ref).where(
+                    tables.mid_turn_reply.c.id == reply_id
+                )
+            )
+        ).one()
+    assert (row.status, row.reply_ref) == (WRITEBACK_DELIVERED, "C5:999.100")
+
+
+async def test_a_span_whose_delivery_commit_was_lost_posts_no_second_message(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The one window core's claim leaves open: the post landed and the commit closing it did not,
+    so the row comes back with no ref and is handed to the surface again. The delivery record keyed
+    by the span's id answers with the message it already posted."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "closing", blob, artifact=False)
+    reply_id = await _seed_spoken_reply(workspace_id, turn_id, "Filed it.")
+
+    await app.state.mid_turn_reply_poller.drain()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.mid_turn_reply)
+            .where(tables.mid_turn_reply.c.id == reply_id)
+            .values(status=WRITEBACK_PENDING, reply_ref=None, claim_expires_at=None)
+        )
+    await app.state.mid_turn_reply_poller.drain()
+
+    posts = [
+        request
+        for request in recorder
+        if str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+    ]
+    assert len(posts) == 1
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.mid_turn_reply.c.status, tables.mid_turn_reply.c.reply_ref).where(
+                    tables.mid_turn_reply.c.id == reply_id
+                )
+            )
+        ).one()
+    assert (row.status, row.reply_ref) == (WRITEBACK_DELIVERED, "C5:999.100")
+
+
+async def test_the_terminal_delivery_drops_every_record_the_turns_replies_made(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """`attach` runs after core has recorded the terminal ref, and every span row already carries
+    the ref of its own message, so the turn's delivery records — its spoken replies' included — are
+    of no further use and are dropped rather than left in the store."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "closing", blob, artifact=False)
+    reply_id = await _seed_spoken_reply(workspace_id, turn_id, "Filed it.")
+
+    await app.state.mid_turn_reply_poller.drain()
+    async with workspace_tx() as connection:
+        spoken_record = await connection.scalar(
+            sa.select(tables.ext_store.c.value).where(
+                tables.ext_store.c.workspace_id == workspace_id,
+                tables.ext_store.c.extension == slack.SLACK_EXTENSION,
+                tables.ext_store.c.key == slack._slack_reply_progress_key(turn_id, reply_id),
+            )
+        )
+    await app.state.writeback_poller.drain()
+
+    assert spoken_record is not None
+    async with workspace_tx() as connection:
+        left = (
+            await connection.execute(
+                sa.select(tables.ext_store.c.key).where(
+                    tables.ext_store.c.workspace_id == workspace_id,
+                    tables.ext_store.c.extension == slack.SLACK_EXTENSION,
+                    tables.ext_store.c.key.startswith(slack.SLACK_REPLY_PROGRESS_PREFIX),
+                )
+            )
+        ).all()
+    assert left == []
 
 
 def _long_reply_transport(

@@ -53,6 +53,8 @@ function waiting(text: string): boolean {
   return screen.getByText(text).classList.contains("italic");
 }
 const REFUSED_TURN = "44444444-4444-4444-8444-444444444444";
+/** The id of a reply the turn delivered mid-flight, as its `reply` frame carries it. */
+const REPLY_ID = "66666666-6666-4666-8666-666666666666";
 
 /** What the chat route answers a message that joined the run a live turn already opened: admission
  *  opened no run for this delivery, so the tail on that turn is the one carrying its frames. */
@@ -418,13 +420,13 @@ test("a queued message stays under the answer streaming above it, and never move
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
+  StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
   expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
   // The turn answers the message it is already inside before it takes up the next one, so a message
-  // waiting on it stands after that answer — under the streaming reply and over the composer, which
-  // is where the drain will leave it. Drawn above, it would state an order the turn contradicts,
-  // and every bubble would shift the moment the fold landed.
+  // waiting on it stands after that answer — under the reply it delivered and over the composer,
+  // which is where the drain will leave it. Drawn above, it would state an order the turn
+  // contradicts, and every bubble would shift the moment the fold landed.
   await userEvent.type(screen.getByLabelText("Message the agent"), "4+4=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("4+4=")).toBeTruthy();
@@ -486,7 +488,7 @@ test("a message sent mid-turn joins the running turn, waits to be taken up, and 
   expect(StreamFake.opened.length).toBe(1);
 });
 
-test("a reply the turn finished before the fold settles ahead of the message it folded", async () => {
+test("a reply the turn delivered before the fold stands ahead of the message it folded", async () => {
   wire({
     ...transcript({ messages: [{ role: "user", text: "write a poem" }], turn: TURN_ID }),
     "/chat": () => json({ ...FOLDED, arrival_id: ARRIVAL_ID }),
@@ -494,17 +496,16 @@ test("a reply the turn finished before the fold settles ahead of the message it 
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
+  StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
   expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "1+1=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(waiting("1+1=")).toBe(true));
 
-  // The fold ends the round, and the engine keeps the round's text in the window ahead of the
-  // message it drained — the poem is the reply to the first message, not narration the closing
-  // answer replaces. The page records it where the durable transcript will state it and streams
-  // the next round into a fresh bubble.
+  // The poem was sent to the member as the turn's own reply to the first message, so it stands in
+  // the log where the durable transcript will state it — above the message the drain then folds.
+  // The fold ends the round and the next round streams into a fresh live bubble.
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   StreamFake.last().emit("message", { text: "2" });
   StreamFake.last().emit("terminal", {
@@ -522,7 +523,34 @@ test("a reply the turn finished before the fold settles ahead of the message it 
   expect(log.indexOf("1+1=")).toBeGreaterThan(log.indexOf("Ducks glide at dusk."));
 });
 
-test("a drain that beats the response still settles the reply ahead of the message", async () => {
+test("working narration is not a reply: a drain clears it rather than settling it", async () => {
+  wire({
+    ...transcript({ messages: [{ role: "user", text: "write a poem" }], turn: TURN_ID }),
+    "/chat": () => json({ ...FOLDED, arrival_id: ARRIVAL_ID }),
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "Thinking about ducks." });
+  expect(await screen.findByText(saying("Thinking about ducks."))).toBeTruthy();
+
+  // Untagged round text reaches no member — Slack posts none of it — so the page must not keep it
+  // as a reply either. The drain ends the round and the words go with it.
+  StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
+  StreamFake.last().emit("message", { text: "2" });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "2",
+    model: "opus",
+    tokens: 3,
+    cost_micro_usd: 1_000,
+  });
+
+  await screen.findByText("2");
+  expect(screen.queryByText(saying("Thinking about ducks."))).toBeNull();
+});
+
+test("a drain that beats the response leaves the reply above the message", async () => {
   let land: (payload: unknown) => void = () => {};
   const admitted = new Promise<Response>((resolve) => {
     land = (payload) => resolve(json(payload));
@@ -534,7 +562,7 @@ test("a drain that beats the response still settles the reply ahead of the messa
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
+  StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
   expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "1+1=");
@@ -543,7 +571,7 @@ test("a drain that beats the response still settles the reply ahead of the messa
 
   // The queue row is committed before the POST answers, so the drain can name it while the
   // response is in flight and no bubble holds the arrival yet. The bubble the send is still
-  // waiting on is the fold's target all the same, and the reply settles ahead of it.
+  // waiting on is the fold's target all the same, and the delivered reply stands above it.
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   land({ ...FOLDED, arrival_id: ARRIVAL_ID });
   StreamFake.last().emit("message", { text: "2" });
@@ -561,8 +589,9 @@ test("a drain that beats the response still settles the reply ahead of the messa
   await waitFor(() => expect(waiting("1+1=")).toBe(false));
 });
 
-test("a second fold anchors on its own message, never one an earlier drain took", async () => {
+test("each fold clears its own message, and the replies between them keep their order", async () => {
   const SECOND_ARRIVAL = "99999999-9999-4999-8999-999999999999";
+  const SECOND_REPLY = "77777777-7777-4777-8777-777777777777";
   const responses: ((payload: unknown) => void)[] = [];
   wire({
     ...transcript({ messages: [{ role: "user", text: "write a poem" }], turn: TURN_ID }),
@@ -571,38 +600,51 @@ test("a second fold anchors on its own message, never one an earlier drain took"
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
-  expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
-  // The first fold's drain beats its response, so the reply settles on the bubble's in-flight
-  // marker. The response landing afterwards must settle that same bubble — moved one place by the
-  // insertion — or the marker left behind would anchor the next drain's reply above it.
+  // Each drain beats its own response, so it clears the wait on a bubble whose arrival id has not
+  // landed yet, and it consumes one marker per row it names. A marker left behind would clear the
+  // next message's wait instead of this one's, and a reply delivered after a fold stands under the
+  // message it answers.
   await userEvent.type(screen.getByLabelText("Message the agent"), "1+1=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("1+1=")).toBeTruthy();
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
-  StreamFake.last().emit("message", { text: "The answer is 2." });
+  StreamFake.last().emit("reply", { id: REPLY_ID, text: "The answer is 2." });
   expect(await screen.findByText(saying("The answer is 2."))).toBeTruthy();
   responses[0]({ ...FOLDED, arrival_id: ARRIVAL_ID });
+  await waitFor(() => expect(waiting("1+1=")).toBe(false));
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "2+2=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("2+2=")).toBeTruthy();
   StreamFake.last().emit("absorbed", { arrivals: [SECOND_ARRIVAL] });
   responses[1]({ ...FOLDED, arrival_id: SECOND_ARRIVAL });
-  StreamFake.last().emit("message", { text: "And that is 4." });
-  StreamFake.last().emit("terminal", {
-    status: "done",
-    text: "And that is 4.",
-    model: "opus",
-    tokens: 3,
-    cost_micro_usd: 1_000,
-  });
+  StreamFake.last().emit("reply", { id: SECOND_REPLY, text: "And that is 4." });
 
-  await screen.findByText("And that is 4.");
+  expect(await screen.findByText(saying("And that is 4."))).toBeTruthy();
+  await waitFor(() => expect(waiting("2+2=")).toBe(false));
   const log = document.body.textContent ?? "";
   expect(log.indexOf("The answer is 2.")).toBeGreaterThan(log.indexOf("1+1="));
   expect(log.indexOf("2+2=")).toBeGreaterThan(log.indexOf("The answer is 2."));
+  expect(log.indexOf("And that is 4.")).toBeGreaterThan(log.indexOf("2+2="));
+});
+
+test("a reply frame replayed after a reconnect states its reply once", async () => {
+  wire({
+    ...transcript({ messages: [{ role: "user", text: "write a poem" }], turn: TURN_ID }),
+    "/chat": () => json(FOLDED),
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
+  expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
+
+  // The hub replays frames after a cursor, and a recovered turn republishes the spans its recorded
+  // rounds produced. The span's id is durable, so the page draws it once.
+  StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
+
+  expect(screen.getAllByText(saying("Ducks glide at dusk.")).length).toBe(1);
 });
 
 test("a drain that beats the response leaves no wait under the message it took up", async () => {

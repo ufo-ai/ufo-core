@@ -58,6 +58,9 @@ from ufo.ext.surface import (
     ListedConversation as ListedConversation,
 )
 from ufo.ext.surface import (
+    MidTurnReply as MidTurnReply,
+)
+from ufo.ext.surface import (
     PortalKind as PortalKind,
 )
 from ufo.ext.surface import (

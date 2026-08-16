@@ -27,6 +27,8 @@ from dbos import DBOS
 from dbos._error import DBOSWorkflowCancelledError
 from PIL import Image
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.accounting import (
     ALLOW,
@@ -62,6 +64,7 @@ from ufo.hub import (
     Hub,
     LiveFrame,
     Parked,
+    Reply,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -72,6 +75,7 @@ from ufo.loop.compaction import (
     is_context_overflow,
 )
 from ufo.loop.prompts.render import RenderedPrompt
+from ufo.loop.replies import MarkedReply, ReplyRedaction, marked_replies
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.catalog import CORE_PRICING
@@ -118,6 +122,7 @@ from ufo.schema.records import (
     RUNNING,
     SCHEDULED_ADMISSION,
     TERMINAL_ERROR_MESSAGE_MAX_CHARS,
+    WRITEBACK_PENDING,
     Agent,
     AskUserInput,
     ConnectRequest,
@@ -130,6 +135,7 @@ from ufo.schema.records import (
     TurnAdmissionSource,
     TurnContext,
     Usage,
+    mid_turn_reply_id_for,
 )
 from ufo.search import SearchProvider
 from ufo.seats import SEAT_REVOKED_MESSAGE, Seats
@@ -1080,6 +1086,12 @@ class TurnEngine:
                     absorbed=tuple(absorbed_ids),
                 )
                 if frame is None:
+                    log(
+                        "turn.answer_recycled",
+                        turn_id=str(self.turn.id),
+                        answer_chars=len(answer),
+                        absorbed=len(absorbed_ids),
+                    )
                     messages = (*final_messages, Message(role="assistant", content=answer))
                     continue
                 if frame.status == "done":
@@ -1302,10 +1314,17 @@ class TurnEngine:
         which skill workflows the window holds — from the window itself, before the compaction that
         may drop them, so a repeat `load_skill` re-mounts its files without re-injecting its
         instructions, and the summary replacing the head carries the names to re-load. A round that
-        calls a tool still narrates: its text streams live to any tailing surface, but only the
-        closing round's text is the returned answer — mid-turn narration is transient working prose,
-        and the shell prompt binds the model to a self-contained closing message, so a durable
-        surface delivers one reply, never the stacked steps that produced it. Also returns the
+        calls a tool still narrates: its text streams live to any tailing surface, and the part
+        of it the model wrapped in a reply tag is delivered to that member as its own message
+        before the turn ends (`_speak`). Untagged narration is transient working prose, and only
+        the closing round's text is the returned answer, so a durable surface reads the replies the
+        turn chose to send plus one closing reply, never the stacked steps that produced them.
+        Every round's text enters the window with the markup gone and the words kept, the closing
+        round's included: the window records what the turn said, and the tag reaches no member on
+        any surface. A closing round's own spans are delivered by the answer rather than by a reply
+        of their own, so the words the redaction held out of the live stream go back onto it
+        (`_stream_closing_spans`) and a surface that prints that stream still prints the answer.
+        Also returns the
         structured question, credential request, or connect request left pending when its tool was
         the turn's final act — each round overwrites all three, so a turn that asked and then
         worked on carries none.
@@ -1374,6 +1393,9 @@ class TurnEngine:
                 messages = (*messages, Message(role="user", content=feedback))
                 continue
             await self._publish_cost(usage_events)
+            spoken, text = marked_replies(text)
+            if tool_calls:
+                await self._speak(spoken, meter.rounds)
             if not tool_calls:
                 if text.strip():
                     if self.output_model is not None and question is None:
@@ -1384,6 +1406,7 @@ class TurnEngine:
                         )
                         messages, answer = await self._force_finish(messages, usage_events, system)
                         return messages, answer, None, None, None
+                    await self._stream_closing_spans(spoken)
                     return messages, text, question, credential_request, connect_request
                 if nudged:
                     raise RuntimeError("model returned an empty response twice")
@@ -1478,9 +1501,14 @@ class TurnEngine:
         absorbed like any other and rides that frame: the member's message reached the turn,
         whatever the hook did with its content. An internally admitted row does not — it reaches the
         window the same way, but the frame is what a surface answers a member's own message with,
-        and no member sent an extension's prompt or a child's result."""
+        and no member sent an extension's prompt or a child's result.
+
+        Each drain that folds anything logs the ids it took, so one message is traceable from the
+        queue into the window it was answered from — the one arrival event a replayed drain still
+        emits, since the claim itself is memoized."""
         drained: list[UUID] = []
-        for arrival in await self._claim_arrivals(tuple(absorbed_ids)):
+        claimed = await self._claim_arrivals(tuple(absorbed_ids))
+        for arrival in claimed:
             absorbed_ids.append(arrival.id)
             if arrival.admission_source == MEMBER_ADMISSION:
                 drained.append(arrival.id)
@@ -1502,9 +1530,82 @@ class TurnEngine:
             message = Message(role="user", content=arrival.rendered)
             arrival_log.append(message)
             messages = (*messages, message)
+        if claimed:
+            log(
+                "turn.arrivals_absorbed",
+                turn_id=str(self.turn.id),
+                arrivals=" ".join(str(arrival.id) for arrival in claimed),
+                members=len(drained),
+            )
         if drained:
             await self._publish(Absorbed(arrivals=tuple(drained)))
         return messages
+
+    async def _speak(self, spoken: tuple[MarkedReply, ...], round_index: int) -> None:
+        """Deliver this round's marked spans to the members they answer, mid-turn and in the order
+        the model wrote them: one delivery row per span for the poller to send through a surface
+        that implements `speak` (Slack), and one Reply frame per span for a surface tailing the
+        hub. On a live surface the frame is the whole delivery — the poller settles the row
+        untouched, no projection reads it back, and the closing reply carries those words again.
+
+        The row's id is the span's own identity (`mid_turn_reply_id_for`), and the insert ignores a
+        conflict on it. That is what makes a replayed turn safe: a recovered workflow re-runs this
+        body with its rounds memoized under this same attempt, derives the same ids, and inserts
+        nothing — the row it would write is the row a poller already delivered. It is a plain write
+        rather than a step for the same reason: the identity carries the idempotency, so a crash
+        between the write and a step record cannot double-post either. A resumed run carries a fresh
+        attempt, so the spans it marks in its own rounds are written and delivered rather than
+        silently dropped onto the ids the parked attempt spent.
+
+        A subagent turn speaks to no member: its conversation is the parent's private channel, and a
+        tag in a child's output is text the parent reads, never a member's message. The markup is
+        stripped from a child's window text all the same, so nothing can carry it outward."""
+        if not spoken or self.turn.subagent_profile is not None:
+            return
+        for span_index, reply in enumerate(spoken):
+            reply_id = mid_turn_reply_id_for(self.turn.id, round_index, span_index, self.attempt)
+            async with workspace_tx() as connection:
+                insert = (
+                    postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+                )
+                written = await connection.execute(
+                    insert(tables.mid_turn_reply)
+                    .values(
+                        id=reply_id,
+                        workspace_id=self.turn.workspace_id,
+                        turn_id=self.turn.id,
+                        round_index=round_index,
+                        span_index=span_index,
+                        message_ref=reply.message_ref,
+                        text=reply.text,
+                        status=WRITEBACK_PENDING,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                    .on_conflict_do_nothing(index_elements=[tables.mid_turn_reply.c.id])
+                )
+            if written.rowcount == 1:
+                log(
+                    "turn.reply_spoken",
+                    turn_id=str(self.turn.id),
+                    reply_id=str(reply_id),
+                    message_ref=str(reply.message_ref or ""),
+                    round=round_index,
+                    chars=len(reply.text),
+                )
+            await self._publish(Reply(id=reply_id, message_ref=reply.message_ref, text=reply.text))
+
+    async def _stream_closing_spans(self, spoken: tuple[MarkedReply, ...]) -> None:
+        """Put a closing round's marked spans back on the delta stream. The redaction withholds a
+        span from the live text while the round runs, because a span belongs to the member as its
+        own delivery: a tool-calling round's spans ride `Reply` frames instead. A closing round's
+        spans ride nothing — their words are the answer the terminal frame carries — so a surface
+        that prints the delta stream and takes the terminal as its cap, the ufo terminal, would end
+        the turn having printed no answer at all. Publishing them here delivers the answer on the
+        one stream that was missing it, and still exactly once: no Reply frame names them, and a
+        surface that redraws from the terminal frame replaces the stream with the same words."""
+        for reply in spoken:
+            await self._publish(TextDelta(text=reply.text))
 
     async def _render_arrival(
         self,
@@ -1595,6 +1696,13 @@ class TurnEngine:
                     denial=denial,
                 )
             )
+        if arrivals:
+            log(
+                "turn.arrivals_claimed",
+                turn_id=str(self.turn.id),
+                arrivals=" ".join(str(arrival.id) for arrival in arrivals),
+                denied=sum(1 for arrival in arrivals if arrival.denial is not None),
+            )
         return tuple(arrivals)
 
     async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None:
@@ -1654,7 +1762,9 @@ class TurnEngine:
             active_requests=active_requests,
         )
         await self._publish_cost(usage_events)
-        return messages, result.text
+        spoken, text = marked_replies(result.text)
+        await self._stream_closing_spans(spoken)
+        return messages, text
 
     async def _force_finish(
         self,
@@ -1863,16 +1973,18 @@ class TurnEngine:
         reasoning: list[ThinkingBlock | RedactedThinkingBlock | ReasoningItemBlock] = []
         usages: list[Usage] = []
         error: Exception | None = None
+        redaction = ReplyRedaction()
 
         async def flush() -> None:
             nonlocal pending
             async with flush_lock:
                 if not buffer:
                     return
-                text = "".join(buffer)
+                visible = redaction.feed("".join(buffer))
                 buffer.clear()
                 pending = 0
-                await self.hub.publish(self.turn.id, TextDelta(text=text))
+                if visible:
+                    await self.hub.publish(self.turn.id, TextDelta(text=visible))
 
         async def pace() -> None:
             while not stop.is_set():
@@ -2543,6 +2655,13 @@ class TurnEngine:
                     )
                 ).scalar_one()
                 if pending:
+                    log(
+                        "turn.commit_refused_by_arrivals",
+                        turn_id=str(self.turn.id),
+                        status=status,
+                        pending=pending,
+                        absorbed=len(absorbed),
+                    )
                     return None, False
             await record_turn_usage(
                 connection,

@@ -58,6 +58,7 @@ from ufo.sdk.hub import (
     CostTick,
     LiveFrame,
     Parked,
+    Reply,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -3113,6 +3114,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             )
         case Absorbed():
             return head + b"event: absorbed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        case Reply():
+            return head + b"event: reply\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case TextDelta():
             return head + b"data: " + frame.model_dump_json().encode() + b"\n\n"
         case _:

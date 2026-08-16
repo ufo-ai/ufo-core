@@ -407,8 +407,14 @@ link to the conversation, a terminal the client and the member's address — so 
 creates elsewhere can name where it was asked for; a message arriving while the conversation's
 newest turn is still live lands on the conversation's inbound queue, which the engine drains into
 that turn at each round boundary as separate `<context>`-tagged messages — the terminal
-commit refuses to close over a non-empty queue, so one FIFO aggregate produces one reply and one
-writeback across all speakers — **identity** resolution (an external id → member + conversation,
+commit refuses to close over a non-empty queue, so one FIFO aggregate ends in one closing reply and
+one writeback across all speakers, and a turn answers a speaker before it ends by marking a span of
+a round's text with the `message_ref` it replies to: on a surface that implements `speak` (Slack)
+core delivers each marked span to that member as its own message, in the order the model wrote it,
+exactly once across a provider retry, a second replica and a replayed turn, and before the closing
+reply, which carries what the turn has not already delivered; a live surface shows a span only on
+its stream, so there the closing reply carries those words too — **identity** resolution (an
+external id → member + conversation,
 linking a `surface_identity` on first contact — `join_member` also creates the member when a
 channel-verified email matches the workspace's own domain, the first member's vetted email domain,
 so only that initial member onboards through provisioning — and `adopt_identity` to span a member across
@@ -447,11 +453,15 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   One armer owns both followers, and the turn's own execution reaches it too, so the execution
   holding the claim is the one narrating and a resumed run gets its narration back: the status Slack
   drops two minutes after its last write is stamped again by the instance that took the turn over.
-  Live feedback is never delivery, which stays the poller's terminal reply.
+  Live feedback is never delivery, which stays the poller's: a `speak` post per marked span while
+  the turn runs, then the terminal reply.
 - **Live** (web; the terminal surface is its directive-stream twin) — the member's connection is held open, so
   admission registers nothing and the surface delivers by `tail`-ing the turn's frames off the hub
   over SSE in its own route. The poller only processes turns that registered a writeback, so it is a
-  no-op for a live surface — the efficient downgrade, not a second seam. The same terminal handoffs
+  no-op for a live surface — the efficient downgrade, not a second seam. A marked span reaches a
+  live member as a `Reply` frame on that stream and nowhere durable: the portal stores no messages,
+  so a page loaded mid-turn draws the transcript without the spans already shown — the accepted
+  gap — and the closing reply carries those words again. The same terminal handoffs
   ride the live stream that the writeback carries: a turn that ended by asking renders its options
   as the surface's own answer affordance under the same idempotent admit (first answer wins,
   `admitted_body` confirming which landed), credential prompts collect privately through the
