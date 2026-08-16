@@ -49,7 +49,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | Table | Owns |
 |---|---|
 | `workspace` | The team unit: name, config digest. Members are unlimited — one flat fee per workspace, nothing bounded or counted here. |
-| `member` | A human. `is_admin` grants workspace management to any number of members; onboarding makes the first member an admin, the last admin cannot be removed, and at least one seated admin remains able to act in chat. `seated_at` marks a member the agent answers: set by the row that creates them (the column's own default, so no creation path can mint a member the agent silently refuses), cleared only by an admin's revoke in chat, gated at admission and per round. Clearing it is the one way to remove a person's access, since the row is an identity and a memory subject that outlives it and the `member` kind refuses delete. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
+| `member` | A human. `is_admin` grants workspace management to any number of members; onboarding makes the first member an admin, the last admin cannot be removed, and at least one seated admin remains able to act in chat. `seated_at` marks a member the agent answers: set by the row that creates them (the column's own default, so no creation path can mint a member the agent silently refuses), cleared only by an admin's revoke in chat, gated at admission and per round. `timezone` is the latest valid IANA zone received from chat metadata; UTC is the default for member-local jobs. Clearing the seat is the one way to remove a person's access, since the row is an identity and a memory subject that outlives it and the `member` kind refuses delete. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
 | `surface_installation` | A chat installation's unique external identity → workspace binding, bound to one agent — the agent every conversation the surface creates lands on (a new binding lands on the workspace's explicit main agent). Shared ingress uses it only to select a candidate credential, authenticates the original request bytes, then binds that workspace. |
 | `agent` | A configured agent: name, prompt, model policy, reasoning effort, sandbox size, granted tool set, skill packs, memory scope. Exactly one per workspace is `is_main`: onboarding creates it, unbound surfaces route to it, and it may update any agent's prompt without crossing member or audience boundaries. A row an extension shipped (`agents`, below) additionally records that extension, the name it declared, and the version that created the row. |
 | `connection` | One member-owned broker account identity per `(workspace, provider, account)`. It holds no secret. `shared` controls disclosure and `account_label` names the account. `connect_account` creates or reuses it and refuses to reassign another member's account. Deleting it atomically stops its sources, tombstones their pages, and removes every connector grant. |
@@ -69,6 +69,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `workspace_balance` | The prepaid balance in micro-USD, and `reserve_micro_usd`, the headroom a turn needs before it may begin. A mutable row rather than a sum over `balance_purchase`, because a lifetime balance has no window to bound its sum. |
 | `job` | Recurring/one-time background work (source sync, page-change fan-out, turn dispatch, subagent result delivery, extension jobs). |
 | `scheduled_task` (scheduled_tasks extension) | Agent-namespaced, member-private recurring invocation with names unique per agent and optional UTC expiry, enforced before invocation. The extension owns the table — core migrations created it and it was adopted in place; fires ride the internal `invoke` capability as scheduled turns. Creation binds the executor and its reporting conversation; updates never move either. The main agent may target an existing child-agent task from any conversation: its creator may inspect, edit, or cancel it; an admin may list management metadata, change cadence or expiry, or cancel, but cannot read or change its prompt or responses; another member cannot see it. Each recurring turn carries the exact claimed UTC occurrence; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. |
+| `sweep_edition` (sweep extension) | One private daily brief per seated member and local date. A pending edition commits its cursor and finding ledger only after a valid terminal reply. A failed edition remains eligible for the next hourly job, up to three attempts. |
 
 ## Agent loop
 
@@ -280,7 +281,7 @@ into core internals.
 
 The active manifest set reads back as the core-registered `extension` kind: one object per
 extension, named lowercase and hyphenated, whose spec names what a member can encounter of it —
-tools, object kinds, credential slots, surfaces, jobs, hook events, source backends, subagents,
+tools, object kinds, credential slots, surfaces, jobs, hook events, source backends, subagents, agents,
 named and never valued — and whose status carries what it asks of the deploy (`sandbox_internet`,
 `requires`). Instances are declarations rather than rows, so their envelope timestamps are null,
 and every mutation refuses: installing and removing an extension is a lockfile act (`ufoctl ext`).
@@ -316,6 +317,10 @@ Manifest registers (each optional):
 | `requires` | Sub-seams this extension consumes from another (the browser pack `requires` `cdp_providers`); `serve` resolves each at boot and fails loud — naming the extension and the seam — if the backend is absent, unknown, or unkeyed, so a missing dependency stops startup rather than the first tool call. |
 
 `ExtensionContext` (capability-scoped, handed to every handler): workspace-scoped store access,
+seated-member paging, member-private scheduled agent admission, and member-bound read context for a
+first-party manifest that declares `member_context_read`; that context spans the member's readable
+conversations and artifacts across agents, and pages with an explicit `source_grant` to an agent,
+never the main-agent owner exception,
 `credentials.get(slot)` / `credentials.resolve(slot)` /
 `credentials.rotate(slot, expected, value)`, the selected `index`/`embed`
 backends,
@@ -464,8 +469,10 @@ The web surface is the member portal and its own audience authority: every membe
 workspace's main agent — the agent every surface routes an unbound member to — and beyond it the
 portal lists and admits exactly the non-main agents whose web audience holds the signed-in
 member — grants kept in the web extension's own store, granted and revoked in chat
-(`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent) —
-while a workspace admin reaches and administers every agent. The deploy's typed subagent profiles
+(`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent). A
+member-private extension conversation is listed as a chat and admits that member's replies, but
+does not grant another conversation or an agent panel. A workspace admin reaches and administers
+every agent. The deploy's typed subagent profiles
 are listed beside those agents unfiltered — a subagent belongs to no member, so no audience gates
 it and no chat route reaches it. Each opens a page of the same deploy shape: the system prompt its
 children run under, the deploy skills it can load (none without `load_skill`; a spawn adds the
@@ -493,9 +500,10 @@ explicit grant holds the agent, never the main-agent default alone. Beside the p
 or holding a turn they spoke — and, under a bound of its own, the readable ones a colleague is in
 and they are not: the rail's projection, each row titled from its first message, flagged `mine`,
 and a colleague's naming who spoke it. A conversation no member spoke in is an extension's errand
-and is in neither. A `#/c/<conversation_id>` permalink opens a web
-chat normally and opens another surface's readable conversation in that same conversation view,
-read-only. A link into the portal from another surface names its target as `?c=<conversation_id>`,
+and is in neither. A `#/c/<conversation_id>` permalink opens a web chat normally, opens a
+member-private extension conversation for replies, and opens every other surface's readable
+conversation in that same conversation view read-only. A link into the portal from another surface
+names its target as `?c=<conversation_id>`,
 because a fragment never reaches the server: the sign-in redirect and the signed-in card carry that
 target, so a signed-out click lands on the conversation rather than a new chat, and a permalink
 whose id is not a conversation id reports the bad link rather than opening one. A reply links the

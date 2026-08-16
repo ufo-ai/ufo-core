@@ -6,6 +6,7 @@ turn path consumes. The cold-start test drives the real `ufoctl init` command th
 first run writes the token and durable state, a second run fails loud."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
@@ -17,6 +18,7 @@ from ufo import cli
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
+from ufo.ext import loader
 from ufo.ext.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import CredentialSlot, Manifest, OnboardingStep
@@ -143,6 +145,18 @@ async def test_onboarding_runs_each_installed_extensions_steps(
     with ws(onboarded.workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
+
+
+def test_third_party_extension_cannot_declare_privileged_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = SimpleNamespace(
+        load=lambda: lambda: Manifest(name="outside", version="1", member_context_read=True),
+        dist=SimpleNamespace(name="outside-package"),
+    )
+    monkeypatch.setattr(loader, "entry_points", lambda group: (entry,))
+    with pytest.raises(ValueError, match="third-party extension"):
+        loader.discovered()
 
 
 async def test_platform_credential_is_read_live_not_seeded(

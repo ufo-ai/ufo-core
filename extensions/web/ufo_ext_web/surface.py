@@ -540,7 +540,7 @@ async def _open_conversation(
     )
     if conversation_id != minted:
         await store.delete(_chat_row_key(minted))
-        if await _own_chat(store, agent_id, email, conversation_id) is None:
+        if await _own_web_chat(store, agent_id, email, conversation_id) is None:
             raise RuntimeError(f"conversation {conversation_id} has no chat row")
         return conversation_id, await _named(ctx, agent_id, member_id, conversation_id)
     await ctx.retitle_conversation(conversation_id, title)
@@ -558,7 +558,7 @@ async def _named(
     return listed[0].title if listed else ""
 
 
-async def _own_chat(
+async def _own_web_chat(
     store: ScopedStore, agent_id: UUID, email: str, conversation_id: UUID
 ) -> ChatRecord | None:
     """The requested conversation's chat record, when it is this member's own chat with this
@@ -571,6 +571,30 @@ async def _own_chat(
     if record.agent_id != agent_id or record.email != email:
         return None
     return record
+
+
+async def _member_chat(
+    ctx: SurfaceContext,
+    store: ScopedStore,
+    agent_id: UUID,
+    member_id: UUID,
+    email: str,
+    conversation_id: UUID,
+) -> ListedConversation | None:
+    web = await _own_web_chat(store, agent_id, email, conversation_id)
+    listed = await ctx.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
+    )
+    if not listed:
+        return None
+    conversation = listed[0]
+    if web is not None:
+        return conversation
+    if conversation.summary.surface.startswith("extension:") and conversation.audience == str(
+        conversation_audience(member_id)
+    ):
+        return conversation
+    return None
 
 
 def _turn_context(email: str, request: Request, source: str) -> TurnContext:
@@ -809,7 +833,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         return resolved
     member_id, email, audience = resolved
     agent_id = _agent_param(request)
-    if agent_id is None or not audience.allows(agent_id):
+    if agent_id is None or not audience.allows_chat(agent_id):
         return Response("no such agent", status_code=404)
     stop = _stop_header(request)
     if isinstance(stop, Response):
@@ -835,6 +859,8 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     if not requested:
         return Response("conversation is required", status_code=400)
     if requested == NEW_CONVERSATION:
+        if not audience.allows(agent_id):
+            return Response("no such agent", status_code=404)
         if answer is not None:
             return Response("an answer names the conversation it was asked in", status_code=400)
         if stop is not None:
@@ -847,7 +873,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
             conversation_id = UUID(requested)
         except ValueError:
             return Response("no such conversation", status_code=404)
-        if await _own_chat(store, agent_id, email, conversation_id) is None:
+        if await _member_chat(ctx, store, agent_id, member_id, email, conversation_id) is None:
             return Response("no such conversation", status_code=404)
         title = await _named(ctx, agent_id, member_id, conversation_id)
     if stop is not None:
@@ -1298,7 +1324,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         return resolved
     member_id, email, audience = resolved
     agent_id = _agent_param(request)
-    if agent_id is None or not audience.allows(agent_id):
+    if agent_id is None or not audience.allows_chat(agent_id):
         return Response("no such agent", status_code=404)
     requested = request.query_params.get("conversation", "").strip()
     if not requested:
@@ -1307,7 +1333,10 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         conversation_id = UUID(requested)
     except ValueError:
         return Response("no such conversation", status_code=404)
-    if await _own_chat(web_extension().store, agent_id, email, conversation_id) is None:
+    if (
+        await _member_chat(ctx, web_extension().store, agent_id, member_id, email, conversation_id)
+        is None
+    ):
         return Response("no such conversation", status_code=404)
     rendered, turn = await _conversation_messages(ctx, conversation_id, member_id)
     if turn is None:
@@ -1368,7 +1397,7 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
         ("others", OTHER_CONVERSATION_LIMIT),
     )
     rows: list[dict[str, object]] = []
-    for agent in audience.agents:
+    for agent in audience.chat_agents:
         for participation, limit in sides:
             listed = await ctx.list_agent_conversations(
                 agent.id, member_id, admin=False, limit=limit, participation=participation
@@ -1386,6 +1415,7 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
                         "conversation_id": str(entry.summary.id),
                         "agent_id": str(agent.id),
                         "agent_name": agent.name,
+                        "agent_model": agent.model,
                         "title": entry.title,
                         "mine": participation == "mine",
                         "speaker": (
@@ -1409,19 +1439,21 @@ async def _resolve_chat(
     requested: str,
 ) -> Response:
     """The conversation a `#/c/<id>` permalink names: a web chat returns its rail row; another
-    surface returns its read-only conversation projection. The same audience gates as their
-    ordinary views answer, down to the viewer's own admin flag — so a row the conversations panel
-    offers an admin to disclose resolves here too, carrying `readable: false` rather than reading
-    as a conversation that does not exist. A malformed or turnless id is absent.
+    surface returns its conversation projection. A member-private extension conversation is a chat;
+    every other surface is read-only. The same audience gates as their ordinary views answer, down
+    to the viewer's own admin flag — so a row the conversations panel offers an admin to disclose
+    resolves here too, carrying `readable: false` rather than reading as a conversation that does
+    not exist. A malformed or turnless id is absent.
 
-    The row it returns is this member's own chat — `_own_chat` answers nothing else — so it is
+    The row it returns is this member's own chat — `_member_chat` answers nothing else — so it is
     `mine` and names no speaker."""
     try:
         named = UUID(requested)
     except ValueError:
         return JSONResponse({"chats": []})
-    for agent in audience.agents:
-        if await _own_chat(store, agent.id, email, named) is None:
+    for agent in audience.chat_agents:
+        own = await _member_chat(ctx, store, agent.id, member_id, email, named)
+        if own is None:
             continue
         latest = await ctx.latest_turn(named)
         if latest is None:
@@ -1436,11 +1468,12 @@ async def _resolve_chat(
                         "conversation_id": str(named),
                         "agent_id": str(agent.id),
                         "agent_name": agent.name,
-                        "title": await _named(ctx, agent.id, member_id, named),
+                        "agent_model": agent.model,
+                        "title": own.title,
                         "mine": True,
                         "speaker": None,
-                        "surface": SURFACE_WEB,
-                        "surface_label": None,
+                        "surface": own.summary.surface,
+                        "surface_label": own.surface_label,
                         "last_at": _iso(detail.turn.created_at),
                     }
                 ]
@@ -2601,7 +2634,7 @@ async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUI
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
-    member_id, _email, audience = resolved
+    member_id, email, audience = resolved
     absent = Response("That turn is not available.", status_code=404, headers={REFUSAL_HEADER: "1"})
     try:
         turn_id = UUID(request.path_params["turn_id"])
@@ -2615,7 +2648,19 @@ async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUI
             "That turn belongs to another member.", status_code=403, headers={REFUSAL_HEADER: "1"}
         )
     detail = await ctx.turn_detail(turn_id)
-    if detail is None or not audience.allows(detail.turn.agent_id):
+    if detail is None:
+        return absent
+    if not audience.allows(detail.turn.agent_id) and (
+        await _member_chat(
+            ctx,
+            web_extension().store,
+            detail.turn.agent_id,
+            member_id,
+            email,
+            detail.turn.conversation_id,
+        )
+        is None
+    ):
         return absent
     return member_id, turn_id
 

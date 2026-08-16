@@ -930,7 +930,10 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     admitted = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=b"hello",
-        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        headers={
+            "cookie": f"{SESSION_COOKIE}={token}",
+            "x-ufo-timezone": "America/New_York",
+        },
     )
     assert admitted.status_code == 200
     turn_id = admitted.json()["turn_id"]
@@ -974,6 +977,11 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
                 sa.select(tables.turn.c.context).where(tables.turn.c.id == UUID(turn_id))
             )
         ).scalar_one()
+        timezone = (
+            await connection.execute(
+                sa.select(tables.member.c.timezone).where(tables.member.c.id == member_id)
+            )
+        ).scalar_one()
     assert linked.member_id == member_id
     assert conversation.surface == "web"
     assert conversation.member_id == member_id
@@ -982,10 +990,11 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     assert writeback is None
     assert context == {
         "sender": "owner@example.com",
-        "timezone": None,
+        "timezone": "America/New_York",
         "question": None,
         "source": (f"https://web/surface/web#/c/{opened} (owner@example.com)"),
     }
+    assert timezone == "America/New_York"
     transcript = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={opened}",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
@@ -3910,6 +3919,87 @@ async def test_the_rail_lists_readable_conversations_with_the_surface_they_came_
         "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
     assert admin_rail.json()["chats"] == []
+
+
+async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _main_agent = web
+    member_id, _token = await _seed_member(workspace_id, "Member@Example.com")
+    token = mint_token(
+        TOKEN_SECRET,
+        str(workspace_id),
+        "member@example.com",
+        timedelta(hours=1),
+    )
+    _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
+    daily_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=daily_agent,
+                workspace_id=workspace_id,
+                name="daily-brief",
+                prompt="Answer briefly.",
+                model="claude-opus-4-8",
+                is_main=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        daily_agent,
+        queue_key=f"daily-brief:{member_id}:2026-08-15",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="extension:sweep",
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        daily_agent,
+        seq=1,
+        inbound="Prepare today's private daily brief.",
+    )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    rail = await client.get("/surface/web/api/chats", headers=cookie)
+    assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(conversation_id)]
+    index = await client.get("/surface/web/api/agents", headers=cookie)
+    assert str(daily_agent) not in {agent["id"] for agent in index.json()["agents"]}
+    overview = await client.get(f"/surface/web/agents/{daily_agent}/overview", headers=cookie)
+    assert overview.status_code == 404
+    new_chat = await client.post(
+        f"/surface/web/agents/{daily_agent}/chat?conversation=new",
+        content=b"Open another chat.",
+        headers=cookie,
+    )
+    assert new_chat.status_code == 404
+    transcript = await client.get(
+        f"/surface/web/agents/{daily_agent}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+    assert transcript.status_code == 200
+    reply = await client.post(
+        f"/surface/web/agents/{daily_agent}/chat?conversation={conversation_id}",
+        content=b"Approve the task draft.",
+        headers=cookie,
+    )
+    assert reply.status_code == 200
+    async with workspace_tx() as connection:
+        speaker = (
+            await connection.execute(
+                sa.select(tables.turn.c.speaker_member_id).where(
+                    tables.turn.c.id == UUID(reply.json()["turn_id"])
+                )
+            )
+        ).scalar_one()
+    assert speaker == member_id
+    foreign = await client.get(
+        f"/surface/web/agents/{daily_agent}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+    )
+    assert foreign.status_code == 404
 
 
 async def test_the_rail_reads_every_surface_under_its_bound(

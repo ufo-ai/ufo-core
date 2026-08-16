@@ -462,6 +462,30 @@ test("an origin rail row opens the read-only pane, never the live chat", async (
   expect(screen.queryByLabelText("Message the agent")).toBeNull();
 });
 
+test("a private extension conversation opens the live chat", async () => {
+  const sweep = {
+    ...CHAT_ROW,
+    agent_id: "22222222-2222-4222-8222-222222222222",
+    agent_name: "daily-brief",
+    agent_model: "claude-sonnet-5",
+    surface: "extension:sweep",
+    surface_label: null,
+    title: "Daily brief",
+  };
+  wire({
+    "/api/chats": () => json({ chats: [sweep] }),
+    "/transcript": () => json({ messages: [{ role: "assistant", text: "Work to finish" }] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: /Daily brief/ }));
+
+  expect(await screen.findByText("Work to finish")).toBeTruthy();
+  expect(screen.getByText("claude-sonnet-5")).toBeTruthy();
+  expect(screen.getByLabelText("Message the agent")).toBeTruthy();
+  expect(screen.queryByText(/read-only here/)).toBeNull();
+});
+
 test("a conversation no read of this account's answers is named unshared, not missing", async () => {
   location.hash = "#/c/99999999-9999-4999-8999-999999999999";
   wire({});

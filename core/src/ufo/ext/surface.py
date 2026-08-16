@@ -1821,6 +1821,23 @@ class SurfaceContext:
             for row in rows
         )
 
+    async def member_extension_agent_ids(self, member_id: UUID) -> frozenset[UUID]:
+        """Agents with a private extension conversation bound to this member."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.agent_id)
+                    .where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.member_id == member_id,
+                        tables.conversation.c.audience == str(conversation_audience(member_id)),
+                        tables.conversation.c.surface.startswith("extension:"),
+                    )
+                    .distinct()
+                )
+            ).scalars()
+        return frozenset(rows)
+
     async def agent_detail(self, agent_id: UUID) -> AgentDetail | None:
         """One agent's configuration for a portal overview — the row beside its prompt digest and
         bound surfaces, or None when no such agent exists in this workspace. The surface's own

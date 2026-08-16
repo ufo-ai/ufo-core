@@ -13,6 +13,10 @@ export const WEB_SURFACE = "web";
 export const SLACK_SURFACE = "slack";
 export const UFO_SURFACE = "ufo";
 
+export function isPortalChat(surface: string): boolean {
+  return surface === WEB_SURFACE || surface.startsWith("extension:");
+}
+
 const SURFACE_WORDS: Record<string, string> = {
   [WEB_SURFACE]: "Portal",
   [SLACK_SURFACE]: "Slack",

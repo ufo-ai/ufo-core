@@ -519,6 +519,7 @@ def manifest() -> Manifest:
                 ),
                 input_model=MemoryUpdateInput,
                 handler=memory_update_handler,
+                side_effecting=True,
             ),
         ),
         objects=(MEMORY_OBJECT,),

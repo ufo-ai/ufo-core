@@ -37,6 +37,7 @@ EXTENSIONS = (
     "slack",
     "sites",
     "scheduled_tasks",
+    "sweep",
     "research",
     "repl",
     "redis_hub",

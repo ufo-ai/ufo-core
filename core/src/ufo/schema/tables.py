@@ -31,6 +31,7 @@ member = sa.Table(
     sa.Column("email", sa.Text, nullable=False),
     sa.Column("is_admin", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("seated_at", sa.DateTime(timezone=True), nullable=True, server_default=sa.func.now()),
+    sa.Column("timezone", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "email"),

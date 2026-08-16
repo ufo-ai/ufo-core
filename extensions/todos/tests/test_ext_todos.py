@@ -80,6 +80,7 @@ def test_manifest_declares_both_tools_and_the_todo_section() -> None:
     update_list = next(tool for tool in manifest.tools if tool.name == "update_todo_list")
     assert "checklist" in update_list.description
     assert "title" in update_list.input_model.model_json_schema()["properties"]
+    assert all(tool.side_effecting for tool in manifest.tools)
     (section,) = manifest.prompt_sections
     assert section.name == "todo_list"
     assert "<todo_list>" in section.body

@@ -295,6 +295,15 @@ class Admission:
                 ).one_or_none()
                 if speaker is None:
                     raise ValueError("turn speaker is not a member of this workspace")
+                if context is not None and context.timezone is not None:
+                    await connection.execute(
+                        sa.update(tables.member)
+                        .where(
+                            tables.member.c.workspace_id == workspace_id,
+                            tables.member.c.id == speaker_member_id,
+                        )
+                        .values(timezone=context.timezone, updated_at=sa.func.now())
+                    )
             deduped = None
             if idempotency_key is not None:
                 deduped = (

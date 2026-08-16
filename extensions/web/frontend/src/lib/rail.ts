@@ -4,6 +4,7 @@ export type ChatRow = {
   conversation_id: string;
   agent_id: string;
   agent_name: string;
+  agent_model?: string;
   title: string;
   last_at: string;
   surface: string;

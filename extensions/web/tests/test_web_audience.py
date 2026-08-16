@@ -217,6 +217,35 @@ async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_pa
         assert [agent.id for agent in remaining.agents] == [main_agent]
 
 
+async def test_a_private_extension_conversation_grants_only_its_chat_agent(
+    db: None, tmp_path
+) -> None:
+    workspace_id, main_agent, second_agent = await _seed()
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                agent_id=second_agent,
+                surface="extension:sweep",
+                queue_key=f"daily-brief:{member_id}:2026-08-15",
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        audience = await web_audience(
+            _surface(workspace_id, tmp_path), context_for(NAME, frozenset()), MEMBER_EMAIL
+        )
+    assert [agent.id for agent in audience.agents] == [main_agent]
+    assert [agent.id for agent in audience.conversation_agents] == [second_agent]
+    assert [agent.id for agent in audience.chat_agents] == [main_agent, second_agent]
+    assert not audience.allows(second_agent)
+
+
 async def test_the_main_agent_needs_no_grant_and_revocation_only_clears_stale_rows(
     db: None, tmp_path
 ) -> None:

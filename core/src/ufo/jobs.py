@@ -37,6 +37,7 @@ from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChang
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import log, log_error, warn
+from ufo.provisioning import AgentProvisioning
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -560,6 +561,8 @@ class _Binding:
     extension: str
     declared: frozenset[str]
     spec: JobSpec
+    member_context_read: bool = False
+    manifest: Manifest | None = None
 
 
 def bindings_from(
@@ -584,6 +587,8 @@ def bindings_from(
                 extension=manifest.name,
                 declared=declared,
                 spec=spec,
+                member_context_read=manifest.member_context_read,
+                manifest=manifest,
             )
             for spec in manifest.jobs
         )
@@ -667,6 +672,8 @@ class JobRunner:
     async def fire(self, key: str, workspace_id: UUID) -> None:
         binding = self._binding(key)
         with ws(workspace_id):
+            if binding.manifest is not None and binding.manifest.agents:
+                await AgentProvisioning((binding.manifest,)).apply(workspace_id)
             invoker = None if self.invoker_factory is None else self.invoker_factory(workspace_id)
             context = context_for(
                 binding.extension,
@@ -679,6 +686,8 @@ class JobRunner:
                 invoker,
                 self.registry,
                 probes=self.probes,
+                member_context_read=binding.member_context_read,
+                member_context_blob=self.blob,
             )
             try:
                 await binding.spec.handler(context)

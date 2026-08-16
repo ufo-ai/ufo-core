@@ -498,6 +498,20 @@ SCAN_PDF = WorkspaceFile("pdfs/scan.pdf", PDF_STUB)
 LOCKED_PDF = WorkspaceFile("pdfs/statement-locked.pdf", PDF_STUB)
 CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
+        "daily-brief-review",
+        "Prepare my private daily brief from today's work, conversations, pages, and outside "
+        "context. Include drafts I can approve later.",
+        expected="daily-brief",
+        forbidden=("research-report", "task-scheduling"),
+    ),
+    SkillLoadCase(
+        "daily-brief-approval",
+        "I approve only the first task draft from this morning's daily brief. Apply that draft "
+        "and leave the other drafts unchanged.",
+        expected="daily-brief",
+        forbidden=("task-scheduling",),
+    ),
+    SkillLoadCase(
         "coding-trace-webhook",
         "Trace how an incoming webhook event reaches the dispatcher in the code under repo/ and "
         "explain where retries are handled.",
@@ -829,7 +843,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Turn the research findings in research/findings.md into a concise Markdown report with "
         "an executive summary, findings, and cited sources.",
         expected="research-report",
-        forbidden=("research-assistant", "create-skill"),
+        forbidden=("research-assistant", "create-skill", "daily-brief"),
         workspace_files=(RESEARCH_FINDINGS,),
     ),
     SkillLoadCase(
@@ -875,6 +889,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "schedule-daily-escalations",
         "Every weekday at 8:30 AM, send me a summary of new high-priority support escalations.",
         expected="task-scheduling",
+        forbidden=("daily-brief",),
     ),
     SkillLoadCase(
         "schedule-weekly-pipeline",

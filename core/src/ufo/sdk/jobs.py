@@ -14,6 +14,9 @@ from ufo.candidates import (
     owner_candidates as owner_candidates,
 )
 from ufo.ext.context import (
+    seated_member_workspaces as seated_member_workspaces,
+)
+from ufo.ext.context import (
     store_key_workspaces as store_key_workspaces,
 )
 from ufo.ext.manifest import (

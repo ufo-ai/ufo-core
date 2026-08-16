@@ -32,6 +32,7 @@ import {
   SLACK_SURFACE,
   UFO_SURFACE,
   WEB_SURFACE,
+  isPortalChat,
   Viewer,
   origin,
   speakerName,
@@ -288,7 +289,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
     if (route.kind !== "chat" || rail.phase !== "ready") return;
     const wanted = route.conversationId;
     if (
-      rail.rows.some((row) => row.conversation_id === wanted && row.surface === WEB_SURFACE) ||
+      rail.rows.some((row) => row.conversation_id === wanted && isPortalChat(row.surface)) ||
       wanted in sought
     ) {
       return;
@@ -586,7 +587,7 @@ function RoutedPane({
   }
   if (route.kind === "chat") {
     const row = rail.rows.find(
-      (entry) => entry.conversation_id === route.conversationId && entry.surface === WEB_SURFACE,
+      (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
     );
     const linkedConversation = linked[route.conversationId];
     if (!row && linkedConversation) {
@@ -602,7 +603,17 @@ function RoutedPane({
         />
       );
     }
-    const agent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;
+    const listedAgent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;
+    const agent =
+      listedAgent ??
+      (row && row.surface.startsWith("extension:")
+        ? {
+            id: row.agent_id,
+            name: row.agent_name,
+            model: row.agent_model ?? "",
+            main: false,
+          }
+        : undefined);
     if (!row || !agent) {
       if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;
       if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
@@ -626,6 +637,7 @@ function RoutedPane({
         conversationId={row.conversation_id}
         onActivity={onActivity}
         onAgentsIndex={onAgentsIndex}
+        conversationOnly={!listedAgent}
         slot={route.slot}
         onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
       />
@@ -852,7 +864,7 @@ function RailList({
             {group.rows.map((row) => {
               const facts = [
                 row.speaker ? speakerName(row.speaker) : null,
-                row.surface === WEB_SURFACE ? null : origin(row),
+                isPortalChat(row.surface) ? null : origin(row),
                 mainAgent && row.agent_id !== mainAgent.id ? row.agent_name : null,
               ].filter((fact): fact is string => fact !== null);
               return (

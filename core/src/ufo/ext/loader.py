@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict
 from ufo.agents import AGENT_OBJECT
 from ufo.artifacts import ARTIFACT_OBJECT
 from ufo.audience import SHARED_AUDIENCE, Audience
+from ufo.blob import WorkspaceBlobStore
 from ufo.connectors import CliCredential
 from ufo.conversations import CONVERSATION_OBJECT
 from ufo.credential_kind import (
@@ -166,6 +167,10 @@ def discovered() -> dict[str, tuple[Manifest, EntryPoint]]:
     found: dict[str, tuple[Manifest, EntryPoint]] = {}
     for entry in entry_points(group=EXTENSION_ENTRY_POINT_GROUP):
         manifest = entry.load()()
+        if manifest.member_context_read and (entry.dist is None or entry.dist.name != "ufo"):
+            raise ValueError(
+                f"third-party extension {manifest.name!r} cannot declare privileged capabilities"
+            )
         if manifest.name in found:
             raise ValueError(f"duplicate extension name: {manifest.name}")
         found[manifest.name] = (manifest, entry)
@@ -268,9 +273,7 @@ def load_manifests(pack: str | None = None) -> tuple[Manifest, ...]:
                     f"extension {pin.name!r} digest {actual} does not match pinned {pin.digest}"
                 )
             active[manifest.name] = manifest
-    if pack is None:
-        return tuple(active.values())
-    return _pack_manifests(pack, active)
+    return tuple(active.values()) if pack is None else _pack_manifests(pack, active)
 
 
 def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, ...]:
@@ -401,9 +404,12 @@ def turn_tools(
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    blob: WorkspaceBlobStore | None = None,
     *,
     audience: Audience,
     public_base_url: str | None = None,
+    scheduled_member_id: UUID | None = None,
+    member_context_blob: WorkspaceBlobStore | None = None,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext]]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
     tools and connector tools — and, per extension tool, the workspace-scoped ExtensionContext its
@@ -436,6 +442,7 @@ def turn_tools(
             declared,
             index,
             embed,
+            blob=blob,
             surfaces=frozenset(surface.name for surface in manifest.surfaces),
             credential_sources=tuple(
                 (slot.name, slot.source) for slot in manifest.credentials if slot.source is not None
@@ -443,6 +450,9 @@ def turn_tools(
             credential_store=credential_store,
             audience=audience,
             public_base_url=public_base_url,
+            member_context_read=manifest.member_context_read,
+            scheduled_member_id=scheduled_member_id,
+            member_context_blob=member_context_blob,
         )
         for tool in declared_tools:
             tools.append(tool)

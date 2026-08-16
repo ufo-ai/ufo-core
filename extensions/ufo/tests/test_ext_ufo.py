@@ -1089,12 +1089,21 @@ async def test_a_stop_carrying_a_message_is_refused(ufo: tuple[AsyncClient, UUID
     assert await _sole_turn(workspace_id) == (turn_id, "running")
 
 
-async def _post(client: AsyncClient, channel: str, token: str, body: bytes) -> list[list[str]]:
+async def _post(
+    client: AsyncClient,
+    channel: str,
+    token: str,
+    body: bytes,
+    timezone: str | None = None,
+) -> list[list[str]]:
+    headers = {"authorization": f"Bearer {token}"}
+    if timezone is not None:
+        headers["x-ufo-timezone"] = timezone
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
         response = await client.post(
             f"/surface/ufo/{channel}",
             content=body,
-            headers={"authorization": f"Bearer {token}"},
+            headers=headers,
         )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
@@ -1149,19 +1158,27 @@ async def test_admitted_turn_carries_the_member_and_the_terminal_as_its_source(
     client, workspace_id = ufo
     await _seed_member(workspace_id, "owner@example.com")
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    await _post(client, "main", token, b"hello")
+    await _post(client, "main", token, b"hello", timezone="America/Los_Angeles")
     async with workspace_tx() as connection:
-        context = (
+        context, timezone = (
             await connection.execute(
-                sa.select(tables.turn.c.context).where(tables.turn.c.workspace_id == workspace_id)
+                sa.select(tables.turn.c.context, tables.member.c.timezone)
+                .select_from(
+                    tables.turn.join(
+                        tables.member,
+                        tables.turn.c.speaker_member_id == tables.member.c.id,
+                    )
+                )
+                .where(tables.turn.c.workspace_id == workspace_id)
             )
-        ).scalar_one()
+        ).one()
     assert context == {
         "sender": "owner@example.com",
-        "timezone": None,
+        "timezone": "America/Los_Angeles",
         "question": None,
         "source": "ufo cli (owner@example.com)",
     }
+    assert timezone == "America/Los_Angeles"
 
 
 async def test_a_reported_timezone_lands_on_the_turn_and_an_unknown_one_drops(

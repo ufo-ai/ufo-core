@@ -3,10 +3,10 @@
 Instances are the manifests this process loaded, so they are declarations rather than rows and
 their envelope timestamps are null. The spec is what a member can encounter of an extension — the
 tools they call, the object kinds they read, the credential slots they fill, the surfaces they
-message on, the jobs, hooks, sources, and subagents that act for them — named, never valued: a slot
-appears by name only, and no read of this kind reaches a stored secret. Status is the other side of
-the declaration, what the extension asks of the deploy: metered public egress for its sandbox tools,
-and the seams it requires another extension to serve.
+message on, and the jobs, hooks, sources, and subagents that act for them — named, never valued: a
+slot appears by name only, and no read of this kind reaches a stored secret. Status is the other
+side of the declaration, what the extension asks of the deploy: metered public egress for its
+sandbox tools, and the seams it requires another extension to serve.
 
 Installing or removing an extension is a deploy act through the lockfile, not a chat act, so every
 mutation refuses.
@@ -170,8 +170,8 @@ class ExtensionObjects:
 
 EXTENSION_DESCRIPTION = (
     "An extension this deploy loaded: its version and what it declares — tools, object kinds, "
-    "credential slots, surfaces, jobs, hooks, sources, and subagents. Read-only; installing or "
-    "removing one is a deploy act through the lockfile."
+    "credential slots, surfaces, jobs, hooks, sources, and subagents. Read-only; "
+    "installing or removing one is a deploy act through the lockfile."
 )
 EXTENSION_GUIDANCE = (
     "The extensions this deploy is running, one object each, named lowercase and hyphenated "

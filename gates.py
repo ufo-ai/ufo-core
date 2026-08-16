@@ -472,7 +472,7 @@ def _sample_declared_points(trees: dict[Path, ast.Module]) -> set[str] | None:
                     keyword.arg
                     for keyword in keywords
                     if keyword.arg is not None
-                    and keyword.arg not in ("name", "version")
+                    and keyword.arg not in ("name", "version", "member_context_read")
                     and not (isinstance(keyword.value, ast.Tuple) and not keyword.value.elts)
                 }
     return declared

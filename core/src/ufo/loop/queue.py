@@ -83,6 +83,7 @@ from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
     INTENT_ADMISSION,
+    SCHEDULED_ADMISSION,
     TERMINAL_ERROR_MESSAGE_MAX_CHARS,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
@@ -122,9 +123,11 @@ def _agent_tools(
     admitted through the panel's own gate. Filtering that lane would refuse every panel mutation on
     an agent that carries an allowlist — including the `connect_account` and `request_credentials`
     that give it authority in the first place."""
-    if allowed is None or admission == INTENT_ADMISSION:
-        return tuple(tool for tool in all_tools if not tool.profile_only)
-    return tuple(tool for tool in all_tools if tool.name in allowed)
+    return (
+        tuple(tool for tool in all_tools if not tool.profile_only)
+        if allowed is None or admission == INTENT_ADMISSION
+        else tuple(tool for tool in all_tools if tool.name in allowed)
+    )
 
 
 def _resolve_profile(registry: SubagentRegistry, turn_id: str, name: str) -> SubagentProfile:
@@ -165,11 +168,8 @@ _provisioned_workspaces: set[UUID] = set()
 async def _apply_provisions(runtime: "Runtime", workspace_id: UUID) -> None:
     """Give a workspace the agents the active extensions ship, once per workspace per process.
 
-    Onboarding covers a new workspace. A workspace that existed before an extension shipped its
-    agent has no other moment to receive it: a boot-time sweep over the fleet would gate turn
-    admission on a write for every workspace, so the first turn of each workspace pays instead. The
-    call is idempotent, so later turns of the same workspace in another process settle on the rows
-    already there. A name the workspace already uses sends the shipped agent to a free variant, so a
+    Onboarding covers a new workspace. The first turn of each workspace also applies the idempotent
+    provisions. A name the workspace already uses sends the shipped agent to a free variant, so a
     collision costs the member's turn nothing."""
     if workspace_id in _provisioned_workspaces:
         return
@@ -406,6 +406,12 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 runtime.embed,
                 audience=audience,
                 public_base_url=runtime.config.connect.public_base_url,
+                scheduled_member_id=(
+                    turn.on_behalf_of_member_id
+                    if turn.admission_source == SCHEDULED_ADMISSION
+                    else None
+                ),
+                member_context_blob=runtime.blob,
             )
             hooks = turn_hooks(
                 runtime.manifests,

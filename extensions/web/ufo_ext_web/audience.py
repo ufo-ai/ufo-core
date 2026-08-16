@@ -8,7 +8,8 @@ to the executing agent, so granting access to an agent
 happens in that agent's own conversation — which a workspace admin can always open, because an
 admin reaches every agent. Everyone else reaches the workspace's main agent — the agent every
 surface routes an unbound member to, so the portal answers a member the way the CLI and an
-unbound Slack install already do — plus exactly the non-main agents granted to their email."""
+unbound Slack install already do — plus non-main agents granted to their email or holding their
+member-private extension conversations."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -63,18 +64,27 @@ class WebAudience:
     """One member's view of the portal: whether they administer the workspace (and so see every
     agent), the agents their web audience holds, and the subset an explicit grant put there
     (empty for an admin, who reaches every agent regardless) — the main agent reaches every
-    member by construction, so a read only an admin's choice may open (the usage panel) gates on
-    `granted`, never on `allows`."""
+    member by construction, and a member-private extension conversation grants only its agent chat,
+    so a read only an admin's explicit choice may open (the usage panel) gates on `granted`, never
+    on `allows`."""
 
     admin: bool
     agents: tuple[AgentSummary, ...]
+    conversation_agents: tuple[AgentSummary, ...]
     granted_ids: frozenset[UUID]
 
     def allows(self, agent_id: UUID) -> bool:
         return any(agent.id == agent_id for agent in self.agents)
 
+    def allows_chat(self, agent_id: UUID) -> bool:
+        return any(agent.id == agent_id for agent in self.chat_agents)
+
     def granted(self, agent_id: UUID) -> bool:
         return self.admin or agent_id in self.granted_ids
+
+    @property
+    def chat_agents(self) -> tuple[AgentSummary, ...]:
+        return (*self.agents, *self.conversation_agents)
 
 
 async def web_audience(
@@ -86,13 +96,27 @@ async def web_audience(
     admin = any(
         entry.admin and entry.email.strip().lower() == lowered for entry in snapshot.members
     )
+    member = next(
+        (entry for entry in snapshot.members if entry.email.strip().lower() == lowered), None
+    )
     agents = await surface.list_agents()
     if admin:
-        return WebAudience(admin=True, agents=agents, granted_ids=frozenset())
+        return WebAudience(
+            admin=True,
+            agents=agents,
+            conversation_agents=(),
+            granted_ids=frozenset(),
+        )
     granted = await _granted_agent_ids(extension.store, lowered)
+    extension_agents = (
+        frozenset() if member is None else await surface.member_extension_agent_ids(member.id)
+    )
     return WebAudience(
         admin=False,
         agents=tuple(a for a in agents if a.main or a.id in granted),
+        conversation_agents=tuple(
+            a for a in agents if a.id in extension_agents and a.id not in granted
+        ),
         granted_ids=granted,
     )
 

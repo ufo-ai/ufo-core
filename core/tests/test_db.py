@@ -490,8 +490,9 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "eval_env_0001",
         "sites_0002",
         "web_0002",
+        "sweep_0001",
     } <= set(heads)
-    assert len(heads) == 14
+    assert len(heads) == 15
 
 
 def test_coding_only_pack_migrates_without_sources(tmp_path: Path) -> None:

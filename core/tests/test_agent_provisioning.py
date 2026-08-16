@@ -21,7 +21,9 @@ from ufo.agents import AgentSpec
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.manifest import AgentProvision, Manifest
+from ufo.ext.context import ExtensionContext
+from ufo.ext.manifest import AgentProvision, JobSpec, Manifest
+from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.queue import _agent_tools, _apply_provisions, _provisioned_workspaces
 from ufo.object_name import validate_object_name
 from ufo.onboarding import Onboarding
@@ -285,6 +287,30 @@ async def test_a_workspace_that_predates_the_extension_gets_the_agent_on_its_nex
             )
     await _apply_provisions(runtime, workspace_id)
     assert await _row(workspace_id, PROVISIONED_AGENT_NAME) is None
+
+
+async def test_an_extension_job_provisions_its_agent_before_the_handler(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    observed: list[bool] = []
+
+    async def handler(_ctx: ExtensionContext) -> None:
+        observed.append(await _row(workspace_id, PROVISIONED_AGENT_NAME) is not None)
+
+    async def candidates() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    manifest = Manifest(
+        name=sample.NAME,
+        version=sample.manifest().version,
+        agents=sample.manifest().agents,
+        jobs=(JobSpec(name="probe", schedule=None, handler=handler, candidates=candidates),),
+    )
+    runner = JobRunner(bindings=bindings_from((manifest,), ()))
+    await runner.fire(f"{sample.NAME}:probe", workspace_id)
+    assert observed == [True]
 
 
 async def test_a_suffixed_name_is_addressable_by_an_extension_whose_own_name_is_not(

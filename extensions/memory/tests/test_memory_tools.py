@@ -48,6 +48,10 @@ TOOL_NARRATION = "remembering what they told me"
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
 
 
+def test_memory_update_is_side_effecting() -> None:
+    assert MEMORY_TOOLS["memory_update"].side_effecting
+
+
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
     values = [0.0] * EMBED_DIM
     for index, value in axes:

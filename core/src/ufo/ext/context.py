@@ -9,8 +9,9 @@ exact path an extension does. The `ExtensionContext` shape is open: it carries t
 index/embed backends, a transaction over the extension's own tables, governed proposals, and
 invoke, without reshaping what handlers already hold."""
 
+import hashlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -18,7 +19,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -30,7 +31,13 @@ from ufo.accounting import (
     read_pending_usage_exports,
 )
 from ufo.agent_scope import agent, agent_current
-from ufo.audience import SHARED_AUDIENCE, Audience, parse_audience
+from ufo.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    parse_audience,
+    readable_audiences,
+)
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
@@ -69,7 +76,13 @@ from ufo.o11y import log
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
 from ufo.schema import tables
-from ufo.schema.records import MEMBER_ADMISSION, AgentChange, ProposalRef, Usage
+from ufo.schema.records import (
+    MEMBER_ADMISSION,
+    SUBAGENT_SURFACE,
+    AgentChange,
+    ProposalRef,
+    Usage,
+)
 from ufo.seats import workspace_domain
 from ufo.sources.sync import PageFeed, SourceRowConfig, source_row_id
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
@@ -541,6 +554,19 @@ def trajectory_workspaces() -> WorkspaceCandidates:
     return owner_candidates(with_a_turn)
 
 
+def seated_member_workspaces() -> WorkspaceCandidates:
+    """Workspaces with at least one seated member, for first-party member jobs."""
+
+    def with_a_seated_member() -> sa.Select[tuple[UUID]]:
+        return (
+            sa.select(tables.member.c.workspace_id)
+            .where(tables.member.c.seated_at.is_not(None))
+            .distinct()
+        )
+
+    return owner_candidates(with_a_seated_member)
+
+
 def store_key_workspaces(extension: str, prefix: str) -> WorkspaceCandidates:
     """The candidate seam a store-backed job declares: the workspaces holding at least one of the
     extension's own `ext_store` keys under `prefix`. Core owns `ext_store`, so it owns this query —
@@ -787,6 +813,59 @@ class TurnOutcome:
     text: str | None
 
 
+class SeatedMember(BaseModel):
+    id: UUID
+    timezone: str = "UTC"
+
+
+class SeatedMemberPage(BaseModel):
+    members: tuple[SeatedMember, ...]
+    next_cursor: UUID | None = None
+
+
+class ScheduledMemberTurn(BaseModel):
+    conversation_id: UUID
+    turn_id: UUID | None
+
+
+class MemberContextRecord(BaseModel):
+    kind: str
+    ref: str
+    title: str
+    text: str
+    information_date: datetime
+    stable_subject_key: str
+
+    @field_validator("information_date")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+MEMBER_CONTEXT_TEXT_BYTES = 10_000
+
+
+async def _member_blob_text(blob: WorkspaceBlobStore, key: str) -> str:
+    data = bytearray()
+    stream = blob.get_stream(key)
+    try:
+        async for chunk in stream:
+            remaining = MEMBER_CONTEXT_TEXT_BYTES + 1 - len(data)
+            data.extend(chunk[:remaining])
+            if len(data) > MEMBER_CONTEXT_TEXT_BYTES:
+                break
+    finally:
+        if isinstance(stream, AsyncGenerator):
+            await stream.aclose()
+    bounded = data[:MEMBER_CONTEXT_TEXT_BYTES]
+    try:
+        return bounded.decode()
+    except UnicodeDecodeError as error:
+        if len(data) <= MEMBER_CONTEXT_TEXT_BYTES or error.reason != "unexpected end of data":
+            raise
+        return bounded[: error.start].decode()
+
+
 @dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
@@ -806,10 +885,516 @@ class ExtensionContext:
     key_slot_for: Callable[[str], str | None] | None = None
     public_base_url: str | None = None
     tailer: TurnTailer | None = None
+    member_context_read_allowed: bool = False
+    scheduled_member_id: UUID | None = None
+    member_context_blob: WorkspaceBlobStore | None = None
 
     @property
     def workspace_id(self) -> UUID:
         return self.store.workspace_id
+
+    async def seated_members(
+        self, *, cursor: UUID | None = None, limit: int = 100
+    ) -> SeatedMemberPage:
+        """Read one page of seated members for a first-party member job."""
+        if not self.member_context_read_allowed:
+            raise PermissionError("this extension cannot read seated members")
+        if limit < 1 or limit > 100:
+            raise ValueError("member page limit must be from 1 through 100")
+        query = (
+            sa.select(tables.member.c.id, tables.member.c.timezone)
+            .where(
+                tables.member.c.workspace_id == self.workspace_id,
+                tables.member.c.seated_at.is_not(None),
+            )
+            .order_by(tables.member.c.id)
+            .limit(limit + 1)
+        )
+        if cursor is not None:
+            query = query.where(tables.member.c.id > cursor)
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        page = rows[:limit]
+        return SeatedMemberPage(
+            members=tuple(SeatedMember(id=row.id, timezone=row.timezone or "UTC") for row in page),
+            next_cursor=page[-1].id if len(rows) > limit else None,
+        )
+
+    async def invoke_agent_for_member(
+        self,
+        *,
+        agent_name: str,
+        member_id: UUID,
+        conversation_key: str,
+        message: str,
+        idempotency_key: str,
+    ) -> ScheduledMemberTurn:
+        """Resolve this extension's agent, open its private member conversation, and schedule
+        one turn."""
+        if not self.member_context_read_allowed:
+            raise PermissionError("this extension cannot schedule member turns")
+        surface = f"extension:{self.store.extension}"
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.select(tables.workspace.c.id)
+                .where(tables.workspace.c.id == self.workspace_id)
+                .with_for_update()
+            )
+            member = (
+                await connection.execute(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == self.workspace_id,
+                        tables.member.c.id == member_id,
+                        tables.member.c.seated_at.is_not(None),
+                    )
+                )
+            ).one_or_none()
+            if member is None:
+                raise PermissionError("scheduled member does not hold a seat")
+            agent_row = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id).where(
+                        tables.agent.c.workspace_id == self.workspace_id,
+                        tables.agent.c.provisioned_by == self.store.extension,
+                        tables.agent.c.provisioned_name == agent_name,
+                    )
+                )
+            ).one_or_none()
+            if agent_row is None:
+                raise ValueError(
+                    f"extension agent {self.store.extension!r}/{agent_name!r} does not exist"
+                )
+            conversation = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.id,
+                        tables.conversation.c.agent_id,
+                        tables.conversation.c.member_id,
+                        tables.conversation.c.audience,
+                    ).where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.surface == surface,
+                        tables.conversation.c.queue_key == conversation_key,
+                    )
+                )
+            ).one_or_none()
+            if conversation is not None and (
+                conversation.agent_id != agent_row.id
+                or conversation.member_id != member_id
+                or conversation.audience != str(conversation_audience(member_id))
+            ):
+                raise PermissionError("scheduled conversation belongs to another principal")
+            if conversation is None:
+                conversation_id = uuid4()
+                await connection.execute(
+                    sa.insert(tables.conversation).values(
+                        id=conversation_id,
+                        workspace_id=self.workspace_id,
+                        agent_id=agent_row.id,
+                        surface=surface,
+                        queue_key=conversation_key,
+                        title="Daily brief",
+                        member_id=member_id,
+                        audience=str(conversation_audience(member_id)),
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            else:
+                conversation_id = conversation.id
+        turn_id = await self.invoke(
+            conversation_id,
+            agent_row.id,
+            message,
+            idempotency_key,
+            on_behalf_of_member_id=member_id,
+            as_scheduled=True,
+        )
+        return ScheduledMemberTurn(conversation_id=conversation_id, turn_id=turn_id)
+
+    async def member_context(
+        self, *, since: datetime, limit: int = 200
+    ) -> tuple[MemberContextRecord, ...]:
+        """Read bounded cross-agent context visible to the scheduled member."""
+        if not self.member_context_read_allowed or self.scheduled_member_id is None:
+            raise PermissionError("member context is not bound to a scheduled member")
+        if limit < 1 or limit > 200:
+            raise ValueError("member context limit must be from 1 through 200")
+        member_id = self.scheduled_member_id
+        if self.member_context_blob is None:
+            raise RuntimeError("member context requires workspace blob storage")
+        audiences = tuple(str(value) for value in readable_audiences(member_id))
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.inbound,
+                        tables.turn.c.terminal,
+                        tables.turn.c.updated_at,
+                        tables.conversation.c.id.label("conversation_id"),
+                        tables.conversation.c.title,
+                    )
+                    .select_from(tables.turn.join(tables.conversation))
+                    .where(
+                        tables.turn.c.workspace_id == self.workspace_id,
+                        tables.turn.c.updated_at >= since,
+                        tables.conversation.c.audience.in_(audiences),
+                        tables.conversation.c.surface != f"extension:{self.store.extension}",
+                        tables.conversation.c.surface != SUBAGENT_SURFACE,
+                    )
+                    .order_by(tables.turn.c.updated_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        records = [
+            MemberContextRecord(
+                kind="conversation",
+                ref=f"conversation/{row.conversation_id}",
+                title=row.title or "Conversation",
+                text=(
+                    row.inbound
+                    + (
+                        "\n" + str(row.terminal.get("text", ""))
+                        if isinstance(row.terminal, dict) and row.terminal.get("text")
+                        else ""
+                    )
+                )[:MEMBER_CONTEXT_TEXT_BYTES],
+                information_date=row.updated_at,
+                stable_subject_key=f"turn:{row.id}",
+            )
+            for row in rows
+        ]
+        async with workspace_tx() as connection:
+            artifact_rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.shared_artifact.c.id,
+                        tables.shared_artifact.c.filename,
+                        tables.shared_artifact.c.subject,
+                        tables.shared_artifact.c.media_type,
+                        tables.shared_artifact.c.blob_key,
+                        tables.shared_artifact.c.updated_at,
+                        tables.conversation.c.id.label("conversation_id"),
+                    )
+                    .select_from(tables.shared_artifact.join(tables.turn).join(tables.conversation))
+                    .where(
+                        tables.shared_artifact.c.workspace_id == self.workspace_id,
+                        tables.shared_artifact.c.updated_at >= since,
+                        tables.conversation.c.audience.in_(audiences),
+                        tables.conversation.c.surface != f"extension:{self.store.extension}",
+                        tables.conversation.c.surface != SUBAGENT_SURFACE,
+                    )
+                    .order_by(tables.shared_artifact.c.updated_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        for row in artifact_rows:
+            text = f"{row.subject or 'Shared file'} ({row.media_type})."
+            if row.media_type.startswith("text/") or row.media_type == "application/json":
+                try:
+                    text = await _member_blob_text(self.member_context_blob, row.blob_key)
+                except (BlobNotFound, UnicodeDecodeError):
+                    pass
+            records.append(
+                MemberContextRecord(
+                    kind="artifact",
+                    ref=f"conversation/{row.conversation_id}",
+                    title=row.filename,
+                    text=text,
+                    information_date=row.updated_at,
+                    stable_subject_key=f"artifact:{row.id}:{row.updated_at.isoformat()}",
+                )
+            )
+        async with workspace_tx() as connection:
+            pages = (
+                await connection.execute(
+                    sa.select(
+                        tables.page.c.id,
+                        tables.page.c.stream,
+                        tables.page.c.title,
+                        tables.page.c.digest,
+                        tables.page.c.body_ref,
+                        tables.page.c.updated_at,
+                    )
+                    .select_from(
+                        tables.page.join(
+                            tables.source, tables.page.c.source_id == tables.source.c.id
+                        )
+                    )
+                    .where(
+                        tables.page.c.workspace_id == self.workspace_id,
+                        tables.page.c.updated_at >= since,
+                        tables.page.c.subject.in_(("shared", f"member:{member_id}")),
+                        tables.page.c.tombstone.is_(False),
+                        tables.source.c.removed_at.is_(None),
+                        sa.exists(
+                            sa.select(1).where(
+                                tables.source_grant.c.workspace_id == self.workspace_id,
+                                tables.source_grant.c.source_id == tables.source.c.id,
+                            )
+                        ),
+                    )
+                    .order_by(tables.page.c.updated_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        for page in pages:
+            try:
+                body = await _member_blob_text(self.member_context_blob, page.body_ref)
+            except (BlobNotFound, UnicodeDecodeError):
+                continue
+            records.append(
+                MemberContextRecord(
+                    kind="page",
+                    ref=f"page/{page.id}",
+                    title=page.title,
+                    text=body,
+                    information_date=page.updated_at,
+                    stable_subject_key=f"page:{page.id}:{page.digest}",
+                )
+            )
+        records.extend(await self._member_extension_records(member_id, audiences, since, limit))
+        return tuple(sorted(records, key=lambda item: item.information_date, reverse=True)[:limit])
+
+    async def _member_extension_records(
+        self, member_id: UUID, audiences: tuple[str, ...], since: datetime, limit: int
+    ) -> tuple[MemberContextRecord, ...]:
+        memory_item = sa.table(
+            "memory_item",
+            sa.column("id", sa.Uuid),
+            sa.column("workspace_id", sa.Uuid),
+            sa.column("subject", sa.Text),
+            sa.column("body", sa.Text),
+            sa.column("memory_kind", sa.Text),
+            sa.column("as_of", sa.DateTime(timezone=True)),
+            sa.column("superseded_by", sa.Uuid),
+            sa.column("updated_at", sa.DateTime(timezone=True)),
+        )
+        objective = sa.table(
+            "objective",
+            sa.column("id", sa.Uuid),
+            sa.column("workspace_id", sa.Uuid),
+            sa.column("conversation_id", sa.Uuid),
+            sa.column("name", sa.Text),
+            sa.column("directive", sa.Text),
+            sa.column("updated_at", sa.DateTime(timezone=True)),
+        )
+        objective_step = sa.table(
+            "objective_step",
+            sa.column("id", sa.Uuid),
+            sa.column("objective_id", sa.Uuid),
+            sa.column("accepts", sa.JSON),
+        )
+        objective_event = sa.table(
+            "objective_event",
+            sa.column("step_id", sa.Uuid),
+            sa.column("kind", sa.Text),
+            sa.column("created_at", sa.DateTime(timezone=True)),
+        )
+        objective_check = sa.table(
+            "objective_check",
+            sa.column("step_id", sa.Uuid),
+            sa.column("verdicts", sa.JSON),
+            sa.column("created_at", sa.DateTime(timezone=True)),
+        )
+        async with workspace_tx() as connection:
+            memories = (
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.id,
+                        memory_item.c.body,
+                        memory_item.c.memory_kind,
+                        memory_item.c.as_of,
+                        memory_item.c.updated_at,
+                    ).where(
+                        memory_item.c.workspace_id == self.workspace_id,
+                        memory_item.c.subject.in_(("shared", f"member:{member_id}")),
+                        memory_item.c.superseded_by.is_(None),
+                        sa.or_(
+                            memory_item.c.updated_at >= since,
+                            memory_item.c.memory_kind == "task",
+                        ),
+                    )
+                )
+            ).all()
+            objectives = (
+                await connection.execute(
+                    sa.select(
+                        objective.c.id,
+                        objective.c.name,
+                        objective.c.directive,
+                        objective.c.updated_at,
+                    )
+                    .select_from(
+                        objective.join(
+                            tables.conversation,
+                            objective.c.conversation_id == tables.conversation.c.id,
+                        )
+                    )
+                    .where(
+                        objective.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.audience.in_(audiences),
+                        tables.conversation.c.surface != f"extension:{self.store.extension}",
+                        tables.conversation.c.surface != SUBAGENT_SURFACE,
+                    )
+                    .order_by(objective.c.updated_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+            objective_ids = tuple(row.id for row in objectives)
+            steps = (
+                (
+                    await connection.execute(
+                        sa.select(
+                            objective_step.c.id,
+                            objective_step.c.objective_id,
+                            objective_step.c.accepts,
+                        ).where(objective_step.c.objective_id.in_(objective_ids))
+                    )
+                ).all()
+                if objective_ids
+                else ()
+            )
+            step_ids = tuple(row.id for row in steps)
+            ranked_events = (
+                sa.select(
+                    objective_event.c.step_id,
+                    objective_event.c.kind,
+                    objective_event.c.created_at,
+                    sa.func.count()
+                    .filter(objective_event.c.kind == "did")
+                    .over(partition_by=objective_event.c.step_id)
+                    .label("did_count"),
+                    sa.func.row_number()
+                    .over(
+                        partition_by=objective_event.c.step_id,
+                        order_by=objective_event.c.created_at.desc(),
+                    )
+                    .label("rank"),
+                ).where(objective_event.c.step_id.in_(step_ids))
+            ).subquery()
+            latest_events = (
+                (
+                    await connection.execute(
+                        sa.select(ranked_events).where(ranked_events.c.rank == 1)
+                    )
+                ).all()
+                if step_ids
+                else ()
+            )
+            ranked_checks = (
+                sa.select(
+                    objective_check.c.step_id,
+                    objective_check.c.verdicts,
+                    objective_check.c.created_at,
+                    sa.func.row_number()
+                    .over(
+                        partition_by=objective_check.c.step_id,
+                        order_by=objective_check.c.created_at.desc(),
+                    )
+                    .label("rank"),
+                ).where(objective_check.c.step_id.in_(step_ids))
+            ).subquery()
+            latest_checks = (
+                (
+                    await connection.execute(
+                        sa.select(ranked_checks).where(ranked_checks.c.rank == 1)
+                    )
+                ).all()
+                if step_ids
+                else ()
+            )
+        steps_by_objective: dict[UUID, list[sa.Row[tuple[object, ...]]]] = {}
+        for step in steps:
+            steps_by_objective.setdefault(step.objective_id, []).append(step)
+        events_by_step = {row.step_id: row for row in latest_events}
+        checks_by_step = {row.step_id: row for row in latest_checks}
+        objective_records: list[MemberContextRecord] = []
+        for row in objectives:
+            objective_steps = steps_by_objective.get(row.id, [])
+            open_objective = not objective_steps
+            information_date = (
+                row.updated_at
+                if row.updated_at.tzinfo is not None
+                else row.updated_at.replace(tzinfo=UTC)
+            )
+            for step in objective_steps:
+                latest_event = events_by_step.get(step.id)
+                latest_check = checks_by_step.get(step.id)
+                if latest_event is not None:
+                    event_date = latest_event.created_at
+                    information_date = max(
+                        information_date,
+                        (
+                            event_date
+                            if event_date.tzinfo is not None
+                            else event_date.replace(tzinfo=UTC)
+                        ),
+                    )
+                if latest_check is not None:
+                    check_date = latest_check.created_at
+                    information_date = max(
+                        information_date,
+                        (
+                            check_date
+                            if check_date.tzinfo is not None
+                            else check_date.replace(tzinfo=UTC)
+                        ),
+                    )
+                accepts = step.accepts if isinstance(step.accepts, list) else []
+                verdicts = (
+                    latest_check.verdicts
+                    if latest_check is not None and isinstance(latest_check.verdicts, list)
+                    else []
+                )
+                done = (
+                    latest_event is not None
+                    and latest_event.kind != "blocked"
+                    and latest_event.did_count > 0
+                    and (
+                        not accepts
+                        or (
+                            len(verdicts) == len(accepts)
+                            and all(
+                                isinstance(verdict, dict) and verdict.get("holds") is True
+                                for verdict in verdicts
+                            )
+                        )
+                    )
+                )
+                open_objective = open_objective or not done
+            if not open_objective:
+                continue
+            objective_digest = hashlib.sha256(
+                f"{row.directive}\0{information_date.isoformat()}".encode()
+            ).hexdigest()
+            objective_records.append(
+                MemberContextRecord(
+                    kind="objective",
+                    ref=f"objective/{row.id}",
+                    title=row.name,
+                    text=row.directive,
+                    information_date=information_date,
+                    stable_subject_key=f"objective:{row.id}:{objective_digest}",
+                )
+            )
+        return (
+            *(
+                MemberContextRecord(
+                    kind="task" if row.memory_kind == "task" else "memory",
+                    ref=f"memory/{row.id}",
+                    title="Task memory" if row.memory_kind == "task" else "Memory",
+                    text=row.body,
+                    information_date=row.as_of or row.updated_at,
+                    stable_subject_key=(
+                        f"memory:{row.id}:{hashlib.sha256(row.body.encode()).hexdigest()}"
+                    ),
+                )
+                for row in memories
+            ),
+            *objective_records,
+        )
 
     async def retitle_conversation(self, conversation_id: UUID, title: str) -> None:
         """Name a conversation of this workspace — what a job that reads a conversation and writes
@@ -1704,6 +2289,9 @@ def context_for(
     credential_store: CredentialStore | None = None,
     tailer: TurnTailer | None = None,
     probes: ConversationProbes | None = None,
+    member_context_read: bool = False,
+    scheduled_member_id: UUID | None = None,
+    member_context_blob: WorkspaceBlobStore | None = None,
     *,
     audience: Audience = SHARED_AUDIENCE,
     public_base_url: str | None = None,
@@ -1737,4 +2325,7 @@ def context_for(
         key_slot_for=None if model_resolver is None else model_resolver.key_slot_for,
         public_base_url=public_base_url,
         tailer=tailer,
+        member_context_read_allowed=member_context_read,
+        scheduled_member_id=scheduled_member_id,
+        member_context_blob=member_context_blob if member_context_read else None,
     )

@@ -95,6 +95,25 @@ async def _turn_count(conversation_id: UUID) -> int:
         ).scalar_one()
 
 
+async def test_member_admission_persists_the_latest_valid_timezone(db: None) -> None:
+    workspace_id, member_id, _agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    await admission.admit_member(
+        workspace_id,
+        conversation_id,
+        "hello",
+        member_id,
+        context=TurnContext(timezone="America/Los_Angeles"),
+    )
+    async with workspace_tx() as connection:
+        timezone = (
+            await connection.execute(
+                sa.select(tables.member.c.timezone).where(tables.member.c.id == member_id)
+            )
+        ).scalar_one()
+    assert timezone == "America/Los_Angeles"
+
+
 async def _queued_bodies(conversation_id: UUID) -> list[str]:
     async with workspace_tx() as connection:
         return list(

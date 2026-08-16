@@ -637,6 +637,7 @@ class Manifest:
     search_providers: tuple[SearchProviderSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     conversation_slots: tuple[ConversationSlotProvider, ...] = ()
+    member_context_read: bool = False
     sandbox_internet: bool = False
     requires: tuple[str, ...] = field(default_factory=tuple)
     deploy_keys: tuple[str, ...] = field(default_factory=tuple)

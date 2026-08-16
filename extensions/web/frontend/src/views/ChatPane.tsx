@@ -13,6 +13,7 @@ import {
 
 export type ChatPaneProps = ChatProps & {
   onAgentsIndex: () => void;
+  conversationOnly?: boolean;
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
 };
@@ -24,12 +25,13 @@ export function ChatPane({
   onCreated,
   onActivity,
   onAgentsIndex,
+  conversationOnly = false,
   slot,
   onSelectSlot,
 }: ChatPaneProps) {
   const [slotReloads, setSlotReloads] = useState(0);
   const slots = usePanelRead<ConversationSlotsPayload>(
-    conversationId
+    conversationId && !conversationOnly
       ? "/agents/" + agent.id + "/conversations/" + conversationId + "/slots"
       : null,
     slotReloads,
@@ -43,6 +45,7 @@ export function ChatPane({
       current={agent.name}
       note={<span className="font-mono text-mono text-ink-soft">{agent.model}</span>}
       actions={
+        !conversationOnly &&
         slots.phase === "ready" && slots.payload.slots.length ? (
           <div className="flex items-center gap-sm" aria-label="Conversation slots">
             {slots.payload.slots.map((entry) => (
