@@ -5443,8 +5443,10 @@ async def test_shared_files_stream_and_reload_as_download_links(
     events = dict(await _collect_events(client, token, turn_id))
     streamed = {file["filename"]: file for file in events["files"]["files"]}
     assert streamed["report.pdf"]["size_bytes"] == 3
+    assert streamed["report.pdf"]["media_type"] == "application/pdf"
     assert streamed["report.pdf"]["url"].startswith("https://web/artifacts/")
     assert streamed["report.pdf"]["preview_url"] is None
+    assert streamed["portrait.jpg"]["media_type"] == "image/jpeg"
     assert streamed["portrait.jpg"]["preview_url"].startswith("/artifacts/")
     assert "&preview=" in streamed["portrait.jpg"]["preview_url"]
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -5459,7 +5461,9 @@ async def test_shared_files_stream_and_reload_as_download_links(
     reloaded = {file["filename"]: file for file in reply["files"]}
     assert reloaded["report.pdf"]["url"].startswith("https://web/artifacts/")
     assert reloaded["report.pdf"]["size_bytes"] == 3
+    assert reloaded["report.pdf"]["media_type"] == "application/pdf"
     assert reloaded["report.pdf"]["preview_url"] is None
+    assert reloaded["portrait.jpg"]["media_type"] == "image/jpeg"
     assert reloaded["portrait.jpg"]["preview_url"].startswith("/artifacts/")
 
 

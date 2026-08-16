@@ -271,10 +271,14 @@ function Said({
   );
 }
 
+const MARKDOWN_MEDIA_TYPE = "text/markdown";
+
 /** What a reply's turn shared, under the words that shared it. A file that is itself a picture is
  *  drawn as one — part of the answer, and pressing it goes to `onOpen` where the screen has an
  *  artifacts sidebar; every other file is a card on a row that scrolls sideways rather than a
- *  column that pushes the rest of the conversation down the page. */
+ *  column that pushes the rest of the conversation down the page. A markdown card is a document
+ *  the sidebar draws, so on a screen with one it opens there too; everywhere else a card links to
+ *  the file itself. */
 function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
   const pictures = files.filter((file) => file.preview_url);
   const cards = files.filter((file) => !file.preview_url);
@@ -289,7 +293,19 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
             <Attachment key={file.filename} size="sm">
               <AttachmentContent>
                 <AttachmentTitle>
-                  {file.url ? <a href={file.url}>{file.filename}</a> : file.filename}
+                  {onOpen && file.media_type === MARKDOWN_MEDIA_TYPE ? (
+                    <button
+                      type="button"
+                      onClick={onOpen}
+                      className="cursor-pointer border-0 bg-transparent p-0 text-inherit"
+                    >
+                      {file.filename}
+                    </button>
+                  ) : file.url ? (
+                    <a href={file.url}>{file.filename}</a>
+                  ) : (
+                    file.filename
+                  )}
                 </AttachmentTitle>
                 <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
               </AttachmentContent>

@@ -101,8 +101,10 @@ def _synthesized() -> list[bytes]:
                     {
                         "filename": "quarterly report.pdf",
                         "subject": "report",
+                        "media_type": "application/pdf",
                         "size_bytes": 2048,
                         "url": "https://ws.example/artifacts/a?exp=1&sig=2",
+                        "preview_url": None,
                     }
                 ]
             },

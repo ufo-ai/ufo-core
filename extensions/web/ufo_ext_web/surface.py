@@ -2711,7 +2711,8 @@ async def _pending_prompts(
 def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, object]:
     """One shared file as the chat draws it, with a same-origin `preview_url` when the file is
     itself a picture — the portal draws those inline in the reply, and the page's CSP loads images
-    only from its own origin, so the minted link travels without its base."""
+    only from its own origin, so the minted link travels without its base. `media_type` is how the
+    chat knows which cards the artifacts sidebar can draw as a document."""
     preview_url = None
     minted = ctx.artifact_preview_link(artifact)
     if minted is not None:
@@ -2720,6 +2721,7 @@ def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, ob
     return {
         "filename": artifact.filename,
         "subject": artifact.subject,
+        "media_type": artifact.media_type,
         "size_bytes": artifact.size_bytes,
         "url": ctx.artifact_link(artifact),
         "preview_url": preview_url,

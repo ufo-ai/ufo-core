@@ -1663,7 +1663,15 @@ test("a settled turn names each shared file once, with its size", async () => {
 
   StreamFake.last().emit("message", { text: "Here it is." });
   StreamFake.last().emit("files", {
-    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null }],
+    files: [
+      {
+        filename: "report.csv",
+        url: "/dl/report.csv",
+        size_bytes: 2048,
+        preview_url: null,
+        media_type: "text/csv",
+      },
+    ],
   });
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -1692,7 +1700,15 @@ test("a file the running turn shares stands under the log before the turn ends",
 
   StreamFake.last().emit("message", { text: "Here it is." });
   StreamFake.last().emit("files", {
-    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null }],
+    files: [
+      {
+        filename: "report.csv",
+        url: "/dl/report.csv",
+        size_bytes: 2048,
+        preview_url: null,
+        media_type: "text/csv",
+      },
+    ],
   });
 
   expect(await screen.findByRole("link", { name: "report.csv" })).toBeTruthy();
@@ -1740,8 +1756,15 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
         url: "/dl/portrait.jpg",
         size_bytes: 88_000,
         preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+        media_type: "image/jpeg",
       },
-      { filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null },
+      {
+        filename: "report.csv",
+        url: "/dl/report.csv",
+        size_bytes: 2048,
+        preview_url: null,
+        media_type: "text/csv",
+      },
     ],
   });
   StreamFake.last().emit("terminal", {
@@ -1783,8 +1806,15 @@ test("a reloaded conversation draws files on the earlier reply that shared them"
               url: "/dl/portrait.jpg",
               size_bytes: 88_000,
               preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+              media_type: "image/jpeg",
             },
-            { filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null },
+            {
+              filename: "report.csv",
+              url: "/dl/report.csv",
+              size_bytes: 2048,
+              preview_url: null,
+              media_type: "text/csv",
+            },
           ],
         },
         { role: "user", text: "thanks" },
@@ -1849,8 +1879,15 @@ test("an image the turn shares stands inline in the answer and opens the artifac
         url: "/dl/portrait.jpg",
         size_bytes: 88_000,
         preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+        media_type: "image/jpeg",
       },
-      { filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null },
+      {
+        filename: "report.csv",
+        url: "/dl/report.csv",
+        size_bytes: 2048,
+        preview_url: null,
+        media_type: "text/csv",
+      },
     ],
   });
   StreamFake.last().emit("terminal", {
@@ -1868,6 +1905,105 @@ test("an image the turn shares stands inline in the answer and opens the artifac
   await userEvent.click(screen.getByRole("button", { name: "portrait.jpg" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
   expect(await screen.findByRole("complementary", { name: "Artifacts" })).toBeTruthy();
+});
+
+/** A markdown file is a document the artifacts sidebar draws, so its card opens there — like a
+ *  picture — instead of navigating to the download. Every other card keeps the download link, and
+ *  a pane with no sidebar keeps it for markdown too. */
+test("a markdown file the turn shares opens the artifacts sidebar instead of downloading", async () => {
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({
+        type: "artifacts",
+        artifacts: [
+          {
+            filename: "notes.md",
+            subject: null,
+            media_type: "text/markdown",
+            size_bytes: 512,
+            created_at: "2026-08-16T12:00:00Z",
+            url: "/dl/notes.md",
+            preview: null,
+          },
+        ],
+        truncated: false,
+      }),
+    "/dl/notes.md": () => new Response("# Notes"),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [
+          { id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifacts", count: 1 },
+        ],
+      }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "write the notes");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  StreamFake.last().emit("message", { text: "Here are the notes." });
+  StreamFake.last().emit("files", {
+    files: [
+      {
+        filename: "notes.md",
+        url: "/dl/notes.md",
+        size_bytes: 512,
+        preview_url: null,
+        media_type: "text/markdown",
+      },
+      {
+        filename: "report.csv",
+        url: "/dl/report.csv",
+        size_bytes: 2048,
+        preview_url: null,
+        media_type: "text/csv",
+      },
+    ],
+  });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+
+  expect(await screen.findByRole("button", { name: "notes.md" })).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
+  expect(screen.getByRole("link", { name: "report.csv" }).getAttribute("href")).toBe(
+    "/dl/report.csv",
+  );
+
+  await userEvent.click(screen.getByRole("button", { name: "notes.md" }));
+  expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
+  expect(await screen.findByRole("complementary", { name: "Artifacts" })).toBeTruthy();
+
+  cleanup();
+  render(
+    <ConversationTranscript
+      conversationId={CONVO_ID}
+      title="Review PR 1268"
+      messages={[
+        {
+          role: "assistant",
+          text: "Here are the notes.",
+          files: [
+            {
+              filename: "notes.md",
+              url: "/dl/notes.md",
+              size_bytes: 512,
+              preview_url: null,
+              media_type: "text/markdown",
+            },
+          ],
+        },
+      ]}
+    />,
+  );
+  expect(screen.getByRole("link", { name: "notes.md" }).getAttribute("href")).toBe("/dl/notes.md");
+  expect(screen.queryByRole("button", { name: "notes.md" })).toBeNull();
 });
 
 test("a credential handoff stores a value and drops the prompt it answered", async () => {

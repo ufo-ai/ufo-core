@@ -77,12 +77,15 @@ export type AdminPayload = {
 };
 
 /** A file a turn shared. `preview_url` is a same-origin picture of it, carried only when the file
- *  is itself an image — the chat draws those inline in the reply instead of as a card. */
+ *  is itself an image — the chat draws those inline in the reply instead of as a card.
+ *  `media_type` says which cards the artifacts sidebar can draw as a document, so pressing one
+ *  opens it there instead of downloading. */
 export type ChatFile = {
   filename: string;
   url: string | null;
   size_bytes: number;
   preview_url: string | null;
+  media_type: string;
 };
 
 export type QuestionOption = { label: string; description?: string };
