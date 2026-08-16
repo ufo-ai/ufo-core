@@ -289,6 +289,12 @@ test("the orbit mark's motion and palette composites survive into the built shee
   expect(css).toMatch(
     /@media\(prefers-reduced-motion:no-preference\)\{\[data-slot=orbit\]>span:first-child\{animation-name:ufo-orbit-0\}/,
   );
+  // The name alone does not move anything. A shorthand carrying every part but the name *is*
+  // `animation:none`, which a minifier is right to collapse to exactly that — taking the duration
+  // with it and leaving the mark parked in the built sheet while it still turned under the dev
+  // server. Only the longhand survives that, so the duration is asserted where it ships.
+  expect(css).toContain("animation-duration:11s");
+  expect(css).not.toMatch(/\[data-slot=orbit\]>span\{[^}]*animation:none/);
 });
 
 test("the bundled faces are Inter for the chrome and Roboto Mono for the code", () => {

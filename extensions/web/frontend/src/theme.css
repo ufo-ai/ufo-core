@@ -581,7 +581,13 @@
     border-radius: 50%;
     background: radial-gradient(circle, var(--orbit-core) 0%, var(--orbit-mid) 42%, transparent 72%);
     filter: brightness(1.1);
-    animation: 11s linear infinite;
+    /* Longhands, because the name is granted below and a shorthand carrying everything but the name
+       means `animation: none` — which a minifier is right to collapse to exactly that, taking the
+       duration with it. Written that way the mark animates under the dev server and stands still in
+       the built sheet, which is the one place it ships. */
+    animation-duration: 11s;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
   }
 
   /* Each light's static pose is its keyframes' 0% — parked on its ∵ vertex. The global
