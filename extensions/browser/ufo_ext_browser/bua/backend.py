@@ -39,6 +39,12 @@ from ufo_ext_browser.bua.session import BrowserSession
 
 CDP_TOKEN_KEY = "cdp-token/{conversation_id}"
 MAX_READ_BYTES = 20 * 1024 * 1024
+SIZE_BUDGET_SECONDS = 30
+ENCODE_BUDGET_SECONDS = 600
+"""Each read an upload makes carries the budget its own work needs. A stat answers at once. Encoding
+a file up to `MAX_READ_BYTES` hands about 27 MiB back on one command's stdout, which the sandbox's
+120s default cuts off part way through a large file — and a cut command reports the carrier's own
+deadline, never the read."""
 DEFAULT_DOWNLOAD_NAME = "download"
 UPLOAD_SETTLE_ATTEMPTS = 20
 UPLOAD_SETTLE_SLEEP_SECONDS = 0.5
@@ -174,18 +180,24 @@ class BuaSurface:
         reads stdin rather than passing a width flag, which is GNU-only, and stands alone in the
         command so the exit code is its own — a pipeline reports its last stage, which would mask an
         unreadable file as an empty upload. Decoding drops the line wrapping, and runs in a thread:
-        a whole file's worth of it is CPU work every other turn on this loop would wait through."""
+        a whole file's worth of it is CPU work every other turn on this loop would wait through.
+        Each command states its own budget, because the encode of a whole file is minutes of work
+        where the sizing is none."""
         if self.sandbox is None:
             raise RuntimeError(
                 "uploading to a remote browser needs the turn's sandbox to read from"
             )
         quoted = shlex.quote(path)
-        size = await self.sandbox.bash(f"stat -c %s -- {quoted}")
+        size = await self.sandbox.bash(f"stat -c %s -- {quoted}", timeout_s=SIZE_BUDGET_SECONDS)
         if size.exit_code != 0:
             raise ValueError(size.stderr.strip() or f"cannot read {path}")
         if int(size.stdout.strip()) > MAX_READ_BYTES:
             raise ValueError(f"{path} is larger than the {MAX_READ_BYTES}-byte upload limit")
-        encoded = await self.sandbox.bash(f"base64 < {quoted}")
+        encoded = await self.sandbox.bash(f"base64 < {quoted}", timeout_s=ENCODE_BUDGET_SECONDS)
+        if encoded.timed_out_after_s is not None:
+            raise ValueError(
+                f"reading {path} for the upload stopped at its {encoded.timed_out_after_s}s budget"
+            )
         if encoded.exit_code != 0:
             raise ValueError(encoded.stderr.strip() or f"cannot read {path}")
         data = await asyncio.to_thread(base64.b64decode, encoded.stdout)

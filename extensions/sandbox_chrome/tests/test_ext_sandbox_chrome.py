@@ -17,7 +17,13 @@ import pytest
 import ufo_ext_sandbox_chrome as ext
 
 from ufo.browser import SessionGone
-from ufo.sandbox.session import DialTarget, ExecResult, SandboxHandle, SandboxSession
+from ufo.sandbox.session import (
+    DEFAULT_EXEC_TIMEOUT_SECONDS,
+    DialTarget,
+    ExecResult,
+    SandboxHandle,
+    SandboxSession,
+)
 
 CANNED_WS = "ws://127.0.0.1:9222/devtools/browser/9f1c-abc-123"
 FAKE_HOST = "9223-sbx123.e2b.app"
@@ -89,6 +95,32 @@ class ShellCarrier:
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         raise AssertionError("the sandbox is not dialed when a download is read")
+
+
+@dataclass
+class ExpiringCarrier:
+    """A carrier whose deadline kills every command that does real work: the command reports
+    nothing of its own, and the logs it left inside the sandbox are all that says why. Answers a
+    tail of those logs and a canned size, and records the budget each command was given."""
+
+    log_tail: str = "chromium: error while loading shared libraries"
+    sized: int = 8
+    timeouts: list[int] = field(default_factory=list)
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
+        self.timeouts.append(timeout_s)
+        if argv[-1].startswith("tail"):
+            return ExecResult(stdout=f"{self.log_tail}\n", stderr="", exit_code=0)
+        if argv[-1].startswith("wc -c"):
+            return ExecResult(stdout=f"{self.sized}\n", stderr="", exit_code=0)
+        return ExecResult(stdout="", stderr="timed out", exit_code=124, timed_out_after_s=timeout_s)
+
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("dial must not be reached when the bring-up expires")
 
 
 @dataclass
@@ -170,6 +202,29 @@ async def test_lease_surfaces_what_the_bring_up_reported() -> None:
         await ext.SandboxChromeCdpProvider().lease(_session(FailingCarrier()))
 
 
+async def test_a_bring_up_the_carrier_kills_reports_the_browser_log_not_its_own_timeout() -> None:
+    """The arithmetic above keeps every enclosed wait inside the deadline, but a sandbox slow to
+    start the program at all still runs out: then the kill takes the program's report with it, and
+    the carrier's `timed out` is all that is left — which says nothing about the browser. The log
+    inside the sandbox does, so it is read back on that path, on its own short budget, since a
+    failure report must not wait the default again."""
+    carrier = ExpiringCarrier()
+    with pytest.raises(RuntimeError) as failure:
+        await ext.SandboxChromeCdpProvider().lease(_session(carrier))
+    assert "error while loading shared libraries" in str(failure.value)
+    assert f"after {ext.BROWSER_START_TIMEOUT_SECONDS}s" in str(failure.value)
+    assert carrier.timeouts == [
+        ext.BROWSER_START_TIMEOUT_SECONDS,
+        ext.LOG_TAIL_BUDGET_SECONDS,
+    ]
+
+
+async def test_a_bring_up_that_expires_with_no_log_still_names_the_deadline() -> None:
+    carrier = ExpiringCarrier(log_tail="")
+    with pytest.raises(RuntimeError, match="stopped the bring-up"):
+        await ext.SandboxChromeCdpProvider().lease(_session(carrier))
+
+
 async def test_reattach_reports_session_gone_so_the_caller_re_leases() -> None:
     with pytest.raises(SessionGone):
         await ext.SandboxChromeCdpProvider().reattach("wss://stale")
@@ -221,6 +276,35 @@ async def test_a_download_the_encoder_cannot_open_raises_instead_of_returning_no
         ext.CdpEndpoint(url="wss://sandbox.test/devtools"), _session(ShellCarrier())
     )
     with pytest.raises(RuntimeError, match="could not read download"):
+        await lease.fetch_download("guid-9")
+
+
+async def test_each_download_read_states_the_budget_its_own_work_needs() -> None:
+    """Reading a download up to `MAX_DOWNLOAD_BYTES` back as base64 on one command's stdout is
+    minutes of work, which the sandbox's 120s default cuts off part way through; the sizing beside
+    it is one syscall. Neither is a browser launch, so neither may borrow the bring-up's deadline —
+    that number says how long a cold chromium takes to bind a port and would move with it."""
+    carrier = FakeCarrier(download_bytes=b"the downloaded file")
+    carrier.download_size = len(carrier.download_bytes)
+    lease = ext.SandboxChromeCdpLease(
+        ext.CdpEndpoint(url="wss://sandbox.test/devtools"), _session(carrier)
+    )
+    assert await lease.fetch_download("guid-9") == b"the downloaded file"
+    assert carrier.timeouts == [
+        ext.DOWNLOAD_SIZE_BUDGET_SECONDS,
+        ext.DOWNLOAD_READ_BUDGET_SECONDS,
+    ]
+    assert ext.DOWNLOAD_READ_BUDGET_SECONDS > DEFAULT_EXEC_TIMEOUT_SECONDS
+
+
+async def test_a_download_read_that_expires_reports_the_budget_not_an_unreadable_file() -> None:
+    """A killed read hands back an empty stdout and the carrier's own message, which is indexed here
+    as a download the sandbox could not read. A file too large for the wait is a different failure
+    and is worth naming as one."""
+    lease = ext.SandboxChromeCdpLease(
+        ext.CdpEndpoint(url="wss://sandbox.test/devtools"), _session(ExpiringCarrier())
+    )
+    with pytest.raises(RuntimeError, match=f"after {ext.DOWNLOAD_READ_BUDGET_SECONDS}s"):
         await lease.fetch_download("guid-9")
 
 

@@ -46,6 +46,10 @@ APP_SERVE_PORT = 8000
 START_SERVER_PORT = 5000
 READINESS_TIMEOUT_SECONDS = 30
 BUILD_TIMEOUT_SECONDS = 600
+LOG_TAIL_LINES = 20
+LOG_TAIL_TIMEOUT_SECONDS = 15
+"""Reading the tail of one log inside the sandbox, on the failure path of a start that already ended
+— so the wait is short and stated rather than the 120s default."""
 SERVER_LOG = f"{TOOL_OUTPUT_DIR}/server-{{port}}.log"
 DEPLOY_LOG = f"{TOOL_OUTPUT_DIR}/deploy-{{port}}.log"
 PUBLISH_LOG = f"{TOOL_OUTPUT_DIR}/publish-{{port}}.log"
@@ -208,8 +212,18 @@ async def _serve(
         timeout_s=READINESS_TIMEOUT_SECONDS + 5,
     )
     if result.exit_code != 0:
-        tail = await ctx.sandbox.bash(f"tail -n 20 {shlex.quote(log)} 2>/dev/null || true")
-        raise RuntimeError(tail.stdout or result.stderr or result.stdout)
+        tail = await ctx.sandbox.bash(
+            f"tail -n {LOG_TAIL_LINES} {shlex.quote(log)} 2>/dev/null || true",
+            timeout_s=LOG_TAIL_TIMEOUT_SECONDS,
+        )
+        if tail.stdout:
+            raise RuntimeError(tail.stdout)
+        if result.timed_out_after_s is not None:
+            raise RuntimeError(
+                f"the server never answered on port {port}: the sandbox stopped the start after "
+                f"{result.timed_out_after_s}s and {log} holds nothing"
+            )
+        raise RuntimeError(result.stderr or result.stdout)
     return {"url": f"http://localhost:{port}", "port": port, "log": log}
 
 

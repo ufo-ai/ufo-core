@@ -47,7 +47,13 @@ from ufo.loop.engine import MAIN_ROUND_LIMIT
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.models.catalog import CORE_MODEL_SPECS
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.sandbox.session import (
+    DEFAULT_EXEC_TIMEOUT_SECONDS,
+    ExecResult,
+    SandboxHandle,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
@@ -193,11 +199,15 @@ class WritesCarrier:
 @dataclass
 class FileCarrier:
     """Serves the two reads the surface makes of a workspace file it must ship to a remote browser
-    (its size, then its bytes) and records every command, so a test can prove a sandbox-local
-    transport reads nothing at all."""
+    (its size, then its bytes) and records every command with the budget it was given, so a test can
+    prove a sandbox-local transport reads nothing at all and that each read states its own wait.
+    `deadline_on` expires the command whose prefix it names, which is the carrier killing it rather
+    than a failure the command reported for itself."""
 
     files: dict[str, bytes] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
+    timeouts: list[int] = field(default_factory=list)
+    deadline_on: str | None = None
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         raise AssertionError("browser tools do not create containers")
@@ -210,6 +220,11 @@ class FileCarrier:
     ) -> ExecResult:
         command = argv[-1]
         self.commands.append(command)
+        self.timeouts.append(timeout_s)
+        if self.deadline_on is not None and command.startswith(self.deadline_on):
+            return ExecResult(
+                stdout="", stderr="timed out", exit_code=124, timed_out_after_s=timeout_s
+            )
         for path, content in self.files.items():
             if shlex.quote(path) not in command:
                 continue
@@ -321,6 +336,33 @@ async def test_upload_through_a_sandbox_local_transport_copies_nothing() -> None
         {"ref": "ref_3", "files": ["/workspace/report.pdf"]},
     )
     assert carrier.commands == []
+
+
+async def test_each_upload_read_states_the_budget_its_own_work_needs() -> None:
+    """A file up to `MAX_READ_BYTES` comes back base64 on one command's stdout, which is minutes of
+    work — under the sandbox's 120s default it is killed part way through and a readable file is
+    reported as a carrier timeout. The sizing beside it is one syscall, so it must not inherit that
+    long wait either: each command asks for the wait its own work needs."""
+    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"})
+    surface, session = _staging_surface(carrier, UploadingLease())
+    session.attached = [len(b"%PDF-1.7 body")]
+    await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
+    assert carrier.commands[0].startswith("stat")
+    assert carrier.commands[1].startswith("base64")
+    sized, encoded = carrier.timeouts[:2]
+    assert sized == backend_module.SIZE_BUDGET_SECONDS
+    assert encoded == backend_module.ENCODE_BUDGET_SECONDS
+    assert encoded > DEFAULT_EXEC_TIMEOUT_SECONDS
+
+
+async def test_an_upload_read_that_expires_reports_the_budget_not_an_unreadable_file() -> None:
+    """The carrier's kill leaves an empty stdout and a message of its own, which reads as a file
+    that cannot be opened. The caller has to be able to tell that apart from a file too large for
+    the wait, because only one of the two is worth retrying with more room."""
+    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"}, deadline_on="base64")
+    surface, _ = _staging_surface(carrier, UploadingLease())
+    with pytest.raises(ValueError, match=f"{backend_module.ENCODE_BUDGET_SECONDS}s budget"):
+        await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
 
 
 async def test_upload_refuses_a_file_larger_than_the_read_cap() -> None:

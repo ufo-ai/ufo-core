@@ -19,6 +19,8 @@ from ufo_ext_sites.store import SITE_NAME_MAX, InvalidSiteName, site_name
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
     LOG_CLEAR_PROG,
+    LOG_TAIL_TIMEOUT_SECONDS,
+    READINESS_TIMEOUT_SECONDS,
     SITES_TOOL_NAMES,
     StartServerInput,
     WebsiteInput,
@@ -48,11 +50,13 @@ class FakeSandbox:
 
     scripted: dict[str, ExecResult] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
+    budgets: dict[str, int | None] = field(default_factory=dict)
     programs: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     claim: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
 
-    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+    async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
         self.commands.append(command)
+        self.budgets[command] = timeout_s
         for needle, result in self.scripted.items():
             if needle in command:
                 return result
@@ -322,6 +326,54 @@ async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path)
     )
     ctx = _context(sandbox, tmp_path)
     with pytest.raises(RuntimeError, match="port in use"):
+        await start_server(
+            ctx,
+            StartServerInput(
+                user_description=TOOL_NARRATION, command="python3 app.py", project_path="/workspace"
+            ),
+        )
+
+
+async def test_the_failure_log_tail_states_its_own_budget(tmp_path: Path) -> None:
+    """The tail runs after a start that already ended, and reads twenty lines out of one file: it
+    must not sit on the sandbox's 120s default, which is a budget for work rather than for a failure
+    report."""
+    sandbox = FakeSandbox(
+        scripted={
+            "nohup": ExecResult(stdout="", stderr="", exit_code=1),
+            "tail -n 20": ExecResult(stdout="Traceback: port in use", stderr="", exit_code=0),
+        }
+    )
+    ctx = _context(sandbox, tmp_path)
+    with pytest.raises(RuntimeError, match="port in use"):
+        await start_server(
+            ctx,
+            StartServerInput(
+                user_description=TOOL_NARRATION, command="python3 app.py", project_path="/workspace"
+            ),
+        )
+    tail = next(command for command in sandbox.commands if command.startswith("tail -n 20"))
+    assert sandbox.budgets[tail] == LOG_TAIL_TIMEOUT_SECONDS
+
+
+async def test_a_start_the_sandbox_killed_names_the_deadline_when_the_log_is_empty(
+    tmp_path: Path,
+) -> None:
+    """The carrier's kill leaves its own `timed out` and nothing else, so a server that never bound
+    its port and wrote no log would be reported as an empty error. Name the deadline that ended it
+    and say the log holds nothing."""
+    sandbox = FakeSandbox(
+        scripted={
+            "nohup": ExecResult(
+                stdout="",
+                stderr="",
+                exit_code=124,
+                timed_out_after_s=READINESS_TIMEOUT_SECONDS + 5,
+            )
+        }
+    )
+    ctx = _context(sandbox, tmp_path)
+    with pytest.raises(RuntimeError, match=f"after {READINESS_TIMEOUT_SECONDS + 5}s"):
         await start_server(
             ctx,
             StartServerInput(

@@ -16,7 +16,9 @@ Readiness is a port that answers, never a pid that exists: a browser recorded bu
 ended and relaunched, so one bad start cannot poison every later lease of the same sandbox. A
 browser that exits during bring-up reports its own log at once instead of spending the wait, and the
 wait itself stays strictly inside the carrier's command deadline, so a failure surfaces the
-browser's log rather than the carrier's timeout.
+browser's log rather than the carrier's timeout. A deadline that fires regardless — a sandbox too
+slow to start the program at all — reads that log back out of the sandbox, since the kill takes the
+program's own report with it.
 
 Chrome and the proxy persist across turns with the per-conversation sandbox, so a lease's `aclose`
 is a no-op and a fresh lease reuses the running Chrome. The BUA engine (the browser extension)
@@ -30,7 +32,7 @@ from dataclasses import dataclass
 
 from ufo.sdk.browser import CdpEndpoint, CdpLease, FileBytes, SessionGone
 from ufo.sdk.manifest import CdpProviderSpec, Manifest
-from ufo.sdk.sandbox import SandboxSession
+from ufo.sdk.sandbox import ExecResult, SandboxSession
 
 NAME = "sandbox_chrome"
 VERSION = "0.1.0"
@@ -62,6 +64,14 @@ PROXY_LOG_PATH = f"{BROWSER_DIR}/proxy.log"
 PROXY_PID_PATH = "/tmp/ufo-browser-proxy.pid"
 PROXY_SCRIPT_PATH = "/tmp/ufo-browser-proxy.py"
 LOG_TAIL_LINES = 20
+LOG_TAIL_BUDGET_SECONDS = 15
+"""Reading the tail of two files inside the sandbox, on the failure path of a command the carrier
+already killed — so the wait is short and stated rather than the 120s default."""
+DOWNLOAD_SIZE_BUDGET_SECONDS = 30
+DOWNLOAD_READ_BUDGET_SECONDS = 600
+"""The two reads of a download carry the budgets their own work needs: `wc -c` answers at once,
+while encoding a file up to `MAX_DOWNLOAD_BYTES` hands about 27 MiB back on one command's stdout.
+Neither is a browser launch, so neither borrows the bring-up's deadline."""
 
 PROXY_SOURCE = (
     f"""CHROME_HOST = "127.0.0.1"
@@ -318,7 +328,7 @@ class SandboxChromeCdpLease:
         is CPU work every other turn on this one loop would wait through. The file is sized first —
         it crosses whole into this process, and what a page downloads is not ours to trust."""
         stored = f"{DOWNLOAD_DIR}/{shlex.quote(guid)}"
-        sized = await self.sandbox.bash(f"wc -c < {stored}")
+        sized = await self.sandbox.bash(f"wc -c < {stored}", timeout_s=DOWNLOAD_SIZE_BUDGET_SECONDS)
         if sized.exit_code != 0:
             raise RuntimeError(f"sandbox_chrome could not read download {guid}: {sized.stderr}")
         if int(sized.stdout.strip()) > MAX_DOWNLOAD_BYTES:
@@ -328,8 +338,12 @@ class SandboxChromeCdpLease:
             )
         result = await self.sandbox.bash(
             f"base64 < {stored}",
-            timeout_s=BROWSER_START_TIMEOUT_SECONDS,
+            timeout_s=DOWNLOAD_READ_BUDGET_SECONDS,
         )
+        if result.timed_out_after_s is not None:
+            raise RuntimeError(
+                f"sandbox_chrome stopped reading download {guid} after {result.timed_out_after_s}s"
+            )
         if result.exit_code != 0:
             raise RuntimeError(f"sandbox_chrome could not read download {guid}: {result.stderr}")
         return await asyncio.to_thread(base64.b64decode, result.stdout)
@@ -355,7 +369,8 @@ class SandboxChromeCdpProvider:
         result = await sandbox.bash(BROWSER_UP_COMMAND, timeout_s=BROWSER_START_TIMEOUT_SECONDS)
         if result.exit_code != 0:
             raise RuntimeError(
-                f"sandbox_chrome failed to bring up the browser: {result.stderr or result.stdout}"
+                "sandbox_chrome failed to bring up the browser: "
+                f"{await _bring_up_failure(sandbox, result)}"
             )
         target = await sandbox.dial(BROWSER_CDP_PROXY_PORT)
         scheme = "wss" if target.tls else "ws"
@@ -367,6 +382,23 @@ class SandboxChromeCdpProvider:
 
     async def reattach(self, token: str) -> CdpLease:
         raise SessionGone(token)
+
+
+async def _bring_up_failure(sandbox: SandboxSession, result: ExecResult) -> str:
+    """What the failed bring-up says, read from the logs inside the sandbox when the carrier's
+    deadline ended the command: the kill takes the program's own report with it, and what remains is
+    a carrier timeout that names nothing about the browser. The logs hold the reason, so they are
+    fetched here rather than left in a sandbox nobody reads again."""
+    reported = result.stderr.strip() or result.stdout.strip()
+    if result.timed_out_after_s is None:
+        return reported
+    logs = await sandbox.bash(
+        f"tail -n {LOG_TAIL_LINES} {CHROME_LOG_PATH} {PROXY_LOG_PATH} 2>&1 || true",
+        timeout_s=LOG_TAIL_BUDGET_SECONDS,
+    )
+    stopped = f"the sandbox stopped the bring-up after {result.timed_out_after_s}s"
+    tail = logs.stdout.strip()
+    return f"{stopped}\n{tail}" if tail else f"{stopped}: {reported}"
 
 
 def _ws_path(url: str) -> str:
