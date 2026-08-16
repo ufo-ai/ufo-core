@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import (
     AgentProvision,
+    AgentSetup,
     AgentSpec,
     CredentialSlot,
     InjectionTarget,
@@ -70,6 +71,7 @@ CODING_TOOL_NAMES = (
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 100
 CODE_REVIEW_AGENT_NAME = "code-review"
+GITHUB_CONNECTOR = "github"
 CODE_REVIEW_PROMPT = (Path(__file__).parent / "prompts" / "agent_code_review.md").read_text()
 
 
@@ -168,6 +170,16 @@ CODING_PROFILE = SubagentProfile(
     max_rounds=CODING_ROUND_LIMIT,
 )
 
+CODE_REVIEW_SETUP = (
+    "Connect the GitHub account this workspace reviews under. A connection binds to the agent "
+    "whose conversation it is made in, so make it here, with you. Then ask the member to "
+    "register the pull-request source for that account and share it — only a shared source "
+    "carries a trigger — "
+    "and apply a source trigger naming it, so a changed pull request wakes this conversation. The "
+    "children also need the ufo GitHub App installed to fetch commits: `connect_github` hands an "
+    "admin that link once for the whole workspace."
+)
+
 CODE_REVIEW_AGENT = AgentProvision(
     name=CODE_REVIEW_AGENT_NAME,
     spec=AgentSpec(
@@ -177,6 +189,7 @@ CODE_REVIEW_AGENT = AgentProvision(
         internet_access_allowed=False,
         sandbox_size="large",
     ),
+    setup=AgentSetup(connectors=(GITHUB_CONNECTOR,), instructions=CODE_REVIEW_SETUP),
 )
 
 

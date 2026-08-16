@@ -371,3 +371,23 @@ def test_the_review_agent_publishes_the_status_the_repository_requires() -> None
     assert "`ufo review`" in agent.spec.prompt
     assert "/repos/{owner}/{repo}/statuses/{head_sha}" in agent.spec.prompt
     assert "/repos/{owner}/{repo}/pulls/{pull_number}/reviews" in agent.spec.prompt
+
+
+def test_the_review_agent_declares_the_account_it_cannot_arrive_with() -> None:
+    """A shipped agent arrives with no grant, so the provision names the one kind of authority a
+    member must give it: a GitHub account, which its publication calls through. The instructions
+    also name the two acts no declaration can carry — sharing the pull-request source, which is
+    what lets a trigger wake it, and installing the App its children fetch commits with."""
+    (agent,) = coding.manifest().agents
+    assert agent.setup.connectors == (coding.GITHUB_CONNECTOR,)
+    assert "share it" in agent.setup.instructions
+    assert "source trigger" in agent.setup.instructions
+    assert "connect_github" in agent.setup.instructions
+
+
+def test_the_review_agent_holds_the_verbs_its_own_setup_names() -> None:
+    """The setup asks the agent to connect an account and apply objects in its own conversation. It
+    runs the member-facing set, so it holds those verbs — an allowlist here would leave it reading
+    instructions it could not follow, which `AgentProvision` refuses outright."""
+    (agent,) = coding.manifest().agents
+    assert agent.tools is None
