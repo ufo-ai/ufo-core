@@ -98,6 +98,7 @@ from ufo.sdk.surfaces import (
     ListedConversation,
     PortalKind,
     ScheduledRun,
+    SharedArtifact,
     SubagentDetail,
     SubagentRun,
     SurfaceAuth,
@@ -1082,6 +1083,7 @@ def _rendered_messages(
     speakers: Mapping[str, str] | None = None,
     questions: Mapping[str, dict[str, object]] | None = None,
     asked: Mapping[str, str] | None = None,
+    files: Mapping[str, list[dict[str, object]]] | None = None,
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
@@ -1102,10 +1104,15 @@ def _rendered_messages(
 
     `asked` names the question a member's words answered, keyed like `speakers`: the bubble draws
     it over the words, and carries it for every speaker, the viewer's own included — an answer
-    reads with what it answered."""
+    reads with what it answered.
+
+    `files` names what each turn shared, keyed like `questions`: the reply carries its own, so a
+    file stands on the words that shared it and stays there when later turns run. A turn that
+    shared and wrote nothing still renders its reply — the file needs the reply it belongs to."""
     subagents = subagents or {}
     questions = questions or {}
     asked = asked or {}
+    files = files or {}
     rendered: list[dict[str, object]] = []
     pending: list[dict[str, str]] = []
     answer = ""
@@ -1116,7 +1123,8 @@ def _rendered_messages(
         closing = current_turn_id if include_subagents else None
         runs = [] if closing is None else subagents.get(closing, [])
         asked = None if closing is None else questions.get(closing)
-        if not answer and not pending and not runs and asked is None:
+        shared = [] if closing is None else files.get(closing, [])
+        if not answer and not pending and not runs and asked is None and not shared:
             return
         reply: dict[str, object] = {"role": "assistant", "text": answer}
         if pending:
@@ -1125,6 +1133,8 @@ def _rendered_messages(
             reply["subagents"] = runs
         if asked is not None:
             reply["question"] = asked
+        if shared:
+            reply["files"] = shared
         rendered.append(reply)
         pending = []
         answer = ""
@@ -1243,10 +1253,14 @@ async def _conversation_messages(
     if recorded is None:
         rendered: list[dict[str, object]] = []
     else:
-        turns, spawned = await asyncio.gather(
+        turns, spawned, shared = await asyncio.gather(
             ctx.list_turns(conversation_id),
             ctx.conversation_subagent_turns(conversation_id),
+            ctx.list_conversation_artifacts(conversation_id, limit=CONVERSATION_ARTIFACTS_MAX),
         )
+        files: dict[str, list[dict[str, object]]] = {}
+        for entry in reversed(shared):
+            files.setdefault(str(entry.turn_id), []).append(_file_payload(ctx, entry.artifact))
         rendered = _rendered_messages(
             recorded.messages,
             await _subagent_nodes(ctx, spawned),
@@ -1267,6 +1281,7 @@ async def _conversation_messages(
                 for turn in turns
                 if turn.context is not None and turn.context.question is not None
             },
+            files,
         )
         if any(turn.subagent_profile is not None for turn in turns):
             for reply in rendered:
@@ -1350,17 +1365,14 @@ async def _open_handoffs(
     ctx: SurfaceContext, turn_id: UUID, terminal: TerminalFrame
 ) -> dict[str, object]:
     """What the conversation's newest committed turn still asks of the member, so a reload
-    re-renders the same affordances the live stream drew: credential prompts still awaiting values,
-    and the turn's shared files. A question is not among them — it rides the reply that asked it,
-    which is where the member answers it."""
+    re-renders the same affordances the live stream drew: credential prompts still awaiting
+    values. A question and a shared file are not among them — each rides the reply it belongs
+    to, which is where the member answers one and reads the other."""
     handoffs: dict[str, object] = {}
     if terminal.credential_request is not None:
         prompts = await _pending_prompts(ctx, terminal.credential_request)
         if prompts is not None:
             handoffs["credentials"] = prompts
-    files = await _turn_files(ctx, turn_id)
-    if files:
-        handoffs["files"] = files
     return handoffs
 
 
@@ -2696,27 +2708,22 @@ async def _pending_prompts(
     return {"reason": request_.reason, "sealed": request_.sealed, "prompts": pending}
 
 
-async def _turn_files(ctx: SurfaceContext, turn_id: UUID) -> list[dict[str, object]]:
-    """The files a turn shared, each with a same-origin `preview_url` when the file is itself a
-    picture — the chat draws those inline in the reply, and the page's CSP loads images only from
-    its own origin, so the minted link travels without its base."""
-    files: list[dict[str, object]] = []
-    for artifact in await ctx.shared_artifacts(turn_id):
-        preview_url = None
-        minted = ctx.artifact_preview_link(artifact)
-        if minted is not None:
-            parsed = urlsplit(minted)
-            preview_url = urlunsplit(("", "", parsed.path, parsed.query, ""))
-        files.append(
-            {
-                "filename": artifact.filename,
-                "subject": artifact.subject,
-                "size_bytes": artifact.size_bytes,
-                "url": ctx.artifact_link(artifact),
-                "preview_url": preview_url,
-            }
-        )
-    return files
+def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, object]:
+    """One shared file as the chat draws it, with a same-origin `preview_url` when the file is
+    itself a picture — the portal draws those inline in the reply, and the page's CSP loads images
+    only from its own origin, so the minted link travels without its base."""
+    preview_url = None
+    minted = ctx.artifact_preview_link(artifact)
+    if minted is not None:
+        parsed = urlsplit(minted)
+        preview_url = urlunsplit(("", "", parsed.path, parsed.query, ""))
+    return {
+        "filename": artifact.filename,
+        "subject": artifact.subject,
+        "size_bytes": artifact.size_bytes,
+        "url": ctx.artifact_link(artifact),
+        "preview_url": preview_url,
+    }
 
 
 async def _events(
@@ -2751,7 +2758,9 @@ async def _events(
                     prompts = await _pending_prompts(ctx, frame.frame.credential_request)
                     if prompts is not None:
                         yield _event("credentials", prompts)
-                files = await _turn_files(ctx, turn_id)
+                files = [
+                    _file_payload(ctx, artifact) for artifact in await ctx.shared_artifacts(turn_id)
+                ]
                 if files:
                     yield _event("files", {"files": files})
             yield _sse(cursor, frame)

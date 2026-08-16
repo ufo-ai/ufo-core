@@ -27,13 +27,6 @@ import {
   PromptInputTextarea,
   PromptInputToolbar,
 } from "@/components/ui/prompt-input";
-import {
-  Attachment,
-  AttachmentContent,
-  AttachmentDescription,
-  AttachmentGroup,
-  AttachmentTitle,
-} from "@/components/ui/attachment";
 import { SILENT, Toast } from "@/components/ui/toast";
 import {
   MessageLog,
@@ -54,8 +47,7 @@ import {
   stopTurn,
   type ChatTarget,
 } from "@/lib/turnStream";
-import { formatSize } from "@/lib/size";
-import type { Agent, ChatFile, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
+import type { Agent, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
 
 export type ChatProps = {
   agent: Agent;
@@ -128,7 +120,6 @@ export function Chat({
   const messages = state.messages;
   const showEmpty = messages !== null && !messages.length && !state.busy && !state.live;
   const stalled = messages === null ? state.fault : null;
-  const trailing = state.handoffs.files ?? null;
   const credentials = state.handoffs.credentials;
   const held = state.busy || state.messages === null;
 
@@ -148,10 +139,8 @@ export function Chat({
               onAct={() => composer.current?.focus()}
             />
           )}
+          onOpenArtifacts={onOpenArtifacts}
         >
-          {trailing && trailing.length ? (
-            <Files files={trailing} onOpenArtifacts={onOpenArtifacts} />
-          ) : null}
           {credentials ? (
             <Handoff>
               <div>{credentials.reason}</div>
@@ -206,67 +195,6 @@ export function Chat({
   );
 }
 
-/** What the turn shared, under the reply that shared it. A file that is itself a picture is drawn
- *  as one — part of the answer, and pressing it opens the artifacts sidebar where the file's own
- *  record is; every other file is a card on a row that scrolls sideways rather than a column that
- *  pushes the composer down the page. */
-function Files({ files, onOpenArtifacts }: { files: ChatFile[]; onOpenArtifacts?: () => void }) {
-  const pictures = files.filter((file) => file.preview_url);
-  const cards = files.filter((file) => !file.preview_url);
-  return (
-    <>
-      {pictures.map((file) => (
-        <Picture key={file.filename} file={file} onOpen={onOpenArtifacts} />
-      ))}
-      {cards.length ? (
-        <AttachmentGroup className="mt-2xs">
-          {cards.map((file) => (
-            <Attachment key={file.filename} size="sm">
-              <AttachmentContent>
-                <AttachmentTitle>
-                  {file.url ? <a href={file.url}>{file.filename}</a> : file.filename}
-                </AttachmentTitle>
-                <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
-              </AttachmentContent>
-            </Attachment>
-          ))}
-        </AttachmentGroup>
-      ) : null}
-    </>
-  );
-}
-
-/** One shared picture, named by its filename. A pane with no sidebar to open draws it as a link to
- *  the file itself. */
-function Picture({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
-  const drawn = (
-    <img
-      loading="lazy"
-      alt={file.filename}
-      src={file.preview_url ?? undefined}
-      className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
-    />
-  );
-  if (onOpen) {
-    return (
-      <button
-        type="button"
-        onClick={onOpen}
-        className="mt-2xs w-fit cursor-pointer border-0 bg-transparent p-0"
-      >
-        {drawn}
-      </button>
-    );
-  }
-  if (file.url) {
-    return (
-      <a href={file.url} className="mt-2xs w-fit">
-        {drawn}
-      </a>
-    );
-  }
-  return <div className="mt-2xs w-fit">{drawn}</div>;
-}
 
 function Handoff({ children }: { children: ReactNode }) {
   return (

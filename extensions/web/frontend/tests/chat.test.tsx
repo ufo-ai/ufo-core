@@ -1708,11 +1708,10 @@ test("a file the running turn shares stands under the log before the turn ends",
   expect(screen.getAllByRole("link", { name: "report.csv" })).toHaveLength(1);
 });
 
-/** The list stands at the foot of the log, so it belongs to the turn the foot of the log is waiting
- *  on. It has to go the moment the member sends, not when the tail that answers them opens: the POST
- *  between the two is exactly where the last turn's file would stand under the words they just
- *  typed, naming what this turn has not produced yet. */
-test("a file the last turn shared does not stand under the message that opens the next", async () => {
+/** A file rides the reply that shared it, never the foot of the log: the member's next message
+ *  stands below the reply and its files, and a follow-up turn takes nothing away from what an
+ *  earlier reply showed. */
+test("a file stays on the reply that shared it when a follow-up opens the next turn", async () => {
   let land: (payload: unknown) => void = () => {};
   const admitted = new Promise<Response>((resolve) => {
     land = (payload) => resolve(json(payload));
@@ -1735,7 +1734,15 @@ test("a file the last turn shared does not stand under the message that opens th
 
   StreamFake.last().emit("message", { text: "Here it is." });
   StreamFake.last().emit("files", {
-    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null }],
+    files: [
+      {
+        filename: "portrait.jpg",
+        url: "/dl/portrait.jpg",
+        size_bytes: 88_000,
+        preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+      },
+      { filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null },
+    ],
   });
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -1744,16 +1751,57 @@ test("a file the last turn shared does not stand under the message that opens th
     cost_micro_usd: 1_000_000,
   });
   expect(await screen.findByRole("link", { name: "report.csv" })).toBeTruthy();
+  expect(screen.getByRole("img", { name: "portrait.jpg" })).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "and another");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(await screen.findByText(saying("and another"))).toBeTruthy();
-  expect(screen.queryByRole("link", { name: "report.csv" })).toBeNull();
+  const reply = screen.getByText(saying("Here it is.")).closest("[data-slot=message]") as HTMLElement;
+  expect(within(reply).getByRole("link", { name: "report.csv" })).toBeTruthy();
+  expect(within(reply).getByRole("img", { name: "portrait.jpg" })).toBeTruthy();
 
   land({ turn_id: "turn-2", conversation_id: CONVO_ID, title: "hello" });
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
-  expect(screen.queryByRole("link", { name: "report.csv" })).toBeNull();
+  expect(screen.getAllByRole("link", { name: "report.csv" })).toHaveLength(1);
+  expect(screen.getAllByRole("img", { name: "portrait.jpg" })).toHaveLength(1);
+});
+
+/** The reload half of the same fact: the transcript states files on the reply that shared them,
+ *  so a conversation read back draws an earlier reply's image where it was, not nowhere. */
+test("a reloaded conversation draws files on the earlier reply that shared them", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "find a headshot" },
+        {
+          role: "assistant",
+          text: "Here is the portrait.",
+          files: [
+            {
+              filename: "portrait.jpg",
+              url: "/dl/portrait.jpg",
+              size_bytes: 88_000,
+              preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+            },
+            { filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048, preview_url: null },
+          ],
+        },
+        { role: "user", text: "thanks" },
+        { role: "assistant", text: "Anything else?" },
+      ],
+    }),
+  );
+  open();
+
+  const picture = await screen.findByRole("img", { name: "portrait.jpg" });
+  const reply = screen.getByText(saying("Here is the portrait.")).closest(
+    "[data-slot=message]",
+  ) as HTMLElement;
+  expect(reply.contains(picture)).toBe(true);
+  expect(within(reply).getByRole("link", { name: "report.csv" })).toBeTruthy();
+  const rows = screen.getByTestId("log").querySelectorAll("[data-slot=message-scroller-item]");
+  expect(rows[rows.length - 1].textContent).toBe("Anything else?");
 });
 
 test("an image the turn shares stands inline in the answer and opens the artifacts sidebar", async () => {

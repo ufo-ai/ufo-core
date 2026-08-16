@@ -181,16 +181,14 @@ export function applyRunFrame(
  *  cursor, so the turn's retained frames arrive from the first of them: whatever the chat had drawn
  *  belongs to the tail this one replaces — the turn the page stopped following, or an earlier source
  *  on this same turn — and holding it would glue two turns into one bubble, or stand the reply the
- *  replay rebuilds behind a copy of itself. The files that tail listed go with it: the frame naming
- *  them arrives with the terminal, so the list under the log is the turn being tailed. A turn the
- *  page leaves is still the transcript's to state, on the next read of it. */
+ *  replay rebuilds behind a copy of itself. The files it listed ride the live turn, so they go with
+ *  it the same way; an earlier turn's files stand on its settled reply, which no new tail touches. */
 export function streamTurn(chatKey: string, turnId: string, answering: boolean): void {
   REATTACHES.delete(chatKey);
   updateChat(chatKey, (state) => ({
     ...state,
     live: liveTurn(),
     turn: { id: turnId, answering },
-    handoffs: { ...state.handoffs, files: null },
   }));
   attach(chatKey, turnId, answering, false);
 }
@@ -223,15 +221,20 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
   const onLive = (change: (live: LiveTurn) => LiveTurn) =>
     updateChat(chatKey, (state) => ({ ...state, live: change(state.live ?? liveTurn()) }));
 
-  /** The reply this turn settles into, carrying what the turn still asks of the member: the
-   *  question stands under the words that asked it, so the reply is recorded for a question alone
-   *  even when the turn wrote nothing else. */
+  /** The reply this turn settles into, carrying what the turn still asks of the member and what
+   *  it shared: the question stands under the words that asked it and a file on the words that
+   *  shared it, so the reply is recorded for either alone even when the turn wrote nothing else. */
   const record = () =>
     updateChat(chatKey, (state) => {
       const live = state.live;
       const asked = state.handoffs.question;
       const question = asked && asked.turn_id === turnId ? asked : null;
-      if (!live || (!live.text && !live.subagents.length && question === null)) return state;
+      if (
+        !live ||
+        (!live.text && !live.subagents.length && !live.files.length && question === null)
+      ) {
+        return state;
+      }
       return {
         ...state,
         messages: (state.messages ?? []).concat({
@@ -241,6 +244,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
           ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
           ...(live.events.length ? { events: live.events } : {}),
           ...(live.subagents.length ? { subagents: live.subagents } : {}),
+          ...(live.files.length ? { files: live.files } : {}),
           ...(question ? { question } : {}),
         }),
       };
@@ -283,7 +287,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
 
   source.addEventListener("files", (event) => {
     const files = JSON.parse((event as MessageEvent).data).files as ChatFile[];
-    updateChat(chatKey, (state) => ({ ...state, handoffs: { ...state.handoffs, files } }));
+    onLive((live) => ({ ...live, files }));
   });
 
   source.addEventListener("credentials", (event) => {
@@ -352,10 +356,11 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
                 ...liveTurn(),
                 meter: live.meter,
                 reconnecting: live.reconnecting,
-                // The runs stay live across the round boundary — they settle on the reply that
-                // closes the turn, where the durable transcript will state them — and their rows
-                // move ahead of the next round's events, which is when they started.
+                // The runs and files stay live across the round boundary — they settle on the
+                // reply that closes the turn, where the durable transcript will state them — and
+                // the runs' rows move ahead of the next round's events, which is when they started.
                 subagents: live.subagents.map((run) => ({ ...run, at: 0 })),
+                files: live.files,
               },
       };
     });
@@ -559,7 +564,6 @@ export async function refreshTranscript(
       handoffs: {
         question,
         credentials: ("credentials" in payload && payload.credentials) || null,
-        files: ("files" in payload && payload.files) || null,
       },
     };
   });
@@ -591,12 +595,7 @@ function timezoneHeader(): Record<string, string> {
  *  A message admitted while a turn runs also gets the queue row it joined: the bubble holds that id
  *  until the turn's `absorbed` event names it back. The drain can beat this response — the row is
  *  committed before the POST returns — so an id the stream has already named is never stamped on,
- *  or the wait would stand under the bubble with nothing left to clear it.
- *
- *  The files at the foot of the log go with the send rather than with the tail it opens: the tail
- *  begins only once this call returns, and until then a list the last turn shared would stand under
- *  the words the member just sent, reading as what this turn produced before it has produced
- *  anything. */
+ *  or the wait would stand under the bubble with nothing left to clear it. */
 export async function sendMessage(
   target: ChatTarget,
   body: string | FormData,
@@ -613,7 +612,6 @@ export async function sendMessage(
     ...state,
     busy: true,
     live: state.live ?? liveTurn(),
-    handoffs: { ...state.handoffs, files: null },
     messages: (state.messages ?? []).concat({
       role: "user",
       text: shown,

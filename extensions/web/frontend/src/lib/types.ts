@@ -159,13 +159,15 @@ export type Message = {
   subagents?: SubagentRun[];
   /** What this reply asked the member, carried by the reply that asked it. */
   question?: ChatQuestion;
+  /** What this reply's turn shared, carried by the reply so the files stay where the words
+   *  that shared them are. */
+  files?: ChatFile[];
 };
 
 export type Transcript = {
   messages: Message[];
   turn?: string;
   credentials?: CredentialRequest | null;
-  files?: ChatFile[] | null;
 };
 
 export type SchemaProperty = {

@@ -34,16 +34,15 @@ export type LiveTurn = {
   connectUrl: string | null;
   events: ActivityEvent[];
   subagents: SubagentRun[];
+  /** What the turn has shared so far. It settles on the reply that closes the turn, where the
+   *  durable transcript states it. */
+  files: ChatFile[];
   reconnecting: boolean;
 };
 
 export type Handoffs = {
   question?: ChatQuestion | null;
   credentials?: CredentialRequest | null;
-  /** What the tailed turn shared, and the one list the page holds: the wire carries these as a
-   *  handoff and a reload reads them back from that same field, so a second copy on the reply would
-   *  stand the file on two rows the moment the turn settles. */
-  files?: ChatFile[] | null;
 };
 
 export type StreamingTurn = { id: string; answering: boolean };
@@ -92,6 +91,7 @@ export function liveTurn(): LiveTurn {
     connectUrl: null,
     events: [],
     subagents: [],
+    files: [],
     reconnecting: false,
   };
 }

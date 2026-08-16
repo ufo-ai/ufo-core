@@ -5387,8 +5387,10 @@ async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children
 
 async def test_shared_files_stream_and_reload_as_download_links(
     web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     conversation_id, turn_id = await _seed_web_turn(
         workspace_id,
@@ -5396,6 +5398,20 @@ async def test_shared_files_stream_and_reload_as_download_links(
         member_id,
         "owner@example.com",
         TerminalFrame(status="done", text="here is the report"),
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nshare the report",
+                ),
+                Message(role="assistant", content="here is the report"),
+            ),
+        ),
     )
     async with workspace_tx() as connection:
         await connection.execute(
@@ -5436,11 +5452,96 @@ async def test_shared_files_stream_and_reload_as_download_links(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
         headers=cookie,
     )
-    reloaded = {file["filename"]: file for file in loaded.json()["files"]}
+    payload = loaded.json()
+    assert "files" not in payload
+    reply = payload["messages"][-1]
+    assert reply["role"] == "assistant"
+    reloaded = {file["filename"]: file for file in reply["files"]}
     assert reloaded["report.pdf"]["url"].startswith("https://web/artifacts/")
     assert reloaded["report.pdf"]["size_bytes"] == 3
     assert reloaded["report.pdf"]["preview_url"] is None
     assert reloaded["portrait.jpg"]["preview_url"].startswith("/artifacts/")
+
+
+async def test_transcript_reply_keeps_its_files_after_a_later_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """Files ride the reply that shared them, so a follow-up turn takes nothing off an earlier
+    reply and the payload carries no conversation-level file list."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, first_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="here is the portrait"),
+    )
+    second_turn = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=second_turn,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="done",
+                inbound="thanks",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(status="done", text="anything else?").model_dump(
+                    mode="json"
+                ),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=first_turn,
+                blob_key=f"artifacts/{uuid4()}/portrait.jpg",
+                workspace_id=workspace_id,
+                filename="portrait.jpg",
+                subject="the portrait",
+                media_type="image/jpeg",
+                size_bytes=5,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=2,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {first_turn}\n</context>\nfind a headshot",
+                ),
+                Message(role="assistant", content="here is the portrait"),
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {second_turn}\n</context>\nthanks",
+                ),
+                Message(role="assistant", content="anything else?"),
+            ),
+        ),
+    )
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    payload = loaded.json()
+    assert "files" not in payload
+    replies = [message for message in payload["messages"] if message["role"] == "assistant"]
+    (file,) = replies[0]["files"]
+    assert file["filename"] == "portrait.jpg"
+    assert file["url"].startswith("https://web/artifacts/")
+    assert file["preview_url"].startswith("/artifacts/")
+    assert "files" not in replies[1]
 
 
 async def test_composer_files_land_in_the_workspace_before_the_turn(

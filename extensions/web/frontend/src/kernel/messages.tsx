@@ -2,6 +2,13 @@ import { useState, type ReactNode } from "react";
 
 import { IconChevronRight } from "@tabler/icons-react";
 
+import {
+  Attachment,
+  AttachmentContent,
+  AttachmentDescription,
+  AttachmentGroup,
+  AttachmentTitle,
+} from "@/components/ui/attachment";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Marker, MarkerContent } from "@/components/ui/marker";
 import { Message, MessageContent, MessageHeader } from "@/components/ui/message";
@@ -19,9 +26,10 @@ import { speakerName } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 import { subagentConversationHash } from "@/lib/route";
+import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
-import type { ChatQuestion, SubagentRun } from "@/lib/types";
+import type { ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
 
 /** How far from the foot still counts as being at it. A reader is at the bottom of a conversation
  *  long before they are at the last pixel of it: a line lands, the composer grows by a row, the
@@ -110,6 +118,10 @@ export function useTakeMeToTheFoot(): () => void {
  *  A question stands under the reply that asked it. The log decides the place and the view
  *  supplies the form: `question` draws one and a pane that cannot answer passes none.
  *
+ *  A reply that shared files draws them under its words: a picture as the picture it is, every
+ *  other file as a card. `onOpenArtifacts` is where pressing a picture goes on a screen with an
+ *  artifacts sidebar; a pane without one passes none and the picture links to the file itself.
+ *
  *  `children` is what the screen hangs at the foot of the transcript, in the same column — a
  *  handoff, an empty state — so nothing floats over the conversation in a pane of its own. */
 export function MessageLog({
@@ -117,6 +129,7 @@ export function MessageLog({
   live = null,
   conversationId,
   question,
+  onOpenArtifacts,
   className,
   children,
 }: {
@@ -124,6 +137,7 @@ export function MessageLog({
   live?: LiveTurn | null;
   conversationId: string | null;
   question?: (asked: ChatQuestion) => ReactNode;
+  onOpenArtifacts?: () => void;
   /** The reading column, set on the messages rather than on the pane that scrolls them: a pane
    *  narrowed to the column carries the scrollbar at the column's edge, which puts a moving bar
    *  in the middle of the screen beside the words instead of at the side of the window. */
@@ -171,6 +185,9 @@ export function MessageLog({
               message.text
             )}
           </Said>
+          {message.files?.length ? (
+            <Files files={message.files} onOpen={onOpenArtifacts} />
+          ) : null}
           {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
           {message.meta ? <Meta>{message.meta}</Meta> : null}
           {message.question && question ? question(message.question) : null}
@@ -197,6 +214,9 @@ export function MessageLog({
               <Said mine={false} entering>
                 <StreamingBody text={row.live.text} />
               </Said>
+              {row.live.files.length ? (
+                <Files files={row.live.files} onOpen={onOpenArtifacts} />
+              ) : null}
               {row.live.connectUrl ? <ConnectLink url={row.live.connectUrl} /> : null}
               {row.live.meter ? <Meta>{row.live.meter}</Meta> : null}
               {row.live.meta ? <Meta>{row.live.meta}</Meta> : null}
@@ -249,6 +269,68 @@ function Said({
       </BubbleContent>
     </Bubble>
   );
+}
+
+/** What a reply's turn shared, under the words that shared it. A file that is itself a picture is
+ *  drawn as one — part of the answer, and pressing it goes to `onOpen` where the screen has an
+ *  artifacts sidebar; every other file is a card on a row that scrolls sideways rather than a
+ *  column that pushes the rest of the conversation down the page. */
+function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
+  const pictures = files.filter((file) => file.preview_url);
+  const cards = files.filter((file) => !file.preview_url);
+  return (
+    <>
+      {pictures.map((file) => (
+        <Picture key={file.filename} file={file} onOpen={onOpen} />
+      ))}
+      {cards.length ? (
+        <AttachmentGroup className="mt-2xs">
+          {cards.map((file) => (
+            <Attachment key={file.filename} size="sm">
+              <AttachmentContent>
+                <AttachmentTitle>
+                  {file.url ? <a href={file.url}>{file.filename}</a> : file.filename}
+                </AttachmentTitle>
+                <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
+              </AttachmentContent>
+            </Attachment>
+          ))}
+        </AttachmentGroup>
+      ) : null}
+    </>
+  );
+}
+
+/** One shared picture, named by its filename. A pane with no sidebar to open draws it as a link to
+ *  the file itself. */
+function Picture({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
+  const drawn = (
+    <img
+      loading="lazy"
+      alt={file.filename}
+      src={file.preview_url ?? undefined}
+      className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
+    />
+  );
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        className="mt-2xs w-fit cursor-pointer border-0 bg-transparent p-0"
+      >
+        {drawn}
+      </button>
+    );
+  }
+  if (file.url) {
+    return (
+      <a href={file.url} className="mt-2xs w-fit">
+        {drawn}
+      </a>
+    );
+  }
+  return <div className="mt-2xs w-fit">{drawn}</div>;
 }
 
 export function Meta({ children }: { children: ReactNode }) {

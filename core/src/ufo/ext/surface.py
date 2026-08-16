@@ -370,7 +370,7 @@ def _media_predicate(column: sa.ColumnElement[str], media: str) -> sa.ColumnElem
 
 @dataclass(frozen=True)
 class ListedArtifact:
-    """One row of the portal's artifacts view with its owner, origin, and ways back: the
+    """One row of the portal's artifacts view with its owner, origin, and ways back: the turn and
     conversation that shared it, its surface, and — where the opening turn reported one — the
     thread it came in on, the same string the conversations listing links by."""
 
@@ -378,6 +378,7 @@ class ListedArtifact:
     created_at: datetime
     owner_email: str | None
     origin: str | None
+    turn_id: UUID
     conversation_id: UUID
     surface: str
     source: str | None
@@ -2185,6 +2186,7 @@ class SurfaceContext:
                 tables.shared_artifact.c.preview_media_type,
                 tables.shared_artifact.c.preview_size_bytes,
                 tables.shared_artifact.c.created_at,
+                tables.shared_artifact.c.turn_id,
                 tables.member.c.email,
                 tables.conversation.c.surface_label,
                 tables.conversation.c.surface,
@@ -2256,6 +2258,7 @@ class SurfaceContext:
                 created_at=row.created_at,
                 owner_email=row.email,
                 origin=row.surface_label or (row.surface if row.surface != "web" else None),
+                turn_id=row.turn_id,
                 conversation_id=row.conversation_id,
                 surface=row.surface,
                 source=sources.get(row.conversation_id),
@@ -2283,6 +2286,7 @@ class SurfaceContext:
                 tables.shared_artifact.c.preview_media_type,
                 tables.shared_artifact.c.preview_size_bytes,
                 tables.shared_artifact.c.created_at,
+                tables.shared_artifact.c.turn_id,
                 tables.member.c.email,
                 tables.conversation.c.surface,
             )
@@ -2325,6 +2329,7 @@ class SurfaceContext:
                 created_at=row.created_at,
                 owner_email=row.email,
                 origin=None,
+                turn_id=row.turn_id,
                 conversation_id=conversation_id,
                 surface=row.surface,
                 source=source,
