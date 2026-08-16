@@ -1404,14 +1404,14 @@ def test_registry_registers_the_default_background_jobs_model_with_tool_use(tmp_
     call site loses a capability by moving to it."""
     registry = model_registry(_config(tmp_path), ())
     spec = registry.spec(DEFAULT_BACKGROUND_JOBS_MODEL)
-    assert spec.provider == "anthropic"
-    assert spec.api_surface == "chat"
+    assert spec.provider == "openai"
+    assert spec.api_surface == "responses"
     assert spec.reasoning.supported
     assert spec.reasoning.tools_with_reasoning
     tools = (ToolSchema(name="record", description="d", input_schema={"type": "object"}),)
     assert spec.wire_reasoning("low", tools) == "low"
     assert spec.wire_reasoning("off", tools) == "off"
-    assert spec.context_window == 200_000
+    assert spec.context_window == 272_000
 
 
 def test_registry_rejects_two_specs_for_one_id(tmp_path: Path) -> None:
