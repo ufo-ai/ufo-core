@@ -16,6 +16,7 @@ IN_PROCESS_BACKEND = "in_process"
 DEFAULT_CDP_PROVIDER = "sandbox_chrome"
 DEFAULT_AUTO_MODEL = "claude-opus-5"
 DEFAULT_AMBIENT_REPLY_MODEL = "gpt-5.6-luna"
+DEFAULT_BACKGROUND_JOBS_MODEL = "gpt-5.6-luna"
 DEFAULT_PROXY_PORT = 8888
 DEFAULT_INGRESS_PORT = 8100
 
@@ -83,13 +84,19 @@ class ModelsConfig(BaseModel):
     turn time, so an agent stays model-agnostic and the deploy pins the backend.
     `ambient_reply_model` is the cheap model the pre-admission ambient-reply decision runs on, one
     call per un-addressed thread reply ahead of any turn — pinned separately because it is priced
-    against the turn it prevents, not against the answer an agent gives."""
+    against the turn it prevents, not against the answer an agent gives.
+    `background_jobs_model` is the model a background job's own metered call runs on — memory fact
+    extraction, memory consolidation, chat titles — pinned separately for the same reason: a job is
+    one bounded schema-bound one-shot over a payload nothing re-reads, so it reads no cache and pays
+    full price on every token. A job whose payload can outgrow this model's context window declares
+    `JobSpec.needs_deploy_model` and keeps `auto_model` instead."""
 
     model_config = ConfigDict(extra="forbid")
     anthropic_api_key_env: str = "ANTHROPIC_API_KEY"
     openai_api_key_env: str = "OPENAI_API_KEY"
     auto_model: str = DEFAULT_AUTO_MODEL
     ambient_reply_model: str = DEFAULT_AMBIENT_REPLY_MODEL
+    background_jobs_model: str = DEFAULT_BACKGROUND_JOBS_MODEL
 
     @model_validator(mode="after")
     def _models_concrete(self) -> "ModelsConfig":
@@ -98,6 +105,10 @@ class ModelsConfig(BaseModel):
         if not self.ambient_reply_model or self.ambient_reply_model == AUTO_MODEL:
             raise ValueError(
                 "models.ambient_reply_model must be a concrete model id, not empty or 'auto'"
+            )
+        if not self.background_jobs_model or self.background_jobs_model == AUTO_MODEL:
+            raise ValueError(
+                "models.background_jobs_model must be a concrete model id, not empty or 'auto'"
             )
         return self
 

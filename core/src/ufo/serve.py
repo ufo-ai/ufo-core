@@ -420,7 +420,9 @@ def _launch_jobs(
     DBOS schedules and one-shot enqueues, after
     launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
     startup); a handler may read a declared credential or the deploy index/embed backends or the
-    page feed, so once any job is registered the credential key must be set."""
+    page feed, so once any job is registered the credential key must be set. Both runners carry
+    `models.background_jobs_model`, so a handler's own metered call runs on the deploy's cheap
+    background model rather than the model a member's turn runs on."""
     probes = ConversationProbes(
         runtime.sandboxes,
         ProbeTokenCodec(secret=runtime.run_tokens.secret),
@@ -441,6 +443,7 @@ def _launch_jobs(
         sandboxes=runtime.sandboxes,
         registry=runtime.registry,
         probes=probes,
+        background_model=runtime.config.models.background_jobs_model,
     )
     bindings = bindings_from(
         runtime.manifests,
@@ -461,6 +464,7 @@ def _launch_jobs(
         sandboxes=runtime.sandboxes,
         registry=runtime.registry,
         probes=probes,
+        background_model=runtime.config.models.background_jobs_model,
     ).launch()
 
 

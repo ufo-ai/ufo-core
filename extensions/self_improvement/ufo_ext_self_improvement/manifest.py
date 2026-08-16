@@ -2,7 +2,12 @@
 
 The cron is a scheduled job (batch-at-interval), so it fires on the clock — never on the proposals
 or store writes it makes. Its handler runs proposer, replay, and grader legs through the scoped
-context's workspace-keyed, metered model access."""
+context's workspace-keyed, metered model access.
+
+The job declares `needs_deploy_model`, so those legs keep the deploy default rather than the cheaper
+background-jobs model: a replay re-sends a whole archived transcript as one request, and that
+transcript was compacted against the deploy default's context window and is bounded by nothing
+else."""
 
 from ufo.sdk.context import ExtensionContext, trajectory_workspaces
 from ufo.sdk.jobs import JobSpec
@@ -39,6 +44,7 @@ def manifest() -> Manifest:
                 schedule=EVAL_SCHEDULE,
                 handler=_tick,
                 candidates=trajectory_workspaces(),
+                needs_deploy_model=True,
             ),
         ),
     )

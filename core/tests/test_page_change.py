@@ -165,6 +165,42 @@ async def test_runner_wires_the_model_into_the_off_turn_context(db: None, tmp_pa
     assert record["model_wired"] is True
 
 
+async def test_a_page_change_consumer_runs_on_the_background_jobs_model(
+    db: None, tmp_path: object
+) -> None:
+    """The fact deriver's distillation pass is a page_change consumer, so its one metered call is a
+    background job's call: the runner hands it the deploy registry with its default replaced by the
+    background-jobs model, and leaves the deploy registry a member turn resolves through alone."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _seed_page(blob, workspace_id, "a page for the background model")
+    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5")
+    seen: list[str] = []
+
+    async def _record_model(ctx: HookContext) -> HookOutcome:
+        assert ctx.ext.model is not None
+        seen.append(ctx.ext.model.model)
+        return None
+
+    runner = PageChangeRunner(
+        manifests=(
+            Manifest(
+                name="deriver_ext",
+                version="0",
+                hooks=(HookSpec(event="page_change", handler=_record_model),),
+            ),
+        ),
+        pages=CorePageFeed(blob=blob),
+        registry=registry,
+        background_model="gpt-5.6-luna",
+    )
+    with ws(workspace_id):
+        await _drive_all(runner)
+
+    assert seen == ["gpt-5.6-luna"]
+    assert registry.auto_model == "claude-opus-5"
+
+
 async def _raise(ctx: HookContext) -> HookOutcome:
     raise RuntimeError("page_change consumer exploded")
 

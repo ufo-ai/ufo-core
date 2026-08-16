@@ -176,8 +176,8 @@ class AnthropicClient:
                 "stream": True,
                 "cache_control": breakpoint_cache,
             }
-            effort = self.spec.default_reasoning(request.reasoning, request.tools)
-            if effort != "off":
+            effort = self.spec.wire_reasoning(request.reasoning, request.tools)
+            if effort not in (None, "off"):
                 create_kwargs["thinking"] = {"type": "adaptive"}
                 if effort != "auto":
                     create_kwargs["output_config"] = {"effort": effort}

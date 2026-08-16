@@ -227,6 +227,13 @@ def test_manifest_declares_only_the_scheduled_eval_cron() -> None:
     assert found.credentials == ()
 
 
+def test_the_eval_cron_keeps_the_deploy_model_for_its_replay_legs() -> None:
+    """A replay re-sends a whole archived transcript as one request, and that transcript was
+    compacted against the deploy default's context window — nothing bounds it again. So this job
+    declares `needs_deploy_model` and stays off the cheaper background-jobs model."""
+    assert si.manifest().jobs[0].needs_deploy_model is True
+
+
 async def test_eval_cron_fails_without_model_access(tmp_path) -> None:
     job = si.manifest().jobs[0]
     with pytest.raises(RuntimeError, match="requires model access"):

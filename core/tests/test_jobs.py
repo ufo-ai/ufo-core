@@ -15,6 +15,8 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore
 from ufo.ext.manifest import JobSpec
 from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
+from ufo.models.catalog import CORE_PRICING
+from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
 from ufo.workspace import ws, ws_current
 
@@ -129,6 +131,62 @@ async def test_fire_logs_the_exact_failed_job_and_reraises(
         "job": key,
         "error_class": "TimeoutError",
     }
+
+
+async def test_a_job_runs_its_own_model_calls_on_the_background_jobs_model(db: None) -> None:
+    """A job's `ctx.model` is the deploy registry with its default replaced by the background-jobs
+    model, so the one-shot a handler runs — fact extraction, consolidation, a chat title — calls and
+    bills the cheap model. The deploy registry the runner holds is left as it is: a member turn
+    resolves `auto` through it and keeps `auto_model`."""
+    workspace_id = await _workspace()
+    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5")
+    seen: list[str] = []
+
+    async def _record_model(context: ExtensionContext) -> None:
+        assert context.model is not None
+        seen.append(context.model.model)
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(
+        name="titles", schedule="* * * * * *", handler=_record_model, candidates=_candidate
+    )
+    runner = JobRunner(
+        bindings=bindings_from((), (spec,)), registry=registry, background_model="gpt-5.6-luna"
+    )
+    await runner.fire(f"{CORE_EXTENSION}:titles", workspace_id)
+    assert seen == ["gpt-5.6-luna"]
+    assert registry.auto_model == "claude-opus-5"
+
+
+async def test_a_job_that_needs_the_deploy_model_keeps_it(db: None) -> None:
+    """One call site does not fit the cheap model: a self-improvement replay re-sends a whole
+    archived transcript, compacted against the deploy default's context window and bounded by
+    nothing else. Such a job declares `needs_deploy_model` and its seam stays on `auto_model`."""
+    workspace_id = await _workspace()
+    registry = ModelRegistry(specs={}, pricing=CORE_PRICING, auto_model="claude-opus-5")
+    seen: list[str] = []
+
+    async def _record_model(context: ExtensionContext) -> None:
+        assert context.model is not None
+        seen.append(context.model.model)
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(
+        name="replay",
+        schedule="* * * * * *",
+        handler=_record_model,
+        candidates=_candidate,
+        needs_deploy_model=True,
+    )
+    runner = JobRunner(
+        bindings=bindings_from((), (spec,)), registry=registry, background_model="gpt-5.6-luna"
+    )
+    await runner.fire(f"{CORE_EXTENSION}:replay", workspace_id)
+    assert seen == ["claude-opus-5"]
 
 
 async def test_recurring_core_job_registers_at_boot_and_fires(

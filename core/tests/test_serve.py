@@ -17,7 +17,13 @@ import ufo.db
 from ufo import serve
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore, S3BlobStore
-from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
+from ufo.config import (
+    DEFAULT_BACKGROUND_JOBS_MODEL,
+    BlobConfig,
+    Config,
+    DatabaseConfig,
+    SandboxConfig,
+)
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
@@ -201,6 +207,50 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["jobs"]["registry"] is registry
     assert captured["launched"] is True
     assert captured["page"]["probes"] is captured["jobs"]["probes"]
+
+
+def test_launch_jobs_hands_both_runners_the_background_jobs_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both jobs runners carry the configured background-jobs model, so a handler's own metered
+    call runs on it — the boot registry stays the deploy default a member turn resolves through."""
+    registry = object()
+    captured: dict[str, object] = {}
+    runtime = SimpleNamespace(
+        config=_local_config(),
+        manifests=(Manifest(name="jobs", version="1"),),
+        dbos=object(),
+        index=object(),
+        embed=object(),
+        blob=object(),
+        registry=registry,
+        sandboxes=object(),
+        subagents=object(),
+        run_tokens=RunTokenCodec(b"launch-jobs-test-secret"),
+        credentials=None,
+    )
+
+    class Runner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["jobs"] = kwargs
+
+        def launch(self) -> None:
+            return None
+
+    def page_change_runner(**kwargs: object) -> object:
+        captured["page"] = kwargs
+        return object()
+
+    monkeypatch.setattr(serve, "PageChangeRunner", page_change_runner)
+    monkeypatch.setattr(serve, "core_jobs", lambda *args: ())
+    monkeypatch.setattr(serve, "bindings_from", lambda *args: ("bindings",))
+    monkeypatch.setattr(serve, "JobRunner", Runner)
+
+    serve._launch_jobs(runtime, object(), object(), object())
+
+    assert captured["page"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
+    assert captured["jobs"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
+    assert captured["jobs"]["registry"] is registry
 
 
 async def test_serve_lifespan_waits_for_background_shutdown(

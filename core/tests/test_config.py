@@ -180,6 +180,34 @@ def test_auto_model_rejects_the_auto_sentinel(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_background_jobs_model_defaults_to_the_cheap_one_shot_model(tmp_path: Path) -> None:
+    """A background job is one bounded one-shot over a payload nothing re-reads, so it reads no
+    cache and pays full price on every token. The default names the cheap model rather than the
+    model a member's turn runs on — which stays `auto_model`, untouched by this knob."""
+    path = tmp_path / "ufo.toml"
+    path.write_text(VALID)
+    config = load_config(path)
+    assert config.models.background_jobs_model == "gpt-5.6-luna"
+    assert config.models.auto_model == "claude-opus-5"
+
+
+def test_background_jobs_model_parse(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    path.write_text(VALID + '\n[models]\nbackground_jobs_model = "claude-haiku-4-5"\n')
+    config = load_config(path)
+    assert config.models.background_jobs_model == "claude-haiku-4-5"
+
+
+def test_background_jobs_model_rejects_the_auto_sentinel_and_the_empty_value(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "ufo.toml"
+    for rejected in ("auto", ""):
+        path.write_text(VALID + f'\n[models]\nbackground_jobs_model = "{rejected}"\n')
+        with pytest.raises(ValidationError):
+            load_config(path)
+
+
 def test_ingress_public_url_must_be_a_full_https_base(tmp_path: Path) -> None:
     """Every site's address is built by putting a label in front of this host, so a bare hostname or
     a path-only value would mint links to nowhere. `http` is refused for a reason of its own: the

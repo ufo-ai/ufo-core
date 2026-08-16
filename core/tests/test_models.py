@@ -13,7 +13,13 @@ from anthropic.types.raw_message_delta_event import Delta
 from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
-from ufo.config import BlobConfig, Config, DatabaseConfig, ModelsConfig
+from ufo.config import (
+    DEFAULT_BACKGROUND_JOBS_MODEL,
+    BlobConfig,
+    Config,
+    DatabaseConfig,
+    ModelsConfig,
+)
 from ufo.credentials import CredentialValueInvalid
 from ufo.ext.manifest import Manifest
 from ufo.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
@@ -1322,7 +1328,10 @@ async def test_openai_default_request_omits_reasoning_effort() -> None:
     assert "reasoning_effort" not in create.kwargs
 
 
-async def test_openai_reasoning_off_omits_reasoning_effort() -> None:
+async def test_openai_reasoning_off_pins_reasoning_effort_none() -> None:
+    """An absent `reasoning_effort` is the provider's own default effort, so `off` has to say
+    `none`: max_tokens is reasoning-inclusive, and a caller that budgeted for the answer alone gets
+    none of it back once the model reasons."""
     create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
     async for _ in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(
         REQUEST.model_copy(update={"reasoning": "medium"})
@@ -1334,7 +1343,7 @@ async def test_openai_reasoning_off_omits_reasoning_effort() -> None:
         REQUEST.model_copy(update={"reasoning": "off"})
     ):
         pass
-    assert "reasoning_effort" not in off.kwargs
+    assert off.kwargs["reasoning_effort"] == "none"
 
 
 def _config(tmp_path: Path, models: ModelsConfig | None = None) -> Config:
@@ -1378,6 +1387,31 @@ def test_registry_rejects_an_auto_model_no_spec_describes(tmp_path: Path) -> Non
     naming no registered spec is a boot failure — not one mid-turn failure per workspace."""
     with pytest.raises(ValueError, match=r"models\.auto_model 'claude-opus-6' is not a registered"):
         model_registry(_config(tmp_path, ModelsConfig(auto_model="claude-opus-6")), ())
+
+
+def test_registry_rejects_a_background_jobs_model_no_spec_describes(tmp_path: Path) -> None:
+    """Every background job's own model call resolves through `background_jobs_model`, so a knob
+    naming no registered spec is a boot failure — not one failed job per workspace per tick."""
+    with pytest.raises(
+        ValueError, match=r"models\.background_jobs_model 'gpt-5.6-sol' is not a registered"
+    ):
+        model_registry(_config(tmp_path, ModelsConfig(background_jobs_model="gpt-5.6-sol")), ())
+
+
+def test_registry_registers_the_default_background_jobs_model_with_tool_use(tmp_path: Path) -> None:
+    """The jobs seam's default has to serve every job call site: a forced-tool extraction pass, a
+    tool-aware replay, and three text one-shots. Reasoning composes with tools on its surface, so no
+    call site loses a capability by moving to it."""
+    registry = model_registry(_config(tmp_path), ())
+    spec = registry.spec(DEFAULT_BACKGROUND_JOBS_MODEL)
+    assert spec.provider == "openai"
+    assert spec.api_surface == "responses"
+    assert spec.reasoning.supported
+    assert spec.reasoning.tools_with_reasoning
+    tools = (ToolSchema(name="record", description="d", input_schema={"type": "object"}),)
+    assert spec.wire_reasoning("low", tools) == "low"
+    assert spec.wire_reasoning("off", tools) == "off"
+    assert spec.context_window == 272_000
 
 
 def test_registry_rejects_two_specs_for_one_id(tmp_path: Path) -> None:
@@ -1446,13 +1480,13 @@ def test_responses_request_carries_tools_and_reasoning_together() -> None:
             "tools": (ToolSchema(name="t", description="d", input_schema={"type": "object"}),),
         }
     )
-    kwargs = responses_request(request)
+    kwargs = responses_request(request, "high")
     assert kwargs["reasoning"] == {"effort": "high"}
     assert [tool["name"] for tool in kwargs["tools"]] == ["t"]
 
 
-def test_responses_request_auto_omits_reasoning() -> None:
-    kwargs = responses_request(REQUEST.model_copy(update={"model": "gpt-5.6-terra"}))
+def test_responses_request_omits_reasoning_without_an_effort() -> None:
+    kwargs = responses_request(REQUEST.model_copy(update={"model": "gpt-5.6-terra"}), None)
     assert "reasoning" not in kwargs
 
 

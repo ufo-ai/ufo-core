@@ -106,12 +106,19 @@ class JobSpec:
     never runs unbound and never fans the fleet itself. It is required and has no fleet-wide value:
     an extension declares it through `owner_candidates` (a per-tick builder of a select over its
     own tables projecting distinct `workspace_id`, run for it under the one RLS-bypass read), so a
-    job that would fire across every workspace regardless of work cannot be expressed."""
+    job that would fire across every workspace regardless of work cannot be expressed.
+
+    `needs_deploy_model` keeps this job's `ctx.model` on `models.auto_model` rather than the cheaper
+    `models.background_jobs_model` every other job's seam resolves through. A job declares it when
+    one of its calls carries a payload only the deploy default's context window holds — a whole
+    archived transcript, say, which was compacted against that window and which nothing bounds
+    again."""
 
     name: str
     schedule: str | None
     handler: Callable[[ExtensionContext], Awaitable[None]]
     candidates: WorkspaceCandidates
+    needs_deploy_model: bool = False
 
 
 @dataclass(frozen=True)

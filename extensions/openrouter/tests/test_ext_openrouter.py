@@ -161,13 +161,15 @@ async def test_reasoning_effort_rides_from_the_request() -> None:
     assert create.calls[0]["extra_body"] == {"reasoning": {"effort": "low"}}
 
 
-async def test_reasoning_off_omits_the_reasoning_budget() -> None:
+async def test_reasoning_off_disables_the_reasoning_budget() -> None:
+    """An omitted budget leaves the upstream model reasoning at its own default effort, and
+    max_tokens is reasoning-inclusive, so `off` says so on the wire."""
     create = ScriptedCreate(
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
     )
     async for _ in _client(create).complete(REQUEST.model_copy(update={"reasoning": "off"})):
         pass
-    assert create.calls[0]["extra_body"] == {}
+    assert create.calls[0]["extra_body"] == {"reasoning": {"enabled": False}}
 
 
 async def test_model_without_reasoning_omits_the_reasoning_budget() -> None:

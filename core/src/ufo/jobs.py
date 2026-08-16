@@ -19,7 +19,7 @@ per candidate workspace, milliseconds — so a tick never waits behind a slow jo
 slot."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -312,8 +312,8 @@ class PageChangeRunner:
     (`{PAGE_CHANGE_CURSOR_KEY}:{discriminator}`), so two hooks in one extension keep independent
     cursors and a restart resumes each exactly where it left off; the handlers stay idempotent, so a
     replayed batch settles on the same state. Each handler runs with the extension's scoped
-    ExtensionContext built the jobs way — the model wired — so a consumer like the fact deriver's
-    distillation pass reaches ctx.model. A
+    ExtensionContext built the jobs way — the model wired, on `background_model` — so a consumer
+    like the fact deriver's distillation pass reaches ctx.model. A
     handler that raises propagates out of `drive` (failing that one workflow) before its cursor
     advances, so the tick makes no progress and the next tick retries from the same place.
     Batch-at-interval and fed only by the source pipeline, so it can never fire on the derived rows
@@ -337,6 +337,7 @@ class PageChangeRunner:
     sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
     probes: ConversationProbes | None = None
+    background_model: str | None = None
 
     def consumers(self) -> tuple[PageChangeConsumer, ...]:
         consumers: list[PageChangeConsumer] = []
@@ -472,9 +473,23 @@ class PageChangeRunner:
             self.blob,
             self.sandboxes,
             invoker,
-            self.registry,
+            _background_registry(self.registry, self.background_model),
             probes=self.probes,
         )
+
+
+def _background_registry(
+    registry: ModelRegistry | None, background_model: str | None
+) -> ModelRegistry | None:
+    """The registry a job's model seam resolves through: the deploy's own, with its default replaced
+    by the configured background-jobs model — the same replacement core makes for the ambient-reply
+    gate, and for the same reason. A job is one bounded one-shot over a payload nothing re-reads, so
+    it reads no cache and pays full price per token; a member turn keeps the deploy default. The
+    price table and every spec stay whole, so the model called is the model priced. No background
+    model configured leaves the registry as it is."""
+    if registry is None or background_model is None:
+        return registry
+    return replace(registry, auto_model=background_model)
 
 
 def core_jobs(
@@ -600,7 +615,10 @@ class JobRunner:
     handler scoped to it. There is no branch that runs a handler outside a bound workspace — an
     empty candidate set enqueues zero executions, and every core and extension job rides the
     identical fan-and-bind, so an unbound handler call cannot exist. On a per-tenant deploy the
-    candidate read resolves to the single workspace, unchanged."""
+    candidate read resolves to the single workspace, unchanged.
+
+    A handler's `ctx.model` runs on `background_model`, the deploy's background-jobs model — except
+    for a job that declares `needs_deploy_model`, which keeps `auto_model`."""
 
     bindings: tuple[_Binding, ...]
     invoker_factory: InvokerFactory | None = None
@@ -611,6 +629,7 @@ class JobRunner:
     sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
     probes: ConversationProbes | None = None
+    background_model: str | None = None
 
     def launch(self) -> None:
         global _firing
@@ -680,7 +699,9 @@ class JobRunner:
                 self.blob,
                 self.sandboxes,
                 invoker,
-                self.registry,
+                self.registry
+                if binding.spec.needs_deploy_model
+                else _background_registry(self.registry, self.background_model),
                 probes=self.probes,
                 member_context_read=binding.member_context_read,
                 member_context_blob=self.blob,

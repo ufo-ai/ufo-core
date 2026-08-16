@@ -127,9 +127,11 @@ class ModelRequest(BaseModel):
     param. `max_tokens` is reasoning-inclusive: thinking draws from it, so the visible answer gets
     what thinking leaves. `auto` sends Anthropic's adaptive thinking with no effort parameter, so
     the model calibrates depth per request; the OpenAI-wire clients have no such mode, so there
-    `auto` renders as the same parameter-free request `off` does — the provider's own default.
-    `off` omits the thinking parameters entirely. `tool_choice` compels the named tool as the
-    round's single act — it must name an offered tool, and the request runs with reasoning off
+    `auto` is the parameter-free request the provider answers at its own default. `off` switches
+    reasoning off, which each wire says in its own shape: Anthropic omits the thinking parameters,
+    the OpenAI wire sends effort `none` and OpenRouter `enabled: false` — a wire that reads an
+    absent parameter as its default effort has to state it. `tool_choice` compels the named tool as
+    the round's single act — it must name an offered tool, and the request runs with reasoning off
     (Anthropic rejects a forced tool choice under extended thinking). `prompt_cache_ttl` is how long
     the breakpoints this request writes stay warm; a client whose provider caches on its own (the
     OpenAI-wire clients) ignores it."""

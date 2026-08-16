@@ -75,14 +75,15 @@ class ModelSpec:
             f"{self.key_slot!r} BYOK slot holds a key {self.provider} does not accept. Replace it."
         )
 
-    def default_reasoning(
+    def wire_reasoning(
         self, requested: ReasoningEffort, tools: tuple[ToolSchema, ...]
-    ) -> ReasoningEffort:
-        """The reasoning effort actually sent: the requested effort when the model supports
-        reasoning and its api surface composes reasoning with this request's tools, forced `off`
-        otherwise."""
+    ) -> ReasoningEffort | None:
+        """The reasoning setting this request carries, or None when it carries no setting at all:
+        the model does not reason, or its api surface refuses reasoning alongside this request's
+        tools. `off` is a setting the request states, never the absence of one — a wire that reads
+        an absent parameter as the provider's own default effort cannot say `off` by omission."""
         if not self.reasoning.supported:
-            return "off"
+            return None
         if tools and not self.reasoning.tools_with_reasoning:
-            return "off"
+            return None
         return requested

@@ -289,7 +289,9 @@ class OpenRouterModelClient:
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
     provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
     nudge. The request's `reasoning` effort rides `extra_body` as the thinking budget OpenRouter
-    derives from max_tokens when the model's spec supports it; `off` omits it."""
+    derives from max_tokens when the model's spec supports it; `off` rides there too, as
+    `enabled: false`, because an omitted parameter leaves the upstream model reasoning at its own
+    default effort through a reasoning-inclusive budget."""
 
     client: openai.AsyncOpenAI
     spec: ModelSpec
@@ -399,8 +401,10 @@ class OpenRouterModelClient:
         self, request: ModelRequest, ignore_providers: frozenset[str]
     ) -> dict[str, Any]:
         extra_body: dict[str, Any] = {}
-        effort = self.spec.default_reasoning(request.reasoning, request.tools)
-        if effort not in ("off", "auto"):
+        effort = self.spec.wire_reasoning(request.reasoning, request.tools)
+        if effort == "off":
+            extra_body["reasoning"] = {"enabled": False}
+        elif effort not in (None, "auto"):
             extra_body["reasoning"] = {"effort": effort}
         if ignore_providers:
             extra_body["provider"] = {"ignore": sorted(ignore_providers)}

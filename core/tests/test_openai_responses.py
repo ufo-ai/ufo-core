@@ -435,7 +435,7 @@ def test_responses_request_preserves_input_controls_and_disables_storage() -> No
             ),
         ),
     )
-    kwargs = responses_request(request)
+    kwargs = responses_request(request, None)
     assert kwargs["instructions"] == "be terse"
     assert kwargs["store"] is False
     assert kwargs["include"] == ["reasoning.encrypted_content"]
@@ -627,9 +627,57 @@ async def test_responses_path_persistent_empty_degrades_to_usage() -> None:
     ]
 
 
-async def test_responses_path_omits_reasoning_when_the_model_does_not_support_it() -> None:
+async def test_responses_path_pins_effort_none_when_the_request_asks_off() -> None:
+    """`off` reaches the wire as effort `none`. An omitted parameter is the provider's own default
+    effort, and `max_output_tokens` is reasoning-inclusive, so a caller that budgeted 100 tokens for
+    a chat title would spend all of them on reasoning and truncate before a word of it."""
     seen: dict[str, Any] = {}
     scripted = ScriptedResponses((_completed_events(), None))
+
+    class Capturing:
+        async def create(self, **kwargs: Any) -> AsyncIterator[object]:
+            seen.update(kwargs)
+            return await scripted.create(**kwargs)
+
+    client = OpenAIClient(
+        client=cast(openai.AsyncOpenAI, SimpleNamespace(responses=Capturing())),
+        spec=RESPONSES_SPEC,
+    )
+    request = _request().model_copy(update={"reasoning": "off", "max_tokens": 100})
+    [event async for event in client.complete(request)]
+    assert seen["reasoning"] == {"effort": "none"}
+    assert seen["max_output_tokens"] == 100
+
+
+async def test_responses_path_forced_tool_choice_carries_effort_none() -> None:
+    """A forced tool choice runs with reasoning off by construction, so the one round it compels
+    spends its whole budget on the call it was forced to make."""
+    seen: dict[str, Any] = {}
+    scripted = ScriptedResponses((_completed_events(), None))
+
+    class Capturing:
+        async def create(self, **kwargs: Any) -> AsyncIterator[object]:
+            seen.update(kwargs)
+            return await scripted.create(**kwargs)
+
+    client = OpenAIClient(
+        client=cast(openai.AsyncOpenAI, SimpleNamespace(responses=Capturing())),
+        spec=RESPONSES_SPEC,
+    )
+    tool = ToolSchema(name="finish", description="finish", input_schema={"type": "object"})
+    request = _request().model_copy(
+        update={"tools": (tool,), "tool_choice": "finish", "reasoning": "off"}
+    )
+    [event async for event in client.complete(request)]
+    assert seen["reasoning"] == {"effort": "none"}
+    assert seen["tool_choice"] == {"type": "function", "name": "finish"}
+
+
+async def test_responses_path_omits_reasoning_when_the_model_does_not_support_it() -> None:
+    """A model that does not reason takes no reasoning parameter, for `off` as much as for `high`:
+    there is nothing to switch off, and `none` is a value its api does not know."""
+    seen: dict[str, Any] = {}
+    scripted = ScriptedResponses((_completed_events(), None), (_completed_events(), None))
 
     class Capturing:
         async def create(self, **kwargs: Any) -> AsyncIterator[object]:
@@ -644,6 +692,9 @@ async def test_responses_path_omits_reasoning_when_the_model_does_not_support_it
     )
     request = _request().model_copy(update={"reasoning": "high"})
     [event async for event in client.complete(request)]
+    assert "reasoning" not in seen
+    seen.clear()
+    [event async for event in client.complete(request.model_copy(update={"reasoning": "off"}))]
     assert "reasoning" not in seen
 
 
@@ -673,3 +724,24 @@ async def test_responses_path_omits_reasoning_when_tools_forbid_the_pair() -> No
     [event async for event in client.complete(request)]
     assert "tools" in seen
     assert "reasoning" not in seen
+
+
+async def test_responses_path_refuses_an_off_request_no_reasoning_parameter_can_state() -> None:
+    """A model that reasons but refuses the parameter alongside tools cannot be told to stop, so the
+    request fails loud instead of running at the provider's default effort on a budget sized for the
+    answer alone."""
+    scripted = ScriptedResponses((_completed_events(), None))
+    spec = replace(
+        RESPONSES_SPEC,
+        reasoning=ReasoningSupport(supported=True, tools_with_reasoning=False),
+    )
+    client = OpenAIClient(
+        client=cast(openai.AsyncOpenAI, SimpleNamespace(responses=scripted)), spec=spec
+    )
+    tool = ToolSchema(name="finish", description="finish", input_schema={"type": "object"})
+    request = _request().model_copy(
+        update={"tools": (tool,), "tool_choice": "finish", "reasoning": "off"}
+    )
+    with pytest.raises(RuntimeError, match="cannot switch its reasoning off"):
+        [event async for event in client.complete(request)]
+    assert scripted.calls == 0

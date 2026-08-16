@@ -44,6 +44,7 @@ from openai.types.responses.response_input_param import FunctionCallOutput, Resp
 from openai.types.responses.response_input_text_content_param import ResponseInputTextContentParam
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
 from openai.types.responses.response_reasoning_item_param import Summary as ReasoningSummaryParam
+from openai.types.shared.reasoning_effort import ReasoningEffort as OpenAIEffort
 
 from ufo.models.interface import (
     ImageBlock,
@@ -82,6 +83,7 @@ STREAM_TRANSPORT_ERRORS = (
 )
 STREAM_STATUS_ERRORS = (openai.APIStatusError,)
 REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
+REASONING_OFF_EFFORT: OpenAIEffort = "none"
 
 
 def openai_sdk_client(api_key: str, base_url: str | None = None) -> openai.AsyncOpenAI:
@@ -267,11 +269,12 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
     return items
 
 
-def responses_request(request: ModelRequest) -> dict[str, Any]:
-    """The `/v1/responses` request. `store=False` keeps the conversation ours — nothing is left on
-    the provider between rounds — and `include` is what asks for the encrypted reasoning body that
-    a kept conversation then has to replay: without it a reasoning item comes back as an id the
-    next request cannot resolve, so the pair travels together and neither is conditional."""
+def responses_request(request: ModelRequest, effort: OpenAIEffort) -> dict[str, Any]:
+    """The `/v1/responses` request, carrying the `effort` the client resolved against the model's
+    spec — None sends no reasoning parameter. `store=False` keeps the conversation ours — nothing
+    is left on the provider between rounds — and `include` is what asks for the encrypted reasoning
+    body that a kept conversation then has to replay: without it a reasoning item comes back as an
+    id the next request cannot resolve, so the pair travels together and neither is conditional."""
     kwargs: dict[str, Any] = {
         "model": request.model,
         "instructions": request.system,
@@ -281,8 +284,8 @@ def responses_request(request: ModelRequest) -> dict[str, Any]:
         "store": False,
         "stream": True,
     }
-    if request.reasoning not in ("off", "auto"):
-        kwargs["reasoning"] = {"effort": request.reasoning}
+    if effort is not None:
+        kwargs["reasoning"] = {"effort": effort}
     if request.tools:
         kwargs["tools"] = [
             FunctionToolParam(
@@ -314,6 +317,27 @@ class OpenAIClient:
             return self._complete_responses(request)
         return self._complete_chat(request)
 
+    def _reasoning_effort(self, request: ModelRequest) -> OpenAIEffort:
+        """The effort this request sends, or None to send no reasoning parameter at all — a model
+        that does not reason has nothing to set. `off` is sent as `none`, because on this wire an
+        absent parameter is the provider's own default effort: a request that omitted it would
+        reason through a `max_tokens` budget the caller sized for the answer alone. A model that
+        reasons but whose surface refuses the parameter alongside tools cannot state `off`, so such
+        a request raises rather than running at that default."""
+        effort = self.spec.wire_reasoning(request.reasoning, request.tools)
+        if effort is None:
+            if request.reasoning == "off" and self.spec.reasoning.supported:
+                raise RuntimeError(
+                    f"model {self.spec.id!r} reasons and refuses a reasoning parameter alongside "
+                    "tools, so a request carrying tools cannot switch its reasoning off"
+                )
+            return None
+        if effort == "auto":
+            return None
+        if effort == "off":
+            return REASONING_OFF_EFFORT
+        return effort
+
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         create_kwargs: dict[str, Any] = {
             "model": request.model,
@@ -322,8 +346,8 @@ class OpenAIClient:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        effort = self.spec.default_reasoning(request.reasoning, request.tools)
-        if effort not in ("off", "auto"):
+        effort = self._reasoning_effort(request)
+        if effort is not None:
             create_kwargs["reasoning_effort"] = effort
         if request.tools:
             create_kwargs["tools"] = [
@@ -507,7 +531,7 @@ class OpenAIClient:
         `api_surface="responses"` — same retry, truncation, refusal, and empty-completion contract,
         translated to the Responses streaming events. Reasoning is gated by the spec exactly as the
         chat path is: an unsupported reasoning or reasoning-with-tools combination never emits the
-        thinking parameters.
+        reasoning parameter, and a request that asks for `off` states it as effort `none`.
 
         The round's reasoning items are collected whole off their done events — the event that
         carries the encrypted body, which the added event does not — and yielded once the stream
@@ -517,8 +541,7 @@ class OpenAIClient:
         return. Held until the stream closes because reasoning is not live output and a re-issued
         attempt must not deliver the abandoned attempt's items, and reasoning alone never counts as
         having yielded: an answerless round stays an empty completion and is retried."""
-        effort = self.spec.default_reasoning(request.reasoning, request.tools)
-        request = request.model_copy(update={"reasoning": effort})
+        effort = self._reasoning_effort(request)
         delay = INITIAL_RETRY_DELAY_SECONDS
         attempt = 0
         empty_attempt = 0
@@ -529,7 +552,7 @@ class OpenAIClient:
             reasoning: list[ReasoningItemBlock] = []
             usage: Usage | None = None
             try:
-                stream = await self.client.responses.create(**responses_request(request))
+                stream = await self.client.responses.create(**responses_request(request, effort))
                 stream_started = False
                 async for event in stream:
                     if not stream_started:
