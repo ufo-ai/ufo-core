@@ -7,12 +7,14 @@ participant pulled into a thread. Admission cannot tell a reply that asks someth
 from two members talking to each other — that needs a model — so an un-addressed reply goes to the
 ambient reply decision (`ambient_reply_wanted`), carrying the thread's recent messages, before any
 turn exists: a message the agent is not wanted in founds none, and the member sees nothing rather
-than filler. Every admitted channel turn carries a bounded digest of ambient context fetched from
-Slack at admit time — the thread's earlier un-addressed messages when mentioned mid-thread, the
-channel's recent messages when starting a fresh thread, and thereafter the replies since the last
-turn that founded none of their own, which no transcript holds. A first-time DM speaker resolves by
-Slack-confirmed email: an existing member links, and a same-domain teammate joins as a new member —
-only the initial member onboards through the CLI.
+than filler. That decision only ever gates the founding of a turn: a seated member's reply that the
+thread's running turn absorbs founds none, so it skips the decision and is admitted. Every admitted
+channel turn carries a bounded digest of ambient context fetched from Slack at admit time — the
+thread's earlier un-addressed messages when mentioned mid-thread, the channel's recent messages when
+starting a fresh thread, and thereafter the replies since the last turn that founded none of their
+own, which no transcript holds. A first-time DM speaker resolves by Slack-confirmed email: an
+existing member links, and a same-domain teammate joins as a new member — only the initial member
+onboards through the CLI.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", each tool call's
@@ -121,6 +123,7 @@ from ufo.sdk.hub import (
 )
 from ufo.sdk.manifest import HookContext, HookOutcome
 from ufo.sdk.o11y import log
+from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
     WORKSPACE_WRITE_MAX_BYTES,
@@ -1403,11 +1406,53 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     if inbound is None:
         return JSONResponse({"ok": True, "ignored": True})
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    if inbound.addressed or inbound.files:
+    if inbound.addressed or inbound.files or await _folds_into_live_turn(ctx, bot_token, inbound):
         await _admit_inbound(ctx, bot_token, inbound, identity)
         return JSONResponse({"ok": True})
     _decide_ambient_in_background(ctx, bot_token, inbound, identity)
     return JSONResponse({"ok": True})
+
+
+async def _folds_into_live_turn(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> bool:
+    """Whether this un-addressed message joins a turn already running in its thread, which is the
+    case where the ambient decision is not the surface's to make.
+
+    The decision gates the founding of a new turn and nothing else (`ambient_reply`), and a message
+    that folds into a live turn founds none: a NO_REPLY there drops a correction, or a "stop", that
+    the running turn is the only thing able to act on, and drops it with nothing a member can see.
+    The classifier reads the thread's tail, which holds the agent's own progress posts, so its "the
+    agent's own last message already answers it" rule leans towards silence exactly while a turn
+    runs. So a fold is admitted as it stands, and the skip is logged: the admitted-and-folded path
+    had no counterpart to `slack.ambient_no_reply` at all.
+
+    A message skips the decision only where admission really does fold it: a turn that absorbs the
+    arrival, and a speaker holding a seat. Admission folds nothing for anyone else — an unresolvable
+    speaker and an unseated one each found a turn it refuses, and the refusal is posted into the
+    thread the members are talking in. So everything short of a fold belongs to the decision, whose
+    NO_REPLY leaves the thread silent. The speaker is resolved here and again at admission, as the
+    thread's own messages are read twice over one message."""
+    if inbound.conversation_id is None:
+        return False
+    live = await ctx.absorbing_turn(inbound.conversation_id)
+    if live is None:
+        return False
+    sender = await _slack_user(bot_token, inbound.slack_user_id)
+    speaker = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
+    if speaker is None:
+        return False
+    async with ctx.transaction() as connection:
+        if not await Seats(ctx.workspace_id).admits(connection, speaker):
+            return False
+    channel, _, thread_ts = inbound.queue_key.partition(":")
+    log(
+        "slack.ambient_gate_skipped",
+        channel=channel,
+        thread_ts=thread_ts,
+        ts=inbound.ts,
+        user=inbound.slack_user_id,
+        turn=str(live),
+    )
+    return True
 
 
 async def _admit_inbound(

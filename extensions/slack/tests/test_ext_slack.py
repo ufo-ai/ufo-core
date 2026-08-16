@@ -2016,6 +2016,19 @@ async def _admit_founding_mention(
     assert response.json() == {"ok": True}
 
 
+async def _end_the_live_turn() -> None:
+    """Take the thread's newest turn terminal, the way its own commit does. This is the state every
+    ambient decision is made in: a reply arriving while a turn is live folds into that turn, so it
+    skips the decision by construction and never reaches the classifier."""
+    async with workspace_tx() as connection:
+        live = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).order_by(tables.turn.c.seq.desc()).limit(1)
+            )
+        ).scalar_one()
+    await _finish_turn(live, "took a look")
+
+
 async def _ambient_reply(client, ts: str, root: str, text: str, user: str = "U2") -> dict:
     """Post an un-addressed thread reply and settle the decision it founds. Ingest acks before
     deciding, so the durable outcome is only there to assert once the task behind the ack ran."""
@@ -2052,7 +2065,8 @@ async def test_an_unwanted_thread_reply_founds_no_turn_at_all(
     db: None, tmp_path, monkeypatch, caplog
 ) -> None:
     """The whole point of the decision: two members talking to each other in a thread the agent
-    converses in cost no turn, no queued inbound, and no reply. The event itself is acked before the
+    converses in cost no turn, no queued inbound, and no reply. The thread's own turn has ended,
+    which is the only state the decision is made in at all. The event itself is acked before the
     decision runs — Slack allows three seconds and the decision needs longer — so what says the
     message was dropped is the unchanged conversation, not the response body."""
     caplog.set_level(logging.INFO, logger="ufo")
@@ -2072,6 +2086,7 @@ async def test_an_unwanted_thread_reply_founds_no_turn_at_all(
     )
     async with client:
         await _admit_founding_mention(client, root)
+        await _end_the_live_turn()
         before = await _conversation_load(workspace_id)
         answer = await _ambient_reply(
             client, "1700000120.000300", root, "<@U1> nice, thanks for chasing that"
@@ -2087,11 +2102,12 @@ async def test_an_unwanted_thread_reply_founds_no_turn_at_all(
 async def test_a_wanted_thread_reply_is_admitted_with_the_thread_it_was_decided_on(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """The other half, and what the decision was given: the reply lands on the conversation as
-    usual, and the thread it was decided from carries each message's speaker and marks the agent's
-    own — including the messages this decision may itself have dropped, which is why the thread is
-    read from Slack rather than from the turns. The same range is read twice over the same message:
-    once for the decision, once at admission for the backfill of what earlier decisions dropped."""
+    """The other half, and what the decision was given: the reply lands on the conversation as its
+    own turn — the thread's earlier turn has ended, which is why the decision ran — and the thread
+    it was decided from carries each message's speaker and marks the agent's own, including the
+    messages this decision may itself have dropped, which is why the thread is read from Slack
+    rather than from the turns. The same range is read twice over the same message: once for the
+    decision, once at admission for the backfill of what earlier decisions dropped."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     root = "1700000000.000100"
@@ -2114,11 +2130,12 @@ async def test_a_wanted_thread_reply_is_admitted_with_the_thread_it_was_decided_
         await _admit_founding_mention(
             client, root, "<@UBOT00000> which vendor feed came back empty?"
         )
+        await _end_the_live_turn()
         answer = await _ambient_reply(
             client, "1700000120.000300", root, "how many rows did the other four come back with?"
         )
     assert answer == {"ok": True}
-    assert await _conversation_load(workspace_id) == (1, 1)
+    assert await _conversation_load(workspace_id) == (2, 0)
     [asked] = decision.asked
     assert '"speaker":"U1","own":false' in asked
     assert '"speaker":"UBOT00000","own":true,"text":"star_city did"' in asked
@@ -2143,6 +2160,23 @@ async def _queued_body(workspace_id: UUID, idempotency_key: str) -> str:
                 )
             )
         ).scalar_one()
+
+
+async def _admitted_body(workspace_id: UUID, idempotency_key: str) -> str:
+    """The body one admission stored, whichever shape it took: the turn a message founded, or the
+    queue row it landed as when a turn was already running."""
+    async with workspace_tx() as connection:
+        founded = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.workspace_id == workspace_id,
+                    tables.turn.c.idempotency_key == idempotency_key,
+                )
+            )
+        ).scalar_one_or_none()
+    if founded is not None:
+        return founded
+    return await _queued_body(workspace_id, idempotency_key)
 
 
 async def test_a_mid_thread_turn_reads_the_replies_that_founded_no_turn(
@@ -2198,13 +2232,14 @@ async def test_a_mid_thread_turn_reads_the_replies_that_founded_no_turn(
             EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
         )
         assert founded.json() == {"ok": True}
+        await _end_the_live_turn()
         await _ambient_reply(client, dropped_ts, root, "<@U1> nice, thanks for chasing that")
         posted = await client.post(
             EVENTS_PATH, content=followup, headers=_sign(followup, int(time.time()))
         )
         assert posted.json() == {"ok": True}
-    assert await _conversation_load(workspace_id) == (1, 1)
-    admitted = await _queued_body(workspace_id, f"C1:{followup_ts}")
+    assert await _conversation_load(workspace_id) == (2, 0)
+    admitted = await _admitted_body(workspace_id, f"C1:{followup_ts}")
     mark = _marker(admitted)
     assert admitted == (
         _background(
@@ -2284,12 +2319,13 @@ async def test_the_backfilled_replies_are_fenced_apart_from_the_members_own_word
     )
     async with client:
         await _admit_founding_mention(client, root)
+        await _end_the_live_turn()
         await _ambient_reply(client, dropped_ts, root, pasted)
         posted = await client.post(
             EVENTS_PATH, content=followup, headers=_sign(followup, int(time.time()))
         )
         assert posted.json() == {"ok": True}
-    admitted = await _queued_body(workspace_id, f"C1:{followup_ts}")
+    admitted = await _admitted_body(workspace_id, f"C1:{followup_ts}")
     mark = _marker(admitted)
     background = f"{AMBIENT_CONTEXT_ELEMENT}_{mark}"
     member = f"{MEMBER_MESSAGE_ELEMENT}_{mark}"
@@ -2337,6 +2373,7 @@ async def test_the_decision_reads_the_end_of_a_long_thread_and_not_its_opening(
     )
     async with client:
         await _admit_founding_mention(client, root)
+        await _end_the_live_turn()
         await _ambient_reply(client, "1700001000.000900", root, "nice, thanks for chasing that")
     [asked] = decision.asked
     assert '"speaker":"UBOT00000","own":true,"text":"star_city did"' in asked
@@ -2376,6 +2413,7 @@ async def test_the_event_is_acked_before_the_decision_it_founds(
         await _admit_founding_mention(
             client, root, "<@UBOT00000> which vendor feed came back empty?"
         )
+        await _end_the_live_turn()
         before = await _conversation_load(workspace_id)
         body = _event_body(
             type="message",
@@ -2390,7 +2428,7 @@ async def test_the_event_is_acked_before_the_decision_it_founds(
         assert await _conversation_load(workspace_id) == before
         gate.set()
         await _settle_ambient()
-        assert await _conversation_load(workspace_id) == (before[0], before[1] + 1)
+        assert await _conversation_load(workspace_id) == (before[0] + 1, before[1])
 
 
 async def test_the_decision_is_skipped_where_a_structural_answer_already_holds(
@@ -2439,6 +2477,200 @@ async def test_the_decision_is_skipped_where_a_structural_answer_already_holds(
         for request in _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
         if request.url.params.get("latest") in ("1700000120.000300", "1700000180.000400")
     ] == ["1700000120.000300", "1700000180.000400"]
+
+
+async def test_a_reply_landing_on_a_live_turn_never_reaches_the_decision(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """The decision gates the founding of a turn and nothing else, so a reply that folds into a turn
+    already running skips it: dropping that message would drop a correction, or a "stop", that only
+    the running turn can act on, and drop it with nothing the member can see. The classifier is
+    fixed to NO_REPLY and is never asked — the message lands on the running turn's queue — and the
+    skip is logged, because the folded path had no event of its own at all."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    root = "1700000000.000100"
+    reply_ts = "1700000120.000300"
+    replies = [{"user": "U1", "ts": root, "text": "<@UBOT00000> take a look"}]
+    decision = FixedDecisionModel(decision="NO_REPLY")
+    _, client, _ = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _ambient_transport(recorder, replies=replies),
+        ambient_reply=AmbientReplyClassifier(model=decision),
+    )
+    async with client:
+        await _admit_founding_mention(client, root)
+        answer = await _ambient_reply(client, reply_ts, root, "stop and roll that back")
+    assert answer == {"ok": True}
+    assert await _conversation_load(workspace_id) == (1, 1)
+    assert decision.asked == []
+    assert not [r for r in caplog.records if r.message == "slack.ambient_no_reply"]
+    async with workspace_tx() as connection:
+        live = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    [skipped] = [r for r in caplog.records if r.message == "slack.ambient_gate_skipped"]
+    assert (
+        skipped.ufo["channel"],
+        skipped.ufo["thread_ts"],
+        skipped.ufo["user"],
+        skipped.ufo["turn"],
+    ) == ("C1", root, "U2", str(live))
+
+
+async def _gated_ambient_reply(
+    tmp_path, monkeypatch, workspace_id: UUID, user: str = "U2"
+) -> FixedDecisionModel:
+    """A thread conversing with the agent, then one un-addressed reply while the founding turn is
+    still live. The decision is fixed to NO_REPLY, so what the reply cost the conversation is what
+    says whether the live-turn gate let it past."""
+    recorder: list[httpx.Request] = []
+    root = "1700000000.000100"
+    replies = [{"user": "U1", "ts": root, "text": "<@UBOT00000> take a look"}]
+    decision = FixedDecisionModel(decision="NO_REPLY")
+    _, client, _ = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _ambient_transport(recorder, replies=replies),
+        ambient_reply=AmbientReplyClassifier(model=decision),
+    )
+    async with client:
+        await _admit_founding_mention(client, root)
+        answer = await _ambient_reply(
+            client, "1700000120.000300", root, "<@U1> nice, thanks for chasing that", user=user
+        )
+    assert answer == {"ok": True}
+    return decision
+
+
+async def test_a_reply_from_a_speaker_who_is_no_member_faces_the_decision(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A speaker on the Slack team holding no member row — no email Slack confirms, or one outside
+    the workspace domain — folds into nothing: admission refuses a member surface's message whose
+    speaker never resolved, and founds a cancelled turn whose refusal the poller posts into the
+    thread the two members are talking in. So the gate hands their reply to the decision, whose
+    NO_REPLY leaves the thread as silent as it was before this one was sent."""
+    workspace_id, _ = await _seed()
+    decision = await _gated_ambient_reply(tmp_path, monkeypatch, workspace_id, user="UGUEST")
+    assert len(decision.asked) == 1
+    assert await _conversation_load(workspace_id) == (1, 0)
+
+
+async def test_a_reply_from_an_unseated_speaker_faces_the_decision(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The same for a member whose seat an admin revoked: the seat gate refuses their message ahead
+    of any fold, so nothing of theirs joins the running turn and every reply they send would found
+    a cancelled turn posting the refusal into the thread."""
+    workspace_id, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                email="member2@example.com",
+                seated_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    decision = await _gated_ambient_reply(tmp_path, monkeypatch, workspace_id)
+    assert len(decision.asked) == 1
+    assert await _conversation_load(workspace_id) == (1, 0)
+
+
+async def test_a_reply_onto_a_parked_turn_faces_the_decision(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A parked turn is held rather than running: the balance that parked it refuses the fold too,
+    so each un-addressed reply would found a parked turn of its own and the dispatcher would
+    release the whole backlog of member-to-member chatter once the balance is credited."""
+    workspace_id, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace_balance).values(
+                workspace_id=workspace_id,
+                balance_micro_usd=0,
+                reserve_micro_usd=1_000,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    decision = await _gated_ambient_reply(tmp_path, monkeypatch, workspace_id)
+    assert len(decision.asked) == 1
+    assert await _conversation_load(workspace_id) == (1, 0)
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert status == "parked"
+
+
+async def test_a_reply_onto_a_turn_whose_cap_broke_faces_the_decision(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The turn is still running, and the spend cap it broke while running refuses the fold all the
+    same: the reply would found a turn of its own, cancelled with the cap's message, which the
+    poller posts into the thread. The gate takes the same spend decision admission does, so the
+    reply goes to the decision instead. The cap is set before the founding mention and broken after
+    it, which is how a cap breaks at all — a running turn spends against it."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    root = "1700000000.000100"
+    replies = [{"user": "U1", "ts": root, "text": "<@UBOT00000> take a look"}]
+    decision = FixedDecisionModel(decision="NO_REPLY")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3_600,
+                limit_micro_usd=1_000,
+                on_breach="reject",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    _, client, _ = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _ambient_transport(recorder, replies=replies),
+        ambient_reply=AmbientReplyClassifier(model=decision),
+    )
+    async with client:
+        await _admit_founding_mention(client, root)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.ledger).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    turn_id=None,
+                    dimension="tokens",
+                    amount=5_000,
+                    priced_micro_usd=5_000,
+                    model="claude-opus-4-8",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        answer = await _ambient_reply(
+            client, "1700000120.000300", root, "<@U1> nice, thanks for chasing that"
+        )
+    assert answer == {"ok": True}
+    assert len(decision.asked) == 1
+    assert await _conversation_load(workspace_id) == (1, 0)
 
 
 async def test_a_bare_conversation_row_is_not_participation(

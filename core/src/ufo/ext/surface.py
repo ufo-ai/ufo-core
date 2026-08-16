@@ -50,7 +50,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.accounting import AgentSpendReport, MemberSpendReport, SpendReport, SpendRollup
+from ufo.accounting import (
+    ALLOW,
+    AgentSpendReport,
+    MemberSpendReport,
+    SpendEvaluator,
+    SpendReport,
+    SpendRollup,
+)
 from ufo.agent_scope import agent as bind_agent
 from ufo.agent_setup import AgentSetup, pending_setup
 from ufo.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
@@ -110,6 +117,8 @@ from ufo.sandbox.terminal import TerminalOp
 from ufo.schema import tables
 from ufo.schema.records import (
     MEMBER_ADMISSION,
+    NON_TERMINAL_STATUSES,
+    PARKED,
     SCHEDULED_ADMISSION,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
@@ -1771,6 +1780,43 @@ class SurfaceContext:
                 )
             ).one_or_none()
         return None if row is None else row.id
+
+    async def absorbing_turn(self, conversation_id: UUID) -> UUID | None:
+        """The turn a message admitted to this conversation now would fold into, or None when it
+        would found a turn of its own instead — what a surface asks before running a gate that
+        governs only the founding of a turn.
+
+        Admission takes the same decision again under the conversation lock, so this is a read of
+        the moment and never an authority. It answers the founding cases it must not miss: the
+        conversation's oldest live turn is the one a fold lands on, a parked turn absorbs nothing
+        because it is held rather than running, and the fold carries the same spend decision the
+        arrival is admitted under, so a held balance or a breached cap answers None here exactly as
+        it refuses the fold there."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.status,
+                        tables.turn.c.agent_id,
+                        tables.conversation.c.member_id,
+                    )
+                    .select_from(tables.turn.join(tables.conversation))
+                    .where(
+                        tables.turn.c.workspace_id == self.workspace_id,
+                        tables.turn.c.conversation_id == conversation_id,
+                        tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                    )
+                    .order_by(tables.turn.c.seq)
+                    .limit(1)
+                )
+            ).one_or_none()
+            if row is None or row.status == PARKED:
+                return None
+            decision = await SpendEvaluator(self.workspace_id, row.member_id, row.agent_id).decide(
+                connection, 0
+            )
+        return row.id if decision.outcome == ALLOW else None
 
     def tail(
         self, turn_id: UUID, since: str = ""
