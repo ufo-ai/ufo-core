@@ -354,7 +354,7 @@ jobs:
 
   edge:
     needs: [changes, rollout]
-    if: needs.changes.outputs.deploy == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && needs.rollout.result == 'success' }}
     runs-on: ubuntu-latest
     concurrency:
       group: ${{ github.event_name == 'pull_request' && format('deploy-edge-pr-{0}', github.event.pull_request.number) || 'deploy-edge' }}

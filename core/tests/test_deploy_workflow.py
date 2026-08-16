@@ -944,7 +944,13 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     edge = jobs["edge"]
     assert isinstance(edge, dict)
     assert edge["needs"] == ["changes", "rollout"]
-    assert edge["if"] == "needs.changes.outputs.deploy == 'true'"
+    # `client` skips whenever the client tree already built, and GitHub skips a descendant of a
+    # skipped job unless it opts out. Without `!cancelled()` the edge plan skips on every such run
+    # and the deployment gate, which demands it succeeded, fails the whole deploy.
+    assert edge["if"] == (
+        "${{ !cancelled() && needs.changes.outputs.deploy == 'true' && "
+        "needs.rollout.result == 'success' }}"
+    )
 
     production = jobs["production"]
     assert isinstance(production, dict)
