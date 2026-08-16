@@ -36,8 +36,14 @@ impl Durable {
     pub async fn from_env() -> Self {
         if let Ok(bucket) = std::env::var("UFO_CACHE_S3_BUCKET") {
             let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let mut builder = aws_sdk_s3::config::Builder::from(&cfg);
+            // A custom endpoint (an S3-compatible store, or minio in tests) needs path-style
+            // addressing — its host does not answer the per-bucket virtual hosts real S3 does.
+            if let Ok(endpoint) = std::env::var("UFO_CACHE_S3_ENDPOINT") {
+                builder = builder.endpoint_url(endpoint).force_path_style(true);
+            }
             return Self::S3 {
-                client: aws_sdk_s3::Client::new(&cfg),
+                client: aws_sdk_s3::Client::from_conf(builder.build()),
                 bucket,
             };
         }

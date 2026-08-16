@@ -1,0 +1,48 @@
+name: cache
+
+# The cache daemon (RFC 0032) is a standalone Rust crate outside the client workspace, so it needs
+# its own check. minio backs the one test that exercises the durable tier's real S3 code paths; it
+# runs as a step rather than a service because minio needs a `server` command a service can't set.
+on:
+  push:
+    branches: [main]
+    paths: ["cache/**", ".github/workflows/cache.yml"]
+  pull_request:
+    paths: ["cache/**", ".github/workflows/cache.yml"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cache
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - name: Start minio
+        working-directory: .
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=testkey00 -e MINIO_ROOT_PASSWORD=testsecret \
+            minio/minio:latest server /data
+          for _ in $(seq 30); do
+            curl -sf http://localhost:9000/minio/health/live && exit 0
+            sleep 2
+          done
+          echo "minio did not become ready" >&2
+          docker logs minio
+          exit 1
+      - run: cargo test
+        env:
+          UFO_TEST_S3_ENDPOINT: http://localhost:9000
+          AWS_ACCESS_KEY_ID: testkey00
+          AWS_SECRET_ACCESS_KEY: testsecret
+          AWS_REGION: us-east-1
