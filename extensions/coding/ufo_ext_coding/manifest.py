@@ -1,5 +1,5 @@
-"""The coding subagent pack: a software-engineering child turn over the core code builtins, plus the
-`coding` skill the agent loads on demand.
+"""The coding pack: a software-engineering child turn over the core code builtins, the `coding`
+skill the agent loads on demand, and the `code-review` agent that puts both to work.
 
 `spawn_subagent("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
 tests, and reports a result. The profile names only tool names — bash/read/write/
@@ -10,9 +10,19 @@ parent decides what reaches the member. Core wraps the prompt with the shared ci
 discipline and fills its skill index. The `coding` skill teaches the main agent to route repo work
 to that child.
 
+`code-review` is the durable agent the pack ships. One conversation tracks one pull request: it
+reads the page the source updates, spawns two `coding` children over the same head SHA with
+different focuses, coalesces their findings, and publishes one `ufo review` commit status. It runs
+on the member-facing tool set, because the page it reads and the GitHub connection it publishes
+through both belong to the workspace, not to this pack. It arrives with no grant and no connection
+of its own: a member gives it the GitHub account in chat, which is what its publication calls
+through.
+
 The pack also declares the GitHub credential slots, because repository work includes Git and API
 calls. A workspace that installs the App gets authenticated Git and API access, with short-lived
-installation tokens swapped onto each wire and only sentinels inside the sandbox."""
+installation tokens swapped onto each wire and only sentinels inside the sandbox. That is what
+opens `github.com` for a child's checkout — public internet stays blocked, so the fetch rides the
+slot's own egress rule and never the open wire."""
 
 import os
 from pathlib import Path
@@ -20,6 +30,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import (
+    AgentProvision,
+    AgentSpec,
     CredentialSlot,
     InjectionTarget,
     Manifest,
@@ -57,6 +69,8 @@ CODING_TOOL_NAMES = (
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 100
+CODE_REVIEW_AGENT_NAME = "code-review"
+CODE_REVIEW_PROMPT = (Path(__file__).parent / "prompts" / "agent_code_review.md").read_text()
 
 
 class CodingInput(BaseModel):
@@ -154,12 +168,24 @@ CODING_PROFILE = SubagentProfile(
     max_rounds=CODING_ROUND_LIMIT,
 )
 
+CODE_REVIEW_AGENT = AgentProvision(
+    name=CODE_REVIEW_AGENT_NAME,
+    spec=AgentSpec(
+        prompt=CODE_REVIEW_PROMPT,
+        model="auto",
+        reasoning="high",
+        internet_access_allowed=False,
+        sandbox_size="large",
+    ),
+)
+
 
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
         subagents=(CODING_PROFILE,),
+        agents=(CODE_REVIEW_AGENT,),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
         credentials=(GIT_INSTALLATION, GIT_CREDENTIAL, GITHUB_API_CREDENTIAL),
         tools=(

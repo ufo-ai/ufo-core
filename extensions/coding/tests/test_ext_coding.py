@@ -306,3 +306,62 @@ def test_the_connect_tool_and_its_return_leg_ship_together() -> None:
 
 def test_the_install_url_names_the_published_app() -> None:
     assert connect.INSTALL_URL == ("https://github.com/apps/flyingobject-ai-ufo/installations/new")
+
+
+def test_the_review_agent_spawns_the_profile_this_pack_registers() -> None:
+    """The shipped agent and the child it drives ship together. A prompt naming a profile the pack
+    does not register is a review agent that can never spawn anything."""
+    manifest = coding.manifest()
+    (agent,) = manifest.agents
+    (profile,) = manifest.subagents
+    assert agent.name == coding.CODE_REVIEW_AGENT_NAME
+    assert f"`{profile.name}` subagents" in agent.spec.prompt
+
+
+def test_the_review_agent_runs_the_member_facing_tool_set() -> None:
+    """It reads the pull-request page and publishes through the workspace's GitHub connection, and
+    this pack declares neither. An allowlist here would leave it holding only its own tools."""
+    (agent,) = coding.manifest().agents
+    assert agent.tools is None
+
+
+def test_the_review_agent_is_provisioned_for_two_parallel_children() -> None:
+    """Two `coding` children run at once in the one sandbox the conversation holds, each with its
+    own checkout of the same repository."""
+    (agent,) = coding.manifest().agents
+    assert agent.spec.sandbox_size == "large"
+    assert agent.spec.reasoning == "high"
+    assert "spawn exactly two `coding` subagents" in agent.spec.prompt
+    assert "Do not spawn preparation, synthesis, or adjudication subagents" in agent.spec.prompt
+    assert "Resolve disagreements yourself" in agent.spec.prompt
+    assert "Spawn exactly two `coding` subagents total for each head SHA" in agent.spec.prompt
+
+
+def test_the_review_agent_discards_every_superseded_head() -> None:
+    (agent,) = coding.manifest().agents
+    assert "Any head SHA change cancels both subagents" in agent.spec.prompt
+    assert (
+        "Never reuse a finding from an older head based on patch equivalence" in agent.spec.prompt
+    )
+
+
+def test_the_review_agent_reaches_github_through_the_slot_this_pack_declares() -> None:
+    """Public internet stays blocked, so a child's `git fetch` reaches github.com only through the
+    git slot's own injection rule — which is why the pack that ships the agent is the pack that
+    declares that slot. Opening the public wire instead would give the agent every host."""
+    manifest = coding.manifest()
+    (agent,) = manifest.agents
+    assert agent.spec.internet_access_allowed is False
+    hosts = {slot.injection.host for slot in manifest.credentials if slot.injection is not None}
+    assert coding.GIT_HOST in hosts
+
+
+def test_the_review_agent_publishes_the_status_the_repository_requires() -> None:
+    """`ufo review` is the required check on the pull request, and the head SHA is what it attaches
+    to. A prompt that names either differently publishes a status nothing is waiting for. Findings
+    ride a pull-request review, so each one lands on the changed line it describes rather than in a
+    status description that holds one sentence."""
+    (agent,) = coding.manifest().agents
+    assert "`ufo review`" in agent.spec.prompt
+    assert "/repos/{owner}/{repo}/statuses/{head_sha}" in agent.spec.prompt
+    assert "/repos/{owner}/{repo}/pulls/{pull_number}/reviews" in agent.spec.prompt
