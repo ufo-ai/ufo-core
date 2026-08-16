@@ -409,6 +409,18 @@ def test_responses_input_replays_the_round_reasoning_ahead_of_its_function_calls
     ]
 
 
+def test_responses_request_leaves_retention_to_a_wire_that_refuses_the_none_mode() -> None:
+    request = ModelRequest(
+        model="openai.gpt-5.6-luna",
+        system="be terse",
+        max_tokens=128,
+        messages=(Message(role="user", content=(TextBlock(text="look"),)),),
+    )
+    kwargs = responses_request(request, None, False)
+    assert "store" not in kwargs
+    assert "include" not in kwargs
+
+
 def test_responses_request_preserves_input_controls_and_disables_storage() -> None:
     request = ModelRequest(
         model="gpt-5.6-terra",
@@ -435,7 +447,7 @@ def test_responses_request_preserves_input_controls_and_disables_storage() -> No
             ),
         ),
     )
-    kwargs = responses_request(request, None)
+    kwargs = responses_request(request, None, True)
     assert kwargs["instructions"] == "be terse"
     assert kwargs["store"] is False
     assert kwargs["include"] == ["reasoning.encrypted_content"]

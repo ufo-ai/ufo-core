@@ -1480,13 +1480,13 @@ def test_responses_request_carries_tools_and_reasoning_together() -> None:
             "tools": (ToolSchema(name="t", description="d", input_schema={"type": "object"}),),
         }
     )
-    kwargs = responses_request(request, "high")
+    kwargs = responses_request(request, "high", True)
     assert kwargs["reasoning"] == {"effort": "high"}
     assert [tool["name"] for tool in kwargs["tools"]] == ["t"]
 
 
 def test_responses_request_omits_reasoning_without_an_effort() -> None:
-    kwargs = responses_request(REQUEST.model_copy(update={"model": "gpt-5.6-terra"}), None)
+    kwargs = responses_request(REQUEST.model_copy(update={"model": "gpt-5.6-terra"}), None, True)
     assert "reasoning" not in kwargs
 
 

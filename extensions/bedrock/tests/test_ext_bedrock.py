@@ -31,6 +31,9 @@ def test_manifest_registers_mantle_specs() -> None:
     assert by_id["openai.gpt-5.6-luna"].price.output == 1_200_000
     assert by_id["openai.gpt-5.6-luna"].context_window == 272_000
     assert by_id["openai.gpt-5.6-luna"].knowledge_cutoff == "2026-02"
+    assert by_id["openai.gpt-5.6-luna"].retention_none is False
+    assert by_id["openai.gpt-5.5"].retention_none is False
+    assert by_id["anthropic.claude-opus-5"].retention_none is True
     assert by_id["anthropic.claude-opus-4-8"].knowledge_cutoff == "2026-01"
     assert by_id["anthropic.claude-opus-5"].context_window == 1_000_000
     assert by_id["anthropic.claude-opus-5"].knowledge_cutoff == "2026-05"
