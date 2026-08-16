@@ -95,6 +95,8 @@ spec:
     # Serve trusts the proxy certificate; only the proxy receives the key.
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_platform}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}
+    # The sandbox cache daemon's callback token (RFC 0032); unused until the cache is enabled.
+    - {secretKey: UFO_CACHE_CONTROL_TOKEN, remoteRef: {key: ${secret_platform}, property: ufo-cache-control-token}}
 ---
 # The signup Slack Connect bot token. Its own Secret, read by the ufo-gateway pod through an explicit
 # secretKeyRef — never part of ufo-platform-secrets, so no envFrom can hand it to serve or a sandbox.

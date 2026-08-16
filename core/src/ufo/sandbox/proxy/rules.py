@@ -64,6 +64,16 @@ class InjectionRule:
 
 
 @dataclass(frozen=True)
+class ServiceRule:
+    """`host` is the sandbox cache: admit its CONNECT and relay its TLS-terminated requests to the
+    local cache daemon, which fetches and caches upstream on the sandbox's behalf. Present only for
+    an agent that already holds `InternetRule` — the cache fronts several public hosts at once, so
+    admitting it must never widen an agent's reach beyond the internet it already has."""
+
+    host: str
+
+
+@dataclass(frozen=True)
 class MeterRule:
     """Every request to `host` is metered under `dimension`."""
 
@@ -85,7 +95,7 @@ class ForwardRule:
     forward: RequestForwarder
 
 
-Rule = ScopeRule | InternetRule | InjectionRule | MeterRule | ForwardRule
+Rule = ScopeRule | InternetRule | InjectionRule | MeterRule | ForwardRule | ServiceRule
 
 
 def provider_host(model: str) -> str:

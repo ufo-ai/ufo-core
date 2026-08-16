@@ -34,6 +34,11 @@ def _documents(workload_ha: bool) -> list[dict[str, object]]:
         HOSTED_TEMPLATE.read_text(),
         flags=re.DOTALL,
     )
+    rendered = re.sub(
+        r'(?m)^%\{ (?:if cache_enabled|if cache_s3_bucket != ""|endif) \}\n?',
+        "",
+        rendered,
+    )
     rendered = re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", "value", rendered)
     return list(yaml.safe_load_all(rendered))
 

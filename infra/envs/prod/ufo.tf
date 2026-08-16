@@ -3,6 +3,11 @@
 data "aws_caller_identity" "current" {}
 
 locals {
+  # The sandbox cache (RFC 0032). The ECR repo and the callback secret are provisioned automatically
+  # by apply, and the image builds on the next deploy once the repo exists; flip to true after that to
+  # run the daemon sidecar and route sandbox git through it.
+  cache_enabled = false
+
   # https://www.cloudflare.com/ips-v4 — the edge ranges Cloudflare connects to origins from. The NLB
   # admits only these, so the ingress is unreachable except through Cloudflare's proxy (DDoS/WAF edge).
   cloudflare_ipv4_ranges = [
@@ -123,6 +128,7 @@ locals {
     backend = "e2b"
     proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
     ingress_public_url = "https://${module.platform.hostname}"
+    ${local.cache_enabled ? "cache_daemon = \"127.0.0.1:9110\"" : ""}
 
     [connect]
     public_base_url = "https://${local.shared_host}"
@@ -242,6 +248,12 @@ data "kubectl_file_documents" "hosted" {
 
     region        = var.region
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+
+    # The sandbox cache (RFC 0032). `cache_enabled` gates the daemon sidecar; `cache_s3_bucket` empty
+    # runs it disk-only (cold on every pod roll) until the bucket and the proxy SA's IRSA policy for
+    # it are applied.
+    cache_enabled   = local.cache_enabled
+    cache_s3_bucket = ""
 
     ses_sender           = var.ses_sender
     ses_region           = var.region

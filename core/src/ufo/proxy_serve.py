@@ -24,6 +24,14 @@ from ufo.grants import GrantStore
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
+from ufo.sandbox.cache import (
+    CACHE_CALLBACK_HOST,
+    CACHE_CALLBACK_PORT,
+    CACHE_CONTROL_TOKEN_ENV,
+    CACHE_HOST,
+    parse_cache_daemon,
+)
+from ufo.sandbox.proxy.credential_callback import CredentialCallback
 from ufo.sandbox.proxy.rules import (
     Rule,
     ScopeRule,
@@ -155,6 +163,7 @@ class ProxyServe:
         init_db(self.owner_dsn)
         await verify_db_reachable()
         artifacts = await derive_artifact_store_rules(blob_store_for(self.config.blob))
+        cache_daemon = parse_cache_daemon(self.config.sandbox.cache_daemon)
         resolver = PerAgentRules(
             base=(*model_rule_base(self.config), *artifacts),
             grants=GrantStore(),
@@ -163,6 +172,7 @@ class ProxyServe:
             internet=derive_manifest_rules(self.manifests),
             transfer_hosts=connector_transfer_hosts(self.manifests),
             clis=connector_clis(self.manifests),
+            cache_host=CACHE_HOST if cache_daemon is not None else None,
         )
         proxy = EgressProxy(
             resolve=resolver.resolve,
@@ -171,12 +181,37 @@ class ProxyServe:
             ca_key=self.ca_key,
             run_tokens=RunTokenCodec.from_env(),
             pricing=self.pricing,
+            cache_daemon=cache_daemon,
         )
         await proxy.start(
             port=self.config.sandbox.proxy_port, public_url=self.config.sandbox.proxy_public_url
         )
         log("proxy.listening", port=self.config.sandbox.proxy_port)
+        callback_server = (
+            await self._start_credential_callback() if cache_daemon is not None else None
+        )
         try:
             await self.shutdown.wait()
         finally:
+            if callback_server is not None:
+                callback_server.close()
+                await callback_server.wait_closed()
             await proxy.stop(self.config.serve.graceful_shutdown_seconds)
+
+    async def _start_credential_callback(self) -> asyncio.AbstractServer:
+        """Bind the loopback credential callback the cache daemon phones home to. The shared token
+        gates it; unset when the cache is enabled fails loud, since the daemon would 401 every git
+        request and cache nothing."""
+        token = os.environ.get(CACHE_CONTROL_TOKEN_ENV)
+        if not token:
+            raise RuntimeError(
+                f"{CACHE_CONTROL_TOKEN_ENV} must be set when the sandbox cache is enabled — the "
+                "daemon presents it on every credential callback"
+            )
+        server = await CredentialCallback(
+            credentials=self.credentials,
+            slots=injecting_slots(self.manifests),
+            token=token,
+        ).serve(CACHE_CALLBACK_HOST, CACHE_CALLBACK_PORT)
+        log("proxy.cache_callback_listening", port=CACHE_CALLBACK_PORT)
+        return server

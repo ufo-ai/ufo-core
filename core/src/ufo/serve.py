@@ -120,8 +120,16 @@ from ufo.runtime_instance import (
     Heartbeat,
     record_fleet_seat,
 )
+from ufo.sandbox.cache import (
+    CACHE_CALLBACK_HOST,
+    CACHE_CALLBACK_PORT,
+    CACHE_CONTROL_TOKEN_ENV,
+    CACHE_HOST,
+    parse_cache_daemon,
+)
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import ProbeEnv
+from ufo.sandbox.proxy.credential_callback import CredentialCallback
 from ufo.sandbox.proxy.rules import (
     connector_transfer_hosts,
     derive_artifact_store_rules,
@@ -1119,6 +1127,8 @@ def _local_egress_proxy(
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
 
+    cache_daemon = parse_cache_daemon(config.sandbox.cache_daemon)
+
     async def _boot() -> ProxyEndpoint:
         resolver = PerAgentRules(
             base=(*model_rule_base(config), *await derive_artifact_store_rules(blob)),
@@ -1128,16 +1138,32 @@ def _local_egress_proxy(
             internet=derive_manifest_rules(manifests),
             transfer_hosts=connector_transfer_hosts(manifests),
             clis=connector_clis(manifests),
+            cache_host=CACHE_HOST if cache_daemon is not None else None,
         )
         ca_cert, ca_key = await generate_ca()
-        return await EgressProxy(
+        endpoint = await EgressProxy(
             resolve=resolver.resolve,
             authorize=resolver.turn_live,
             ca_cert=ca_cert,
             ca_key=ca_key,
             run_tokens=run_tokens,
             pricing=pricing,
+            cache_daemon=cache_daemon,
         ).start(port=config.sandbox.proxy_port)
+        if cache_daemon is not None:
+            # The cache daemon resolves its git credential through this loopback callback; without
+            # it every cache-routed clone would 502. Runs for the process's life on the proxy loop.
+            token = os.environ.get(CACHE_CONTROL_TOKEN_ENV)
+            if not token:
+                raise RuntimeError(
+                    f"{CACHE_CONTROL_TOKEN_ENV} must be set when the sandbox cache is enabled"
+                )
+            await CredentialCallback(
+                credentials=credentials,
+                slots=injecting_slots(manifests),
+                token=token,
+            ).serve(CACHE_CALLBACK_HOST, CACHE_CALLBACK_PORT)
+        return endpoint
 
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 

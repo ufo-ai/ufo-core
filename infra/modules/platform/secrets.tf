@@ -16,6 +16,14 @@ resource "random_password" "ufo_token" {
   special = false
 }
 
+# The shared secret the sandbox cache daemon presents to the proxy's loopback credential callback
+# (RFC 0032). Minted here so both the proxy and the cache container read one value from the platform
+# secret; unused until the cache is enabled.
+resource "random_password" "cache_control_token" {
+  length  = 48
+  special = false
+}
+
 # The shared serve fleet's process keys live only in the ufo-serve Secret.
 # The Fernet credential key seals every hosted workspace's BYOK credential rows, so it is minted once
 # and reused verbatim every apply — a re-minted key orphans every stored credential. A Fernet key is
@@ -178,10 +186,11 @@ resource "aws_secretsmanager_secret_version" "platform" {
 
   secret_id = aws_secretsmanager_secret.platform.id
   secret_string = jsonencode({
-    "ufo-token-secret"     = random_password.ufo_token.result
-    "egress-ca-cert"       = tls_self_signed_cert.egress_ca.cert_pem
-    "egress-ca-key"        = tls_private_key.egress_ca.private_key_pem
-    "serve-credential-key" = local.serve_credential_key
+    "ufo-token-secret"        = random_password.ufo_token.result
+    "egress-ca-cert"          = tls_self_signed_cert.egress_ca.cert_pem
+    "egress-ca-key"           = tls_private_key.egress_ca.private_key_pem
+    "serve-credential-key"    = local.serve_credential_key
+    "ufo-cache-control-token" = random_password.cache_control_token.result
   })
 }
 

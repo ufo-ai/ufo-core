@@ -29,6 +29,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0029](0029-monitor.md) | Monitor — a durable watch that fires once on change | implemented |
 | [0030](0030-extension-registered-agents.md) | Extension-registered agents — an extension ships a worker | proposed |
 | [0031](0031-static-asset-store.md) | Content-addressed static assets in the shared blob store | implemented |
+| [0032](0032-sandbox-cache.md) | Sandbox cache — a Rust data-plane daemon behind the egress proxy | proposed |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working

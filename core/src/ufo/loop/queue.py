@@ -65,6 +65,7 @@ from ufo.o11y import (
     turn_span,
 )
 from ufo.provisioning import AgentProvisioning
+from ufo.sandbox.cache import cache_git_config
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
@@ -475,6 +476,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 clis,
                 runtime.credentials,
                 injecting_slots(runtime.manifests),
+                cache_rewrite=(
+                    runtime.config.sandbox.cache_daemon is not None
+                    and agent.internet_access_allowed
+                ),
             )
         sandbox_authorizer = SandboxAuthorizer(
             sandbox=sandbox,
@@ -663,6 +668,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.agent.c.model,
                     tables.agent.c.reasoning,
                     tables.agent.c.tools,
+                    tables.agent.c.internet_access_allowed,
                     tables.conversation.c.audience,
                 )
                 .select_from(
@@ -705,6 +711,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
             model=row.model,
             reasoning=row.reasoning,
             tools=None if row.tools is None else tuple(row.tools),
+            internet_access_allowed=row.internet_access_allowed,
         ),
         parse_audience(row.audience),
     )
@@ -758,6 +765,7 @@ async def _open_sandbox(
     clis: Mapping[str, CliCredential],
     credentials: CredentialStore | None,
     slots: tuple[CredentialSlot, ...],
+    cache_rewrite: bool = False,
 ) -> SandboxSession:
     """Open the sandbox this turn runs in, under the turn's signed run token and the env its
     credentials derive.
@@ -786,6 +794,7 @@ async def _open_sandbox(
     and drops only the connector CLI vars it is handed, carrying everything else across
     unchanged."""
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
+    cache_config = cache_git_config() if cache_rewrite else ()
     return await sandboxes.open(
         turn.sandbox_conversation_id or turn.conversation_id,
         run_tokens.encode(run),
@@ -794,6 +803,7 @@ async def _open_sandbox(
             **_git_config_env(
                 (
                     *GIT_PROXY_AUTH_CONFIG,
+                    *cache_config,
                     *await _git_credential_config(credentials, slots, turn.workspace_id),
                 )
             ),

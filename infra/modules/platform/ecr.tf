@@ -1,7 +1,7 @@
-# Image registry for the runtime bundle and hosted gateway.
+# Image registry for the runtime bundle, hosted gateway, and sandbox cache daemon.
 
 locals {
-  ecr_repositories = ["ufo", "ufo-control"]
+  ecr_repositories = ["ufo", "ufo-control", "ufo-cache"]
 }
 
 resource "aws_ecr_repository" "this" {

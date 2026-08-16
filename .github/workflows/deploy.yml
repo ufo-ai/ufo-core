@@ -191,6 +191,22 @@ jobs:
             docker push "$ECR_REGISTRY/ufo-control:$IMAGE_TAG"
           fi
 
+      # Sandbox cache daemon (RFC 0032): a Rust binary built from `cache/`, run as the proxy pod's
+      # cache sidecar. The repository is created by terraform (ecr.tf), which applies later in this
+      # job — so the build waits for it to exist rather than pushing into a repo that isn't there yet.
+      # Once provisioned it builds every deploy so the image is ready before the cache is enabled.
+      - name: Build + push cache image
+        if: github.event_name != 'pull_request'
+        run: |
+          if ! aws ecr describe-repositories --repository-names ufo-cache >/dev/null 2>&1; then
+            echo "ufo-cache repository not provisioned yet (terraform apply creates it) — skipping"
+          elif aws ecr describe-images --repository-name ufo-cache --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "ufo-cache:$IMAGE_TAG already pushed — skipping"
+          else
+            docker build -f cache/Dockerfile -t "$ECR_REGISTRY/ufo-cache:$IMAGE_TAG" cache
+            docker push "$ECR_REGISTRY/ufo-cache:$IMAGE_TAG"
+          fi
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.14.9"

@@ -177,6 +177,10 @@ class SandboxConfig(BaseModel):
     proxy_public_url: str | None = None
     ingress_port: int = DEFAULT_INGRESS_PORT
     ingress_public_url: str | None = None
+    cache_daemon: str | None = None
+    """`host:port` of the sandbox cache daemon co-located on the proxy pod (RFC 0032). Set enables
+    the cache: the proxy relays the cache host to it and internet-holding sandboxes route git and
+    npm through it. Unset, no sandbox is rewritten and the cache host is not admitted."""
 
     @model_validator(mode="after")
     def _ingress_base_is_addressable(self) -> "SandboxConfig":

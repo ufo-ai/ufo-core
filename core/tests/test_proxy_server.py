@@ -2,6 +2,7 @@ import asyncio
 import base64
 import gc
 import gzip
+import json
 import logging
 import os
 import re
@@ -34,11 +35,13 @@ from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.grants import GrantStore, grant_sentinel
+from ufo.sandbox.cache import CACHE_HOST
 from ufo.sandbox.exec_env import (
     GIT_PROXY_AUTH_CONFIG,
     _git_config_env,
     _git_credential_config,
 )
+from ufo.sandbox.proxy.credential_callback import CredentialCallback
 from ufo.sandbox.proxy.rules import (
     OPENAI_HOST,
     REQUEST_METER_DIMENSION,
@@ -3015,3 +3018,274 @@ async def test_an_unusable_binding_exports_nothing_and_admits_nothing(db: None) 
     rules = await derive_credential_rules(slots, seeded.workspace_id, store)
 
     assert rules == ()
+
+
+@dataclass
+class _RecordingDaemon:
+    requests: list[bytes] = field(default_factory=list)
+
+
+async def _cache_daemon() -> tuple[str, int, _RecordingDaemon, asyncio.AbstractServer]:
+    """A stand-in for the local cache daemon: it records the request line and headers it is relayed
+    and answers a fixed response with `connection: close`, so a test can assert what identity the
+    proxy stamped."""
+    record = _RecordingDaemon()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = await reader.readuntil(b"\r\n\r\n")
+        record.requests.append(head)
+        body = b"PACK"
+        writer.write(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/x-git-upload-pack-advertisement\r\n"
+            b"content-length: " + str(len(body)).encode() + b"\r\nconnection: close\r\n\r\n" + body
+        )
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    host, port = server.sockets[0].getsockname()[:2]
+    return host, port, record, server
+
+
+async def test_the_cache_service_relays_to_the_daemon_with_proxy_stamped_identity(db: None) -> None:
+    """An internet-holding turn's CONNECT to the cache host is TLS-terminated and relayed to the
+    local daemon carrying the proxy's own `(workspace, user)` — never the container's. A client that
+    sets its own `x-ufo-*` header is stripped, so a sandbox cannot claim another workspace's
+    credential, and the daemon's response streams back."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    daemon_host, daemon_port, record, server = await _cache_daemon()
+    resolver = PerAgentRules(base=(), grants=None, cache_host=CACHE_HOST)
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+        cache_daemon=(daemon_host, daemon_port),
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {CACHE_HOST}:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert b"200" in await reader.readline()
+        while (await reader.readline()) not in (b"\r\n", b""):
+            pass
+        context = ssl.create_default_context(cadata=cert)
+        await writer.start_tls(context, server_hostname=CACHE_HOST)
+        writer.write(
+            b"GET /git/github.com/o/r/info/refs?service=git-upload-pack HTTP/1.1\r\n"
+            b"host: " + CACHE_HOST.encode() + b"\r\n"
+            b"x-ufo-workspace: spoofed\r\n"
+            b"x-ufo-user: spoofed\r\n\r\n"
+        )
+        await writer.drain()
+        response = await reader.read()
+        writer.close()
+    finally:
+        await proxy.stop()
+        server.close()
+    assert response.startswith(b"HTTP/1.1 200")
+    assert b"PACK" in response
+    relayed = record.requests[0]
+    assert f"x-ufo-workspace: {workspace_id}".encode() in relayed
+    assert b"spoofed" not in relayed
+    assert b"connection: close" in relayed.lower()
+    assert b"/git/github.com/o/r/info/refs" in relayed
+
+
+async def test_the_cache_service_meters_the_egress_it_relays(db: None) -> None:
+    """Egress through the cache costs the same `egress` unit a direct tunnel would: a relayed git
+    request writes one ledger row keyed to the turn, so routing a fetch through the cache never
+    silences billing that the direct path charged."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    daemon_host, daemon_port, _record, server = await _cache_daemon()
+    resolver = PerAgentRules(base=(), grants=None, cache_host=CACHE_HOST)
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+        cache_daemon=(daemon_host, daemon_port),
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {CACHE_HOST}:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert b"200" in await reader.readline()
+        while (await reader.readline()) not in (b"\r\n", b""):
+            pass
+        context = ssl.create_default_context(cadata=cert)
+        await writer.start_tls(context, server_hostname=CACHE_HOST)
+        writer.write(
+            b"GET /git/github.com/o/r/info/refs?service=git-upload-pack HTTP/1.1\r\n"
+            b"host: " + CACHE_HOST.encode() + b"\r\n\r\n"
+        )
+        await writer.drain()
+        await reader.read()
+        writer.close()
+    finally:
+        await proxy.stop()
+        server.close()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.ledger.c.dimension, tables.ledger.c.amount).where(
+                    tables.ledger.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert (row.dimension, int(row.amount)) == ("egress", 1)
+
+
+async def test_a_narrowed_agent_is_not_admitted_the_cache(db: None) -> None:
+    """The cache fronts several public hosts, so it is admitted only for an agent that already holds
+    the internet. A turn whose agent is narrowed off the internet is refused the cache host at
+    CONNECT, exactly as any unscoped host."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection, internet_access_allowed=False)
+    resolver = PerAgentRules(base=(), grants=None, cache_host=CACHE_HOST)
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+        cache_daemon=("127.0.0.1", 1),
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
+    try:
+        status, reason = await _connect_reason(endpoint.port, CACHE_HOST, token)
+    finally:
+        await proxy.stop()
+    assert status == 403
+    assert b"not permitted" in reason
+
+
+async def _call_callback(
+    port: int, token: str, payload: dict[str, object]
+) -> tuple[int, dict[str, object] | None]:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    body = json.dumps(payload).encode()
+    writer.write(
+        b"POST /internal/git-credential HTTP/1.1\r\nauthorization: Bearer "
+        + token.encode()
+        + b"\r\ncontent-length: "
+        + str(len(body)).encode()
+        + b"\r\n\r\n"
+        + body
+    )
+    await writer.drain()
+    head, _, resp_body = (await reader.read()).partition(b"\r\n\r\n")
+    writer.close()
+    return int(head.split()[1]), (json.loads(resp_body) if resp_body else None)
+
+
+async def test_the_credential_callback_returns_the_workspace_git_token_and_principal(
+    db: None,
+) -> None:
+    """A git host the workspace holds a credential for resolves to that secret and a
+    workspace-scoped principal — the same slot the proxy injects directly, handed to the daemon to
+    authenticate its own upstream fetch."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(seeded.workspace_id, "github_git_token", "ghp-real")
+    slots = (
+        CredentialSlot(
+            name="github_git_token",
+            description="git token",
+            injection=InjectionTarget(
+                host="github.com",
+                header="Authorization",
+                sentinel="SENTINEL_GIT",
+                git_basic_user="x-access-token",
+            ),
+        ),
+    )
+    callback = CredentialCallback(credentials=store, slots=slots, token="shared")
+    server = await callback.serve("127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        own = await _call_callback(
+            port, "shared", {"workspace_id": str(seeded.workspace_id), "host": "github.com"}
+        )
+        other = await _call_callback(
+            port, "shared", {"workspace_id": str(seeded.workspace_id), "host": "gitlab.com"}
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert own == (
+        200,
+        {
+            "username": "x-access-token",
+            "token": "ghp-real",
+            "principal": f"w{seeded.workspace_id}",
+        },
+    )
+    assert other == (200, {"credential": None, "principal": "public"})
+
+
+async def test_the_credential_callback_refuses_a_request_without_the_shared_token() -> None:
+    """The callback is machine-to-machine: a request that does not present the shared token is
+    refused before any resolution, so a leak of the loopback port alone grants nothing."""
+    callback = CredentialCallback(credentials=None, slots=(), token="shared")
+    server = await callback.serve("127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        status, _ = await _call_callback(port, "wrong", {"workspace_id": "x", "host": "github.com"})
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert status == 401
+
+
+def test_service_origin_rewrites_a_git_cache_path_to_its_upstream() -> None:
+    """The daemon-down fall-through reconstructs the origin from the cache path:
+    `/git/<host>/<rest>` names the real host and a request line pointed at `/<rest>`."""
+    origin = proxy_server._service_origin(
+        b"GET /git/github.com/o/r/info/refs?service=git-upload-pack HTTP/1.1\r\n"
+    )
+    assert origin == ("github.com", b"GET /o/r/info/refs?service=git-upload-pack HTTP/1.1\r\n")
+
+
+def test_service_origin_refuses_a_non_git_cache_path() -> None:
+    assert proxy_server._service_origin(b"GET /nope HTTP/1.1\r\n") is None
+    assert proxy_server._service_origin(b"GET /git/github.com HTTP/1.1\r\n") is None
+    assert proxy_server._service_origin(b"GET /host/registry.npmjs.org/pkg HTTP/1.1\r\n") is None
+
+
+def test_direct_headers_strip_identity_and_correct_the_host() -> None:
+    """The fall-through re-originates anonymously: the cache identity is stripped, the sandbox's
+    `Host: cache.ufo.internal` is corrected to the real origin, and the rest is passed through."""
+    out = proxy_server._direct_headers(
+        [
+            b"host: cache.ufo.internal\r\n",
+            b"x-ufo-workspace: w1\r\n",
+            b"x-ufo-user: u1\r\n",
+            b"accept: */*\r\n",
+        ],
+        "github.com",
+    )
+    assert b"host: github.com\r\n" in out
+    assert b"cache.ufo.internal" not in out
+    assert b"x-ufo-workspace" not in out and b"x-ufo-user" not in out
+    assert b"accept: */*\r\n" in out
+    assert b"connection: close\r\n" in out

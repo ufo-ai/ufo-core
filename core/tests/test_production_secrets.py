@@ -137,7 +137,7 @@ def test_configured_production_backends_receive_platform_credentials() -> None:
         item["secretKey"]: item["remoteRef"]["property"] for item in platform["spec"]["data"]
     }
     hosted = re.sub(
-        r"(?m)^%\{ (?:if workload_ha|endif) \}\n?",
+        r'(?m)^%\{ (?:if workload_ha|if cache_enabled|if cache_s3_bucket != ""|endif) \}\n?',
         "",
         (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text(),
     )

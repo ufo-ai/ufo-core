@@ -337,6 +337,14 @@ spec:
             - name: UFO_CREDENTIAL_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}
+%{ if cache_enabled }
+            # The shared secret the cache daemon presents to this process's loopback credential
+            # callback (RFC 0032). proxy and cache read the same value; a request without it is
+            # refused before any resolution.
+            - name: UFO_CACHE_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: UFO_CACHE_CONTROL_TOKEN}
+%{ endif }
           resources:
             requests: {cpu: 250m, memory: 384Mi}
             limits: {cpu: "2", memory: 768Mi}
@@ -351,12 +359,52 @@ spec:
             tcpSocket: {port: proxy}
             initialDelaySeconds: 30
             periodSeconds: 20
+%{ if cache_enabled }
+        # The sandbox cache daemon: git mirrors + npm/PyPI caching for internet-holding sandboxes,
+        # sharing loopback with the proxy. It authenticates upstream by phoning the proxy's
+        # credential callback; the proxy routes `cache.ufo.internal` to it (config.sandbox.cache_daemon).
+        # Bound to loopback, so its health probe execs against 127.0.0.1 rather than the pod IP.
+        - name: cache
+          image: ${registry}/ufo-cache:${image_tag}
+          env:
+            - {name: UFO_CACHE_LISTEN, value: "127.0.0.1:9110"}
+            - {name: UFO_CACHE_STATE, value: /var/cache/ufo}
+            - {name: UFO_CACHE_CONTROL_URL, value: "http://127.0.0.1:9111"}
+            - name: UFO_CACHE_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: UFO_CACHE_CONTROL_TOKEN}
+%{ if cache_s3_bucket != "" }
+            - {name: UFO_CACHE_S3_BUCKET, value: "${cache_s3_bucket}"}
+            - {name: AWS_REGION, value: "${region}"}
+%{ endif }
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 3Gi}
+          volumeMounts:
+            - {name: cache, mountPath: /var/cache/ufo}
+          # Liveness only — never readiness. The cache is an optimization co-located with the proxy;
+          # gating pod readiness on it would drop a healthy egress proxy (and all sandbox egress)
+          # out of the Service on a cache blip. A dead cache is restarted; the proxy keeps serving,
+          # falling through to origin.
+          livenessProbe:
+            exec: {command: [curl, -sf, "http://127.0.0.1:9110/_health"]}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+%{ endif }
       volumes:
         - name: config
           secret:
             secretName: ufo-serve
             items:
               - {key: ufo.toml, path: ufo.toml}
+%{ if cache_enabled }
+        # The cache's hot tier: node-local scratch, wiped on pod roll. Durability is the S3 tier the
+        # daemon restores from on a cold start, not this volume. Sized well above the daemon's
+        # UFO_CACHE_DISK_LIMIT_BYTES (default 4 GiB of finished mirrors) to leave headroom for
+        # in-progress clones the sweep counts but cannot evict.
+        - name: cache
+          emptyDir: {sizeLimit: 20Gi}
+%{ endif }
 %{ if workload_ha }
 ---
 apiVersion: policy/v1

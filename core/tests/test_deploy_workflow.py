@@ -17,6 +17,10 @@ from ufo.sources.sync import SOURCE_SYNC_FAILED_METRIC
 
 ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
+# Terraform template `if`/`endif` directive lines, stripped before a template parses as YAML.
+TEMPLATE_DIRECTIVE = (
+    r'(?m)^%\{ (?:if workload_ha|if cache_enabled|if cache_s3_bucket != ""|endif) \}\n?'
+)
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
 TESTED_TEMPLATES = "small=ufo-sbx-small:b1,medium=ufo-sbx-medium:b2,large=ufo-sbx-large:b3"
@@ -2687,7 +2691,7 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
         document
         for source in (
             re.sub(
-                r"(?m)^%\{ (?:if workload_ha|endif) \}\n?",
+                TEMPLATE_DIRECTIVE,
                 "",
                 (templates / f"{name}.yaml.tpl").read_text(),
             )
@@ -2896,7 +2900,7 @@ def test_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
         document
         for source in (
             re.sub(
-                r"(?m)^%\{ (?:if workload_ha|endif) \}\n?",
+                TEMPLATE_DIRECTIVE,
                 "",
                 (templates / name).read_text(),
             )
@@ -2934,6 +2938,34 @@ def test_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
     testing = (ROOT / "infra" / "envs" / "testing" / "ufo.tf").read_text()
     assert len(re.findall(r"deployment_id\s+= var\.deployment_id", production)) == 2
     assert len(re.findall(r'deployment_id\s+= "testing"', testing)) == 2
+
+
+def test_the_cache_sidecar_keeps_the_proxy_probes_on_the_proxy_container() -> None:
+    """With the cache enabled the sandbox-proxy pod runs two containers, and each keeps its own
+    health probes — the proxy its TCP probe on the `proxy` port, the cache its own — so the sidecar
+    block cannot silently detach the proxy's probes onto a container that lacks the port."""
+    source = re.sub(
+        TEMPLATE_DIRECTIVE, "", (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    )
+    documents = [
+        document
+        for document in yaml.safe_load_all(re.sub(r"\$\{([^}]+)\}", r"\1", source))
+        if isinstance(document, dict)
+    ]
+    proxy = next(
+        document
+        for document in documents
+        if document.get("kind") == "Deployment"
+        and document["metadata"]["name"] == "ufo-sandbox-proxy"
+    )
+    containers = {c["name"]: c for c in proxy["spec"]["template"]["spec"]["containers"]}
+    assert set(containers) == {"proxy", "cache"}
+    assert containers["proxy"]["readinessProbe"]["tcpSocket"]["port"] == "proxy"
+    assert containers["proxy"]["livenessProbe"]["tcpSocket"]["port"] == "proxy"
+    # The cache has liveness (restart a wedged daemon) but NO readiness — a cache blip must never
+    # take the healthy egress proxy out of the sandbox-proxy Service.
+    assert "livenessProbe" in containers["cache"]
+    assert "readinessProbe" not in containers["cache"]
 
 
 def test_deployment_gate_joins_every_selected_result() -> None:

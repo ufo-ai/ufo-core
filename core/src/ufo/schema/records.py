@@ -188,6 +188,9 @@ class Agent(BaseModel):
     """The agent's tool allowlist, or None for the member-facing set. A name the live registry does
     not answer is absent rather than an error: an extension the deploy stopped installing leaves the
     agent short a tool, never unable to take a turn."""
+    internet_access_allowed: bool = True
+    """Whether this agent's sandbox reaches the public internet — the per-agent narrowing the proxy
+    also gates on. Governs whether the turn's sandbox is routed through the egress cache."""
 
 
 class TurnContext(BaseModel):

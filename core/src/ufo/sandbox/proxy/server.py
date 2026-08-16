@@ -67,6 +67,7 @@ from ufo.grants import GrantStore
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
 from ufo.o11y import emit_metric, log, log_error, warn
+from ufo.sandbox.cache import CACHE_GIT_HOSTS
 from ufo.sandbox.containment import contained_file, contained_leaf
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
@@ -79,6 +80,7 @@ from ufo.sandbox.proxy.rules import (
     MeterRule,
     Rule,
     ScopeRule,
+    ServiceRule,
     derive_cli_rules,
     derive_credential_rules,
     derive_grant_rules,
@@ -257,6 +259,7 @@ class PerAgentRules:
     credentials: CredentialStore | None = None
     slots: tuple[CredentialSlot, ...] = ()
     internet: tuple[InternetRule, ...] = ()
+    cache_host: str | None = None
     transfer_hosts: ConnectorTransferHosts = field(
         default_factory=lambda: ConnectorTransferHosts(explicit={})
     )
@@ -277,6 +280,8 @@ class PerAgentRules:
                 rules = (
                     (*self.base, *self.internet) if authority.internet_access_allowed else self.base
                 )
+                if self.cache_host is not None and authority.internet_access_allowed:
+                    rules = (*rules, ServiceRule(host=self.cache_host))
                 if self.credentials is not None and self.slots:
                     rules = (
                         *rules,
@@ -394,6 +399,7 @@ class EgressProxy:
     run_tokens: RunTokenCodec
     resolve_public: PublicAddressResolver | None = None
     pricing: Pricing = CORE_PRICING
+    cache_daemon: tuple[str, int] | None = None
     _server: asyncio.Server | None = field(default=None, init=False)
     _workdir: tempfile.TemporaryDirectory | None = field(default=None, init=False)
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict, init=False)
@@ -544,6 +550,11 @@ class EgressProxy:
                 rules = await self._rules_for(principal)
             except Exception:
                 await _respond(writer, 503, EGRESS_AUTHORIZATION_UNAVAILABLE)
+                return
+            if self.cache_daemon is not None and any(
+                isinstance(rule, ServiceRule) and rule.host == host for rule in rules
+            ):
+                await self._service(reader, writer, host, principal)
                 return
             connect_host = host
             exactly_scoped = any(
@@ -794,6 +805,92 @@ class EgressProxy:
         )
         await self._meter_tokens(principal, accumulator)
 
+    async def _service(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        host: str,
+        principal: EgressPrincipal,
+    ) -> None:
+        """Terminate the sandbox's TLS to the cache host and relay one request to the local cache
+        daemon, stamping the trusted workspace and acting-member identity the daemon resolves its
+        upstream credential by. The sandbox presents no credential — the daemon authenticates
+        upstream itself — and any `x-ufo-*` header the container tries to set is stripped, so
+        identity is the proxy's to assert, never the container's. `Connection: close` bounds the
+        exchange to one request: every request re-enters here over its own CONNECT and is
+        re-stamped, so a reused connection can never carry a request the proxy did not identify. A
+        daemon that cannot be reached is not a dead end — the request falls through to its origin
+        directly, so a cache outage slows clones rather than breaking them."""
+        assert self.cache_daemon is not None
+        leaf_context = await self._leaf_context(host)
+        try:
+            client_reader, client_writer = await _start_tls_server(reader, writer, leaf_context)
+            request = await _read_request_head(client_reader)
+        except (OSError, ssl.SSLError):
+            return
+        if isinstance(request, _HeaderRefusal):
+            await _respond(client_writer, request.status, request.message)
+            return
+        if request is None:
+            return
+        request_line, headers = request
+        try:
+            daemon_reader, daemon_writer = await asyncio.wait_for(
+                asyncio.open_connection(*self.cache_daemon),
+                timeout=CONNECT_UPSTREAM_TIMEOUT_SECONDS,
+            )
+        except (OSError, TimeoutError):
+            await self._service_direct(
+                client_reader, client_writer, request_line, headers, principal
+            )
+            return
+        await self._meter_service(request_line, principal)
+        daemon_writer.write(request_line)
+        daemon_writer.write(_service_headers(headers, principal))
+        daemon_writer.write(b"\r\n")
+        try:
+            await daemon_writer.drain()
+        except OSError:
+            return
+        await _relay(client_reader, client_writer, daemon_reader, daemon_writer)
+
+    async def _service_direct(
+        self,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+        request_line: bytes,
+        headers: list[bytes],
+        principal: EgressPrincipal,
+    ) -> None:
+        """The cache daemon is down: proxy this request straight to its origin so the cache is never
+        a single point of failure for egress. The cache path names the real host and path
+        (`/git/<host>/<rest>` → `https://<host>/<rest>`); the request re-originates anonymously, so
+        a public clone or npm fetch still completes while an own-org private fetch degrades to
+        unauthenticated until the daemon returns. Nothing is cached on this path, but the egress
+        request is billed the same as the daemon path so a cache outage never silences metering."""
+        origin = _service_origin(request_line)
+        if origin is None or origin[0] not in CACHE_GIT_HOSTS:
+            await _respond(client_writer, 502, "cache unavailable")
+            return
+        host, origin_line = origin
+        try:
+            upstream_reader, upstream_writer = await asyncio.wait_for(
+                asyncio.open_connection(host, DEFAULT_HTTPS_PORT, ssl=True, server_hostname=host),
+                timeout=CONNECT_UPSTREAM_TIMEOUT_SECONDS,
+            )
+        except (OSError, TimeoutError, ssl.SSLError):
+            await _respond(client_writer, 502, "cache unavailable")
+            return
+        await self._meter_service(request_line, principal)
+        upstream_writer.write(origin_line)
+        upstream_writer.write(_direct_headers(headers, host))
+        upstream_writer.write(b"\r\n")
+        try:
+            await upstream_writer.drain()
+        except OSError:
+            return
+        await _relay(client_reader, client_writer, upstream_reader, upstream_writer)
+
     async def _forward_broker(
         self,
         client_reader: asyncio.StreamReader,
@@ -898,6 +995,19 @@ class EgressProxy:
             context.set_alpn_protocols(["http/1.1"])
             self._contexts[host] = context
             return context
+
+    async def _meter_service(self, request_line: bytes, principal: EgressPrincipal) -> None:
+        """Bill one cache-routed git request under its real upstream host, so egress through the
+        cache costs the same `requests` unit the direct tunnel would have charged. The cache host is
+        the wire target, not the billed host — the request path names the origin, and each request
+        re-enters over its own CONNECT (`Connection: close`), so one call here is one billed
+        request, matching a direct fetch's two-request smart-HTTP exchange unit for unit."""
+        origin = _service_origin(request_line)
+        if origin is None:
+            return
+        rules = (MeterRule(host=origin[0], dimension=REQUEST_METER_DIMENSION),)
+        self._meter(origin[0], rules)
+        await self._meter_ledger(origin[0], principal, rules)
 
     def _meter(self, host: str, rules: tuple[Rule, ...]) -> None:
         for rule in rules:
@@ -1273,6 +1383,76 @@ def _forward_response_bytes(response: ForwardedResponse) -> bytes:
 
 def _has_crlf(value: str) -> bool:
     return "\r" in value or "\n" in value
+
+
+_SERVICE_STRIPPED = frozenset(
+    {
+        b"x-ufo-workspace",
+        b"x-ufo-user",
+        b"connection",
+        b"keep-alive",
+        b"proxy-connection",
+        b"proxy-authorization",
+    }
+)
+
+
+def _service_headers(headers: list[bytes], principal: EgressPrincipal) -> bytes:
+    """The request header block relayed to the cache daemon: the sandbox's own headers minus any it
+    must not set — the identity headers (asserted here, never trusted from the container) and the
+    connection controls — plus the proxy-stamped `(workspace, user)` and a `close` that delimits the
+    exchange to one re-identified request."""
+    kept = b"".join(
+        line for line in headers if line.partition(b":")[0].strip().lower() not in _SERVICE_STRIPPED
+    )
+    member = principal.acting_member_id
+    stamped = (
+        f"x-ufo-workspace: {principal.workspace_id}\r\n"
+        f"x-ufo-user: {'' if member is None else member}\r\n"
+        "connection: close\r\n"
+    ).encode()
+    return kept + stamped
+
+
+def _service_origin(request_line: bytes) -> tuple[str, bytes] | None:
+    """The origin host and rewritten request line for a git cache path: `GET /git/<host>/<rest>`
+    becomes `GET /<rest>` bound for `<host>`. None when the path is not a git cache path, so the
+    fall-through refuses rather than dial an arbitrary host."""
+    parts = request_line.split(b" ")
+    if len(parts) != 3:
+        return None
+    method, target, version = parts
+    segments = target.decode("latin-1").lstrip("/").split("/", 2)
+    if len(segments) != 3:
+        return None
+    kind, host, rest = segments
+    if kind != "git" or not host or not rest:
+        return None
+    origin_line = method + b" /" + rest.encode("latin-1") + b" " + version
+    return host, origin_line
+
+
+_DIRECT_STRIPPED = frozenset(
+    {
+        b"host",
+        b"x-ufo-workspace",
+        b"x-ufo-user",
+        b"connection",
+        b"keep-alive",
+        b"proxy-connection",
+        b"proxy-authorization",
+    }
+)
+
+
+def _direct_headers(headers: list[bytes], host: str) -> bytes:
+    """The header block for the daemon-down fall-through: the sandbox's own headers minus the cache
+    identity and connection controls, with `Host` corrected to the origin and a `close` bound. No
+    credential is added — the fall-through is anonymous."""
+    kept = b"".join(
+        line for line in headers if line.partition(b":")[0].strip().lower() not in _DIRECT_STRIPPED
+    )
+    return kept + f"host: {host}\r\nconnection: close\r\n".encode()
 
 
 def _inject(headers: list[bytes], candidates: list[InjectionRule]) -> bytes:
