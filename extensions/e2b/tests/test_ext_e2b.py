@@ -164,6 +164,8 @@ class _Commands:
     stops_fail: bool = False
     stops_reject: bool = False
     launch_never_answers: bool = False
+    """A box that answers nothing at all — its launch, its stop and any probe alike, which is what
+    a frozen `envd` looks like from outside."""
     _next_pid: int = 2000
 
     async def outcome(self, cmd: str) -> _Result:
@@ -198,6 +200,8 @@ class _Commands:
         background: bool = False,
     ) -> _Result | _Handle:
         self.runs.append((cmd, cwd, timeout))
+        if self.launch_never_answers:
+            raise TimeoutException("the box answers nothing")
         signalled = re.fullmatch(r"kill -9 -(\d+)", cmd)
         if signalled:
             if self.stops_fail:
@@ -212,8 +216,6 @@ class _Commands:
         self.envs.append(envs)
         if not background:
             return await self.outcome(cmd)
-        if self.launch_never_answers:
-            raise TimeoutException("the deadline fired before the launch answered")
         self._next_pid += 1
         self.alive[self._next_pid] = cmd
         return _Handle(self, self._next_pid, cmd)
@@ -1370,6 +1372,25 @@ async def test_a_deadline_that_beats_the_launch_has_nothing_to_stop() -> None:
     assert result.exit_code == EXEC_TIMEOUT_CODE
     assert result.timed_out_after_s == 60
     assert not any(cmd.startswith("kill") for cmd, _, _ in commands.runs)
+
+
+async def test_a_launch_the_box_cannot_answer_is_the_box_going_silent() -> None:
+    """Measured against a container whose `envd` was frozen: the launch is what its deadline takes,
+    so the stop that would have noticed is never reached and every later call paid its own budget
+    again. Detaching returns as soon as the command has a pid, so a launch outlasting the caller's
+    whole budget is a gone channel rather than slow work — the plainest reading of one there is."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.launch_never_answers = True
+    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
+    before = len(commands.runs)
+
+    with pytest.raises(SandboxUnreachable):
+        await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 60)
+
+    assert [cmd for cmd, _, _ in commands.runs[before:]] == [SILENT_PROBE_CMD]
 
 
 async def test_the_deadline_stop_ends_the_launcher_and_spares_its_detached_task(

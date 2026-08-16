@@ -604,8 +604,11 @@ class E2BCarrier:
         it — the bash tool's launch script holds the other half of this contract. Nothing but this
         ever stops what the group holds: no later call can name a group whose pid it never saw.
         A deadline that fires before the launch answers has no pid to name and nothing yet running
-        behind it. The stop is best-effort and swallowed, since what the caller must still be told
-        is the deadline its own command hit.
+        behind it — and is the plainest reading of a gone channel there is, since detaching returns
+        as soon as the command has a pid and cannot legitimately outlast a caller's whole budget.
+        That box is remembered here, because a container silent enough to swallow its own launch
+        never reaches the stop that would otherwise have noticed. The stop is best-effort and
+        swallowed, since what the caller must still be told is the deadline its own command hit.
 
         A stream severed while the command runs arrives as neither of those SDK exceptions, and as
         no class this can name. The command itself keeps running inside the sandbox and completes,
@@ -628,7 +631,9 @@ class E2BCarrier:
             return ExecResult(stdout=error.stdout, stderr=error.stderr, exit_code=error.exit_code)
         except TimeoutException as error:
             emit_metric("sandbox_exec_timeout_total", carrier=CARRIER_NAME)
-            if running is not None:
+            if running is None:
+                self._silent.add(handle.container_id)
+            else:
                 await self._stop_group(sandbox, handle.container_id, running.pid)
             return ExecResult(
                 stdout="",
