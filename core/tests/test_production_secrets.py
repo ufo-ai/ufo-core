@@ -37,6 +37,7 @@ def _environment(deployment_id: str = "run-1") -> dict[str, str]:
         "E2B_API_KEY": "e2b-value",
         "EXA_API_KEY": "exa-value",
         "OPENAI_API_KEY": "openai-value",
+        "OPENROUTER_API_KEY": "openrouter-value",
         "TURBOPUFFER_API_KEY": "turbopuffer-value",
     }
 
@@ -178,6 +179,7 @@ def test_production_secret_writes_preserve_owned_values() -> None:
     assert api_keys["e2b-api-key"] == "e2b-value"
     assert api_keys["exa-api-key"] == "exa-value"
     assert api_keys["openai-api-key"] == "openai-value"
+    assert api_keys["openrouter-api-key"] == "openrouter-value"
     assert api_keys["turbopuffer-api-key"] == "turbopuffer-value"
     assert all(
         api_keys[name] == f"owned-{name}" for name in API_KEYS_PROPERTIES - API_KEY_INPUTS.keys()
@@ -197,6 +199,7 @@ def test_production_secret_writes_preserve_owned_values() -> None:
         "e2b-value",
         "exa-value",
         "openai-value",
+        "openrouter-value",
         "turbopuffer-value",
     ]
     assert all(value not in part for write in writes for value in values for part in write.command)
@@ -365,6 +368,7 @@ def test_main_initializes_missing_production_values(
             "e2b-api-key": "e2b-value",
             "exa-api-key": "exa-value",
             "openai-api-key": "openai-value",
+            "openrouter-api-key": "openrouter-value",
             "turbopuffer-api-key": "turbopuffer-value",
         }
     else:

@@ -19,6 +19,7 @@ API_KEY_INPUTS = {
     "e2b-api-key": "E2B_API_KEY",
     "exa-api-key": "EXA_API_KEY",
     "openai-api-key": "OPENAI_API_KEY",
+    "openrouter-api-key": "OPENROUTER_API_KEY",
     "turbopuffer-api-key": "TURBOPUFFER_API_KEY",
 }
 API_KEYS_PROPERTIES = frozenset(

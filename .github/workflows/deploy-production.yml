@@ -49,10 +49,11 @@ jobs:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
         run: |
           missing=false
-          for name in ANTHROPIC_API_KEY BROWSERBASE_API_KEY CLOUDFLARE_API_TOKEN DD_API_KEY DD_APP_KEY E2B_API_KEY EXA_API_KEY OPENAI_API_KEY TURBOPUFFER_API_KEY; do
+          for name in ANTHROPIC_API_KEY BROWSERBASE_API_KEY CLOUDFLARE_API_TOKEN DD_API_KEY DD_APP_KEY E2B_API_KEY EXA_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY TURBOPUFFER_API_KEY; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is required"
               missing=true
@@ -308,6 +309,7 @@ jobs:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
           PRODUCTION_DEPLOYMENT_ID: ${{ github.run_id }}
         run: |
