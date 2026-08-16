@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-import ufo.tools.builtins as builtins_module
+import ufo.tools.tasks as tasks_module
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF
@@ -28,17 +28,16 @@ from ufo.sandbox.session import (
     SandboxSpec,
 )
 from ufo.schema.records import Agent, Turn
-from ufo.tools.builtins import (
+from ufo.tools.builtins import BashInput, bash_handler
+from ufo.tools.context import SpawnResult, ToolContext
+from ufo.tools.tasks import (
     BACKGROUND_DIRECTIVE,
     BACKGROUND_TASKS_DIR,
     DETACHED_LEAD,
     EXEC_TIMEOUT_COMMAND_MAX_CHARS,
     EXEC_TIMEOUT_VITALS_CMD,
     TASK_PROBE,
-    BashInput,
-    bash_handler,
 )
-from ufo.tools.context import SpawnResult, ToolContext
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
 PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")
@@ -702,7 +701,7 @@ async def test_a_container_that_cannot_answer_is_the_reading_that_matters(
     says the command channel stopped answering rather than the work being slow. The probe is
     bounded by its own wait, and the tool result is the command's timeout either way — diagnosis
     must never change what the caller is told."""
-    monkeypatch.setattr(builtins_module, "EXEC_TIMEOUT_VITALS_SECONDS", 0.05)
+    monkeypatch.setattr(tasks_module, "EXEC_TIMEOUT_VITALS_SECONDS", 0.05)
 
     class _Unanswering(_RecordingCarrier):
         async def exec(

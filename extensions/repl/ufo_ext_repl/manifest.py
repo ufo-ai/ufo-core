@@ -11,17 +11,36 @@ packages (playwright) resolve; xlsx_repl runs the composed Python with a footer 
 runs in the sandbox through `ctx.sandbox`, so the container's mount and egress scoping hold; the
 combined stdout/stderr and exit code come back, plus any images the JS code handed to `emitImage` —
 a prelude-defined global keeping a rolling base64 JSONL window the handler folds into
-ImageContent."""
+ImageContent.
+
+The interpreter runs through the same detached task journal the builtin `bash` runs on, so a cell
+that outgrows the caller's budget keeps running — its interpreter and whatever it launched, a
+headless browser included — and the result hands back the handles that reach it. Because state
+commits only on exit 0, an expired cell leaves the REPL exactly where it was, and the result says
+so: a blind retry replays the same starting point. Each call emits into a file of its own, so a
+survivor still writing images cannot hand them to the call after it."""
 
 import json
 import shlex
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError
 
 from ufo.sdk.manifest import Manifest, SkillSpec
 from ufo.sdk.o11y import emit_metric, turn_profile
-from ufo.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    MAX_COMMAND_TIMEOUT_MS,
+    ImageContent,
+    TaskRun,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolResult,
+    run_task,
+    task_handles,
+    timeout_notice,
+)
 
 NAME = "repl"
 VERSION = "0.1.0"
@@ -40,11 +59,9 @@ WORKSPACE_DIR = "/workspace"
 REPL_STATE_DIR = f"{WORKSPACE_DIR}/.repl"
 JS_REPL_PATH = f"{REPL_STATE_DIR}/js-repl.js"
 JS_RUN_PATH = f"{REPL_STATE_DIR}/js-run.mjs"
-JS_EMIT_RELATIVE = ".repl/js-emit.jsonl"
-JS_EMIT_PATH = f"{WORKSPACE_DIR}/{JS_EMIT_RELATIVE}"
+JS_EMIT_RELATIVE_DIR = ".repl"
 XLSX_REPL_PATH = f"{REPL_STATE_DIR}/xlsx-repl.py"
 XLSX_RUN_PATH = f"{REPL_STATE_DIR}/xlsx-run.py"
-REPL_TIMEOUT_SECONDS = 120
 GLOBAL_MODULES_DIR = f"{REPL_STATE_DIR}/node_modules"
 GLOBAL_MODULE_ROOTS = (
     '"$(npm root -g)"',
@@ -96,41 +113,59 @@ def global_modules_link(roots: tuple[str, ...] = GLOBAL_MODULE_ROOTS) -> str:
 
 EMIT_IMAGE_LIMIT = 5
 EMIT_IMAGE_MAX_B64_CHARS = 2_000_000
-JS_EMIT_PRELUDE = (
-    'import { writeFileSync as __ufoEmitWrite } from "node:fs";\n'
-    'import { resolve as __ufoEmitResolve } from "node:path";\n'
-    "(() => {\n"
-    f"  const EMIT_PATH = __ufoEmitResolve({json.dumps(JS_EMIT_RELATIVE)});\n"
-    f"  const MAX_B64 = {EMIT_IMAGE_MAX_B64_CHARS};\n"
-    f"  const LIMIT = {EMIT_IMAGE_LIMIT};\n"
-    "  const entries = [];\n"
-    "  globalThis.emitImage = (value, mediaType) => {\n"
-    "    let data = null;\n"
-    "    let type = mediaType;\n"
-    "    if (Buffer.isBuffer(value) || value instanceof Uint8Array) {\n"
-    '      data = Buffer.from(value).toString("base64");\n'
-    '    } else if (typeof value === "string") {\n'
-    "      data = value;\n"
-    '    } else if (value && typeof value === "object") {\n'
-    '      data = typeof value.bytes === "string"\n'
-    "        ? value.bytes\n"
-    '        : Buffer.from(value.bytes).toString("base64");\n'
-    "      type = type ?? value.mimeType;\n"
-    "    } else {\n"
-    '      throw new TypeError("emitImage: pass a Buffer, Uint8Array, base64 string, '
-    'or {bytes, mimeType}");\n'
-    "    }\n"
-    "    if (data.length > MAX_B64) {\n"
-    '      throw new RangeError("emitImage: image over " + MAX_B64 + " base64 chars; '
-    'use JPEG or lower quality");\n'
-    "    }\n"
-    "    entries.push("
-    'JSON.stringify({ media_type: type || "image/png", data }) + "\\n");\n'
-    "    while (entries.length > LIMIT) entries.shift();\n"
-    '    __ufoEmitWrite(EMIT_PATH, entries.join(""));\n'
-    "  };\n"
-    "})();\n"
-)
+
+
+def js_emit_relative(call: str) -> str:
+    """Where one call's images land, named by the call and workspace-relative: only argv is
+    rewritten to the carrier's workspace directory, never a path inside the run file, so the
+    prelude resolves this against the interpreter's own working directory.
+
+    Per call because an expired cell keeps running: the process that outgrew its budget holds the
+    path it started with, so a write it makes after the result was discarded lands in its own file
+    rather than replacing what the next call emitted."""
+    return f"{JS_EMIT_RELATIVE_DIR}/js-emit-{call}.jsonl"
+
+
+def js_emit_prelude(emit_relative: str) -> str:
+    """The emitImage global, over the emit file this call reads back: a rolling window of the last
+    images as base64 JSONL, rewritten whole on every emit."""
+    return (
+        'import { writeFileSync as __ufoEmitWrite } from "node:fs";\n'
+        'import { resolve as __ufoEmitResolve } from "node:path";\n'
+        "(() => {\n"
+        f"  const EMIT_PATH = __ufoEmitResolve({json.dumps(emit_relative)});\n"
+        f"  const MAX_B64 = {EMIT_IMAGE_MAX_B64_CHARS};\n"
+        f"  const LIMIT = {EMIT_IMAGE_LIMIT};\n"
+        "  const entries = [];\n"
+        "  globalThis.emitImage = (value, mediaType) => {\n"
+        "    let data = null;\n"
+        "    let type = mediaType;\n"
+        "    if (Buffer.isBuffer(value) || value instanceof Uint8Array) {\n"
+        '      data = Buffer.from(value).toString("base64");\n'
+        '    } else if (typeof value === "string") {\n'
+        "      data = value;\n"
+        '    } else if (value && typeof value === "object") {\n'
+        '      data = typeof value.bytes === "string"\n'
+        "        ? value.bytes\n"
+        '        : Buffer.from(value.bytes).toString("base64");\n'
+        "      type = type ?? value.mimeType;\n"
+        "    } else {\n"
+        '      throw new TypeError("emitImage: pass a Buffer, Uint8Array, base64 string, '
+        'or {bytes, mimeType}");\n'
+        "    }\n"
+        "    if (data.length > MAX_B64) {\n"
+        '      throw new RangeError("emitImage: image over " + MAX_B64 + " base64 chars; '
+        'use JPEG or lower quality");\n'
+        "    }\n"
+        "    entries.push("
+        'JSON.stringify({ media_type: type || "image/png", data }) + "\\n");\n'
+        "    while (entries.length > LIMIT) entries.shift();\n"
+        '    __ufoEmitWrite(EMIT_PATH, entries.join(""));\n'
+        "  };\n"
+        "})();\n"
+    )
+
+
 XLSX_RESULT_FOOTER = (
     "\nimport json as _json\n"
     "try:\n"
@@ -139,17 +174,32 @@ XLSX_RESULT_FOOTER = (
     "    pass\n"
 )
 
+REPLAY_SEMANTICS = (
+    "State advances only on a call that exits 0: a call that fails or expires is discarded whole, "
+    "so the next call composes onto the state before it. A retry therefore replays the same "
+    "starting point — change the code rather than repeat it."
+)
+STATE_UNCHANGED = (
+    "REPL state did not advance: this call's code is not committed, so the next call composes onto "
+    "the state before it."
+)
+TIMEOUT_DESCRIPTION = (
+    "How long to wait for this call in the foreground, in milliseconds. Max "
+    f"{MAX_COMMAND_TIMEOUT_MS} ({MAX_COMMAND_TIMEOUT_MS // 60_000} minutes). Code still running at "
+    "the deadline is not stopped — it continues in the background and the result hands back its "
+    "task id, log path, and pid, while the REPL state stays where it was."
+)
 JS_REPL_DESCRIPTION = (
     "Persistent Node.js REPL for Playwright browser automation and interactive website/game "
     "testing. Variables, imports, and state persist across calls. The REPL starts automatically on "
     "first use. Call emitImage(value, mediaType?) with a Buffer, Uint8Array, base64 string, or "
     f"{{bytes, mimeType}} to return images inline in the tool result — up to {EMIT_IMAGE_LIMIT} "
-    "per execution."
+    f"per execution. {REPLAY_SEMANTICS}"
 )
 XLSX_REPL_DESCRIPTION = (
     "Persistent Python REPL for Excel spreadsheet manipulation using openpyxl. Variables persist "
     "across calls. MUST call load_skill(name='office-xlsx') before first use. Set result = ... to "
-    "return data."
+    f"return data. {REPLAY_SEMANTICS}"
 )
 
 
@@ -157,6 +207,7 @@ class JsReplInput(BaseModel):
     code: str = Field(
         description="JavaScript code to execute. Variables and imports persist across calls."
     )
+    timeout: int | None = Field(default=None, description=TIMEOUT_DESCRIPTION)
     reset: bool | None = Field(
         default=None,
         description="Reset the REPL context and start fresh. Any code provided runs after the "
@@ -172,6 +223,7 @@ class XlsxReplInput(BaseModel):
         description="Python code to execute. Use openpyxl directly for spreadsheet operations. "
         "Variables persist across calls. Set result = ... to return data."
     )
+    timeout: int | None = Field(default=None, description=TIMEOUT_DESCRIPTION)
     reset: bool | None = Field(
         default=None, description="Reset REPL state — clears all variables and loaded workbooks."
     )
@@ -193,15 +245,29 @@ async def _candidate_source(ctx: ToolContext, path: str, code: str, reset: bool)
 def _repl_result(
     stdout: str, stderr: str, exit_code: int, images: tuple[ImageContent, ...] = ()
 ) -> ToolResult:
+    """A run the interpreter itself ended. A failing one carries the replay semantics with it: the
+    code it just ran is discarded, so a retry starts from the state before it — unsaid, that is how
+    one broken block becomes the same failure three times."""
+    payload: dict[str, object] = {"stdout": stdout, "stderr": stderr, "exit_code": exit_code}
+    if exit_code != 0:
+        payload["notice"] = STATE_UNCHANGED
     return ToolResult(
-        content=(
-            TextContent(
-                text=json.dumps({"stdout": stdout, "stderr": stderr, "exit_code": exit_code})
-            ),
-            *images,
-        ),
+        content=(TextContent(text=json.dumps(payload)), *images),
         is_error=exit_code != 0,
     )
+
+
+def _expired_result(run: TaskRun, applied_s: int) -> ToolResult:
+    """The budget expired, which no exit code can say: code running `timeout` exits 124 exactly as
+    a carrier-stopped run does, and "your code is broken" and "your budget was too short" want
+    opposite fixes. The interpreter and whatever it launched keep running when they survived, so the
+    handles are the way to the output the wait never collected. State is unchanged either way — the
+    reason a blind retry buys the same expiry again."""
+    if run.pid is None:
+        notice = f"{timeout_notice(applied_s, run.requested_s)} {STATE_UNCHANGED}"
+        return ToolResult(content=(TextContent(text=notice),), is_error=True)
+    handles = task_handles(run.task_id, run.pid, applied_s=applied_s, note=STATE_UNCHANGED)
+    return ToolResult(content=(TextContent(text=handles),))
 
 
 class EmittedImage(BaseModel):
@@ -209,10 +275,11 @@ class EmittedImage(BaseModel):
     data: str
 
 
-async def _emitted_images(ctx: ToolContext) -> tuple[ImageContent, ...]:
-    if not await ctx.sandbox.file_exists(JS_EMIT_PATH):
+async def _emitted_images(ctx: ToolContext, emit_path: str) -> tuple[ImageContent, ...]:
+    if not await ctx.sandbox.file_exists(emit_path):
         return ()
-    emitted = await ctx.sandbox.bash(f"cat {shlex.quote(JS_EMIT_PATH)}")
+    emitted = await ctx.sandbox.bash(f"cat {shlex.quote(emit_path)}")
+    await ctx.sandbox.bash(f"rm -f {shlex.quote(emit_path)}")
     images = []
     for line in [line for line in emitted.stdout.splitlines() if line][-EMIT_IMAGE_LIMIT:]:
         try:
@@ -225,30 +292,37 @@ async def _emitted_images(ctx: ToolContext) -> tuple[ImageContent, ...]:
 
 async def js_repl(ctx: ToolContext, args: JsReplInput) -> ToolResult:
     candidate = await _candidate_source(ctx, JS_REPL_PATH, args.code, bool(args.reset))
-    await ctx.sandbox.write_file(JS_RUN_PATH, JS_EMIT_PRELUDE.encode() + candidate.encode())
-    await ctx.sandbox.bash(f"rm -f {shlex.quote(JS_EMIT_PATH)}")
+    emit_relative = js_emit_relative(uuid4().hex[:8])
+    await ctx.sandbox.write_file(
+        JS_RUN_PATH, js_emit_prelude(emit_relative).encode() + candidate.encode()
+    )
     linked = await ctx.sandbox.bash(global_modules_link())
     if linked.exit_code != 0:
         raise OSError(linked.stderr.strip() or "linking global node_modules failed")
-    result = await ctx.sandbox.bash(
-        f"node {shlex.quote(JS_RUN_PATH)}", timeout_s=REPL_TIMEOUT_SECONDS
-    )
-    _meter_run(ctx, JS_REPL_TOOL, result.exit_code)
-    if result.exit_code == 0:
+    run = await run_task(ctx, f"node {shlex.quote(JS_RUN_PATH)}", args.timeout)
+    _meter_run(ctx, JS_REPL_TOOL, run.result.exit_code)
+    if (applied_s := run.result.timed_out_after_s) is not None:
+        return _expired_result(run, applied_s)
+    if run.result.exit_code == 0:
         await ctx.sandbox.write_file(JS_REPL_PATH, candidate.encode())
-    return _repl_result(result.stdout, result.stderr, result.exit_code, await _emitted_images(ctx))
+    return _repl_result(
+        run.result.stdout,
+        run.result.stderr,
+        run.result.exit_code,
+        await _emitted_images(ctx, f"{WORKSPACE_DIR}/{emit_relative}"),
+    )
 
 
 async def xlsx_repl(ctx: ToolContext, args: XlsxReplInput) -> ToolResult:
     candidate = await _candidate_source(ctx, XLSX_REPL_PATH, args.code, bool(args.reset))
     await ctx.sandbox.write_file(XLSX_RUN_PATH, candidate.encode() + XLSX_RESULT_FOOTER.encode())
-    result = await ctx.sandbox.bash(
-        f"python3 {shlex.quote(XLSX_RUN_PATH)}", timeout_s=REPL_TIMEOUT_SECONDS
-    )
-    _meter_run(ctx, XLSX_REPL_TOOL, result.exit_code)
-    if result.exit_code == 0:
+    run = await run_task(ctx, f"python3 {shlex.quote(XLSX_RUN_PATH)}", args.timeout)
+    _meter_run(ctx, XLSX_REPL_TOOL, run.result.exit_code)
+    if (applied_s := run.result.timed_out_after_s) is not None:
+        return _expired_result(run, applied_s)
+    if run.result.exit_code == 0:
         await ctx.sandbox.write_file(XLSX_REPL_PATH, candidate.encode())
-    return _repl_result(result.stdout, result.stderr, result.exit_code)
+    return _repl_result(run.result.stdout, run.result.stderr, run.result.exit_code)
 
 
 def manifest() -> Manifest:

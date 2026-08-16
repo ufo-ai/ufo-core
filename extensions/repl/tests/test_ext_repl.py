@@ -1,3 +1,4 @@
+import asyncio
 import json
 import shlex
 from dataclasses import dataclass, field, replace
@@ -10,6 +11,7 @@ import ufo_ext_documents.manifest as documents
 import ufo_ext_repl.manifest as repl
 from ufo_ext_repl.manifest import JsReplInput, XlsxReplInput
 
+import ufo.tools.tasks as tasks
 from ufo.blob import FilesystemBlobStore
 from ufo.ext.loader import skill_registry
 from ufo.sandbox.local import LocalCarrier
@@ -22,6 +24,7 @@ from ufo.sandbox.session import (
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.tools.tasks import MAX_COMMAND_TIMEOUT_MS
 
 TOOL_NARRATION = "working through the numbers"
 
@@ -30,15 +33,24 @@ TOOL_NARRATION = "working through the numbers"
 class FakeSandbox:
     """Scripts the sandbox for the REPL handlers: write_file/file_exists track a file dict, `cat`
     reads it back (the accumulate read-back), `rm` deletes, and `node`/`python3` return canned
-    results — `node` also drops `node_emit` into the emit file when set, standing in for a run
-    whose code called emitImage — so the accumulate-then-run flow is exercised without a real
-    container."""
+    results — `node` also drops `node_emit` into the emit file the run file names, standing in for a
+    run whose code called emitImage, and `late_emit` into the emit file of the call before it,
+    standing in for the process of an expired call writing on past its result — so the
+    accumulate-then-run flow is exercised without a real container.
+
+    `sh` stands in for the task journal the interpreter is launched through: it answers as the
+    command the launch carries, and answers the liveness probe with `probe_pid` — the wrapper that
+    outlived an expired wait, empty for a sandbox that ran nothing."""
 
     files: dict[str, bytes] = field(default_factory=dict)
+    probe_pid: str = ""
+    timeouts: list[int | None] = field(default_factory=list)
     node_result: ExecResult = field(
         default_factory=lambda: ExecResult(stdout="ran", stderr="", exit_code=0)
     )
     node_emit: bytes | None = None
+    late_emit: bytes | None = None
+    emit_paths: list[str] = field(default_factory=list)
     python_result: ExecResult = field(
         default_factory=lambda: ExecResult(stdout="{}", stderr="", exit_code=0)
     )
@@ -60,18 +72,33 @@ class FakeSandbox:
             self.files.pop(shlex.split(path)[-1], None)
             return ExecResult(stdout="", stderr="", exit_code=0)
         if head == "node":
+            emit_path = self._emit_path()
             if self.node_emit is not None:
-                self.files[repl.JS_EMIT_PATH] = self.node_emit
+                self.files[emit_path] = self.node_emit
+            if self.late_emit is not None and self.emit_paths:
+                self.files[self.emit_paths[-1]] = self.late_emit
+            self.emit_paths.append(emit_path)
             return self.node_result
         if head == "python3":
             return self.python_result
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if tasks.TASK_PROBE in script:
+            return ExecResult(stdout=self.probe_pid, stderr="", exit_code=0)
+        self.timeouts.append(timeout_s)
+        return await self.bash(args[-1])
 
     async def file_exists(self, path: str) -> bool:
         return path in self.files
 
     async def write_file(self, path: str, content: bytes) -> None:
         self.files[path] = content
+
+    def _emit_path(self) -> str:
+        run_file = self.files[repl.JS_RUN_PATH].decode()
+        relative = json.loads(run_file.split("__ufoEmitResolve(", 1)[1].split(")", 1)[0])
+        return f"{repl.WORKSPACE_DIR}/{relative}"
 
 
 async def _unavailable_spawn(profile: str, payload: dict, background: bool = False) -> SpawnResult:
@@ -118,6 +145,96 @@ def test_manifest_declares_both_repls_with_verbatim_descriptions() -> None:
     assert "openpyxl" in tools["xlsx_repl"].description
     assert "code" in tools["js_repl"].input_model.model_json_schema()["properties"]
     assert manifest.sandbox_internet is True
+
+
+def test_both_repls_take_a_capped_budget_and_state_the_replay_rule() -> None:
+    """The model raises a REPL budget the way it raises bash's, to the same ceiling, and each
+    description says what a call that does not exit 0 does to the state — unsaid, a retry replays
+    the same starting point and buys the same failure again."""
+    for tool in repl.manifest().tools:
+        timeout = tool.input_model.model_json_schema()["properties"]["timeout"]
+        assert str(MAX_COMMAND_TIMEOUT_MS) in timeout["description"]
+        assert repl.REPLAY_SEMANTICS in tool.description
+
+
+async def test_repl_timeout_is_milliseconds_capped_and_converted(tmp_path: Path) -> None:
+    """The budget arrives in milliseconds like bash's and is capped before it converts to the
+    carrier's seconds; an omitted one asks for no deadline, leaving the session's default budget."""
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.js_repl(ctx, JsReplInput(code="1", timeout=5000, user_description="d"))
+    await repl.js_repl(ctx, JsReplInput(code="2", timeout=9_000_000, user_description="d"))
+    await repl.js_repl(ctx, JsReplInput(code="3", user_description="d"))
+    await repl.xlsx_repl(
+        ctx, XlsxReplInput(code="a = 1", timeout=9_000_000, user_description=TOOL_NARRATION)
+    )
+    assert sandbox.timeouts == [5, 600, None, 600]
+
+
+async def test_an_expired_cell_keeps_running_and_hands_back_its_handles(tmp_path: Path) -> None:
+    """The budget is how long the caller waits, not how long the work may take: an interpreter still
+    running when it expires is handed back as the task it now is, under the same handle names bash
+    reports, and the result says the state did not advance."""
+    sandbox = FakeSandbox(
+        node_result=ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=120),
+        probe_pid="4321",
+    )
+    ctx = _context(sandbox, tmp_path)
+
+    result = await repl.js_repl(ctx, JsReplInput(code="await hang()", user_description="d"))
+
+    assert result.is_error is False
+    text = result.content[0].text
+    assert "did not complete within its 120s timeout" in text
+    assert repl.STATE_UNCHANGED in text
+    handles = json.loads(text.splitlines()[-1])
+    assert handles["pid"] == "4321"
+    assert set(handles) == {"task", "pid", "log", "exit_file", "watch", "stop"}
+    assert repl.JS_REPL_PATH not in sandbox.files
+
+
+async def test_an_expired_cell_the_sandbox_stopped_names_the_budget(tmp_path: Path) -> None:
+    """A wait that expired with nothing left alive is the sandbox failing to run the code, and only
+    that is the caller's error. It reports which deadline fired and that the request was capped —
+    the exit code cannot say either, since code running `timeout` exits 124 the same way."""
+    sandbox = FakeSandbox(
+        python_result=ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=600)
+    )
+    ctx = _context(sandbox, tmp_path)
+
+    result = await repl.xlsx_repl(
+        ctx,
+        XlsxReplInput(code="load()", timeout=9_000_000, user_description=TOOL_NARRATION),
+    )
+
+    assert result.is_error is True
+    assert "600s" in result.content[0].text
+    assert "9000s requested was capped" in result.content[0].text
+    assert repl.STATE_UNCHANGED in result.content[0].text
+    assert repl.XLSX_REPL_PATH not in sandbox.files
+
+
+async def test_an_expired_cell_leaves_the_state_a_later_call_composes_onto(tmp_path: Path) -> None:
+    """What the notice claims, held as behaviour: the expired call is discarded whole, so the next
+    call composes onto the state before it rather than onto the code that never finished."""
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.js_repl(ctx, JsReplInput(code="const x = 1", user_description="d"))
+    sandbox.node_result = ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=120)
+    await repl.js_repl(ctx, JsReplInput(code="await hang()", user_description="d"))
+    sandbox.node_result = ExecResult(stdout="ok", stderr="", exit_code=0)
+    await repl.js_repl(ctx, JsReplInput(code="const y = 2", user_description="d"))
+    assert sandbox.files[repl.JS_REPL_PATH] == b"const x = 1\nconst y = 2\n"
+
+
+async def test_a_failed_run_says_its_code_was_discarded(tmp_path: Path) -> None:
+    """A failing run carries the replay rule with it: the code it ran is not committed, so an agent
+    that re-sends the same block gets the same failure — which is how one broken block became three
+    identical losses."""
+    sandbox = FakeSandbox(node_result=ExecResult(stdout="", stderr="boom", exit_code=1))
+    ctx = _context(sandbox, tmp_path)
+    result = await repl.js_repl(ctx, JsReplInput(code="throw new Error()", user_description="d"))
+    assert json.loads(result.content[0].text)["notice"] == repl.STATE_UNCHANGED
 
 
 def test_data_skills_parse_and_index() -> None:
@@ -234,7 +351,8 @@ async def test_js_repl_composes_prelude_and_accumulated_code_into_the_run_file(
     await repl.js_repl(ctx, JsReplInput(code="let x = 1", user_description="d"))
     await repl.js_repl(ctx, JsReplInput(code="console.log(x)", user_description="d"))
     run_file = sandbox.files[repl.JS_RUN_PATH].decode()
-    assert run_file == repl.JS_EMIT_PRELUDE + "let x = 1\nconsole.log(x)\n"
+    emit_relative = sandbox.emit_paths[-1].removeprefix(f"{repl.WORKSPACE_DIR}/")
+    assert run_file == repl.js_emit_prelude(emit_relative) + "let x = 1\nconsole.log(x)\n"
     assert any(command == f"node {repl.JS_RUN_PATH}" for command in sandbox.commands)
 
 
@@ -274,13 +392,49 @@ async def test_js_repl_drops_a_torn_emit_line(tmp_path: Path) -> None:
     assert [image.data for image in result.content[1:]] == ["b2s="]
 
 
-async def test_js_repl_clears_stale_emits_and_stays_text_only(tmp_path: Path) -> None:
+async def test_js_repl_leaves_an_earlier_calls_emits_out_of_a_text_only_result(
+    tmp_path: Path,
+) -> None:
+    stale_path = f"{repl.WORKSPACE_DIR}/{repl.js_emit_relative('0ldca11')}"
     stale = b'{"media_type": "image/png", "data": "old"}\n'
-    sandbox = FakeSandbox(files={repl.JS_EMIT_PATH: stale})
+    sandbox = FakeSandbox(files={stale_path: stale})
     ctx = _context(sandbox, tmp_path)
     result = await repl.js_repl(ctx, JsReplInput(code="console.log(1)", user_description="d"))
     assert len(result.content) == 1
-    assert repl.JS_EMIT_PATH not in sandbox.files
+
+
+async def test_js_repl_removes_the_emit_file_it_read(tmp_path: Path) -> None:
+    emitted = json.dumps({"media_type": "image/png", "data": "cG5n"}) + "\n"
+    sandbox = FakeSandbox(node_emit=emitted.encode())
+    ctx = _context(sandbox, tmp_path)
+    result = await repl.js_repl(ctx, JsReplInput(code="emitImage(shot)", user_description="d"))
+    assert [image.data for image in result.content[1:]] == ["cG5n"]
+    assert sandbox.emit_paths[-1] not in sandbox.files
+
+
+async def test_js_repl_gives_each_call_an_emit_file_of_its_own(tmp_path: Path) -> None:
+    """A cell that outgrew its budget keeps running, so it can still write images after its result
+    was discarded. The next call reads a file of its own, so what the survivor writes stays out of
+    it and the call keeps the images it emitted itself."""
+    survivor = json.dumps({"media_type": "image/png", "data": "c3Vy"}) + "\n"
+    own = json.dumps({"media_type": "image/jpeg", "data": "b3du"}) + "\n"
+    sandbox = FakeSandbox(
+        node_result=ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=120),
+        probe_pid="4321",
+        node_emit=survivor.encode(),
+    )
+    ctx = _context(sandbox, tmp_path)
+    await repl.js_repl(ctx, JsReplInput(code="await hang(shot)", user_description="d"))
+    sandbox.node_result = ExecResult(stdout="ran", stderr="", exit_code=0)
+    sandbox.node_emit = own.encode()
+    sandbox.late_emit = survivor.encode()
+
+    result = await repl.js_repl(ctx, JsReplInput(code="emitImage(shot)", user_description="d"))
+
+    assert sandbox.emit_paths[0] != sandbox.emit_paths[1]
+    assert [(image.media_type, image.data) for image in result.content[1:]] == [
+        ("image/jpeg", "b3du")
+    ]
 
 
 async def test_xlsx_repl_wraps_accumulated_code_with_the_result_footer(tmp_path: Path) -> None:
@@ -329,6 +483,90 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
     )
     assert resolved.is_error is False
     assert "/node_modules/npm/" in json.loads(resolved.content[0].text)["stdout"]
+
+
+async def test_a_js_cell_over_its_budget_survives_in_the_real_local_carrier(
+    tmp_path: Path,
+) -> None:
+    """The whole point of the journal, against a real process group: the carrier ends the expired
+    exec by killing the launcher's group, and the node process sits outside it, so the work goes
+    on — the log grows after the tool answered and the exit code lands later. A cell that opened a
+    browser keeps it, instead of losing the launch to the deadline."""
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            workspace_host_path=str(tmp_path / "workspace"),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token-abc",
+        )
+    )
+    session = SandboxSession(carrier=carrier, handle=handle)
+    ctx = _context(session, tmp_path)
+    code = (
+        "for (let tick = 1; tick <= 8; tick++) {\n"
+        "  console.log(`tick ${tick}`);\n"
+        "  await new Promise((done) => setTimeout(done, 400));\n"
+        "}"
+    )
+
+    result = await repl.js_repl(ctx, JsReplInput(code=code, timeout=1000, user_description="d"))
+
+    assert result.is_error is False
+    assert repl.STATE_UNCHANGED in result.content[0].text
+    task = json.loads(result.content[0].text.splitlines()[-1])
+    at_return = await session.bash(f'cat "{task["log"]}"')
+    for _ in range(200):
+        landed = await session.bash(f'cat "{task["exit_file"]}" 2>/dev/null || true')
+        if landed.stdout.strip():
+            break
+        await asyncio.sleep(0.05)
+    assert landed.stdout.strip() == "0"
+    after = await session.bash(f'cat "{task["log"]}"')
+    assert after.stdout != at_return.stdout
+    assert "tick 8" in after.stdout
+    assert not (tmp_path / "workspace" / ".repl" / "js-repl.js").exists()
+
+
+async def test_an_expired_cell_emitting_on_leaves_the_next_calls_images_alone(
+    tmp_path: Path,
+) -> None:
+    """Against real node processes: the cell that outgrew its budget goes on emitting an image every
+    100ms, and the next call emits one of its own and then waits, so the survivor writes several
+    times after that emit. The next call reads its own file, so it answers with its own image."""
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            workspace_host_path=str(tmp_path / "workspace"),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token-abc",
+        )
+    )
+    ctx = _context(SandboxSession(carrier=carrier, handle=handle), tmp_path)
+    survivor = (
+        "for (let tick = 1; tick <= 40; tick++) {\n"
+        '  emitImage(Buffer.from([9, 9, 9]), "image/png");\n'
+        "  await new Promise((done) => setTimeout(done, 100));\n"
+        "}"
+    )
+    expired = await repl.js_repl(
+        ctx, JsReplInput(code=survivor, timeout=1000, user_description="d")
+    )
+    assert repl.STATE_UNCHANGED in expired.content[0].text
+    own = (
+        'emitImage(Buffer.from([1, 2, 3]), "image/jpeg");\n'
+        "await new Promise((done) => setTimeout(done, 600));"
+    )
+
+    result = await repl.js_repl(ctx, JsReplInput(code=own, user_description="d"))
+
+    assert result.is_error is False
+    assert [(image.media_type, image.data) for image in result.content[1:]] == [
+        ("image/jpeg", "AQID")
+    ]
 
 
 async def test_global_modules_link_resolves_a_package_only_in_a_secondary_root(

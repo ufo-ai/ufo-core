@@ -81,8 +81,8 @@ from ufo.sandbox.session import (
     SandboxSpec,
     SandboxUnreachable,
 )
-from ufo.tools.builtins import (
-    MAX_BASH_TIMEOUT_MS,
+from ufo.tools.tasks import (
+    MAX_COMMAND_TIMEOUT_MS,
     TASK_BASH,
     TASK_LAUNCH,
     TASK_PROBE,
@@ -1601,7 +1601,7 @@ async def test_a_bash_command_at_the_tools_ceiling_never_pauses_mid_run() -> Non
     and the container cannot pause under it."""
     sdk, carrier = _leased(_Clock())
     handle = await carrier.create(_spec(uuid4()))
-    ceiling = MAX_BASH_TIMEOUT_MS // 1000
+    ceiling = MAX_COMMAND_TIMEOUT_MS // 1000
 
     result = await carrier.exec(handle, ("bash", "-lc", "make test"), ceiling)
 
