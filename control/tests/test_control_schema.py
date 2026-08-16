@@ -40,7 +40,7 @@ from ufo_control.gateway_workos import (
 )
 from ufo_control.main import main
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV
-from ufo_control.schema import shape_control_schema
+from ufo_control.schema import require_control_schema, shape_control_schema
 
 REPO = Path(__file__).resolve().parents[2]
 HOSTED_TEMPLATE = REPO / "infra/templates/hosted.yaml.tpl"
@@ -372,6 +372,127 @@ async def test_the_verb_frees_an_object_number_a_live_ledger_still_requires(
         assert isinstance(await InviteCodes(pool=pool).redeem("formco.io", uuid4()), InviteAccepted)
     finally:
         await pool.close()
+
+
+async def test_the_verb_gives_a_claim_ledger_the_column_that_links_its_grant(
+    empty_database: str,
+) -> None:
+    """`invite_id` joined the claim ledger's create statement long after the first database was
+    shaped, and a create statement adds no column to a table already there. Every claim read carries
+    the column, so a ledger that never got it fails signup itself rather than one narrow verb."""
+    connection = await asyncpg.connect(empty_database)
+    try:
+        await connection.execute(f"create schema {SCHEMA}")
+        await connection.execute(
+            f"create table {SCHEMA}.onboard_claim ("
+            "  id uuid primary key,"
+            "  email text not null,"
+            "  email_domain text not null,"
+            "  code_hash text not null,"
+            "  surface text not null,"
+            "  surface_ref text not null,"
+            "  attempts integer not null default 0,"
+            "  expires_at timestamptz not null,"
+            "  verified_at timestamptz,"
+            "  tenant_name text,"
+            "  resulting_workspace_id text,"
+            "  created_at timestamptz not null default now())"
+        )
+    finally:
+        await connection.close()
+
+    await shape_control_schema(empty_database)
+
+    pool = await asyncpg.create_pool(empty_database, min_size=1, max_size=2)
+    try:
+        store = OnboardStore(pool=pool)
+        claim_id = uuid4()
+        await store.insert_claim(
+            OnboardClaim(
+                claim_id=claim_id,
+                email="founder@granted.io",
+                email_domain="granted.io",
+                surface="ufo",
+                surface_ref="grant-proof",
+                expires_at=datetime.now(UTC) + timedelta(minutes=15),
+                verified_at=None,
+                invite_id=None,
+            )
+        )
+        invites = InviteCodes(pool=pool)
+        await invites.mint(7, "founder@granted.io")
+        accepted = await invites.redeem("granted.io", claim_id)
+        assert isinstance(accepted, InviteAccepted)
+        claim = await store.live_claim("ufo", "grant-proof")
+        assert claim is not None and claim.invite_id == accepted.invite_id, (
+            "a live claim ledger gains invite_id only through RESHAPE; without it the grant a "
+            "signup redeemed detaches from the claim that redeemed it"
+        )
+    finally:
+        await pool.close()
+
+
+async def test_the_verb_refuses_a_declared_column_no_reshape_statement_adds(
+    empty_database: str,
+) -> None:
+    """The class rather than one column: a table already there gains a column only through RESHAPE,
+    so the verb ends by holding every table to the shape its own create statement declares. It names
+    what is missing and leaves the database as it found it, so the deploy Job fails while the
+    gateway it gates still serves the shape it has."""
+    connection = await asyncpg.connect(empty_database)
+    try:
+        await connection.execute(f"create schema {SCHEMA}")
+        await connection.execute(
+            f"create table {SCHEMA}.slack_connect_delivery ("
+            "  email_domain text primary key,"
+            "  email text not null,"
+            "  state text not null,"
+            "  channel_name text not null unique,"
+            "  channel_id text,"
+            "  slack_invitation_id text,"
+            "  invite_attempted_at timestamptz,"
+            "  worker_id text,"
+            "  claim_expires_at timestamptz,"
+            "  next_attempt_at timestamptz,"
+            "  attempts integer not null default 0,"
+            "  last_error text,"
+            "  created_at timestamptz not null default now(),"
+            "  updated_at timestamptz not null default now(),"
+            "  delivered_at timestamptz)"
+        )
+    finally:
+        await connection.close()
+
+    with pytest.raises(
+        RuntimeError, match=r"does not carry ufo_control\.slack_connect_delivery\.greeted_at\."
+    ):
+        await shape_control_schema(empty_database)
+
+    shaped = await _catalog(empty_database)
+    assert {name for kind, name, _ in shaped if kind == TABLE_KIND} == {"slack_connect_delivery"}, (
+        "a shape the reshape cannot carry to head must leave the database as it found it"
+    )
+
+
+async def test_the_gateway_refuses_a_ledger_missing_a_column_this_build_declares(
+    empty_database: str,
+) -> None:
+    """The consumer end of the same shape. A replica whose build declares a column the database does
+    not carry names the column and refuses to serve, rather than raising `UndefinedColumnError` on
+    whichever path reads it first — a background sweep, where nobody is watching, included."""
+    await shape_control_schema(empty_database)
+    connection = await asyncpg.connect(empty_database)
+    try:
+        await connection.execute(
+            f"alter table {SCHEMA}.slack_connect_delivery drop column greeted_at"
+        )
+    finally:
+        await connection.close()
+
+    with pytest.raises(
+        RuntimeError, match=r"does not carry ufo_control\.slack_connect_delivery\.greeted_at —"
+    ):
+        await require_control_schema(empty_database)
 
 
 def test_the_gateway_refuses_to_boot_an_unshaped_schema(

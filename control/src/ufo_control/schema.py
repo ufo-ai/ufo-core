@@ -83,7 +83,77 @@ RESHAPE = (
     " drop column if exists use_case",
     f"alter table {gateway_store.TABLE} add column if not exists created_workspace boolean"
     " not null default false",
+    f"alter table {gateway_store.TABLE} add column if not exists invite_id uuid",
 )
+
+CREATE_TABLE = "create table if not exists "
+TABLE_CONSTRAINTS = frozenset({"primary", "unique", "check", "foreign", "exclude", "constraint"})
+
+LIVE_COLUMNS = (
+    "select table_name, column_name from information_schema.columns"
+    "  where table_schema = $1 and table_name = any($2::text[])"
+)
+
+
+def _definitions(body: str) -> list[str]:
+    """The comma-separated definitions of one column list, keeping a `check (state in ('a', 'b'))`
+    whole rather than splitting it on the commas inside its own parentheses."""
+    definitions = [""]
+    depth = 0
+    for character in body:
+        if character == ")" and depth == 0:
+            break
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        if character == "," and depth == 0:
+            definitions.append("")
+            continue
+        definitions[-1] += character
+    return definitions
+
+
+def _declared_shape(statements: tuple[str, ...]) -> dict[str, frozenset[str]]:
+    """The columns every `create table if not exists` declares, by table — the head shape read off
+    the only place that states it.
+
+    A create statement writes nothing to a table already there, so a column added to one reaches an
+    existing database through `RESHAPE` alone. A column no `RESHAPE` statement adds stays absent
+    from every database shaped before it, and the first request that reads it raises
+    `UndefinedColumnError` under a member rather than in the deploy."""
+    shape = {}
+    for statement in statements:
+        if not statement.startswith(CREATE_TABLE):
+            continue
+        table, _, body = statement[len(CREATE_TABLE) :].partition("(")
+        columns = set()
+        for definition in _definitions(body):
+            tokens = definition.split()
+            if tokens and tokens[0] not in TABLE_CONSTRAINTS:
+                columns.add(tokens[0])
+        shape[table.strip()] = frozenset(columns)
+    return shape
+
+
+HEAD_SHAPE = _declared_shape(DDL)
+
+
+async def _drifted_columns(connection: asyncpg.Connection) -> list[str]:
+    """Every declared column the database does not carry, qualified and sorted."""
+    rows = await connection.fetch(
+        LIVE_COLUMNS,
+        gateway_store.SCHEMA,
+        [table.split(".", maxsplit=1)[1] for table in HEAD_SHAPE],
+    )
+    live: dict[str, set[str]] = {}
+    for row in rows:
+        live.setdefault(row["table_name"], set()).add(row["column_name"])
+    return sorted(
+        f"{table}.{column}"
+        for table, declared in HEAD_SHAPE.items()
+        for column in declared - live.get(table.split(".", maxsplit=1)[1], set())
+    )
 
 
 async def shape_control_schema(dsn: str) -> None:
@@ -109,7 +179,13 @@ async def shape_control_schema(dsn: str) -> None:
     The index renames are not cosmetic: an index name is schema-scoped, and while Postgres
     uniquifies the names it generates for a primary key and a unique column, `create index if not
     exists` on the explicitly named due index would find the old table's index holding that name
-    and silently create nothing — leaving the head table to scan for due rows."""
+    and silently create nothing — leaving the head table to scan for due rows.
+
+    The last act holds the shaped database to `HEAD_SHAPE`, which is the whole class of reshape
+    omission rather than one column: a column added to a create statement and forgotten here reaches
+    no database that already holds its table. The check runs inside the transaction, so a database
+    the reshape cannot carry to head keeps everything it had — the Job fails naming every missing
+    column, and the gateway Deployment it gates never rolls."""
     connection = await asyncpg.connect(dsn)
     try:
         async with connection.transaction():
@@ -136,11 +212,22 @@ async def shape_control_schema(dsn: str) -> None:
                     await connection.execute(statement)
             for statement in RESHAPE:
                 await connection.execute(statement)
+            drifted = await _drifted_columns(connection)
+            if drifted:
+                raise RuntimeError(
+                    f"the shaped database does not carry {', '.join(drifted)}. A create statement"
+                    " adds no column to a table already there. Add `alter table ... add column if"
+                    " not exists` to RESHAPE for each one."
+                )
     finally:
         await connection.close()
 
 
 async def require_control_schema(dsn: str) -> None:
+    """A replica serves only against the shape its own build declares. A ledger absent names the
+    verb that shapes it. A ledger present but missing a column this build declares earns the same
+    refusal: the build and the database disagree, and every path that reads the column fails one
+    request at a time otherwise — a background sweep, where nobody is watching, included."""
     connection = await asyncpg.connect(dsn)
     try:
         for table in LEDGERS:
@@ -148,5 +235,11 @@ async def require_control_schema(dsn: str) -> None:
                 raise RuntimeError(
                     f"{table} is absent — run `ufo-control migrate` before starting the gateway"
                 )
+        drifted = await _drifted_columns(connection)
+        if drifted:
+            raise RuntimeError(
+                f"the database does not carry {', '.join(drifted)} — run `ufo-control migrate`"
+                " from this build before starting the gateway"
+            )
     finally:
         await connection.close()
