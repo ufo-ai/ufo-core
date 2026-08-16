@@ -13,6 +13,8 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from evals.memory_100.models import Snapshot
 from evals.memory_100.snapshot import load_snapshot
@@ -259,26 +261,40 @@ class Memory100Materializer:
     async def _commit_memories(
         self, workspace_id: UUID, audiences: tuple[AudienceBinding, ...]
     ) -> None:
+        """Seed the snapshot's memories by a raw content-addressed insert rather than the store's
+        own upsert. A haystack memory is a whole recorded session, so most bodies run well past
+        MEMORY_BODY_MAX_CHARS — a bound the live write path holds over what an agent authors, and
+        one this fixed corpus predates. The id repeats what `commit` addresses over
+        `(workspace, subject, item_class, body)`, because readiness evidence and the grader's maps
+        key off it. `embedding_digest` stays NULL, leaving the index job the sole producer of chunks
+        and embeddings, and `on_conflict_do_nothing` keeps a second materialization of the same
+        snapshot a no-op."""
         members = {binding.alias: binding.member_id for binding in audiences}
-        store = memory_store.MemoryStore(
-            index=self.index,
-            embed=self.embed,
-            transaction=workspace_tx,
-            workspace_id=workspace_id,
-            page_states=context_for("memory", frozenset()).page_states,
-        )
-        for memory in self.snapshot.memories:
-            member_id = members[memory.audience]
-            await store.commit(
-                memory_store.MemoryWrite(
-                    subject=(SHARED_SUBJECT if member_id is None else member_subject(member_id)),
+        async with workspace_tx() as connection:
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            for memory in self.snapshot.memories:
+                member_id = members[memory.audience]
+                subject = SHARED_SUBJECT if member_id is None else member_subject(member_id)
+                item_id = uuid5(
+                    memory_store.MEMORY_ITEM_NAMESPACE,
+                    "\x00".join((str(workspace_id), subject, memory.item_class, memory.body)),
+                )
+                statement = insert(memory_store.memory_item).values(
+                    id=item_id,
+                    workspace_id=workspace_id,
+                    subject=subject,
                     body=memory.body,
                     item_class=memory.item_class,
                     memory_kind=memory.memory_kind,
                     confidence=memory.confidence,
                     source_ref=memory.source_ref,
+                    superseded_by=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
                 )
-            )
+                await connection.execute(
+                    statement.on_conflict_do_nothing(index_elements=[memory_store.memory_item.c.id])
+                )
 
     async def _drain_memory_index(self) -> None:
         indexer = memory_store.MemoryIndexer(

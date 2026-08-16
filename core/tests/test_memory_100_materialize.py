@@ -8,7 +8,13 @@ import ufo_ext_sample as sample
 from pydantic import BaseModel
 from ufo_ext_index_default import DefaultIndex, pack_embedding
 from ufo_ext_memory import manifest as memory_manifest
-from ufo_ext_memory.store import MemoryStore, memory_item, recall_subjects
+from ufo_ext_memory.store import (
+    MEMORY_BODY_MAX_CHARS,
+    MEMORY_ITEM_NAMESPACE,
+    MemoryStore,
+    memory_item,
+    recall_subjects,
+)
 from ufo_testsupport.migrations import apply_cached_migrations
 
 from evals.memory_100.materialize import Memory100Materializer
@@ -27,9 +33,11 @@ from ufo.ext.context import ScopedStore, SourceReader, context_for
 from ufo.sandbox.containment import ContainmentError
 from ufo.schema import tables
 from ufo.sources.sync import page_id_for
+from ufo.subjects import member_subject
 from ufo.workspace import ws
 
 PAGE_REF_SCALE = 12_500
+ALICE_BODY = "Alice's private launch phrase is alpha lantern."
 
 
 class DeterministicEmbed:
@@ -60,7 +68,7 @@ async def memory_100_db(memory_100_database_url: str) -> AsyncIterator[None]:
         await dispose_db()
 
 
-def _snapshot(root: Path) -> None:
+def _snapshot(root: Path, alice_body: str = ALICE_BODY) -> None:
     cases = (
         tuple(
             SnapshotCase(
@@ -119,8 +127,8 @@ def _snapshot(root: Path) -> None:
         SnapshotMemory(
             source_ref="session/alice",
             audience="alice",
-            body="Alice's private launch phrase is alpha lantern.",
-            digest=content_digest("Alice's private launch phrase is alpha lantern."),
+            body=alice_body,
+            digest=content_digest(alice_body),
         ),
         SnapshotMemory(
             source_ref="session/bob",
@@ -291,6 +299,63 @@ async def test_post_stage_database_failure_rolls_back_and_retry_reuses_stage(
     readiness = await materializer.run()
     assert readiness.pages_root == materializer.pages_root
     assert readiness.page_count == len(load_snapshot(snapshot_root).pages)
+
+
+async def test_materializes_a_memory_body_past_the_live_write_bound(
+    memory_100_db: None, tmp_path: Path
+) -> None:
+    """A haystack memory is a whole recorded session, far past the bound the live write path holds
+    over an authored body. The snapshot predates that bound, so its body lands whole, under the id
+    the store's own content address would give it, and recall reaches it."""
+    session = ALICE_BODY + " Session transcript line.\n" * 400
+    assert len(session) > MEMORY_BODY_MAX_CHARS
+    snapshot_root = tmp_path / "snapshot"
+    _snapshot(snapshot_root, session)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    embed = DeterministicEmbed()
+    index = DefaultIndex(transaction=workspace_tx)
+    materializer = Memory100Materializer.from_snapshot(
+        snapshot_root,
+        tmp_path / "state",
+        blob=blob,
+        index=index,
+        embed=embed,
+    )
+
+    readiness = await materializer.run()
+
+    alice = {binding.alias: binding.member_id for binding in readiness.audiences}["alice"]
+    assert alice is not None
+    with ws(readiness.workspace_id):
+        memory_context = context_for("memory", frozenset())
+        store = MemoryStore(
+            index,
+            embed,
+            workspace_tx,
+            readiness.workspace_id,
+            memory_context.page_states,
+            memory_context.readable_page_states,
+            memory_context.readable_source_ids,
+        )
+        recalled = await store.recall(
+            "alpha lantern",
+            recall_subjects(conversation_audience(alice)),
+            8,
+            source_reader=SourceReader(
+                agent_id=uuid5(readiness.workspace_id, "memory_100/agent"),
+                requesting_member_id=alice,
+                subjects=recall_subjects(conversation_audience(alice)),
+            ),
+        )
+
+    assert readiness.memory_count == 2
+    assert [item.body for item in recalled] == [session]
+    assert [item.memory_id for item in recalled] == [
+        uuid5(
+            MEMORY_ITEM_NAMESPACE,
+            "\x00".join((str(readiness.workspace_id), member_subject(alice), "fact", session)),
+        )
+    ]
 
 
 async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
