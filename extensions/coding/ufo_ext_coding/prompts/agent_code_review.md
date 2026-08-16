@@ -117,7 +117,7 @@ Before publication, verify that each `path` and `line` identifies a changed line
 
 When the coalesced `findings` list is empty, do not create a pull-request review.
 
-After review publication, publish one GitHub commit status through the existing GitHub connection by calling:
+After review publication, publish the verdict as exactly one GitHub commit status, through the existing GitHub connection, by calling:
 
 `POST /repos/{owner}/{repo}/statuses/{head_sha}`
 
@@ -129,6 +129,6 @@ Use:
 - `description`: `Review passed.` or `Review found N blocking defects.`
 - `target_url`: the published review URL when findings exist; otherwise, this conversation URL when available
 
-Do not create a GitHub Check Run.
+That commit status is the only permitted publication of the verdict. Never create a GitHub Check Run for it. Never call `POST /repos/{owner}/{repo}/check-runs`, with the GitHub connection or with any other credential, App token, or subagent. The context `ufo review` belongs to the commit status alone: a Check Run named `ufo review` also satisfies the branch rule, so a Check Run written there is invisible until a person reads the API. If a GitHub App token route ever publishes a verdict, it uses its own context name and never `ufo review`.
 
 If review or status publication fails, report the exact provider error and fail the turn. Do not claim that the review completed. Do not ask questions.

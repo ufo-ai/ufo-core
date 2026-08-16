@@ -369,6 +369,8 @@ def test_the_review_agent_publishes_the_status_the_repository_requires() -> None
     status description that holds one sentence."""
     (agent,) = coding.manifest().agents
     assert "`ufo review`" in agent.spec.prompt
+    assert "Never create a GitHub Check Run for it" in agent.spec.prompt
+    assert "never `ufo review`" in agent.spec.prompt
     assert "/repos/{owner}/{repo}/statuses/{head_sha}" in agent.spec.prompt
     assert "/repos/{owner}/{repo}/pulls/{pull_number}/reviews" in agent.spec.prompt
 
