@@ -52,6 +52,7 @@ from starlette.responses import Response
 
 from ufo.accounting import AgentSpendReport, MemberSpendReport, SpendReport, SpendRollup
 from ufo.agent_scope import agent as bind_agent
+from ufo.agent_setup import AgentSetup, pending_setup
 from ufo.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
 from ufo.artifact_url import ARTIFACT_URL_TTL_SECONDS, mint_artifact_url
 from ufo.audience import (
@@ -500,8 +501,8 @@ class InstallationSummary(BaseModel):
 
 
 class AgentDetail(BaseModel):
-    """One agent as a portal overview reads it: the row's configuration beside its prompt digest
-    and the chat surfaces whose installations bind to it."""
+    """One agent as a portal overview reads it: the row's configuration beside its prompt digest,
+    the chat surfaces whose installations bind to it, and what it still needs from a member."""
 
     name: str
     main: bool
@@ -512,6 +513,10 @@ class AgentDetail(BaseModel):
     prompt: str
     prompt_digest: str
     surfaces: tuple[str, ...]
+    setup: AgentSetup | None
+    """The grants an extension shipped this agent expecting that no grant covers yet, or None once
+    it is wired and for an agent no extension shipped. The portal offers the setup from this, and
+    stops offering it as the grants land — the offer is derived, never a flag to clear."""
     updated_at: datetime
 
     @field_validator("updated_at")
@@ -1887,6 +1892,9 @@ class SurfaceContext:
             prompt=row.prompt,
             prompt_digest=prompt_digest(row.prompt),
             surfaces=tuple(surfaces),
+            setup=dict((agent, missing) for agent, _name, missing in await pending_setup()).get(
+                agent_id
+            ),
             updated_at=row.updated_at,
         )
 

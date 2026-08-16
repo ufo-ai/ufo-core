@@ -7,10 +7,20 @@ import { Reveal } from "@/components/ui/reveal";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { type NoticeState, OutcomeNotice, Panel, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
+import { newChatHash } from "@/lib/route";
+import { setPendingAsk } from "@/lib/pendingAsk";
 import { webAudienceLabel } from "@/lib/audience";
 import { day } from "@/lib/moments";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
+
+/** What an extension-shipped agent still needs granted before it can work, or null once it is
+ *  wired. Derived from the grants themselves, so the offer disappears on its own. */
+type AgentSetupNeeded = { connectors: string[]; instructions: string };
+
+/** What the button types on the member's behalf. It names the skill rather than the acts, so the
+ *  agent reads its own outstanding grants at that moment instead of trusting a stale button. */
+const SETUP_ASK = "Load the agent-setup skill and follow its instructions.";
 
 type OverviewPayload = {
   agent: {
@@ -20,6 +30,7 @@ type OverviewPayload = {
     updated_at: string;
     prompt: string;
     prompt_digest: string;
+    setup: AgentSetupNeeded | null;
   };
   spec: Record<string, unknown>;
   spec_schema: { properties?: Record<string, SchemaProperty> };
@@ -112,9 +123,39 @@ export function Overview({ agent }: { agent: Agent }) {
           }
         }
 
+        // The setup ask goes to the composer, not to a send. Every grant binds to the agent whose
+        // conversation it is made in, and the member who presses this is the speaker the granting
+        // verbs gate on — so the member must be *in* that conversation, not merely the cause of
+        // one. Founding it here would leave an id nothing else holds: no rail row, a read-only
+        // conversation tab, and a connect link that lives only on the live tail.
+        function startSetup() {
+          setPendingAsk(agent.id, SETUP_ASK);
+          window.location.hash = newChatHash(agent.id);
+        }
+
         return (
           <>
             <OutcomeNotice state={notice} />
+            {ready.agent.setup ? (
+              <Group title="Setup">
+                <Facts
+                  rows={[
+                    {
+                      label: "Still needed",
+                      value: ready.agent.setup.connectors
+                        .map((provider) => provider + " account")
+                        .join(", "),
+                    },
+                  ]}
+                />
+                {ready.agent.setup.instructions ? (
+                  <Hint>{ready.agent.setup.instructions}</Hint>
+                ) : null}
+                <Button type="button" onClick={startSetup}>
+                  Start setup
+                </Button>
+              </Group>
+            ) : null}
             <Group title="Agent">
               <Facts
                 rows={[

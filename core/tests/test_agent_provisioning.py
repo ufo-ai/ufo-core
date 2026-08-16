@@ -17,13 +17,13 @@ import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from ufo_ext_sample import PROVISIONED_AGENT_NAME, PROVISIONED_AGENT_PROMPT
 
-from ufo.agents import (
+from ufo.agent_setup import (
     SETUP_SKILL_NAME,
     AgentSetup,
-    AgentSpec,
     pending_setup,
     setup_skill,
 )
+from ufo.agents import AgentSpec
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx

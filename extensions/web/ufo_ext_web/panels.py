@@ -441,7 +441,8 @@ async def agent_overview(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
     """The overview projection: the agent's configuration and prompt digest, the deploy's public
     internet capability as the ceiling the agent setting narrows, the deploy's model ids for the
     model choice, the writable spec's own schema (the form renders its fields from it, never a
-    parallel description), and — for an admin — the web audience this extension grants."""
+    parallel description), what an extension-shipped agent still needs granted, and — for an admin —
+    the web audience this extension grants."""
     detail = await ctx.agent_detail(agent_id)
     if detail is None:
         return Response("no such agent", status_code=404)
@@ -458,6 +459,7 @@ async def agent_overview(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
                 "prompt_digest": detail.prompt_digest,
                 "surfaces": list(detail.surfaces),
                 "updated_at": detail.updated_at.isoformat(),
+                "setup": None if detail.setup is None else detail.setup.model_dump(mode="json"),
             },
             "deploy": {"sandbox_internet": ctx.deploy_sandbox_internet},
             "models": list(ctx.models),

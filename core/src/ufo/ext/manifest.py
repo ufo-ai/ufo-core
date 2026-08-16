@@ -19,7 +19,8 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.agents import AgentSetup, AgentSpec
+from ufo.agent_setup import AgentSetup
+from ufo.agents import AgentSpec
 from ufo.audience import SHARED_AUDIENCE, Audience
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider

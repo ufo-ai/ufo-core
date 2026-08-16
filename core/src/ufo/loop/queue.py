@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
 from ufo.agent_scope import agent
-from ufo.agents import setup_skill
+from ufo.agent_setup import setup_skill
 from ufo.audience import Audience, parse_audience
 from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider

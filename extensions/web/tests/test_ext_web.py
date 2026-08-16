@@ -7299,6 +7299,7 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
     assert data["agent"]["prompt"] == "be brief"
     assert len(data["agent"]["prompt_digest"]) > 8
     assert data["agent"]["updated_at"].endswith("+00:00")
+    assert data["agent"]["setup"] is None
     assert data["deploy"]["sandbox_internet"] is False
     assert data["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
     assert data["spec"] == {
@@ -10402,3 +10403,78 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
         "text": "and a blog post",
         "asked": "A blog post too?",
     }
+
+
+async def test_the_overview_offers_the_setup_a_shipped_agent_still_needs(
+    db: None, web: tuple[AsyncClient, UUID, UUID]
+) -> None:
+    """The portal is where a member finishes an install, so the agent read carries what is still
+    ungranted. It is derived from the grants, not a flag: the offer is present while the connector
+    is unheld and absent once any connection of that provider is granted to this agent."""
+    client, workspace_id, _agent_id = web
+    shipped = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=shipped,
+                workspace_id=workspace_id,
+                name="shipped",
+                prompt="be shipped",
+                model="claude-opus-4-8",
+                provisioned_by="sample",
+                provisioned_name="shipped",
+                provisioned_version="0.1.0",
+                setup={"connectors": ["acme"], "instructions": "Connect the Acme account."},
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    offered = await client.get(f"/surface/web/agents/{shipped}/overview", headers=cookie)
+    assert offered.status_code == 200
+    assert offered.json()["agent"]["setup"] == {
+        "connectors": ["acme"],
+        "instructions": "Connect the Acme account.",
+    }
+
+    connection_id = uuid4()
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=shipped,
+                surface="test",
+                queue_key=conversation_id.hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider="acme",
+                account_id="acme-1",
+                host="api.acme.test",
+                owner_member_id=_member_id,
+                conversation_id=conversation_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                agent_id=shipped,
+                connection_id=connection_id,
+                conversation_id=conversation_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    settled = await client.get(f"/surface/web/agents/{shipped}/overview", headers=cookie)
+    assert settled.json()["agent"]["setup"] is None

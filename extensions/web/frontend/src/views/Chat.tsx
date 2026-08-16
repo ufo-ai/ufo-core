@@ -39,6 +39,7 @@ import { COLUMN } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
+import { takePendingAsk } from "@/lib/pendingAsk";
 import {
   answerQuestions,
   refreshTranscript,
@@ -387,7 +388,9 @@ function Composer({
 }) {
   const state = useChat(target.key);
   const toTheFoot = useTakeMeToTheFoot();
-  const [text, setText] = useState(() => readDraft(draftKey));
+  // A panel may hand the composer the message it would have typed. It wins over a draft for
+  // this open only: the member reads it and presses send, so the conversation is theirs.
+  const [text, setText] = useState(() => takePendingAsk(target.agentId) || readDraft(draftKey));
   const [stopping, setStopping] = useState(false);
   // The turn the page is tailing, and so the one a stop can name. A send holds the chat busy before
   // admission answers with a turn id, and a stop of a turn nobody has named yet reaches nothing.
