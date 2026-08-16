@@ -4,6 +4,9 @@
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.agents import (
+    AgentSetup as AgentSetup,
+)
+from ufo.agents import (
     AgentSpec as AgentSpec,
 )
 from ufo.credentials import (
@@ -92,6 +95,9 @@ from ufo.ext.conversation_slots import (
 )
 from ufo.ext.conversation_slots import (
     TasksSlotPayload as TasksSlotPayload,
+)
+from ufo.ext.manifest import (
+    SETUP_TOOLS as SETUP_TOOLS,
 )
 from ufo.ext.manifest import (
     AgentProvision as AgentProvision,

@@ -95,6 +95,7 @@ class AgentProvisioning:
                         provisioned_by=extension,
                         provisioned_name=provision.name,
                         provisioned_version=manifest.version,
+                        setup=provision.setup.model_dump(mode="json"),
                         updated_at=sa.func.now(),
                     )
                     .where(tables.agent.c.id == standing.id)
@@ -138,7 +139,9 @@ class AgentProvisioning:
         name: str,
     ) -> None:
         """The ordinary row, carrying no grant, credential, source, or memory of the installer's:
-        an agent an extension shipped starts with the authority a member gives it in chat.
+        an agent an extension shipped starts with the authority a member gives it in chat. The row
+        records what that authority is (`setup`), which is the only part of it an extension may
+        state — a member still makes every edge, and the status read tells them which are missing.
 
         The insert yields to a row already there rather than raising. Two first turns of one
         workspace can read the absent row together — in one process or in two replicas — and both
@@ -162,6 +165,7 @@ class AgentProvisioning:
                 provisioned_by=manifest.name,
                 provisioned_name=provision.name,
                 provisioned_version=manifest.version,
+                setup=provision.setup.model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
 from ufo.agent_scope import agent
+from ufo.agents import setup_skill
 from ufo.audience import Audience, parse_audience
 from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
@@ -437,6 +438,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
             tools = ToolRegistry(_agent_tools(all_tools, agent.tools, turn.admission_source))
+            if (waiting := await setup_skill(turn.agent_id)) is not None:
+                skills = skills.merged_with((waiting,))
             system_prompt = render_system_prompt(
                 agent.prompt,
                 sections,

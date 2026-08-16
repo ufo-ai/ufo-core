@@ -88,6 +88,7 @@ agent = sa.Table(
     sa.Column("provisioned_by", sa.Text, nullable=True),
     sa.Column("provisioned_name", sa.Text, nullable=True),
     sa.Column("provisioned_version", sa.Text, nullable=True),
+    sa.Column("setup", sa.JSON, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(

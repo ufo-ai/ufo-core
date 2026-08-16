@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.agents import AgentSpec
+from ufo.agents import AgentSetup, AgentSpec
 from ufo.audience import SHARED_AUDIENCE, Audience
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
@@ -493,6 +493,7 @@ class HookSpec:
 
 
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$")
+SETUP_TOOLS = ("load_skill", "connect_account", "object_apply")
 
 
 @dataclass(frozen=True)
@@ -503,17 +504,28 @@ class AgentProvision:
     `tools` None is the member-facing tool set; a tuple is an allowlist,
     intersected with the live registry at turn load so an inactive extension contributes nothing.
     It sits here rather than on `AgentSpec` because the spec is what `object_apply agent` writes: an
-    allowlist may name a primitive held back from ordinary turns, so it is shipped, never typed."""
+    allowlist may name a primitive held back from ordinary turns, so it is shipped, never typed.
+    `setup` names the grants a member must still make for the agent to work, and what the
+    main agent should do to obtain them."""
 
     name: str
     spec: AgentSpec
     tools: tuple[str, ...] | None = None
+    setup: AgentSetup = field(default_factory=AgentSetup)
 
     def __post_init__(self) -> None:
         if not AGENT_NAME_RE.match(self.name):
             raise ValueError(f"agent provision name {self.name!r} is not an object name")
         if not (self.spec.prompt or "").strip():
             raise ValueError(f"agent provision {self.name!r} has no prompt")
+        if not self.setup.connectors or self.tools is None:
+            return
+        if missing := [name for name in SETUP_TOOLS if name not in self.tools]:
+            raise ValueError(
+                f"agent provision {self.name!r} declares setup but its allowlist omits "
+                f"{', '.join(missing)} — an agent asked to obtain its own grants must hold the "
+                "verbs that obtain them"
+            )
 
 
 SUBAGENT_ROUND_LIMIT = 50

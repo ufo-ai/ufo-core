@@ -17,19 +17,25 @@ import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from ufo_ext_sample import PROVISIONED_AGENT_NAME, PROVISIONED_AGENT_PROMPT
 
-from ufo.agents import AgentSpec
+from ufo.agents import (
+    SETUP_SKILL_NAME,
+    AgentSetup,
+    AgentSpec,
+    pending_setup,
+    setup_skill,
+)
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
-from ufo.ext.manifest import AgentProvision, JobSpec, Manifest
+from ufo.ext.manifest import SETUP_TOOLS, AgentProvision, JobSpec, Manifest
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.queue import _agent_tools, _apply_provisions, _provisioned_workspaces
 from ufo.object_name import validate_object_name
 from ufo.onboarding import Onboarding
 from ufo.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
 from ufo.schema import tables
-from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION
+from ufo.schema.records import DEFAULT_AGENT_NAME, INTENT_ADMISSION, MEMBER_ADMISSION
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
@@ -46,7 +52,11 @@ def _provision(name: str = PROVISIONED_AGENT_NAME, **overrides: object) -> Agent
         internet_access_allowed=False,
         prompt=PROVISIONED_AGENT_PROMPT,
     )
-    return AgentProvision(name=name, spec=spec.model_copy(update=overrides), tools=("sample_echo",))
+    return AgentProvision(
+        name=name,
+        spec=spec.model_copy(update=overrides),
+        tools=("sample_echo", *SETUP_TOOLS),
+    )
 
 
 def _manifest(extension: str, *provisions: AgentProvision, version: str = "0.1.0") -> Manifest:
@@ -105,7 +115,7 @@ async def test_onboarding_creates_the_shipped_agent(
         False,
         False,
     )
-    assert created.tools == ["sample_echo"]
+    assert created.tools == ["sample_echo", *SETUP_TOOLS]
     assert (created.provisioned_by, created.provisioned_name, created.provisioned_version) == (
         sample.NAME,
         PROVISIONED_AGENT_NAME,
@@ -189,7 +199,7 @@ async def test_an_identical_row_is_adopted(
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
     workspace_id = await _workspace(database_url, tmp_path, ())
-    await _insert_agent(workspace_id, PROVISIONED_AGENT_NAME, tools=["sample_echo"])
+    await _insert_agent(workspace_id, PROVISIONED_AGENT_NAME, tools=["sample_echo", *SETUP_TOOLS])
     outcomes = await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(
         workspace_id
     )
@@ -377,3 +387,209 @@ def test_a_prepared_intent_runs_past_the_allowlist() -> None:
     the two that would give it an account or a key."""
     selected = _agent_tools(TOOLS, ("checkout_code_review",), INTENT_ADMISSION)
     assert [tool.name for tool in selected] == ["read"]
+
+
+async def _conversation(workspace_id: UUID, agent_id: UUID) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="test",
+                queue_key=conversation_id.hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id
+
+
+async def _grant_connection(workspace_id: UUID, agent_id: UUID, provider: str) -> UUID:
+    connection_id = uuid4()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id, agent_id)
+        async with workspace_tx() as connection:
+            owner = (
+                (
+                    await connection.execute(
+                        sa.select(tables.member.c.id).where(
+                            tables.member.c.workspace_id == workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            await connection.execute(
+                sa.insert(tables.connection).values(
+                    id=connection_id,
+                    workspace_id=workspace_id,
+                    provider=provider,
+                    account_id=f"acct-{connection_id.hex[:8]}",
+                    host="api.sample.test",
+                    owner_member_id=owner,
+                    conversation_id=conversation_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.connector_grant).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    connection_id=connection_id,
+                    conversation_id=conversation_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    return connection_id
+
+
+async def _unmet(workspace_id: UUID, name: str) -> AgentSetup | None:
+    with ws(workspace_id):
+        return {name: missing for _, name, missing in await pending_setup()}.get(name)
+
+
+async def test_the_shipped_agent_records_every_grant_it_still_needs(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shipped agent arrives with no edges, so what it cannot do yet is the first thing a member
+    must be told. The declaration lands on the row beside the prompt, and the read reports it."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert created is not None
+    assert created.setup == {
+        "connectors": [sample.CONNECTOR_PROVIDER],
+        "instructions": sample.PROVISIONED_AGENT_SETUP,
+    }
+    assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) == AgentSetup(
+        connectors=(sample.CONNECTOR_PROVIDER,), instructions=sample.PROVISIONED_AGENT_SETUP
+    )
+
+
+async def test_the_grant_a_member_makes_settles_its_need(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declaration names a kind of authority, so any connection of that provider answers it —
+    which account stays the member's choice."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert created is not None
+    await _grant_connection(workspace_id, created.id, sample.CONNECTOR_PROVIDER)
+    assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) is None
+
+
+async def test_a_grant_to_another_agent_settles_nothing(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both edges are keyed on the agent, so a connection the main agent holds does not reach the
+    shipped one. Reporting otherwise would tell a member they were done while it still cannot
+    act."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
+    assert main is not None
+    await _grant_connection(workspace_id, main.id, sample.CONNECTOR_PROVIDER)
+    assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) == AgentSetup(
+        connectors=(sample.CONNECTOR_PROVIDER,), instructions=sample.PROVISIONED_AGENT_SETUP
+    )
+
+
+async def test_an_agent_no_extension_shipped_needs_nothing(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member's own agent declares no needs, so the read reports none rather than an empty shape
+    every caller would have to tell apart from a satisfied one."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    assert await _unmet(workspace_id, DEFAULT_AGENT_NAME) is None
+
+
+async def test_an_agent_that_is_not_set_up_is_told_so_in_its_own_conversation(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The setup slot is how a shipped agent asks for what it needs. It reaches the one agent that
+    can act on it, carries the extension's own instructions, and names every missing grant."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert created is not None
+    with ws(workspace_id):
+        skill = await setup_skill(created.id)
+    assert skill is not None
+    assert skill.name == SETUP_SKILL_NAME
+    assert "You are installed but not set up" in skill.instructions
+    assert f"a {sample.CONNECTOR_PROVIDER} account" in skill.instructions
+    assert sample.PROVISIONED_AGENT_SETUP in skill.instructions
+    assert PROVISIONED_AGENT_NAME not in skill.description
+
+
+async def test_the_setup_slot_empties_as_the_grants_land(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It disappears on its own, so a wired workspace carries no standing instruction naming work
+    that is already done."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert created is not None
+    with ws(workspace_id):
+        assert await setup_skill(created.id) is not None
+    await _grant_connection(workspace_id, created.id, sample.CONNECTOR_PROVIDER)
+    with ws(workspace_id):
+        assert await setup_skill(created.id) is None
+
+
+async def test_a_workspace_with_nothing_shipped_carries_no_setup_slot(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
+    assert main is not None
+    with ws(workspace_id):
+        assert await setup_skill(main.id) is None
+
+
+async def test_an_agent_with_nothing_outstanding_is_told_nothing(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The skill is about the asking agent alone. Handing one agent another's outstanding grants
+    would name work it cannot do: every grant binds to the agent whose conversation it is made
+    in."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
+    shipped = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert main is not None and shipped is not None
+    with ws(workspace_id):
+        assert await setup_skill(main.id) is None
+        assert await setup_skill(shipped.id) is not None
+
+
+def test_a_provision_refuses_an_allowlist_that_cannot_obtain_its_own_grants() -> None:
+    """The skill tells an agent to call `connect_account` and `object_apply`, and an allowlist
+    holds nothing it does not name — so a provision declaring both is a shipped agent that could
+    read its own instructions and follow none of them. It is refused where it is written."""
+    spec = AgentSpec(model="auto", reasoning="auto", internet_access_allowed=False, prompt="probe")
+    with pytest.raises(ValueError, match="allowlist omits"):
+        AgentProvision(
+            name="short-handed",
+            spec=spec,
+            tools=("sample_echo",),
+            setup=AgentSetup(connectors=("sample_connector",)),
+        )
+
+
+def test_a_provision_that_declares_no_setup_keeps_a_bare_allowlist() -> None:
+    """The verbs are required by the setup slot, not by shipping an agent, so an agent that asks
+    for nothing still holds exactly what it declares."""
+    spec = AgentSpec(model="auto", reasoning="auto", internet_access_allowed=False, prompt="probe")
+    provision = AgentProvision(name="self-contained", spec=spec, tools=("sample_echo",))
+    assert provision.tools == ("sample_echo",)
