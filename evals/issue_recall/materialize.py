@@ -1,10 +1,11 @@
 """Materialize the `issue_recall` fixture into a seeded workspace, before serve boots.
 
 Runs the production chain the leaf grades: the rendered fixture pages land through the core sync
-driver as a folder source, both memory `page_change` consumers drain with the model wired — so
-`index_pages` writes the chunks and mirror rows and `derive_facts` distills each page into durable
-facts — then the memory indexer embeds those facts so vector recall can reach them. Attestation
-records the page-to-fact map the leaf grades against and prints the readiness path.
+driver as a folder source, both memory `page_change` consumers drain the way a deploy's job runner
+drives them — so `index_pages` writes the chunks and mirror rows and `derive_facts` distills each
+page into durable facts on the background-jobs model — then the memory indexer embeds those facts so
+vector recall can reach them. Attestation records the page-to-fact map the leaf grades against and
+prints the readiness path.
 
     python -m evals.issue_recall.materialize --state <run>/state
 """
@@ -78,6 +79,7 @@ class Materializer:
     embed: EmbedClient
     manifests: tuple[Manifest, ...]
     registry: ModelRegistry
+    background_model: str
     postgres: bool
 
     async def run(self) -> CorpusReadiness:
@@ -200,6 +202,10 @@ class Materializer:
             raise RuntimeError(f"issue_recall stage does not match the fixture: {self.pages_root}")
 
     async def _drain_page_consumers(self) -> None:
+        """Drive both consumers the way a deploy's job runner does, `background_model` included: the
+        derivation pass is a background job's own metered call, so it resolves through
+        `models.background_jobs_model`. The leaf then grades the facts a deploy would really hold,
+        not facts distilled by the model a member's turn runs on."""
         runner = PageChangeRunner(
             manifests=self.manifests,
             pages=CorePageFeed(blob=self.blob),
@@ -207,6 +213,7 @@ class Materializer:
             embed=self.embed,
             blob=self.blob,
             registry=self.registry,
+            background_model=self.background_model,
         )
         consumers = runner.consumers()
         available = {(consumer.extension, consumer.discriminator) for consumer in consumers}
@@ -321,6 +328,7 @@ async def _run(config: Config, state_root: Path) -> CorpusReadiness:
             embed=embed_backend(manifests, config.memory.embed_backend, credentials),
             manifests=manifests,
             registry=model_registry(config, manifests),
+            background_model=config.models.background_jobs_model,
             postgres=config.database.url.startswith("postgresql"),
         ).run()
     finally:

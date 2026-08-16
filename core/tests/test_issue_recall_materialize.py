@@ -12,7 +12,7 @@ the readiness this produces, so the producer and its consumer are proved togethe
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4, uuid5
@@ -47,6 +47,7 @@ from evals.issue_recall.runner import load_issue_recall
 from evals.issue_recall.state import CorpusAttestor
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
+from ufo.config import ModelsConfig
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.context import ScopedStore, SourceReader, context_for
 from ufo.indexing import TextChunker
@@ -60,6 +61,7 @@ from ufo.subjects import SHARED_SUBJECT
 from ufo.workspace import ws
 
 AUTO_MODEL = "claude-opus-4-8"
+BACKGROUND_MODEL = ModelsConfig().background_jobs_model
 TOPIC_TERMS = ("token", "webhook", "export", "sync")
 
 
@@ -84,9 +86,11 @@ class PageEchoModelClient:
     """
 
     calls: int = 0
+    models: list[str] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.calls += 1
+        self.models.append(request.model)
         message = request.messages[0].content
         assert isinstance(message, str)
         payload = json.loads(message)
@@ -166,6 +170,7 @@ def _materializer(
         embed=TopicEmbed(),
         manifests=(memory_manifest.manifest(),),
         registry=_registry(client),
+        background_model=BACKGROUND_MODEL,
         postgres=False,
     )
 
@@ -355,6 +360,25 @@ async def test_materializes_the_fixture_into_a_recallable_attested_corpus(
     assert recalled_refs & token_refs, "the filing topic's own cluster must be recalled"
     assert sources, "the landed pages must be searchable through the mem_page mirror"
     assert list(subjects) == [SHARED_SUBJECT]
+
+
+async def test_the_derivation_pass_runs_on_the_background_jobs_model(
+    seeded_workspace: UUID, tmp_path: Path
+) -> None:
+    """On a deploy the fact deriver is a page_change job, so its one metered call per batch resolves
+    through `models.background_jobs_model`. The materializer hands the runner that model too, so the
+    leaf grades facts distilled by the model production distills them with; deriving on `auto_model`
+    would leave nothing measuring extraction as it actually runs. The deploy registry keeps its own
+    default, which a member turn resolves through."""
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    client = PageEchoModelClient()
+    materializer = _materializer(tmp_path, client, blob)
+
+    await materializer.run()
+
+    assert BACKGROUND_MODEL != AUTO_MODEL
+    assert client.models == [BACKGROUND_MODEL] * 3
+    assert materializer.registry.auto_model == AUTO_MODEL
 
 
 async def test_rematerializing_the_same_corpus_reuses_the_stage_and_attests_the_same(

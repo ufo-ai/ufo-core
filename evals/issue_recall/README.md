@@ -10,7 +10,7 @@ chose to run.
 | Fixture | 23 in-repo GitHub records: 3 clusters of related issues/PRs/comments (9 pages) + 14 distractors, several near-topic (`atlas sync` performance, Okta SSO, webhook-signature docs) |
 | Haystack | 473 declared ambient memories the graded facts compete against — 40 near-topic negatives, 13 live copies across five duplicate families, 60 issue-shaped records from five sibling repositories, and a generated bank of ordinary workspace facts |
 | Pages | Rendered by the real `GitHubConnector` (`flatten` then `render`), landed by the core sync driver as a folder source |
-| Recall path | `derive_facts` distills each page into durable facts, stamping each with the `created_from_page_id` link back to its page; those facts are what auto-inject can reach, so readiness maps page → derived fact ids through that link |
+| Recall path | `derive_facts` distills each page into durable facts on `models.background_jobs_model`, the model a deploy's page-change jobs run, stamping each with the `created_from_page_id` link back to its page; those facts are what auto-inject can reach, so readiness maps page → derived fact ids through that link |
 | Grade | Coverage of the case's related pages in the injected memory ids, their ranks, and whether the front of the injected context is related rather than distractors |
 
 One leaf (`issue_recall`), twenty-two cases: eighteen graded on coverage, three absent-topic
@@ -164,10 +164,10 @@ duration of a run — it re-reads the same staged bytes and changes nothing.
 
 The stack orchestrator materializes the corpus before serve boots (`ufoctl init`, then
 `python -m evals.issue_recall.materialize`), then drives the leaf against the running deploy. The
-run needs `ANTHROPIC_API_KEY` (target turns and the fact-derivation pass), `OPENAI_API_KEY`
-(corpus and query embeddings), and `EXA_API_KEY` (the assistant pack's research extension refuses
-to boot without its search provider), and a template `[o11y] otlp_endpoint` — the recall collector
-binds a free loopback port per run.
+run needs `ANTHROPIC_API_KEY` (target turns), `OPENAI_API_KEY` (corpus and query embeddings, and the
+fact-derivation pass on the default `models.background_jobs_model`), and `EXA_API_KEY` (the
+assistant pack's research extension refuses to boot without its search provider), and a template
+`[o11y] otlp_endpoint` — the recall collector binds a free loopback port per run.
 
 The stack imposes no Postgres requirement on this corpus — 23 pages ask nothing of the database that
 SQLite cannot hold, and provisioning accepts a SQLite template. The recipe below still names Postgres
