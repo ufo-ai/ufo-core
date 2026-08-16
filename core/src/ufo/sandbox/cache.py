@@ -10,6 +10,21 @@ host the proxy recognizes, and the git config that addresses the cache instead o
 CACHE_HOST = "cache.ufo.internal"
 CACHE_GIT_HOSTS = ("github.com",)
 
+# The public package registries and download CDNs the proxy transparently routes through the cache
+# for an internet-holding agent. Unlike git, these need no sandbox config: the proxy intercepts the
+# real host, so npm/pip/cargo/go are unchanged and a tarball's own absolute URL still hits the
+# cache. The daemon's own UFO_CACHE_PKG_HOSTS allowlist must stay in step with this list.
+CACHE_PKG_HOSTS = (
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+    "proxy.golang.org",
+    "sum.golang.org",
+)
+
 CACHE_CALLBACK_HOST = "127.0.0.1"
 CACHE_CALLBACK_PORT = 9111
 CACHE_CONTROL_TOKEN_ENV = "UFO_CACHE_CONTROL_TOKEN"

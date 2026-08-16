@@ -125,6 +125,7 @@ from ufo.sandbox.cache import (
     CACHE_CALLBACK_PORT,
     CACHE_CONTROL_TOKEN_ENV,
     CACHE_HOST,
+    CACHE_PKG_HOSTS,
     parse_cache_daemon,
 )
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -1139,6 +1140,7 @@ def _local_egress_proxy(
             transfer_hosts=connector_transfer_hosts(manifests),
             clis=connector_clis(manifests),
             cache_host=CACHE_HOST if cache_daemon is not None else None,
+            cache_pkg_hosts=CACHE_PKG_HOSTS if cache_daemon is not None else (),
         )
         ca_cert, ca_key = await generate_ca()
         endpoint = await EgressProxy(

@@ -10,13 +10,16 @@ use crate::config::Config;
 use crate::creds::CredentialClient;
 use crate::durable::Durable;
 use crate::git::GitStrategy;
+use crate::pkg::PkgCache;
 
 const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
     git: Arc<GitStrategy>,
+    pkg: Arc<PkgCache>,
     allowed_git_hosts: Arc<Vec<String>>,
+    allowed_pkg_hosts: Arc<Vec<String>>,
 }
 
 pub fn app(config: &Config, durable: Durable) -> Router {
@@ -26,14 +29,23 @@ pub fn app(config: &Config, durable: Durable) -> Router {
     ));
     let durable = Arc::new(durable);
     let state = AppState {
+        // Sibling roots, swept independently: the git sweep totals its own tree and the package
+        // sweep its own, so package bytes never charge against the git ceiling (nor the reverse).
         git: Arc::new(GitStrategy::new(
-            config.state_root.clone(),
+            config.state_root.join("git"),
             creds,
             config.upstream_scheme.clone(),
-            durable,
+            durable.clone(),
             config.disk_limit_bytes,
         )),
+        pkg: Arc::new(PkgCache::new(
+            config.state_root.join("pkg"),
+            durable,
+            config.upstream_scheme.clone(),
+            config.pkg_disk_limit_bytes,
+        )),
         allowed_git_hosts: Arc::new(config.allowed_git_hosts.clone()),
+        allowed_pkg_hosts: Arc::new(config.allowed_pkg_hosts.clone()),
     };
     Router::new()
         .route("/_health", get(|| async { "ok" }))
@@ -53,21 +65,34 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
 
     // The daemon fetches only an allowlisted set of hosts. Anything else is refused before a URL is
     // built from it, so a sandbox cannot reach a private or in-cluster address through the cache.
-    if kind != "git" || !state.allowed_git_hosts.iter().any(|h| h == host) {
+    let allowed = match kind {
+        "git" => state.allowed_git_hosts.iter().any(|h| h == host),
+        "pkg" => state.allowed_pkg_hosts.iter().any(|h| h == host),
+        _ => false,
+    };
+    if !allowed {
         return (StatusCode::NOT_FOUND, "host not cached").into_response();
     }
-
-    let workspace = trusted(&headers, "x-ufo-workspace");
-    if workspace.is_empty() {
-        return (StatusCode::BAD_REQUEST, "missing workspace").into_response();
-    }
-    let user = trusted(&headers, "x-ufo-user");
 
     let bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response(),
     };
 
+    if kind == "pkg" {
+        return state
+            .pkg
+            .handle(&method, host, tail, uri.query(), &headers, bytes)
+            .await;
+    }
+
+    // A git request carries the proxy-stamped identity the daemon resolves its upstream credential
+    // by; the package cache is anonymous and needs none.
+    let workspace = trusted(&headers, "x-ufo-workspace");
+    if workspace.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing workspace").into_response();
+    }
+    let user = trusted(&headers, "x-ufo-user");
     state
         .git
         .handle(

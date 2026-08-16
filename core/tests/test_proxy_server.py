@@ -50,6 +50,7 @@ from ufo.sandbox.proxy.rules import (
     InternetRule,
     MeterRule,
     ScopeRule,
+    ServiceRule,
     derive_credential_rules,
     derive_manifest_rules,
     derive_model_rules,
@@ -3150,6 +3151,96 @@ async def test_the_cache_service_meters_the_egress_it_relays(db: None) -> None:
             )
         ).one()
     assert (row.dimension, int(row.amount)) == ("egress", 1)
+
+
+async def test_the_cache_service_prefixes_a_package_host_to_its_daemon_route(db: None) -> None:
+    """A public registry the agent reaches is transparently intercepted: the CONNECT to the real
+    host is TLS-terminated and relayed to the daemon with the path prefixed to its `/pkg/<host>`,
+    carrying the proxy-stamped identity. So npm and pip are unchanged — they still address the real
+    registry — yet every fetch is served by the cache, and a client-set `x-ufo-*` is stripped."""
+    pkg_host = "registry.npmjs.org"
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    daemon_host, daemon_port, record, server = await _cache_daemon()
+    resolver = PerAgentRules(
+        base=(), grants=None, cache_host=CACHE_HOST, cache_pkg_hosts=(pkg_host,)
+    )
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+        cache_daemon=(daemon_host, daemon_port),
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {pkg_host}:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert b"200" in await reader.readline()
+        while (await reader.readline()) not in (b"\r\n", b""):
+            pass
+        context = ssl.create_default_context(cadata=cert)
+        await writer.start_tls(context, server_hostname=pkg_host)
+        writer.write(
+            b"GET /lodash HTTP/1.1\r\n"
+            b"host: " + pkg_host.encode() + b"\r\n"
+            b"x-ufo-workspace: spoofed\r\n\r\n"
+        )
+        await writer.drain()
+        response = await reader.read()
+        writer.close()
+    finally:
+        await proxy.stop()
+        server.close()
+    assert response.startswith(b"HTTP/1.1 200")
+    relayed = record.requests[0]
+    assert relayed.startswith(b"GET /pkg/registry.npmjs.org/lodash HTTP/1.1")
+    assert f"x-ufo-workspace: {workspace_id}".encode() in relayed
+    assert b"spoofed" not in relayed
+
+
+async def test_resolve_admits_package_hosts_only_alongside_the_internet(db: None) -> None:
+    """An internet-holding agent is admitted a service rule per package host, each carrying the
+    daemon's `/pkg/<host>` prefix; a narrowed agent is admitted none — the cache never widens reach
+    past the internet the agent already has."""
+    async with workspace_tx() as connection:
+        wide_ws, wide_turn, *_ = await _seed_turn(connection)
+    async with workspace_tx() as connection:
+        narrow_ws, narrow_turn, *_ = await _seed_turn(connection, internet_access_allowed=False)
+    resolver = PerAgentRules(
+        base=(),
+        grants=None,
+        cache_host=CACHE_HOST,
+        cache_pkg_hosts=("registry.npmjs.org", "pypi.org"),
+    )
+    wide = await resolver.resolve(RunToken(wide_ws, wide_turn))
+    narrow = await resolver.resolve(RunToken(narrow_ws, narrow_turn))
+    admitted = {
+        rule.host: rule.daemon_prefix
+        for rule in wide
+        if isinstance(rule, ServiceRule) and rule.daemon_prefix is not None
+    }
+    assert admitted == {
+        "registry.npmjs.org": "/pkg/registry.npmjs.org",
+        "pypi.org": "/pkg/pypi.org",
+    }
+    assert not any(isinstance(rule, ServiceRule) for rule in narrow)
+
+
+def test_prefix_target_names_the_daemon_pkg_route() -> None:
+    """The daemon route is named by prefixing the request path; a malformed line passes through."""
+    assert (
+        proxy_server._prefix_target(b"GET /lodash HTTP/1.1", "/pkg/registry.npmjs.org")
+        == b"GET /pkg/registry.npmjs.org/lodash HTTP/1.1"
+    )
+    assert proxy_server._prefix_target(b"garbage", "/pkg/x") == b"garbage"
 
 
 async def test_a_narrowed_agent_is_not_admitted_the_cache(db: None) -> None:

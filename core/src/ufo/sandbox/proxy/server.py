@@ -260,6 +260,7 @@ class PerAgentRules:
     slots: tuple[CredentialSlot, ...] = ()
     internet: tuple[InternetRule, ...] = ()
     cache_host: str | None = None
+    cache_pkg_hosts: tuple[str, ...] = ()
     transfer_hosts: ConnectorTransferHosts = field(
         default_factory=lambda: ConnectorTransferHosts(explicit={})
     )
@@ -281,7 +282,14 @@ class PerAgentRules:
                     (*self.base, *self.internet) if authority.internet_access_allowed else self.base
                 )
                 if self.cache_host is not None and authority.internet_access_allowed:
-                    rules = (*rules, ServiceRule(host=self.cache_host))
+                    rules = (
+                        *rules,
+                        ServiceRule(host=self.cache_host),
+                        *(
+                            ServiceRule(host=host, daemon_prefix=f"/pkg/{host}")
+                            for host in self.cache_pkg_hosts
+                        ),
+                    )
                 if self.credentials is not None and self.slots:
                     rules = (
                         *rules,
@@ -551,10 +559,16 @@ class EgressProxy:
             except Exception:
                 await _respond(writer, 503, EGRESS_AUTHORIZATION_UNAVAILABLE)
                 return
-            if self.cache_daemon is not None and any(
-                isinstance(rule, ServiceRule) and rule.host == host for rule in rules
-            ):
-                await self._service(reader, writer, host, principal)
+            service_rule = (
+                next(
+                    (r for r in rules if isinstance(r, ServiceRule) and r.host == host),
+                    None,
+                )
+                if self.cache_daemon is not None
+                else None
+            )
+            if service_rule is not None:
+                await self._service(reader, writer, host, principal, service_rule)
                 return
             connect_host = host
             exactly_scoped = any(
@@ -811,16 +825,19 @@ class EgressProxy:
         writer: asyncio.StreamWriter,
         host: str,
         principal: EgressPrincipal,
+        rule: ServiceRule,
     ) -> None:
-        """Terminate the sandbox's TLS to the cache host and relay one request to the local cache
-        daemon, stamping the trusted workspace and acting-member identity the daemon resolves its
-        upstream credential by. The sandbox presents no credential — the daemon authenticates
-        upstream itself — and any `x-ufo-*` header the container tries to set is stripped, so
-        identity is the proxy's to assert, never the container's. `Connection: close` bounds the
-        exchange to one request: every request re-enters here over its own CONNECT and is
-        re-stamped, so a reused connection can never carry a request the proxy did not identify. A
-        daemon that cannot be reached is not a dead end — the request falls through to its origin
-        directly, so a cache outage slows clones rather than breaking them."""
+        """Terminate the sandbox's TLS and relay one request to the local cache daemon, stamping the
+        trusted workspace and acting-member identity. The sandbox presents no credential the proxy
+        trusts — any `x-ufo-*` header the container sets is stripped, so identity is the proxy's to
+        assert. `Connection: close` bounds the exchange to one re-identified request.
+
+        A git rule (no `daemon_prefix`) relays verbatim: the sandbox already addressed the daemon's
+        `/git/<origin>/…` route, and the billed origin is read back out of that path. A package rule
+        intercepts a real registry, so the path is prefixed with the daemon's `/pkg/<host>` route
+        while the origin billed and fallen through to stays `host`. A daemon that cannot be
+        reached is not a dead end — the request falls through to its origin directly, so a cache
+        outage slows fetches rather than breaking them."""
         assert self.cache_daemon is not None
         leaf_context = await self._leaf_context(host)
         try:
@@ -834,6 +851,15 @@ class EgressProxy:
         if request is None:
             return
         request_line, headers = request
+        if rule.daemon_prefix is None:
+            origin = _service_origin(request_line)
+            daemon_line = request_line
+            billed_host = origin[0] if origin is not None else None
+            fallthrough = origin if origin is not None and origin[0] in CACHE_GIT_HOSTS else None
+        else:
+            daemon_line = _prefix_target(request_line, rule.daemon_prefix)
+            billed_host = host
+            fallthrough = (host, request_line)
         try:
             daemon_reader, daemon_writer = await asyncio.wait_for(
                 asyncio.open_connection(*self.cache_daemon),
@@ -841,11 +867,12 @@ class EgressProxy:
             )
         except (OSError, TimeoutError):
             await self._service_direct(
-                client_reader, client_writer, request_line, headers, principal
+                client_reader, client_writer, fallthrough, headers, principal
             )
             return
-        await self._meter_service(request_line, principal)
-        daemon_writer.write(request_line)
+        if billed_host is not None:
+            await self._meter_service(billed_host, principal)
+        daemon_writer.write(daemon_line)
         daemon_writer.write(_service_headers(headers, principal))
         daemon_writer.write(b"\r\n")
         try:
@@ -858,21 +885,23 @@ class EgressProxy:
         self,
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
-        request_line: bytes,
+        fallthrough: tuple[str, bytes] | None,
         headers: list[bytes],
         principal: EgressPrincipal,
     ) -> None:
         """The cache daemon is down: proxy this request straight to its origin so the cache is never
-        a single point of failure for egress. The cache path names the real host and path
-        (`/git/<host>/<rest>` → `https://<host>/<rest>`); the request re-originates anonymously, so
-        a public clone or npm fetch still completes while an own-org private fetch degrades to
-        unauthenticated until the daemon returns. Nothing is cached on this path, but the egress
-        request is billed the same as the daemon path so a cache outage never silences metering."""
-        origin = _service_origin(request_line)
-        if origin is None or origin[0] not in CACHE_GIT_HOSTS:
+        a single point of failure for egress. `fallthrough` is the origin host and the request line
+        bound for it — for git the origin parsed out of the `/git/<host>/…` path, for a package host
+        the host itself and the request verbatim. None when no safe origin resolved (e.g. a git path
+        naming a host off the allowlist), which refuses rather than dial an arbitrary address.
+        The request re-originates with its own headers, so an authenticated publish still carries
+        its credential while an anonymous fetch stays anonymous. Nothing is cached on this path, but
+        the egress request is billed the same as the daemon path so a cache outage never silences
+        metering."""
+        if fallthrough is None:
             await _respond(client_writer, 502, "cache unavailable")
             return
-        host, origin_line = origin
+        host, origin_line = fallthrough
         try:
             upstream_reader, upstream_writer = await asyncio.wait_for(
                 asyncio.open_connection(host, DEFAULT_HTTPS_PORT, ssl=True, server_hostname=host),
@@ -881,7 +910,7 @@ class EgressProxy:
         except (OSError, TimeoutError, ssl.SSLError):
             await _respond(client_writer, 502, "cache unavailable")
             return
-        await self._meter_service(request_line, principal)
+        await self._meter_service(host, principal)
         upstream_writer.write(origin_line)
         upstream_writer.write(_direct_headers(headers, host))
         upstream_writer.write(b"\r\n")
@@ -996,18 +1025,15 @@ class EgressProxy:
             self._contexts[host] = context
             return context
 
-    async def _meter_service(self, request_line: bytes, principal: EgressPrincipal) -> None:
-        """Bill one cache-routed git request under its real upstream host, so egress through the
-        cache costs the same `requests` unit the direct tunnel would have charged. The cache host is
-        the wire target, not the billed host — the request path names the origin, and each request
-        re-enters over its own CONNECT (`Connection: close`), so one call here is one billed
-        request, matching a direct fetch's two-request smart-HTTP exchange unit for unit."""
-        origin = _service_origin(request_line)
-        if origin is None:
-            return
-        rules = (MeterRule(host=origin[0], dimension=REQUEST_METER_DIMENSION),)
-        self._meter(origin[0], rules)
-        await self._meter_ledger(origin[0], principal, rules)
+    async def _meter_service(self, host: str, principal: EgressPrincipal) -> None:
+        """Bill one cache-routed request under its real upstream host, so egress through the cache
+        costs the same `requests` unit the direct tunnel would have charged. The cache host is the
+        wire target, not the billed host — a git request names its origin in the path, a package
+        request in its intercepted host — and each request re-enters over its own CONNECT
+        (`Connection: close`), so one call here is one billed request."""
+        rules = (MeterRule(host=host, dimension=REQUEST_METER_DIMENSION),)
+        self._meter(host, rules)
+        await self._meter_ledger(host, principal, rules)
 
     def _meter(self, host: str, rules: tuple[Rule, ...]) -> None:
         for rule in rules:
@@ -1412,6 +1438,17 @@ def _service_headers(headers: list[bytes], principal: EgressPrincipal) -> bytes:
         "connection: close\r\n"
     ).encode()
     return kept + stamped
+
+
+def _prefix_target(request_line: bytes, prefix: str) -> bytes:
+    """Prepend `prefix` to a request line's path, naming the daemon's package route while the origin
+    the daemon dials stays the intercepted host: `GET /lodash HTTP/1.1` with the prefix
+    `/pkg/registry.npmjs.org` becomes `GET /pkg/registry.npmjs.org/lodash HTTP/1.1`."""
+    parts = request_line.split(b" ", 2)
+    if len(parts) != 3:
+        return request_line
+    method, target, version = parts
+    return method + b" " + prefix.encode() + target + b" " + version
 
 
 def _service_origin(request_line: bytes) -> tuple[str, bytes] | None:

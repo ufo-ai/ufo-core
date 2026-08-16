@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex as SyncMutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::body::Bytes;
@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 use crate::cgi::response_from_cgi;
 use crate::creds::{CredentialClient, Resolved};
 use crate::durable::Durable;
+use crate::inuse::InUse;
 
 /// A warm mirror is re-snapshotted to the durable tier at most this often.
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(600);
@@ -45,11 +46,7 @@ pub struct GitStrategy {
     mirror_limit: u64,
     mirrors: Mutex<HashMap<PathBuf, Arc<Mutex<MirrorState>>>>,
     last_sweep: Mutex<Option<Instant>>,
-    // Mirrors a live request is fetching or serving right now, by refcount. The sweep consults this
-    // under a lock it also holds for the atomic rename-aside, so an in-use mirror is never evicted.
-    // A plain `std` mutex: every critical section is a counter bump or a single rename — never I/O,
-    // never held across an await — so the blocking sweep and the async handlers share it safely.
-    in_use: Arc<SyncMutex<HashMap<PathBuf, usize>>>,
+    in_use: InUse,
 }
 
 impl GitStrategy {
@@ -68,7 +65,7 @@ impl GitStrategy {
             mirror_limit,
             mirrors: Mutex::new(HashMap::new()),
             last_sweep: Mutex::new(None),
-            in_use: Arc::new(SyncMutex::new(HashMap::new())),
+            in_use: InUse::default(),
         }
     }
 
@@ -104,7 +101,7 @@ impl GitStrategy {
 
         // Hold the mirror in use across both the fetch and the serve below, so the LRU sweep cannot
         // evict the directory this request is reading. Dropped when the response is built.
-        let _in_use = self.mark_in_use(&mirror);
+        let _in_use = self.in_use.guard(&mirror);
 
         // Every request refreshes the mirror: a read right after a push is never stale, and — since
         // `info/refs` and `git-upload-pack` are separate connections that a load balancer may route
@@ -203,22 +200,6 @@ impl GitStrategy {
         let limit = self.mirror_limit;
         let in_use = self.in_use.clone();
         tokio::task::spawn_blocking(move || sweep_mirrors(&root, limit, &in_use));
-    }
-
-    /// Register `mirror` as in use for as long as the returned guard lives, so a concurrent sweep
-    /// leaves it alone. The refcount admits concurrent requests to one mirror; the last guard to
-    /// drop clears the entry.
-    fn mark_in_use(&self, mirror: &Path) -> InUseGuard {
-        *self
-            .in_use
-            .lock()
-            .unwrap()
-            .entry(mirror.to_path_buf())
-            .or_insert(0) += 1;
-        InUseGuard {
-            in_use: self.in_use.clone(),
-            path: mirror.to_path_buf(),
-        }
     }
 
     /// Rebuild a missing mirror from a durable snapshot instead of re-cloning origin. Returns false
@@ -393,24 +374,6 @@ impl GitStrategy {
     }
 }
 
-/// Drops a request's claim on a mirror, letting the sweep evict it once no request holds it.
-struct InUseGuard {
-    in_use: Arc<SyncMutex<HashMap<PathBuf, usize>>>,
-    path: PathBuf,
-}
-
-impl Drop for InUseGuard {
-    fn drop(&mut self) {
-        let mut held = self.in_use.lock().unwrap();
-        if let Some(count) = held.get_mut(&self.path) {
-            *count -= 1;
-            if *count == 0 {
-                held.remove(&self.path);
-            }
-        }
-    }
-}
-
 fn classify(tail: &str) -> Option<(Endpoint, String)> {
     if let Some(repo) = tail.strip_suffix("/info/refs") {
         return Some((Endpoint::Info, safe_repo(repo)?));
@@ -518,7 +481,7 @@ fn basename(mirror: &Path) -> &str {
 /// already renamed away, and the request finds it missing and re-clones) — it never fetches a
 /// directory being deleted underneath it. The recursive delete runs outside the lock, on the
 /// renamed-aside path, so the lock never covers I/O and the event loop never stalls behind it.
-fn sweep_mirrors(root: &Path, limit: u64, in_use: &SyncMutex<HashMap<PathBuf, usize>>) {
+fn sweep_mirrors(root: &Path, limit: u64, in_use: &InUse) {
     let (mut remaining, _) = dir_size_and_mtime(root);
     if remaining <= limit {
         return;
@@ -534,14 +497,7 @@ fn sweep_mirrors(root: &Path, limit: u64, in_use: &SyncMutex<HashMap<PathBuf, us
         // No concurrent sweep runs (the interval gate serialises them), so a stale tomb can only be
         // a prior crash's; clear it before the lock so no I/O runs under the lock.
         let _ = std::fs::remove_dir_all(&evicting);
-        let reserved = {
-            let held = in_use.lock().unwrap();
-            if held.contains_key(&path) {
-                false
-            } else {
-                std::fs::rename(&path, &evicting).is_ok()
-            }
-        };
+        let reserved = in_use.reserve_if_free(&path, || std::fs::rename(&path, &evicting).is_ok());
         if reserved {
             remaining = remaining.saturating_sub(size);
             let _ = std::fs::remove_dir_all(&evicting);
@@ -602,7 +558,7 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 /// A principal or host is an opaque path segment; keep it to safe characters so it cannot escape the
 /// state root. `/` and `..` collapse to `_`.
-fn sanitize(segment: &str) -> String {
+pub(crate) fn sanitize(segment: &str) -> String {
     segment
         .chars()
         .map(|c| {
@@ -618,14 +574,13 @@ fn sanitize(segment: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
-    use std::sync::Mutex as SyncMutex;
 
     use filetime::{set_file_mtime, FileTime};
 
     use super::{safe_repo, sweep_mirrors};
+    use crate::inuse::InUse;
 
     #[test]
     fn accepts_a_normal_repo_and_strips_trailing_git_and_slashes() {
@@ -664,7 +619,7 @@ mod tests {
         plant_mirror(root, "new", 4096, 2_000);
 
         // Limit fits one mirror; the older one is evicted, the newer kept.
-        let idle = SyncMutex::new(HashMap::new());
+        let idle = InUse::default();
         sweep_mirrors(root, 5000, &idle);
 
         assert!(
@@ -678,6 +633,26 @@ mod tests {
     }
 
     #[test]
+    fn sweep_counts_only_its_own_root_not_a_sibling_package_tree() {
+        // git mirrors live under `<state>/git` and the package cache under `<state>/pkg`. The git
+        // sweep must total only its own root — a package tree fat enough to blow the git ceiling must
+        // never make the sweep evict a mirror that fits under it.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        plant_mirror(&state.join("git"), "repo", 4096, 1_000);
+        let pkg = state.join("pkg/registry.npmjs.org");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("big.body"), vec![0u8; 1_000_000]).unwrap();
+
+        sweep_mirrors(&state.join("git"), 100_000, &InUse::default());
+
+        assert!(
+            state.join("git/host/repo.git").join("HEAD").exists(),
+            "the git sweep must ignore the sibling package tree's bytes"
+        );
+    }
+
+    #[test]
     fn sweep_spares_a_mirror_held_in_use_even_when_it_is_the_oldest() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -686,11 +661,8 @@ mod tests {
 
         // The oldest mirror is the one a live request holds; the sweep must skip it and reclaim from
         // the idle newer mirror instead, never deleting the directory being served.
-        let in_use = SyncMutex::new(HashMap::new());
-        in_use
-            .lock()
-            .unwrap()
-            .insert(root.join("host/old.git"), 1usize);
+        let in_use = InUse::default();
+        let _held = in_use.guard(&root.join("host/old.git"));
 
         sweep_mirrors(root, 5000, &in_use);
 

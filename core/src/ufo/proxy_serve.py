@@ -29,6 +29,7 @@ from ufo.sandbox.cache import (
     CACHE_CALLBACK_PORT,
     CACHE_CONTROL_TOKEN_ENV,
     CACHE_HOST,
+    CACHE_PKG_HOSTS,
     parse_cache_daemon,
 )
 from ufo.sandbox.proxy.credential_callback import CredentialCallback
@@ -173,6 +174,7 @@ class ProxyServe:
             transfer_hosts=connector_transfer_hosts(self.manifests),
             clis=connector_clis(self.manifests),
             cache_host=CACHE_HOST if cache_daemon is not None else None,
+            cache_pkg_hosts=CACHE_PKG_HOSTS if cache_daemon is not None else (),
         )
         proxy = EgressProxy(
             resolve=resolver.resolve,

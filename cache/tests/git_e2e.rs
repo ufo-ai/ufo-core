@@ -83,6 +83,8 @@ fn config(state: PathBuf, control_url: String, allowed: &str) -> Config {
         disk_limit_bytes: 1 << 30,
         upstream_scheme: "http".into(),
         allowed_git_hosts: vec![allowed.to_string()],
+        allowed_pkg_hosts: vec![],
+        pkg_disk_limit_bytes: 1 << 30,
     }
 }
 
@@ -144,6 +146,7 @@ async fn cold_clone_populates_the_mirror_and_a_warm_clone_reflects_a_new_upstrea
         "cold clone hits upstream"
     );
     let mirror = state
+        .join("git")
         .join("public")
         .join(format!("{}", up_addr).replace(':', "_"))
         .join("acme")
@@ -198,6 +201,7 @@ async fn mirror_is_namespaced_by_the_principal_the_control_plane_returns() {
     .await;
 
     let isolated = state
+        .join("git")
         .join("w7-u-alice")
         .join(format!("{}", up_addr).replace(':', "_"))
         .join("acme")
@@ -207,7 +211,7 @@ async fn mirror_is_namespaced_by_the_principal_the_control_plane_returns() {
         "mirror not under principal dir"
     );
     assert!(
-        !state.join("public").exists(),
+        !state.join("git").join("public").exists(),
         "nothing should land under public for a user principal"
     );
 }

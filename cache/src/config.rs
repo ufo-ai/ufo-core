@@ -13,7 +13,8 @@ pub struct Config {
     pub control_url: String,
     /// Shared secret presented to the control plane on every callback.
     pub control_token: String,
-    /// Soft ceiling for the whole state tree; eviction runs above it.
+    /// Soft ceiling for the git mirror tree (`state_root/git`); its eviction runs above it. The
+    /// package tree is a sibling bounded separately by `pkg_disk_limit_bytes`.
     pub disk_limit_bytes: u64,
     /// Scheme used to reach upstreams. `https` in every real deploy; overridable so tests can point
     /// a strategy at a local plaintext origin.
@@ -21,11 +22,31 @@ pub struct Config {
     /// The hosts the daemon will mirror. Any other host in a request path is refused, so a sandbox
     /// cannot steer the cache at a private or in-cluster address. `github.com` in every real deploy.
     pub allowed_git_hosts: Vec<String>,
+    /// The package registries and download CDNs the daemon will forward-cache. Any other host in a
+    /// `/pkg/` request is refused, so the cache cannot be pointed at a private or in-cluster address.
+    pub allowed_pkg_hosts: Vec<String>,
+    /// Soft ceiling for the package cache tree; its eviction runs above it. Separate from the git
+    /// ceiling because the package cache is shared across every workspace and grows differently.
+    pub pkg_disk_limit_bytes: u64,
 }
 
-// Per-tier ceiling (host cache and git mirrors are bounded separately), so the cache volume must
-// hold roughly twice this plus headroom.
+// Per-tier ceiling (the package cache and git mirrors are bounded separately), so the cache volume
+// must hold both plus headroom.
 const DEFAULT_DISK_LIMIT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const DEFAULT_PKG_DISK_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+// Public registries and their download CDNs for Node, Python, Rust, and Go — the build/test time
+// sinks. More ecosystems (apt, apk, RubyGems, Maven) drop in through UFO_CACHE_PKG_HOSTS.
+const DEFAULT_PKG_HOSTS: &[&str] = &[
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+    "proxy.golang.org",
+    "sum.golang.org",
+];
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
@@ -47,6 +68,15 @@ impl Config {
             allowed_git_hosts: std::env::var("UFO_CACHE_GIT_HOSTS")
                 .map(|v| v.split(',').map(|h| h.trim().to_string()).collect())
                 .unwrap_or_else(|_| vec!["github.com".into()]),
+            allowed_pkg_hosts: std::env::var("UFO_CACHE_PKG_HOSTS")
+                .map(|v| v.split(',').map(|h| h.trim().to_string()).collect())
+                .unwrap_or_else(|_| DEFAULT_PKG_HOSTS.iter().map(|h| (*h).to_string()).collect()),
+            pkg_disk_limit_bytes: match std::env::var("UFO_CACHE_PKG_DISK_LIMIT_BYTES") {
+                Ok(v) => v
+                    .parse()
+                    .map_err(|e| format!("UFO_CACHE_PKG_DISK_LIMIT_BYTES: {e}"))?,
+                Err(_) => DEFAULT_PKG_DISK_LIMIT_BYTES,
+            },
         })
     }
 }

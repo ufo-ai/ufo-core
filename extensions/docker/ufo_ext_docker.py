@@ -60,6 +60,8 @@ DEFAULT_NETWORK = "ufo-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
 DROP_NET_RAW_ARGS = ("--cap-drop", "NET_RAW")
+CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-proxy.crt"
+SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 EXEC_TIMEOUT_CODE = 124
 TIMED_OUT_CODE = -1000
 """`_docker`'s own deadline, told apart from every code a process can report: an exit status is
@@ -119,6 +121,13 @@ class DockerCarrier:
             "no_proxy": NO_PROXY_HOSTS,
             "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
             "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
+            # Point the toolchains that ignore the system trust store at the CA `_install_ca` merges
+            # in, so a MITM'd host (a cache-fronted registry included) is trusted by pip, requests,
+            # curl, and Node alike — not only by the tools that read `/etc/ssl`.
+            "SSL_CERT_FILE": SYSTEM_CA_BUNDLE,
+            "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE,
+            "CURL_CA_BUNDLE": SYSTEM_CA_BUNDLE,
+            "NODE_EXTRA_CA_CERTS": CA_SANDBOX_PATH,
             **spec.env,
         }
         running = await self._running_id(name)

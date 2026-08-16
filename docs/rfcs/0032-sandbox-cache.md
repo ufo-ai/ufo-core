@@ -12,8 +12,8 @@ date: 2026-08-15
 > its own: it phones the Python control plane for a git credential scoped to `(workspace, user,
 > host)`, so the cross-customer mint that sank the first attempt (#1629) is structurally impossible,
 > not policed. The daemon is Rust — it is the first module of the egress **data plane**, while
-> authorization stays in Python (the **control plane**). This ships git caching; npm/PyPI is deferred
-> (see Scope).
+> authorization stays in Python (the **control plane**). It caches git and the public package
+> registries (npm, PyPI, crates.io, the Go proxy) — the build/test time sinks.
 
 ## Current state
 
@@ -78,14 +78,39 @@ The mirror path is `MirrorRoot / <principal> / <host> / <org> / <repo>`. Public 
 is shared across a workspace's users (they have equal access); PAT-fetched content is isolated to
 the fetching user. This is the intra-workspace analogue of the per-customer instance boundary.
 
-### Scope: git today, package registries deferred
+### Scope: git and public package registries
 
-This ships **git only**. npm/PyPI caching is deferred: the obvious approach (point the client at a
-`/host/<registry>/` path prefix) fails because npm's client rebuilds every tarball URL as
-`new URL(pathname, registry)`, dropping the prefix — correct registry caching needs registry-host
-routing plus response rewriting, a separate design. So the daemon fronts only an **allowlist**
-(`github.com`); any other host in a request path is refused before a URL is built from it, so a
-sandbox cannot steer the cache at a private, in-cluster, or metadata address.
+Two strategies behind one daemon, each fronting an **allowlist** so a sandbox cannot steer the cache
+at a private, in-cluster, or metadata address:
+
+- **git** (`github.com`) — the principal-namespaced mirror below.
+- **packages** (`registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`, `crates.io`,
+  `static.crates.io`, `index.crates.io`, `proxy.golang.org`, `sum.golang.org`) — the transparent
+  HTTP cache below.
+
+The naïve package approach — point the client at a `/host/<registry>/` path prefix — fails because
+npm rebuilds every tarball URL as `new URL(pathname, registry)`, dropping the prefix. So the proxy
+**transparently intercepts the real registry host** instead (it already MITMs hosts for credential
+injection): npm/pip/cargo/go are unchanged and a metadata document's own absolute download URL still
+resolves to a cached host. Because these artifacts are public and immutable, the package cache is
+**shared across tenants** (one `public` principal) rather than per-principal like git — the opposite
+isolation call, and the right one: it maximises the hit rate and leaks nothing.
+
+### The package strategy: a shared HTTP forward-cache
+
+A standard RFC-7234 cache keyed by `(host, path, accept-encoding)`. It honours the origin's
+`Cache-Control`: a `GET 200` marked `immutable`/long `max-age` (every tarball, wheel, crate, and Go
+zip) is stored and served from disk; mutable metadata (`no-cache`/short `max-age`, or no freshness
+signal at all — never guessed) passes through. A stale entry with a validator is **revalidated
+conditionally** (`If-None-Match`/`If-Modified-Since`) — a `304` refreshes it without re-downloading.
+Three things stay uncached, streamed straight through: a non-GET, a request carrying
+`Authorization`/`Cookie` (so a private package on a shared host never enters the shared cache), and a
+`Range` request. The cold miss writes the body to disk and commits it — renamed into place with its
+meta — before responding, so the very next request is a hit and a dropped download leaves nothing
+half-written; warm requests stream from disk. Durability and the LRU sweep are the git strategy's,
+reused. Because the proxy now MITMs these registries, each carrier points npm and pip at a CA bundle
+holding the proxy root (the e2b and docker carriers both do), or their TLS to the intercepted host
+would fail.
 
 ### The git strategy: local mirror over durable S3
 
@@ -108,16 +133,19 @@ to register. So it configures in core, beside the proxy's existing model-host kn
 a `Manifest.services` point.
 
 - **proxy config** — the daemon address from the deploy env (off when unset). The daemon's own
-  `allowed_git_hosts` (`github.com`) bounds what it will fetch.
-- **`ServiceRule` + admission** — the proxy admits the cache host **only for an agent that already
-  holds `InternetRule`** (the cache is a faster path to hosts that agent can already reach; a
-  narrowed agent never gains reach through it). `_service` TLS-terminates and relays to the daemon on
-  loopback, stamping the trusted `x-ufo-workspace`/`x-ufo-user` headers, and **falls through to the
-  direct upstream (allowlisted host only) when the daemon is down** (a cache outage slows clones,
-  never breaks them).
-- **`exec_env` rewrite** — for an internet-holding agent only, `insteadOf` → cache for github, emitted
-  through the existing `GIT_CONFIG_*` env channel. The rewrite and the admission share the one gate,
-  so a narrowed agent is neither rewritten nor admitted.
+  `allowed_git_hosts`/`allowed_pkg_hosts` bound what it will fetch; both default to the same lists the
+  proxy routes, kept in step by a cross-language test.
+- **`ServiceRule` + admission** — the proxy admits the cache host and each package host **only for an
+  agent that already holds `InternetRule`** (the cache is a faster path to hosts that agent can
+  already reach; a narrowed agent never gains reach through it). `_service` TLS-terminates and relays
+  to the daemon on loopback, stamping the trusted `x-ufo-workspace`/`x-ufo-user` headers. A git rule
+  relays verbatim; a package rule carries a `daemon_prefix` (`/pkg/<host>`) so the intercepted real
+  host names the daemon's package route. Either **falls through to the direct upstream when the daemon
+  is down** (a cache outage slows fetches, never breaks them).
+- **`exec_env` rewrite** — git alone needs one: for an internet-holding agent, `insteadOf` → cache for
+  github via the existing `GIT_CONFIG_*` channel. Packages need no rewrite — the proxy intercepts the
+  real host, so the sandbox's package managers are unconfigured. Rewrite and admission share the one
+  gate, so a narrowed agent is neither rewritten nor admitted.
 
 ### Packaging
 
@@ -162,9 +190,15 @@ per-customer boundary is the deploy's RLS-scoped workspace, and the principal na
 
 ## Open decisions
 
-- **npm/PyPI caching.** Deferred (see Scope). Doing it right needs registry-host routing (a cache
-  host per registry so the client's URL rebuild survives) plus packument/simple-index response
-  rewriting — its own PR, on top of this git-only base.
+- **More package ecosystems.** apt, apk, RubyGems, and Maven drop in as `allowed_pkg_hosts` +
+  `CACHE_PKG_HOSTS` entries — no new code, since the package strategy is host-agnostic — once a real
+  workload wants them.
+- **Private registries.** The shared package cache serves public registries only; an authenticated
+  request passes through uncached. A per-principal package tier (mirroring the git model) would let
+  private-registry artifacts cache too, if a workload needs it.
+- **Cold-miss streaming.** A cold package miss buffers the body to disk and commits before responding,
+  so its first byte waits on the full download; a tee that streams to the client while caching would
+  cut that latency on the first fetch of a large artifact. Warm hits already stream.
 - **Least-privilege principal.** Default is "principal follows the credential Python chose," which
   isolates a public repo to a user when that user has a PAT connected. Detecting public repos to
   keep them in the shared `public`/`org` mirror is a follow-on optimization.

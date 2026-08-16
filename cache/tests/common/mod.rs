@@ -78,6 +78,22 @@ pub fn registry() -> (Router, Arc<AtomicUsize>) {
                 ([("cache-control", "no-store")], "META")
             }),
         )
+        .route(
+            // Sleeps before answering so two concurrent requests are both mid-download before either
+            // commits — the window a shared temp file would corrupt.
+            "/slow.tgz",
+            any(|State(hits): State<Arc<AtomicUsize>>| async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                (
+                    [
+                        ("content-type", "application/octet-stream"),
+                        ("cache-control", "public, max-age=31557600, immutable"),
+                    ],
+                    "SLOW-TARBALL-BODY",
+                )
+            }),
+        )
         .with_state(state);
     (router, hits)
 }

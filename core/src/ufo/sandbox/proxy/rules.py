@@ -65,12 +65,19 @@ class InjectionRule:
 
 @dataclass(frozen=True)
 class ServiceRule:
-    """`host` is the sandbox cache: admit its CONNECT and relay its TLS-terminated requests to the
-    local cache daemon, which fetches and caches upstream on the sandbox's behalf. Present only for
-    an agent that already holds `InternetRule` — the cache fronts several public hosts at once, so
-    admitting it must never widen an agent's reach beyond the internet it already has."""
+    """Admit `host`'s CONNECT and relay its TLS-terminated requests to the local cache daemon, which
+    fetches and caches upstream on the sandbox's behalf. Present only for an agent that already
+    holds `InternetRule` — the cache fronts several public hosts at once, so admitting it must never
+    widen an agent's reach beyond the internet it already has.
+
+    `daemon_prefix` distinguishes the two shapes the daemon serves. None: `host` is the synthetic
+    cache host and the sandbox already addressed the daemon (`/git/<origin>/…`), so the request
+    relays verbatim. Set: `host` is a real registry the proxy transparently intercepts, so the
+    request's path is prefixed with `daemon_prefix` (`/pkg/<host>`) to name the daemon's package
+    route while the origin stays `host` itself."""
 
     host: str
+    daemon_prefix: str | None = None
 
 
 @dataclass(frozen=True)

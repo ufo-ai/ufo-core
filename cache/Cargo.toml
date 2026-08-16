@@ -23,6 +23,7 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 async-stream = "0.3"
+filetime = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 aws-config = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }

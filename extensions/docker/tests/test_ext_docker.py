@@ -107,6 +107,11 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     assert f"ANTHROPIC_API_KEY={SENTINEL_MODEL_KEY}" in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-1" in exec_argv
     assert exec_argv.index("cid1") > exec_argv.index(f"HTTPS_PROXY={proxy_url}")
+    # The toolchains that ignore the system trust store are pointed at the proxy CA, so a MITM'd
+    # host (a cache-fronted registry included) is trusted by pip and Node, not only by /etc/ssl.
+    assert "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" in exec_argv
+    assert "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt" in exec_argv
+    assert "NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ufo-proxy.crt" in exec_argv
 
 
 async def test_missing_conversation_network_is_created(
