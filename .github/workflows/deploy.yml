@@ -47,7 +47,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
-          python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/deploy-paths"
+          git diff --no-renames "$BASE_SHA...$HEAD_SHA" -- infra/modules/platform/iam.tf infra/modules/platform/ses.tf > "$RUNNER_TEMP/auth-diff"
+          python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/deploy-paths" "$RUNNER_TEMP/auth-diff"
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ] || grep -Eq "$DEPLOY_PATHS_PATTERN" "$RUNNER_TEMP/deploy-paths"; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else

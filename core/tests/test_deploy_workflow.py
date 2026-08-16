@@ -571,36 +571,143 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     script = selector["run"]
     assert isinstance(script, str)
     assert 'git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA"' in script
-    assert 'python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/deploy-paths"' in script
+    assert (
+        'git diff --no-renames "$BASE_SHA...$HEAD_SHA" -- '
+        "infra/modules/platform/iam.tf infra/modules/platform/ses.tf" in script
+    )
+    assert (
+        'python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/deploy-paths" '
+        '"$RUNNER_TEMP/auth-diff"' in script
+    )
     assert 'if [ "$GITHUB_EVENT_NAME" != "pull_request" ]' in script
     assert "exit 0" not in script
 
 
-def test_runtime_authorization_changes_are_split_across_deploys() -> None:
+_ADDITIVE_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -0,0 +1,2 @@\n+resource "aws_iam_policy" "cache_s3" {\n+}\n'
+)
+_CONTRACTION_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -1,3 +1,1 @@\n-  actions = ["s3:GetObject", "s3:PutObject"]\n'
+)
+_COMMENT_ONLY_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    "@@ -1,2 +1,1 @@\n-  # a stale comment\n"
+)
+_NARROWING_ARGUMENT_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -63,6 +63,7 @@ module "irsa_app_s3" {\n'
+    "   role_policy_arns = { s3 = aws_iam_policy.app_s3.arn }\n"
+    '+  assume_role_condition_test = "StringEquals"\n'
+)
+_NARROWING_BLOCK_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -45,6 +45,10 @@ data "aws_iam_policy_document" "app_s3" {\n'
+    "   statement {\n"
+    '+    condition {\n+      test     = "StringNotEquals"\n'
+    '+      variable = "aws:PrincipalTag/env"\n+    }\n'
+)
+_DENY_ATTACHMENT_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -112,3 +112,20 @@ module "irsa_cache_s3" {\n'
+    "   tags = local.tags\n }\n"
+    '+data "aws_iam_policy_document" "app_s3_no_delete" {\n'
+    "+  statement {\n"
+    '+    effect    = "Deny"\n'
+    '+    actions   = ["s3:DeleteObject"]\n'
+    '+    resources = ["${aws_s3_bucket.blob.arn}/*"]\n'
+    "+  }\n+}\n"
+    '+resource "aws_iam_policy" "app_s3_no_delete" {\n'
+    "+  policy = data.aws_iam_policy_document.app_s3_no_delete.json\n+}\n"
+    '+resource "aws_iam_role_policy_attachment" "app_s3_no_delete" {\n'
+    "+  role       = module.irsa_app_s3.iam_role_name\n"
+    "+  policy_arn = aws_iam_policy.app_s3_no_delete.arn\n+}\n"
+)
+_LIVE_ROLE_ATTACHMENT_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -112,3 +112,6 @@ module "irsa_cache_s3" {\n'
+    "   tags = local.tags\n }\n"
+    '+resource "aws_iam_role_policy_attachment" "app_s3_scoped" {\n'
+    "+  role       = module.irsa_app_s3.iam_role_name\n"
+    "+  policy_arn = aws_iam_policy.app_s3_scoped.arn\n+}\n"
+)
+_EXPANSION_BLOCK_GROUP_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -72,3 +72,24 @@ module "irsa_app_s3" {\n'
+    "   tags = local.tags\n }\n"
+    '+data "aws_iam_policy_document" "cache_s3" {\n'
+    "+  statement {\n"
+    '+    actions   = ["s3:GetObject", "s3:PutObject"]\n'
+    '+    resources = ["${aws_s3_bucket.cache.arn}/*"]\n'
+    "+  }\n+}\n"
+    '+resource "aws_iam_policy" "cache_s3" {\n'
+    "+  policy = data.aws_iam_policy_document.cache_s3.json\n+}\n"
+    '+module "irsa_cache_s3" {\n'
+    "+  role_name        = local.cache_s3_role_name\n"
+    "+  role_policy_arns = { s3 = aws_iam_policy.cache_s3.arn }\n"
+    "+  oidc_providers = {\n"
+    "+    main = {\n"
+    "+      provider_arn = module.eks.oidc_provider_arn\n"
+    "+    }\n+  }\n+}\n"
+    '+resource "aws_iam_role_policy_attachment" "cache_s3" {\n'
+    "+  role       = module.irsa_cache_s3.iam_role_name\n"
+    "+  policy_arn = aws_iam_policy.cache_s3.arn\n+}\n"
+)
+
+
+def test_authorization_expansions_co_deploy_but_contractions_split() -> None:
     gate = _deploy_change_gate()
-    gate.validate_deploy_change(("infra/modules/platform/iam.tf",))
-    gate.validate_deploy_change(("infra/modules/platform/ses.tf",))
+    # Authorization alone, or a runtime change alone, is always fine.
+    gate.validate_deploy_change(("infra/modules/platform/iam.tf",), _ADDITIVE_AUTH_DIFF)
     gate.validate_deploy_change(("core/src/ufo/serve.py",))
     gate.validate_deploy_change(
-        ("infra/modules/platform/iam.tf", "core/tests/test_deploy_workflow.py")
+        ("infra/modules/platform/iam.tf", "core/tests/test_deploy_workflow.py"), _ADDITIVE_AUTH_DIFF
     )
-    with pytest.raises(ValueError, match="expand IAM, roll and drain"):
+    # A whole new role, its policy and the attachment that binds them co-deploy: no live principal
+    # holds the new grant, so the roll cannot break on it.
+    gate.validate_deploy_change(
+        ("infra/modules/platform/iam.tf", "core/src/ufo/serve.py"),
+        _EXPANSION_BLOCK_GROUP_AUTH_DIFF,
+    )
+    # A new grant (expansion) co-deploys with its consumer — terraform creates it before the roll.
+    for runtime_path in (
+        "infra/envs/testing/ufo.tf",
+        "infra/templates/hosted.yaml.tpl",
+        "core/src/ufo/serve.py",
+    ):
+        gate.validate_deploy_change(
+            ("infra/modules/platform/iam.tf", runtime_path), _ADDITIVE_AUTH_DIFF
+        )
+    # Removing a grant (contraction) must split from its consumers.
+    with pytest.raises(ValueError, match="contract IAM only after"):
+        gate.validate_deploy_change(
+            ("infra/modules/platform/iam.tf", "infra/templates/hosted.yaml.tpl"),
+            _CONTRACTION_AUTH_DIFF,
+        )
+    # A comment/blank-only removal changes no grant, so it is not a contraction.
+    gate.validate_deploy_change(
+        ("infra/modules/platform/iam.tf", "infra/envs/prod/ufo.tf"), _COMMENT_ONLY_AUTH_DIFF
+    )
+    # Added lines narrow an existing grant as surely as removed lines drop it: an argument added
+    # to a live role, or a condition added to a live statement, is a contraction too.
+    # Whole new blocks narrow too: a Deny denies whoever holds the policy, and an attachment onto a
+    # role the diff does not create rewrites the authorization of a principal already live.
+    for narrowing_diff in (
+        _NARROWING_ARGUMENT_AUTH_DIFF,
+        _NARROWING_BLOCK_AUTH_DIFF,
+        _DENY_ATTACHMENT_AUTH_DIFF,
+        _LIVE_ROLE_ATTACHMENT_AUTH_DIFF,
+    ):
+        with pytest.raises(ValueError, match="contract IAM only after"):
+            gate.validate_deploy_change(
+                ("infra/modules/platform/iam.tf", "core/src/ufo/serve.py"), narrowing_diff
+            )
+    # Fail closed: no diff supplied means expand-vs-contract is unknown, so enforce the split.
+    with pytest.raises(ValueError, match="contract IAM only after"):
         gate.validate_deploy_change(
             ("infra/modules/platform/ses.tf", "control/src/ufo_control/gateway_email.py")
         )
-
-    for runtime_path in (
-        ".github/scripts/deploy_change_gate.py",
-        ".github/scripts/production_prerequisites.sh",
-        "core/src/ufo/serve.py",
-        "extensions/e2b/ufo_ext_e2b.py",
-        "infra/envs/prod/ufo.tf",
-        "infra/production_secrets.py",
-        "infra/templates/hosted.yaml.tpl",
-        "sandbox/build_template.py",
-    ):
-        with pytest.raises(ValueError, match="expand IAM, roll and drain"):
-            gate.validate_deploy_change(("infra/modules/platform/iam.tf", runtime_path))
 
 
 def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
@@ -633,6 +740,20 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
             target.write_text(path)
         git("add", "-A")
         git("commit", "-m", paths[0] if paths else "seed")
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def commit_content(files: dict[str, str], message: str) -> str:
+        for path, content in files.items():
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        git("add", "-A")
+        git("commit", "-m", message)
         return subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],
             check=True,
@@ -683,13 +804,81 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     assert code == 0, stderr
     assert "deploy=true" in output
 
-    git("checkout", "-b", "boundary")
-    boundary_head = commit("infra/modules/platform/iam.tf", "core/src/ufo/loop/engine.py")
-    git("update-ref", "refs/remotes/origin/main", runtime_head)
-    git("branch", "-D", "main")
-    code, output, stderr = run_select("workflow_dispatch", "origin/main", boundary_head)
+    # Put existing grants on main so a later diff can add beside them, narrow one, or remove one.
+    git("checkout", "main")
+    keep_grant = 'module "keep" {\n  role_policy_arns = { s3 = "arn" }\n}\n'
+    drop_grant = 'module "drop" {\n  role_policy_arns = { s3 = "arn" }\n}\n'
+    iam_base = commit_content(
+        {"infra/modules/platform/iam.tf": keep_grant + drop_grant}, "iam-base"
+    )
+    git("update-ref", "refs/remotes/origin/main", iam_base)
+
+    # Expansion: a new grant added to iam.tf beside a runtime change co-deploys — gate allows it.
+    git("checkout", "-b", "expand")
+    expand_head = commit_content(
+        {
+            "infra/modules/platform/iam.tf": keep_grant
+            + drop_grant
+            + 'module "new" {\n  role_policy_arns = { s3 = "arn" }\n}\n',
+            "core/src/ufo/loop/engine.py": "x = 1\n",
+        },
+        "expand",
+    )
+    code, output, stderr = run_select("workflow_dispatch", "origin/main", expand_head)
+    assert code == 0, stderr
+    assert "deploy=true" in output
+
+    # Contraction: removing a grant beside a runtime change must split across deploys — rejected.
+    git("checkout", "main")
+    git("checkout", "-b", "contract")
+    contract_head = commit_content(
+        {
+            "infra/modules/platform/iam.tf": keep_grant,
+            "core/src/ufo/loop/engine.py": "x = 1\n",
+        },
+        "contract",
+    )
+    code, output, stderr = run_select("workflow_dispatch", "origin/main", contract_head)
     assert code == 1
-    assert "expand IAM, roll and drain" in stderr
+    assert "contract IAM only after" in stderr
+    assert "deploy=" not in output
+
+    # Contraction by addition: one line added inside a live role narrows it — also rejected.
+    git("checkout", "main")
+    git("checkout", "-b", "narrow")
+    narrow_head = commit_content(
+        {
+            "infra/modules/platform/iam.tf": 'module "keep" {\n'
+            '  assume_role_condition_test = "StringEquals"\n'
+            '  role_policy_arns = { s3 = "arn" }\n}\n' + drop_grant,
+            "core/src/ufo/loop/engine.py": "x = 1\n",
+        },
+        "narrow",
+    )
+    code, output, stderr = run_select("workflow_dispatch", "origin/main", narrow_head)
+    assert code == 1
+    assert "contract IAM only after" in stderr
+    assert "deploy=" not in output
+
+    # Contraction by whole new blocks: a Deny bound to a role that already exists narrows that
+    # live role while its consumer rolls — rejected even though the diff only adds.
+    git("checkout", "main")
+    git("checkout", "-b", "deny")
+    deny_head = commit_content(
+        {
+            "infra/modules/platform/iam.tf": keep_grant
+            + drop_grant
+            + 'data "aws_iam_policy_document" "no_delete" {\n'
+            '  statement {\n    effect = "Deny"\n  }\n}\n'
+            'resource "aws_iam_role_policy_attachment" "no_delete" {\n'
+            "  role = module.keep.iam_role_name\n}\n",
+            "core/src/ufo/loop/engine.py": "x = 1\n",
+        },
+        "deny",
+    )
+    code, output, stderr = run_select("workflow_dispatch", "origin/main", deny_head)
+    assert code == 1
+    assert "contract IAM only after" in stderr
     assert "deploy=" not in output
 
 
@@ -699,11 +888,35 @@ def test_deploy_change_gate_entrypoint_exits_nonzero_on_the_boundary(tmp_path: P
     gate = ROOT / ".github" / "scripts" / "deploy_change_gate.py"
     paths = tmp_path / "deploy-paths"
     paths.write_text("infra/modules/platform/iam.tf\ncore/src/ufo/serve.py\n")
+    # No auth diff supplied: expand-vs-contract is unknown, so the gate fails closed.
     rejected = subprocess.run(
         [sys.executable, str(gate), str(paths)], capture_output=True, text=True
     )
     assert rejected.returncode == 1
-    assert "expand IAM, roll and drain" in rejected.stderr
+    assert "contract IAM only after" in rejected.stderr
+
+    # A contraction diff is rejected even with the diff present.
+    auth_diff = tmp_path / "auth-diff"
+    auth_diff.write_text(
+        "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+        '@@ -1,2 +1,1 @@\n-  actions = ["s3:PutObject"]\n'
+    )
+    contracted = subprocess.run(
+        [sys.executable, str(gate), str(paths), str(auth_diff)], capture_output=True, text=True
+    )
+    assert contracted.returncode == 1
+    assert "contract IAM only after" in contracted.stderr
+
+    # An additive diff (a new grant) co-deploys with its consumer.
+    auth_diff.write_text(
+        "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+        '@@ -0,0 +1,1 @@\n+resource "aws_iam_policy" "cache_s3" {}\n'
+    )
+    expanded = subprocess.run(
+        [sys.executable, str(gate), str(paths), str(auth_diff)], capture_output=True, text=True
+    )
+    assert expanded.returncode == 0, expanded.stderr
+
     paths.write_text("core/src/ufo/serve.py\n")
     allowed = subprocess.run(
         [sys.executable, str(gate), str(paths)], capture_output=True, text=True
@@ -2137,6 +2350,10 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     gate.parent.mkdir(parents=True)
     shutil.copy(ROOT / ".github" / "scripts" / "deploy_change_gate.py", gate)
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    # Seed an existing grant on base so the target commit can remove one (a contraction).
+    authorization = repo / "infra" / "modules" / "platform" / "iam.tf"
+    authorization.parent.mkdir(parents=True)
+    authorization.write_text('policy "keep" {}\npolicy "drop" {}\n')
     subprocess.run(
         [
             "git",
@@ -2168,9 +2385,8 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     base_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
-    authorization = repo / "infra" / "modules" / "platform" / "iam.tf"
-    authorization.parent.mkdir(parents=True)
-    authorization.write_text("changed\n")
+    # Contraction: drop the "drop" grant, landing beside a runtime (workflow) change.
+    authorization.write_text('policy "keep" {}\n')
     workflow = repo / ".github" / "workflows" / "deploy-production.yml"
     workflow.parent.mkdir(parents=True)
     workflow.write_text("changed\n")
@@ -2300,7 +2516,7 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     )
     split = boundary(base_sha, target_sha, span_sha)
     assert split.returncode != 0
-    assert b"expand IAM, roll and drain" in split.stderr
+    assert b"contract IAM only after" in split.stderr
     assert gh_calls.read_text().splitlines() == [success_query]
     assert boundary(base_sha, target_sha, clean_sha).returncode == 0
     assert boundary(base_sha, target_sha, span_sha, replace=target_sha).returncode != 0
@@ -2317,7 +2533,7 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     assert boundary("", target_sha, span_sha, replace=base_sha).returncode != 0
     replacement_span = boundary("", base_sha, span_sha, replace=base_sha)
     assert replacement_span.returncode != 0
-    assert b"expand IAM, roll and drain" in replacement_span.stderr
+    assert b"contract IAM only after" in replacement_span.stderr
     existing = boundary("", "", cluster="found")
     assert existing.returncode != 0
     assert existing.stdout == b"::error::No recorded production deployment.\n"

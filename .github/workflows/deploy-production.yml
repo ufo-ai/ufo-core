@@ -166,7 +166,8 @@ jobs:
           fi
           git merge-base --is-ancestor "$BASE_SHA" "$TARGET_SHA"
           git diff --name-only --no-renames "$BASE_SHA...$TARGET_SHA" > "$RUNNER_TEMP/production-paths"
-          python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/production-paths"
+          git diff --no-renames "$BASE_SHA...$TARGET_SHA" -- infra/modules/platform/iam.tf infra/modules/platform/ses.tf > "$RUNNER_TEMP/production-auth-diff"
+          python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/production-paths" "$RUNNER_TEMP/production-auth-diff"
 
       - name: Record the production attempt
         id: attempt

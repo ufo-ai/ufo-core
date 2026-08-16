@@ -34,7 +34,7 @@ test for the extension API — every entry must be expressible without touching 
 | Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. Bedrock Mantle and OpenRouter ship as extensions. |
 | Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. |
 | Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
-| Runtime authorization rollout | Deploys are serialized. IAM authorization and runtime consumers cannot change together: expand IAM, roll and drain the runtime, then contract IAM. CI rejects a change spanning that boundary. |
+| Runtime authorization rollout | Deploys are serialized. A whole new IAM grant lands with its consumers: terraform creates it before the roll, and the rollout-health gate catches a consumer that cannot yet assume it. Narrowing or removing an existing grant does not: expand IAM, roll and drain the runtime, then contract IAM. CI rejects a contraction that spans that boundary, and reads as a contraction any authorization diff that touches an existing grant: a line added inside a block already there, a Deny, or a policy bound to a principal the diff does not itself declare. |
 | CLI | One CLI: `ufo` (`serve`, `bundle`, `ext`, admin verbs). |
 
 ## Workspace model
