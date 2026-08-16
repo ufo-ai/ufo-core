@@ -35,6 +35,7 @@ from ufo.config import (
     IN_PROCESS_BACKEND,
     Config,
     load_config,
+    terminal_walks_files,
 )
 from ufo.connectors import AuthProxy, ConnectorEntry, ConnectorRegistry, SourceCredentialResolver
 from ufo.credentials import (
@@ -244,6 +245,7 @@ def run() -> None:
             ),
             workspace_root=config.sandbox.workspace_root,
             terminals=_select_terminal_transport(config, manifests, fleet_blob),
+            walk_files=terminal_walks_files(config),
         ),
         hub=hub,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),

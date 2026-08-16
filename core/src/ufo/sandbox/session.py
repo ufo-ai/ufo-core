@@ -289,6 +289,13 @@ class SandboxUnreachable(RuntimeError):
     """The dial contract's error: a carrier's sandbox is gone or has no external route."""
 
 
+class FileWalkDisabled(RuntimeError):
+    """The deploy turned the workspace tree walk off (`terminal.walk_files`, `UFO_NO_FILE_WALK`), so
+    a walking file op has no listing to read and never ran. Its own error rather than a generic
+    failure because a caller that walks for a projection rather than for the model skips on it:
+    nothing was scanned, so what it recorded before is not made stale."""
+
+
 class Carrier(Protocol):
     """Create-or-attach a per-conversation container and reach its `/workspace`: run commands in it,
     write bytes in, stream bytes out. `/workspace` is the carrier's own storage and the only copy of

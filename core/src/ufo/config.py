@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ufo.models.interface import AUTO_MODEL
 
 CONFIG_PATH_ENV = "UFO_CONFIG"
+NO_FILE_WALK_ENV = "UFO_NO_FILE_WALK"
 DEFAULT_CONFIG_PATH = Path("ufo.toml")
 IN_PROCESS_BACKEND = "in_process"
 DEFAULT_CDP_PROVIDER = "sandbox_chrome"
@@ -273,10 +274,18 @@ class TerminalConfig(BaseModel):
     fleet already running the Redis hub selects the Redis terminal transport beside it with no new
     URL. The in-process transport is correct only on a single serve instance; a shared fleet selects
     a cross-pod backend so a member's held connection and their turn's workflow reach one terminal
-    even when they land on different pods."""
+    even when they land on different pods.
+
+    `walk_files` says whether a walking file op may walk the member's own directory. On — the
+    default, and what every deploy did before the key existed — `grep`, `glob`, and the turn-end
+    changes scan each enumerate the bound tree first, which is the work the client labels
+    `list files`. Off, none of the three walks and none of them reaches the terminal, so the walk
+    costs nothing on the member's machine and no row is shown: `grep` and `glob` then refuse
+    instead of answering, and the changes projection keeps its last scan."""
 
     model_config = ConfigDict(extra="forbid")
     backend: str = IN_PROCESS_BACKEND
+    walk_files: bool = True
 
 
 class BrowserConfig(BaseModel):
@@ -346,6 +355,16 @@ class Config(BaseModel):
 
 def config_path() -> Path:
     return Path(os.environ.get(CONFIG_PATH_ENV, str(DEFAULT_CONFIG_PATH)))
+
+
+def terminal_walks_files(config: Config) -> bool:
+    """Whether this deploy walks the member's directory for a walking file op. `UFO_NO_FILE_WALK`
+    set to any value is the opt-out and wins over the config key, so a member running their own node
+    turns the walk off for one process without editing a file; the env var never turns a walk back
+    on, which is `terminal.walk_files`'s answer alone."""
+    if os.environ.get(NO_FILE_WALK_ENV):
+        return False
+    return config.terminal.walk_files
 
 
 def load_config(path: Path | None = None) -> Config:
