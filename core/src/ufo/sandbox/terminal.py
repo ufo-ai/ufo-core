@@ -28,7 +28,6 @@ from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from ufo.config import NO_FILE_WALK_ENV
 from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     EGRESS_CA_CERT_ENV,
@@ -36,7 +35,6 @@ from ufo.sandbox.session import (
     WORKSPACE_DIR,
     DialTarget,
     ExecResult,
-    FileWalkDisabled,
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
@@ -544,10 +542,6 @@ class TerminalCarrier:
     own shell is not. The container carriers are where `containment` is load-bearing."""
 
     terminals: TerminalTransport
-    walk_files: bool = True
-    """Whether a walking file op may enumerate the bound directory — the deploy's
-    `terminal.walk_files`, resolved once at boot. Off, a walk refuses here, before any op travels,
-    so the member's tree is never read and their client shows no row for it."""
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """The bound terminal as a handle, waiting out the gap between the client's held streams —
@@ -700,14 +694,7 @@ class TerminalCarrier:
         its native implementation, so only the params and the result cross. A tree walk is two
         ops: the enumeration `find` first, through the same exec primitive, then the op reading
         its listing — what a walk visits is decided by a command this process composed, never by
-        the client. A deploy that turned the walk off refuses those two ops together: the listing
-        the op would read is the walk, so answering the op without it would report an empty tree as
-        the truth about the member's directory."""
-        if op in WALK_ENUMERATION and not self.walk_files:
-            raise FileWalkDisabled(
-                f"the {op} walk of this workspace is off for this deploy "
-                f"(terminal.walk_files, {NO_FILE_WALK_ENV})"
-            )
+        the client."""
         root = _root(handle)
         rewritten = {
             key: _under_root(root, value)

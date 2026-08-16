@@ -33,7 +33,6 @@ from ufo.sandbox.session import (
     SANDBOX_UID,
     WORKSPACE_DIR,
     Carrier,
-    FileWalkDisabled,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
@@ -90,11 +89,6 @@ class ConversationSandbox:
     single node, a cross-pod transport (Redis) on a shared fleet. Whichever the deploy selects can
     serve a terminal, so a `client:` binding is always admissible: the transport, not the process,
     owns whether the held connection and the turn's workflow reach one terminal."""
-    walk_files: bool = True
-    """Whether a walking file op may enumerate a terminal-bound directory — `terminal.walk_files`
-    and its `UFO_NO_FILE_WALK` opt-out, resolved at boot and handed to every terminal carrier this
-    process makes. A deploy carrier's own walks are unaffected: they read the sandbox's disk, not
-    the member's."""
 
     async def open(
         self, conversation_id: UUID, run_token: str, env: Mapping[str, str]
@@ -144,7 +138,7 @@ class ConversationSandbox:
             return None
         bound_path = sandbox_handle_id(CLIENT_BACKEND, stored)
         if bound_path is not None:
-            carrier = TerminalCarrier(terminals=self.terminals, walk_files=self.walk_files)
+            carrier = TerminalCarrier(terminals=self.terminals)
             handle = await carrier.attach(
                 SandboxSpec(
                     conversation_id=conversation_id,
@@ -219,26 +213,21 @@ class ConversationSandbox:
     async def entries(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
         """Member-visible files in the conversation's workspace, path-sorted. The in-container
         `sbxfs glob` walk excludes Git metadata before its result cap; filtering in a surface would
-        let metadata consume the cap and hide files. Empty when the conversation has no sandbox yet,
-        and empty on a deploy whose walk is off — listing a terminal-bound directory is the walk
-        `terminal.walk_files` refuses, so the browser shows nothing rather than failing the panel.
+        let metadata consume the cap and hide files. Empty when the conversation has no sandbox yet.
         Paths come back absolute in the walker's own view — `/workspace/…` from a containerised
         carrier, the host directory from the local carrier's argv rewrite — so each is made relative
         against whichever of those two roots it carries."""
         session = await self.existing(conversation_id)
         if session is None:
             return ()
-        try:
-            listed = await session.run_sbxfs(
-                "glob",
-                {
-                    "pattern": "**/*",
-                    "path": WORKSPACE_DIR,
-                    "exclude_names": list(WORKSPACE_LISTING_EXCLUDE_NAMES),
-                },
-            )
-        except FileWalkDisabled:
-            return ()
+        listed = await session.run_sbxfs(
+            "glob",
+            {
+                "pattern": "**/*",
+                "path": WORKSPACE_DIR,
+                "exclude_names": list(WORKSPACE_LISTING_EXCLUDE_NAMES),
+            },
+        )
         files = listed["files"]
         if not isinstance(files, list):
             raise RuntimeError("sbxfs glob did not return a file list")
@@ -301,7 +290,7 @@ class ConversationSandbox:
             bound = self.terminals.workspace(conversation_id)
             bound_path = None if bound is None else bound.cwd
         if bound_path is not None:
-            carrier = TerminalCarrier(terminals=self.terminals, walk_files=self.walk_files)
+            carrier = TerminalCarrier(terminals=self.terminals)
             handle = await carrier.create(
                 SandboxSpec(
                     conversation_id=conversation_id,

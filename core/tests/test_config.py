@@ -152,14 +152,6 @@ def test_terminal_backend_parses(tmp_path: Path) -> None:
     assert config.terminal.backend == "redis"
 
 
-def test_terminal_walks_files_unless_the_key_says_otherwise(tmp_path: Path) -> None:
-    path = tmp_path / "ufo.toml"
-    path.write_text(VALID)
-    assert load_config(path).terminal.walk_files is True
-    path.write_text(VALID + "\n[terminal]\nwalk_files = false\n")
-    assert load_config(path).terminal.walk_files is False
-
-
 def test_unknown_terminal_key_rejected(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(VALID + '\n[terminal]\nbackend = "redis"\nurl = "redis://cache:6379/0"\n')

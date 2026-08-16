@@ -19,7 +19,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.db import workspace_tx
 from ufo.o11y import log
-from ufo.sandbox.session import FileWalkDisabled, SandboxSession
+from ufo.sandbox.session import SandboxSession
 from ufo.schema import tables
 from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 
@@ -58,11 +58,7 @@ class WorkspaceChangeRecorder:
     subagent shares its parent's workspace, so a child's work refreshes the projection the parent's
     portal reads. A scan that fails leaves the last one standing: this is a projection of the
     workspace, and a stale answer to `what changed` beats no answer and beats failing a turn that
-    already ended.
-
-    A deploy whose walk is off (`terminal.walk_files`) records nothing at all: this scan is the tree
-    walk the member opted out of, so it is skipped rather than answered, and the last scan stands as
-    what the portal reads."""
+    already ended."""
 
     sandbox: SandboxSession
     workspace_id: UUID
@@ -71,8 +67,6 @@ class WorkspaceChangeRecorder:
     async def record(self) -> None:
         try:
             await self._store(await self._scan())
-        except FileWalkDisabled:
-            return
         except Exception as error:
             log(
                 "workspace.changes.scan_failed",
