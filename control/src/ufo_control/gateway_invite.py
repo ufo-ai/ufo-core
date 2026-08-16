@@ -34,6 +34,8 @@ DDL = (
     "  object_number integer not null check (object_number > 0),"
     "  email text not null,"
     "  email_domain text not null,"
+    "  business text,"
+    "  goals text,"
     "  expires_at timestamptz not null,"
     "  consumed_at timestamptz,"
     "  created_at timestamptz not null default now())",
@@ -53,6 +55,20 @@ STANDING = (
 class InviteError(RuntimeError):
     """Granting refused: the object or the domain is already identified, or already holds a live
     grant."""
+
+
+MAX_PROFILE_CHARS = 500
+
+
+@dataclass(frozen=True)
+class SignupProfile:
+    """What the intake form collected about one customer: what their company does, and what they
+    want an agent to do. It reaches their workspace as the main agent's opening context, so the
+    agent knows who it works for on its first turn rather than asking for what they already told
+    us."""
+
+    business: str
+    goals: str
 
 
 @dataclass(frozen=True)
@@ -100,9 +116,29 @@ class InviteCodes:
                 )
             )
 
-    async def mint(self, object_number: int, email: str) -> MintedInvite:
+    async def profile(self, email_domain: str) -> SignupProfile | None:
+        """What the newest grant for this domain recorded, or None when the form collected nothing.
+        The newest grant wins: a re-granted domain describes the customer as they are now."""
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"select business, goals from {TABLE}"
+                " where email_domain = $1 and business is not null"
+                " order by created_at desc, id desc limit 1",
+                email_domain,
+            )
+        if row is None:
+            return None
+        return SignupProfile(business=row["business"], goals=row["goals"])
+
+    async def mint(
+        self, object_number: int, email: str, profile: SignupProfile | None = None
+    ) -> MintedInvite:
         address, domain = normalize_email(email)
         WorkEmailPolicy().validate(address)
+        if profile is not None and not all(
+            0 < len(field) <= MAX_PROFILE_CHARS for field in (profile.business, profile.goals)
+        ):
+            raise InviteError(f"each profile field is 1 to {MAX_PROFILE_CHARS} characters")
         now = datetime.now(UTC)
         expires_at = now + self.ttl
         async with self.pool.acquire() as connection:
@@ -122,13 +158,16 @@ class InviteCodes:
                 try:
                     await connection.execute(
                         f"insert into {TABLE}"
-                        " (id, object_number, email, email_domain, expires_at)"
-                        " values ($1, $2, $3, $4, $5)",
+                        " (id, object_number, email, email_domain, expires_at,"
+                        "  business, goals)"
+                        " values ($1, $2, $3, $4, $5, $6, $7)",
                         uuid4(),
                         object_number,
                         address,
                         domain,
                         expires_at,
+                        profile.business if profile else None,
+                        profile.goals if profile else None,
                     )
                 except asyncpg.UniqueViolationError as raced:
                     raise InviteError(

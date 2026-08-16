@@ -74,6 +74,7 @@ WORKSPACE_BASE_URL_ENV = "UFO_WORKSPACE_BASE_URL"
 INVITE_REQUIRED_ENV = "UFO_INVITE_REQUIRED"
 DEBUG_SURFACE_PATH = "/surface/debug"
 FIRST_MOVE_PROMPT = "What first?"
+SLACK_CHOICE = "Connect Slack"
 BILLING_CHOICE = "Set up billing"
 TOUR_CHOICE = "Show me what you can do"
 WORKSPACE_PROMPT = "Choose a workspace:"
@@ -177,10 +178,7 @@ class Onboarding:
                 refusal = await self._invite_gate(claim, install)
                 if refusal is not None:
                     return refusal
-            ensured, created = (
-                await self.workspaces.create(claim.email_domain, claim.email),
-                True,
-            )
+            ensured, created = await self._create(claim), True
         else:
             create_available = claim.invite_id is not None or await self.invites.available(
                 claim.email_domain
@@ -199,10 +197,7 @@ class Onboarding:
                     refusal = await self._invite_gate(claim, install)
                     if refusal is not None:
                         return refusal
-                    ensured, created = (
-                        await self.workspaces.create(claim.email_domain, claim.email),
-                        True,
-                    )
+                    ensured, created = await self._create(claim), True
                 else:
                     selected = next((choice for choice in choices if choice.label == body), None)
                     if selected is None:
@@ -217,6 +212,12 @@ class Onboarding:
                     )
         await self.store.complete(claim.claim_id, ensured.workspace_id, created_workspace=created)
         return self._signed_in(claim, ensured, install)
+
+    async def _create(self, claim: OnboardClaim) -> EnsuredWorkspace:
+        """Open this domain's workspace with whatever the intake form recorded about the customer,
+        so their agent opens knowing who it works for."""
+        profile = await self.invites.profile(claim.email_domain)
+        return await self.workspaces.create(claim.email_domain, claim.email, profile)
 
     async def _invite_gate(self, claim: OnboardClaim, install: bytes) -> bytes | None:
         """A refusal screen, or `None` when the flow may open the workspace. The verified email
@@ -249,11 +250,7 @@ class Onboarding:
                 return render(
                     install,
                     directive("say", f"{domain} has no invite."),
-                    directive(
-                        "say",
-                        "Join the waitlist: "
-                        f"curl https://{self.apex_host}/waitlist -d email={claim.email}",
-                    ),
+                    directive("say", f"Join the waitlist: https://{self.apex_host}"),
                     directive("exit", "0"),
                 )
 
@@ -279,7 +276,8 @@ class Onboarding:
             if operator
             else b"",
             directive("say", f"Signed in: {claim.email}"),
-            directive("choose", FIRST_MOVE_PROMPT, BILLING_CHOICE, TOUR_CHOICE)
+            directive("slack", SLACK_CHOICE) if ensured.admin else b"",
+            directive("choose", FIRST_MOVE_PROMPT, SLACK_CHOICE, BILLING_CHOICE, TOUR_CHOICE)
             if ensured.admin and claim.surface != WEB_CHANNEL
             else directive("ask", PROMPT),
         )
@@ -400,13 +398,15 @@ def gateway_app() -> FastAPI:
             serve_role=_dsn_role(serve_url),
         )
         init_db(serve_url)
-        deliveries = None if inviter is None else asyncio.create_task(inviter.run())
+        background = [
+            asyncio.create_task(poller.run()) for poller in (inviter,) if poller is not None
+        ]
         try:
             yield
         finally:
-            if deliveries is not None:
-                deliveries.cancel()
-                await asyncio.gather(deliveries, return_exceptions=True)
+            for task in background:
+                task.cancel()
+            await asyncio.gather(*background, return_exceptions=True)
             state = None
             await dispose_db()
             await pool.close()

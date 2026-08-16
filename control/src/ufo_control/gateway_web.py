@@ -23,6 +23,11 @@ that email, their workspace URL, the terminal install line — and, when the gat
 directive arrived (an operator-domain email only), a form that POSTs the token to the operator
 session debugger, which exchanges it for its session cookie — the bearer never rides a URL.
 
+The `slack` directive (an admin only, since only an admin installs) names what to ask the workspace
+for. The card states it rather than linking it: an install link seals one workspace and one member
+for fifteen minutes, so it can only be minted by the turn that answers the member, never printed
+onto a page they may leave open.
+
 A conversation the portal redirected here with (`/login?c=<uuid>`) is carried onto the card's
 portal action and onto the Google hop, so the member lands on the conversation they clicked rather
 than a new chat. Only a uuid shape is carried, and it rides the hop's query out and back, so it
@@ -135,6 +140,7 @@ LOGIN_PAGE = r"""<!doctype html>
       <input type="hidden" name="token" id="portal-token">
       <button type="submit">Open your workspace</button>
     </form>
+    <div class="hint" id="slack-line" style="margin-top:10px"></div>
     <div class="hint" style="margin-top:10px">From your terminal:</div>
     <pre id="curl-line"></pre>
     <form id="debugger-row" method="post">
@@ -162,6 +168,7 @@ const artifact = artifactRaw.startsWith('/artifacts/') ? artifactRaw : null;
 let token = null;
 let workspace = null;
 let debuggerUrl = null;
+let slackAsk = null;
 let email = null;
 let choosing = false;
 let finished = false;
@@ -204,6 +211,11 @@ function complete() {
   document.getElementById('portal-token').value = token;
   document.getElementById('curl-line').textContent =
     'curl -fsSL ' + location.origin + '/ufo | sh';
+  if (slackAsk) {
+    const slackLine = document.getElementById('slack-line');
+    slackLine.textContent = 'To install ufo in Slack, ask your workspace: ' + slackAsk;
+    slackLine.style.display = 'block';
+  }
   if (debuggerUrl) {
     const row = document.getElementById('debugger-row');
     row.action = debuggerUrl;
@@ -223,6 +235,7 @@ function handle(directive) {
   else if (directive.verb === 'choose') prompt(arg, directive.fields.slice(1));
   else if (directive.verb === 'token') token = arg;
   else if (directive.verb === 'workspace') workspace = arg;
+  else if (directive.verb === 'slack') slackAsk = arg;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
   else if (directive.verb === 'exit') {
     if (arg !== '0') line('Failed — reload to retry.', 'error');

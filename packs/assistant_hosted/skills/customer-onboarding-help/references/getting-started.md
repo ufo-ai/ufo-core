@@ -23,11 +23,14 @@ every agent there; other agents appear once an admin shares them (see `capabilit
    email domain, so a contractor or an advisor is added the same way as a colleague. Signing in
    opens the one workspace their verified address can enter, or asks them to choose when an exact
    membership and their email domain name different workspaces. An exact membership needs no invite.
-5. **A workspace admin is offered billing setup at the end.** In the terminal the admin gets a choice
-   on the concluding screen; picking it starts a chat with the agent, which returns a link for saving
-   a payment method. A joined teammate gets the ordinary prompt instead, and signing in through the
+5. **A workspace admin is offered connecting Slack, then billing setup at the end.** In the terminal
+   the admin gets a choice on the concluding screen; picking one starts a chat with the agent, which
+   returns either an "Add to Slack" link or a link for saving a payment method. A joined teammate
+   gets the ordinary prompt instead, and signing in through the
    web page ends on a signed-in card without the menu; "Open your workspace" there opens the web
-   portal, where the workspace's main agent already answers them.
+   portal, where the workspace's main agent already answers them. The card names connecting Slack
+   for an admin, since an install link is only good for fifteen minutes and has to come from the
+   agent that answers them.
 6. **Slack comes next.** See `slack-install.md`.
 
 ## What to say when asked

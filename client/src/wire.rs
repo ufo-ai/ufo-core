@@ -690,6 +690,7 @@ mod tests {
     #[test]
     fn drops_unknown_verbs() {
         assert_eq!(parse_line("debugger\thttps://d"), Directive::Unknown);
+        assert_eq!(parse_line("slack\tConnect Slack"), Directive::Unknown);
         assert_eq!(parse_line("auth\t/auth/start"), Directive::Unknown);
         assert_eq!(parse_line("ufo\t15 line1\\nline2"), Directive::Unknown);
         assert_eq!(parse_line("logout"), Directive::Unknown);
@@ -781,8 +782,8 @@ mod tests {
                     replayed += 1;
                 }
                 None => {
-                    assert_eq!(
-                        row.verb, "debugger",
+                    assert!(
+                        matches!(row.verb.as_str(), "debugger" | "slack"),
                         "verb {:?} parsed to Unknown",
                         row.verb
                     );
@@ -791,7 +792,7 @@ mod tests {
             }
         }
         assert_eq!(replayed + dropped, raw.lines().count());
-        assert_eq!(dropped, 1);
+        assert_eq!(dropped, 2);
         assert!(replayed > 0);
     }
 

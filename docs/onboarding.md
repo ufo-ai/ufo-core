@@ -103,11 +103,17 @@ claimed by two workspaces fails loud without creating another. Creation derives 
 from the domain.
 `SharedWorkspaces.create` and `join` report whether the member is an admin
 (`EnsuredWorkspace.admin`), and
-the last screen turns on it: an admin is offered `Set up billing` as a `choose`, a joined teammate
-gets the ordinary `ask` prompt. The `workspace` directive has already landed by then, so whichever
-option the admin picks posts to
-`/surface/ufo` as their first chat message and the agent drives billing from there — the gateway
-mints no billing link and adds no billing directive.
+the last screen turns on it: an admin is offered `Connect Slack`, `Set up billing`, and a tour as a
+`choose`, a joined teammate gets the ordinary `ask` prompt. The `workspace` directive has already
+landed by then, so whichever option the admin picks posts to
+`/surface/ufo` as their first chat message and the agent drives it from there — the gateway
+mints no billing link, no install link, and adds no directive for either.
+
+Slack leads that list because the install is what moves a customer onto their own surface, and the
+browser card carries the same push as a `slack` directive naming what to ask. Neither renderer can
+carry the link itself: an "Add to Slack" URL seals one workspace and one member for fifteen minutes
+(`CREDENTIAL_REQUEST_TTL_SECONDS`), so only the turn that answers the member can mint one that still
+works when they click it. Both are admin-only, since only an admin installs.
 
 ### Driving billing locally
 
@@ -143,7 +149,14 @@ token is machine-consumed and never printed.
 
 Creating a workspace is invite-gated; joining an existing one never is. A grant names one email
 domain, so the verified email *is* the redemption: `ufo-control invite <object-number> <email>`
-grants a waitlist object's domain and emails the invitation to it, and the flow burns the domain's
+grants a waitlist object's domain and emails the invitation to it. Its `--business` and `--goals`
+options carry what the intake form collected — what their company does, and what they want an agent
+to do; they are given together or not at all,
+and they open the main agent's prompt in the workspace that grant creates. They arrive through
+`ufo.untrusted.wall`, attributed to the form and never as instructions: the form is public, whoever
+filled it proved nothing, and the employee who later signs in never typed a word of it — so the
+prompt states that the member is believed over it wherever the two differ. A grant minted without
+them leaves a workspace reading exactly as one `ufoctl init` seats. The flow burns the domain's
 live grant and stamps the claim's `invite_id` in one transaction — no third prompt, and nothing for
 the member to carry from the invitation back into the terminal. The invitation therefore holds no
 secret, and a colleague at the granted domain is identified by the same grant, which is who usually

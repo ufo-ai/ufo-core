@@ -641,11 +641,18 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
     assert verify_token(joined_directives["token"], UUID(workspace_id)) == "mate@sharedtwo.io"
     assert await _members_in(workspace_id) == ["boss@sharedtwo.io", "mate@sharedtwo.io"]
     assert directives["choose"] == "\t".join(
-        (gateway.FIRST_MOVE_PROMPT, gateway.BILLING_CHOICE, gateway.TOUR_CHOICE)
-    )
+        (
+            gateway.FIRST_MOVE_PROMPT,
+            gateway.SLACK_CHOICE,
+            gateway.BILLING_CHOICE,
+            gateway.TOUR_CHOICE,
+        )
+    ), "the admin's first move leads with Slack"
+    assert directives["slack"] == gateway.SLACK_CHOICE
     assert "ask" not in directives
     assert joined_directives["ask"] == PROMPT
     assert "choose" not in joined_directives
+    assert "slack" not in joined_directives, "a teammate cannot install, so is never told to"
 
 
 def test_invite_cli_rejects_a_nonpositive_object_number() -> None:

@@ -20,7 +20,12 @@ from ufo_control.gateway_email import (
     invite_email,
     public_apex_host,
 )
-from ufo_control.gateway_invite import InviteCodes, InviteError, MintedInvite
+from ufo_control.gateway_invite import (
+    InviteCodes,
+    InviteError,
+    MintedInvite,
+    SignupProfile,
+)
 from ufo_control.gateway_slack_connect import rearm_failed_delivery
 from ufo_control.rls import bootstrap_policies, ensure_serve_role, owner_dsn
 from ufo_control.schema import require_control_schema, shape_control_schema
@@ -80,17 +85,28 @@ def migrate() -> None:
 @main.command()
 @click.argument("object_number", type=click.IntRange(min=1))
 @click.argument("email")
-def invite(object_number: int, email: str) -> None:
-    """Grant a waitlist object's email domain one new workspace and email it the invitation."""
+@click.option("--business", help="What they said their company does.")
+@click.option("--goals", help="What they said they want an agent to do.")
+def invite(object_number: int, email: str, business: str | None, goals: str | None) -> None:
+    """Grant a waitlist object's email domain one new workspace and email it the invitation.
+
+    Both intake answers open the new workspace's main agent prompt. They travel together: a grant
+    describes this customer completely or not at all.
+    """
+    if bool(business) != bool(goals):
+        raise click.ClickException("--business and --goals are given together or not")
+    profile = SignupProfile(business=business, goals=goals) if business and goals else None
     try:
-        minted = asyncio.run(_mint_invite(object_number, email))
+        minted = asyncio.run(_mint_invite(object_number, email, profile))
     except (InviteError, WorkEmailError) as error:
         raise click.ClickException(str(error)) from error
     expires = minted.expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
     click.echo(f"object #{minted.object_number} granted to {minted.email}, expires {expires} UTC")
 
 
-async def _mint_invite(object_number: int, email: str) -> MintedInvite:
+async def _mint_invite(
+    object_number: int, email: str, profile: SignupProfile | None
+) -> MintedInvite:
     """The SES sender is built before the grant lands, so a deploy missing its mail configuration
     refuses without spending the object's one live grant. A grant that outlives its own invitation
     still opens the workspace — the member proves it by verifying the granted address — so a failed
@@ -101,7 +117,7 @@ async def _mint_invite(object_number: int, email: str) -> MintedInvite:
     sender = email_sender_from_env()
     pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=1)
     try:
-        minted = await InviteCodes(pool=pool).mint(object_number, email)
+        minted = await InviteCodes(pool=pool).mint(object_number, email, profile)
     finally:
         await pool.close()
     subject, body = invite_email(minted.email, minted.expires_at, apex_host)

@@ -26,6 +26,7 @@ from ufo.serve import RESERVED_HOST_PREFIXES
 import ufo_control.gateway as gateway
 from ufo_control.gateway import (
     INVITE_REQUIRED_ENV,
+    SLACK_CHOICE,
     TOKEN_SECRET_ENV,
     WORKSPACE_BASE_URL_ENV,
     gateway_app,
@@ -117,6 +118,7 @@ def test_login_page_member_copy_is_the_fixed_copy() -> None:
         ">Open your workspace</button>",
         "From your terminal:",
         ">Session debugger</button>",
+        "'To install ufo in Slack, ask your workspace: '",
         "'Sign in again'",
         "'Network error — retrying…'",
         "'Error ' + res.status + ' — try again.'",
@@ -675,6 +677,24 @@ def test_debugger_directive_never_lands_outside_the_operator_domain(
         signed_in = _walk(client, verifier, email)
     assert _fields(signed_in, "token")
     assert not _fields(signed_in, "debugger")
+
+
+def test_the_slack_directive_names_what_to_ask_and_reaches_admins_only(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The web card cannot carry an install link — the seal names one workspace and one member and
+    lives fifteen minutes — so the gateway names the ask instead, and only to whoever installs."""
+    _configure(monkeypatch, gateway_postgres)
+    _grant(gateway_postgres, 79, "founder@slackpushco.io")
+    verifier = _verifies(monkeypatch, FakeVerifier())
+    with _client() as client:
+        founder = _walk(client, verifier, "founder@slackpushco.io")
+    with _client() as second:
+        teammate = _walk(second, verifier, "mate@slackpushco.io")
+
+    assert _fields(founder, "slack") == [SLACK_CHOICE]
+    assert _fields(teammate, "token"), "the teammate still signed in"
+    assert not _fields(teammate, "slack"), "a teammate cannot install, so is never told to"
 
 
 def test_gateway_serves_every_reserved_host_prefix() -> None:

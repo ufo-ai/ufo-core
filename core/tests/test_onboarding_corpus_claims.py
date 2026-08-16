@@ -115,11 +115,20 @@ CLAIMS = (
         pattern=r"if not choices:",
     ),
     Claim(
-        claim="an admin is offered billing setup at the end of signup",
+        claim="an admin is offered connecting Slack, then billing setup, at the end of signup",
         corpus="references/getting-started.md",
-        phrase="offered billing setup at the end",
+        phrase="offered connecting Slack, then billing setup at the end",
         source=GATEWAY,
-        pattern=r'directive\("choose", FIRST_MOVE_PROMPT, BILLING_CHOICE',
+        pattern=(
+            r'directive\(\s*"choose", FIRST_MOVE_PROMPT, SLACK_CHOICE, BILLING_CHOICE, TOUR_CHOICE'
+        ),
+    ),
+    Claim(
+        claim="the browser card names connecting Slack to an admin, and never carries the link",
+        corpus="references/getting-started.md",
+        phrase="card names connecting Slack for an admin",
+        source=GATEWAY,
+        pattern=r'directive\("slack", SLACK_CHOICE\) if ensured\.admin else b""',
     ),
     Claim(
         claim="the shared Slack channel's invitation is a deploy switch away, so never promise it",
