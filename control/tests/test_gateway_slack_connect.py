@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import asyncpg
 import pytest
@@ -48,6 +48,7 @@ from ufo_control.main import main
 REPO = Path(__file__).parents[2]
 
 TEAM_ID = "T0PERATOR"
+APEX_HOST = "flyingobject.ai"
 BOT_TOKEN = "xoxb-operator-token"
 CHANNEL_ID = "C0CUSTOMER"
 INVITE_ID = "I0INVITE"
@@ -74,6 +75,7 @@ def _default_handlers() -> dict[str, SlackHandler]:
         "auth.test": responds({"ok": True, "team_id": TEAM_ID}),
         "conversations.create": responds({"ok": True, "channel": {"id": CHANNEL_ID}}),
         "conversations.inviteShared": responds({"ok": True, "invite_id": INVITE_ID}),
+        "chat.postMessage": responds({"ok": True, "ts": "1700000000.000100"}),
     }
 
 
@@ -173,66 +175,65 @@ def _inviter(pool: asyncpg.Pool, worker_id: str = "worker-a") -> SlackConnectInv
         pool=pool,
         slack=SlackConnectClient(bot_token=BOT_TOKEN),
         team_id=TEAM_ID,
+        apex_host=APEX_HOST,
         worker_id=worker_id,
         poll_interval=TICK_SECONDS,
     )
 
 
-async def _completed_claim(
+async def _granted_domain(
     pool: asyncpg.Pool,
     email: str,
-    workspace_id: str | None,
     *,
-    invited: bool = True,
+    consumed: bool = False,
     age: timedelta = timedelta(),
-) -> UUID:
-    claim_id = uuid4()
+) -> str:
+    """One `ufo-control invite` grant, seeded as the verb mints it. The object number comes off the
+    ledger's own maximum, so a test may grant several domains without colliding on the live-object
+    index."""
+    domain = email.split("@")[1]
     await pool.execute(
-        "insert into ufo_control.onboard_claim (id, email, email_domain, surface,"
-        "  surface_ref, expires_at, verified_at, resulting_workspace_id, invite_id, created_at)"
-        " values ($1, $2, $3, 'ufo', $4, now() + interval '1 hour', now(), $5, $6,"
-        "  now() - $7::interval)",
-        claim_id,
+        "insert into ufo_control.invite_code"
+        "  (id, object_number, email, email_domain, expires_at, consumed_at, created_at)"
+        " select $1, coalesce(max(object_number), 0) + 1, $2, $3,"
+        "   now() + interval '14 days', $4, now() - $5::interval"
+        " from ufo_control.invite_code",
+        uuid4(),
         email,
-        email.split("@")[1],
-        str(claim_id),
-        workspace_id,
-        uuid4() if invited else None,
+        domain,
+        datetime.now(UTC) if consumed else None,
         age,
     )
-    return claim_id
+    return domain
 
 
-async def _row(pool: asyncpg.Pool, onboard_claim_id: UUID) -> asyncpg.Record:
-    row = await pool.fetchrow(
-        f"select * from {TABLE} where onboard_claim_id = $1", onboard_claim_id
-    )
+async def _row(pool: asyncpg.Pool, email_domain: str) -> asyncpg.Record:
+    row = await pool.fetchrow(f"select * from {TABLE} where email_domain = $1", email_domain)
     assert row is not None, "no delivery row was materialized"
     return row
 
 
-async def _claim_ids(pool: asyncpg.Pool) -> list[UUID]:
-    rows = await pool.fetch(f"select onboard_claim_id from {TABLE} order by created_at")
-    return [row["onboard_claim_id"] for row in rows]
+async def _domains(pool: asyncpg.Pool) -> list[str]:
+    rows = await pool.fetch(f"select email_domain from {TABLE} order by created_at")
+    return [row["email_domain"] for row in rows]
 
 
-async def test_a_completed_invite_wall_claim_earns_one_channel_and_one_invitation(
+async def test_a_granted_domain_earns_one_channel_and_one_invitation(
     slack: SlackStub, store: OnboardStore
 ) -> None:
+    """A domain re-granted after its first grant lapsed is still one customer: the second grant
+    finds the row its own domain already keys and sends nothing."""
     pool = store.pool
-    workspace_id = str(uuid4())
-    founder = await _completed_claim(
-        pool, "founder@acme.io", workspace_id, age=timedelta(minutes=5)
+    founder = await _granted_domain(
+        pool, "founder@acme.io", consumed=True, age=timedelta(minutes=5)
     )
-    await _completed_claim(pool, "second@acme.io", workspace_id)
-    await _completed_claim(pool, "member@joinco.io", str(uuid4()), invited=False)
-    await _completed_claim(pool, "half@pending.io", None)
+    await _granted_domain(pool, "second@acme.io")
 
     inviter = _inviter(pool)
     assert await inviter.poll() is True
     assert await inviter.poll() is False
 
-    assert await _claim_ids(pool) == [founder]
+    assert await _domains(pool) == [founder]
     row = await _row(pool, founder)
     channel_name = "ext-acme-flyingobject"
     assert row["channel_name"] == channel_name
@@ -251,6 +252,158 @@ async def test_a_completed_invite_wall_claim_earns_one_channel_and_one_invitatio
         {"channel": CHANNEL_ID, "emails": "founder@acme.io", "external_limited": "false"}
     ]
     assert slack.forms("conversations.listConnectInvites") == []
+    assert slack.forms("chat.postMessage") == [
+        {
+            "channel": CHANNEL_ID,
+            "text": "This channel is shared with ufo. Anyone at acme.io can sign in at "
+            f"https://{APEX_HOST}/login, or from a terminal with "
+            f"`curl -fsSL https://{APEX_HOST}/ufo | sh`.",
+        }
+    ]
+    assert row["greeted_at"] is not None
+
+
+async def test_a_greeting_that_slack_refused_is_retried_and_then_never_repeated(
+    slack: SlackStub, store: OnboardStore
+) -> None:
+    """The one act that accepts a duplicate rather than a silent miss: the marker is written after
+    Slack answers, so a refused post is retried, and a row that already carries the marker posts
+    nothing on any later sweep."""
+    pool = store.pool
+    founder = await _granted_domain(pool, "founder@greetco.io")
+    slack.handlers["chat.postMessage"] = responds({"ok": False, "error": "ratelimit"})
+
+    assert await _inviter(pool).poll() is True
+    row = await _row(pool, founder)
+    assert row["state"] == "pending", "a refused greeting must not settle the row"
+    assert row["greeted_at"] is None
+    assert row["slack_invitation_id"] == INVITE_ID, "the invitation still stands"
+
+    slack.handlers["chat.postMessage"] = responds({"ok": True, "ts": "1700000000.000100"})
+    await pool.execute(
+        f"update {TABLE} set next_attempt_at = null where email_domain = $1", founder
+    )
+    assert await _inviter(pool).poll() is True
+    assert (await _row(pool, founder))["state"] == "delivered"
+    assert len(slack.forms("chat.postMessage")) == 2, "the refused post was never retried"
+    assert slack.forms("conversations.inviteShared") == [
+        {"channel": CHANNEL_ID, "emails": "founder@greetco.io", "external_limited": "false"}
+    ], "the retry re-invited the customer"
+
+    await pool.execute(
+        f"update {TABLE} set state = 'pending', next_attempt_at = null where email_domain = $1",
+        founder,
+    )
+    assert await _inviter(pool).poll() is True
+    assert len(slack.forms("chat.postMessage")) == 2, "a settled row greeted the customer twice"
+
+
+async def _signed_up(pool: asyncpg.Pool, email: str, *, created: bool = True) -> str:
+    """A finished signup that burned no grant — what every signup looks like once
+    `UFO_INVITE_REQUIRED` is false. `created` is False for a join: a contractor, an advisor, or
+    operator staff landing in a workspace their own domain does not name."""
+    domain = email.split("@")[1]
+    claim_id = uuid4()
+    await pool.execute(
+        "insert into ufo_control.onboard_claim (id, email, email_domain, surface, surface_ref,"
+        "  expires_at, verified_at, resulting_workspace_id, created_workspace)"
+        " values ($1, $2, $3, 'ufo', $4, now() + interval '1 hour', now(), $5, $6)",
+        claim_id,
+        email,
+        domain,
+        str(claim_id),
+        str(uuid4()),
+        created,
+    )
+    return domain
+
+
+async def test_a_join_earns_no_channel_and_no_invitation(
+    slack: SlackStub, store: OnboardStore
+) -> None:
+    """An advisor seated at another email domain, or operator staff, finishes a claim against a
+    workspace their own domain does not name. Counting that would open a public channel in the
+    operator workspace for a domain that is no customer, invite someone who is not one, and greet
+    them with a promise the invite gate would refuse."""
+    pool = store.pool
+    await _signed_up(pool, "advisor@outsideco.dev", created=False)
+
+    assert await _inviter(pool).poll() is False
+    assert await _domains(pool) == []
+    assert slack.calls == []
+
+
+async def test_a_grant_that_lapsed_unredeemed_earns_nothing(
+    slack: SlackStub, store: OnboardStore
+) -> None:
+    """A grant nobody redeemed is a dead lead. Opening its channel would promise that anyone at
+    that domain can sign in, and the invite gate would refuse them with InviteExpired. It also
+    decides the first sweep against a database of existing grants: only the live and the redeemed
+    earn a channel, never every domain ever approached."""
+    pool = store.pool
+    await _granted_domain(pool, "founder@lapsedco.io")
+    await pool.execute(
+        "update ufo_control.invite_code set expires_at = now() - interval '1 day'"
+        " where email_domain = $1",
+        "lapsedco.io",
+    )
+
+    assert await _inviter(pool).poll() is False
+    assert await _domains(pool) == []
+    assert slack.calls == []
+
+
+async def test_a_redeemed_grant_still_earns_its_channel(
+    slack: SlackStub, store: OnboardStore
+) -> None:
+    """Redeemed is the other half of the same test: that customer signed up, so an expiry long
+    past is no reason to leave them without a channel."""
+    pool = store.pool
+    founder = await _granted_domain(pool, "founder@redeemedco.io", consumed=True)
+    await pool.execute(
+        "update ufo_control.invite_code set expires_at = now() - interval '1 day'"
+        " where email_domain = $1",
+        founder,
+    )
+
+    assert await _inviter(pool).poll() is True
+    assert (await _row(pool, founder))["state"] == "delivered"
+
+
+async def test_a_signup_with_no_grant_still_earns_its_channel(
+    slack: SlackStub, store: OnboardStore
+) -> None:
+    """Once the invite gate is off there is no grant to key on, and this feature has to survive
+    that. A signup that created a workspace is the other durable fact it fires from."""
+    pool = store.pool
+    founder = await _signed_up(pool, "founder@openco.io")
+
+    assert await _inviter(pool).poll() is True
+
+    row = await _row(pool, founder)
+    assert row["state"] == "delivered"
+    assert row["channel_name"] == "ext-openco-flyingobject"
+    assert slack.forms("conversations.inviteShared") == [
+        {"channel": CHANNEL_ID, "emails": "founder@openco.io", "external_limited": "false"}
+    ]
+
+
+async def test_a_grant_and_its_signup_are_one_customer_and_one_invitation(
+    slack: SlackStub, store: OnboardStore
+) -> None:
+    """Both triggers fire for a granted customer who then signs up. The domain is the key, not the
+    fact, so they land on one row — otherwise every invite-gated customer would be invited twice."""
+    pool = store.pool
+    founder = await _granted_domain(pool, "founder@bothco.io", consumed=True)
+    await _signed_up(pool, "founder@bothco.io")
+
+    for _ in range(3):
+        if not await _inviter(pool).poll():
+            break
+
+    assert await _domains(pool) == [founder]
+    assert len(slack.forms("conversations.inviteShared")) == 1
+    assert len(slack.forms("conversations.create")) == 1
 
 
 async def test_a_shared_domain_label_gives_exactly_one_customer_the_channel(
@@ -260,14 +413,14 @@ async def test_a_shared_domain_label_gives_exactly_one_customer_the_channel(
     accepted readability trade, and these are the invariants it must still hold: exactly one of the
     two gets the channel — never both, or they would share it — and an unrelated customer is
     untouched, because `on conflict do nothing` keeps one collision from aborting the batch. Which
-    of the two wins is not defined: `MATERIALIZE` orders by `resulting_workspace_id`, so a random
-    uuid decides, not who signed up first. The loser needs a channel by hand."""
+    of the two wins is defined: `MATERIALIZE` orders by the channel name then `created_at`, so the
+    older grant takes it. The loser needs a channel by hand."""
     pool = store.pool
     twins = [
-        await _completed_claim(pool, "founder@acme.io", str(uuid4()), age=timedelta(minutes=5)),
-        await _completed_claim(pool, "founder@acme.com", str(uuid4())),
+        await _granted_domain(pool, "founder@acme.io", age=timedelta(minutes=5)),
+        await _granted_domain(pool, "founder@acme.com"),
     ]
-    bystander = await _completed_claim(pool, "founder@bystanderco.io", str(uuid4()))
+    bystander = await _granted_domain(pool, "founder@bystanderco.io")
 
     inviter = _inviter(pool)
     for _ in range(4):
@@ -275,11 +428,12 @@ async def test_a_shared_domain_label_gives_exactly_one_customer_the_channel(
             break
 
     landed = await pool.fetch(
-        f"select onboard_claim_id, channel_name, state from {TABLE}"
-        " where onboard_claim_id = any($1::uuid[])",
+        f"select email_domain, channel_name, state from {TABLE}"
+        " where email_domain = any($1::text[])",
         twins,
     )
     assert len(landed) == 1, "two customers must never share one channel"
+    assert landed[0]["email_domain"] == "acme.io", "the older grant takes the shared name"
     assert landed[0]["channel_name"] == "ext-acme-flyingobject"
     assert landed[0]["state"] == "delivered"
     assert (await _row(pool, bystander))["state"] == "delivered", (
@@ -289,7 +443,7 @@ async def test_a_shared_domain_label_gives_exactly_one_customer_the_channel(
 
 async def test_two_pollers_never_claim_the_same_row(slack: SlackStub, store: OnboardStore) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@raceco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@raceco.io")
 
     claimed = await asyncio.gather(
         *(_inviter(pool, f"worker-{index}").poll() for index in range(4))
@@ -306,7 +460,7 @@ async def test_an_expired_lease_is_recoverable_by_another_replica(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@leaseco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@leaseco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set state = 'claimed', worker_id = 'gone', attempts = 3,"
@@ -323,7 +477,7 @@ async def test_an_expired_lease_is_recoverable_by_another_replica(
 
 async def test_a_stolen_lease_abandons_the_writeback(slack: SlackStub, store: OnboardStore) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@stealco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@stealco.io")
 
     async def steal(form: dict[str, str]) -> tuple[int, dict[str, Any]]:
         await pool.execute(f"update {TABLE} set worker_id = 'thief'")
@@ -343,8 +497,7 @@ async def test_a_crash_after_channel_creation_recovers_the_exact_channel(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    workspace_id = str(uuid4())
-    founder = await _completed_claim(pool, "founder@retryco.io", workspace_id)
+    founder = await _granted_domain(pool, "founder@retryco.io")
     channel_name = "ext-retryco-flyingobject"
     pages = {
         "": {
@@ -374,7 +527,7 @@ async def test_an_ambiguous_invitation_reconciles_without_a_second_invitation(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@ambigco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@ambigco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set channel_id = $1, invite_attempted_at = now()", CHANNEL_ID
@@ -408,7 +561,7 @@ async def test_a_dead_invitation_is_never_mistaken_for_a_live_one(
     leaves it in the list. Matching the channel alone would settle a customer who never got a
     working invite, so a dead status means invite again."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@revokedco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@revokedco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set channel_id = $1, invite_attempted_at = now()", CHANNEL_ID
@@ -434,7 +587,7 @@ async def test_an_unrecognized_invite_status_fails_for_operator_review(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@oddstatusco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@oddstatusco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set channel_id = $1, invite_attempted_at = now()", CHANNEL_ID
@@ -459,7 +612,7 @@ async def test_an_externally_shared_channel_settles_an_ambiguous_invitation(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@sharedco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@sharedco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set channel_id = $1, invite_attempted_at = now()", CHANNEL_ID
@@ -480,7 +633,7 @@ async def test_unreconcilable_ambiguity_fails_instead_of_inviting_again(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@opaqueco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@opaqueco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set channel_id = $1, invite_attempted_at = now()", CHANNEL_ID
@@ -500,8 +653,7 @@ async def test_transient_and_terminal_slack_errors_take_distinct_durable_paths(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    workspace_id = str(uuid4())
-    founder = await _completed_claim(pool, "founder@errorco.io", workspace_id)
+    founder = await _granted_domain(pool, "founder@errorco.io")
     slack.handlers["conversations.inviteShared"] = responds({"ok": False, "error": "ratelimit"})
 
     assert await _inviter(pool).poll() is True
@@ -535,7 +687,7 @@ async def test_repeated_transient_failures_stop_at_the_attempt_ceiling(
     """The only place a transient error becomes terminal. One attempt short of the ceiling the row
     still reschedules; the attempt that reaches it lands `failed` instead of waiting again."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@ceilingco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@ceilingco.io")
     slack.handlers["conversations.inviteShared"] = responds(
         {"ok": False, "error": "service_unavailable"}
     )
@@ -564,7 +716,7 @@ async def test_a_malformed_channel_object_is_classified_terminal(
     """`_text` narrows a wrong-shaped payload into a terminal error rather than an AttributeError,
     so this lands `failed` through the classified branch. The catch-all is proven separately."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@oddshapeco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@oddshapeco.io")
     slack.handlers["conversations.create"] = responds({"ok": True, "channel": "not-an-object"})
 
     assert await _inviter(pool).poll() is True
@@ -581,7 +733,7 @@ async def test_a_null_channel_on_another_invite_never_crashes_reconciliation(
     """`entry.get("channel", {})` only defaults when the key is absent — an explicit null would have
     raised AttributeError, which is unclassified. A junk entry for some other channel is skipped."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@nullchanco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@nullchanco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set channel_id = $1, invite_attempted_at = now()", CHANNEL_ID
@@ -639,7 +791,7 @@ async def test_a_rate_limited_delivery_waits_the_interval_slack_asked_for(
 ) -> None:
     """`Retry-After` has to reach the durable schedule, not just the exception."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@waitco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@waitco.io")
     slack.handlers["conversations.inviteShared"] = responds({"ok": False}, status=429)
     slack.headers["conversations.inviteShared"] = {"Retry-After": "5"}
 
@@ -654,7 +806,7 @@ async def test_an_over_long_recipient_never_reaches_slack(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "l" * 250 + "@toolongco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "l" * 250 + "@toolongco.io")
 
     assert await _inviter(pool).poll() is True
     row = await _row(pool, founder)
@@ -668,7 +820,7 @@ async def test_a_long_domain_is_truncated_inside_slacks_channel_name_limit(
 ) -> None:
     """The docstring claims 77 characters inside Slack's 80. Prove it at the boundary."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@" + "d" * 80 + ".io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@" + "d" * 80 + ".io")
 
     assert await _inviter(pool).poll() is True
     row = await _row(pool, founder)
@@ -683,7 +835,7 @@ async def test_a_persisted_error_is_bounded_and_never_carries_the_token(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@leakco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@leakco.io")
     slack.handlers["conversations.create"] = responds(
         {"ok": False, "error": f"refused {BOT_TOKEN} {'x' * (ERROR_CHARS * 2)}"}, status=400
     )
@@ -703,7 +855,7 @@ async def test_a_token_from_another_team_fails_the_row_and_keeps_the_poller_aliv
     retired poller would strand every later signup behind a green `/healthz`. Correcting the deploy
     is enough for the next signup, and `slack-connect-retry` re-arms the rows the mistake hit."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@wrongteamco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@wrongteamco.io")
     slack.handlers["auth.test"] = responds({"ok": True, "team_id": "T0IMPOSTOR"})
 
     inviter = _inviter(pool)
@@ -714,13 +866,34 @@ async def test_a_token_from_another_team_fails_the_row_and_keeps_the_poller_aliv
     assert row["channel_id"] is None
     assert row["last_error"] == (f"{BOT_TOKEN_ENV} belongs to team T0IMPOSTOR, not {TEAM_ID}")
 
-    later = await _completed_claim(pool, "founder@nextco.io", str(uuid4()))
+    later = await _granted_domain(pool, "founder@nextco.io")
     slack.handlers["auth.test"] = responds({"ok": True, "team_id": TEAM_ID})
     assert await inviter.poll() is True
     assert (await _row(pool, later))["state"] == "delivered"
     assert await rearm_failed_delivery(pool, founder) is not None
     assert await inviter.poll() is True
     assert (await _row(pool, founder))["state"] == "delivered"
+
+
+def test_the_app_manifest_declares_a_scope_for_every_method_the_workflow_calls() -> None:
+    """A missing scope fails nowhere but production, against a real customer's channel. The
+    manifest is the operator's copy-paste source for api.slack.com, so it is asserted against the
+    methods this module actually calls."""
+    manifest = (REPO / "control/slack-connect-app.yaml").read_text()
+    scopes = {
+        "auth.test": None,
+        "conversations.create": "channels:manage",
+        "conversations.list": "channels:read",
+        "conversations.info": "channels:read",
+        "conversations.listConnectInvites": "conversations.connect:manage",
+        "conversations.inviteShared": "conversations.connect:write",
+        "chat.postMessage": "chat:write",
+    }
+    source = (REPO / "control/src/ufo_control/gateway_slack_connect.py").read_text()
+    for method, scope in scopes.items():
+        assert f'"{method}"' in source, f"{method} is no longer called"
+        if scope is not None:
+            assert f"      - {scope}\n" in manifest, f"{method} needs {scope}"
 
 
 async def test_no_repr_can_print_the_bot_token(store: OnboardStore) -> None:
@@ -739,7 +912,7 @@ async def test_a_non_object_response_reaches_the_unclassified_catch_all(
     which no classifier claims. It must land `failed` rather than leaving the row `claimed` to be
     re-claimed every lease forever, recording nothing and alerting nobody."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@arrayco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@arrayco.io")
     slack.handlers["conversations.create"] = responds([{"not": "an object"}])
 
     assert await _inviter(pool).poll() is True
@@ -754,8 +927,7 @@ async def test_a_junk_channel_entry_never_crashes_the_name_lookup(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    workspace_id = str(uuid4())
-    founder = await _completed_claim(pool, "founder@junklistco.io", workspace_id)
+    founder = await _granted_domain(pool, "founder@junklistco.io")
     channel_name = "ext-junklistco-flyingobject"
     slack.handlers["conversations.create"] = responds({"ok": False, "error": "name_taken"})
     slack.handlers["conversations.list"] = responds(
@@ -772,11 +944,11 @@ async def test_the_polling_loop_delivers_and_stops_on_cancellation(
     slack: SlackStub, store: OnboardStore
 ) -> None:
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@loopco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@loopco.io")
     inviter = _inviter(pool)
     running = asyncio.create_task(inviter.run())
     for _ in range(SERVER_START_TICKS):
-        row = await pool.fetchrow(f"select state from {TABLE} where onboard_claim_id = $1", founder)
+        row = await pool.fetchrow(f"select state from {TABLE} where email_domain = $1", founder)
         if row is not None and row["state"] == "delivered":
             break
         await asyncio.sleep(TICK_SECONDS)
@@ -794,7 +966,7 @@ async def test_a_broken_sweep_is_reported_and_never_stops_the_poller(
     every later signup behind a healthy `/healthz`. It is reported, not masked, and recovery needs
     no restart."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@sweepco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@sweepco.io")
     materialize = gateway_slack_connect.MATERIALIZE
     monkeypatch.setattr(gateway_slack_connect, "MATERIALIZE", "select this_column_does_not_exist")
     inviter = _inviter(pool)
@@ -808,7 +980,7 @@ async def test_a_broken_sweep_is_reported_and_never_stops_the_poller(
 
     monkeypatch.setattr(gateway_slack_connect, "MATERIALIZE", materialize)
     for _ in range(SERVER_START_TICKS):
-        row = await pool.fetchrow(f"select state from {TABLE} where onboard_claim_id = $1", founder)
+        row = await pool.fetchrow(f"select state from {TABLE} where email_domain = $1", founder)
         if row is not None and row["state"] == "delivered":
             break
         await asyncio.sleep(TICK_SECONDS)
@@ -824,7 +996,7 @@ async def test_an_unbounded_channel_walk_fails_instead_of_guessing(
     """`name_taken` promises the channel exists, so never finding it inside the page bound is
     inconsistent channel state, not a channel to invent."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@endlessco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@endlessco.io")
 
     async def endless(form: dict[str, str]) -> tuple[int, dict[str, Any]]:
         return 200, {
@@ -850,7 +1022,7 @@ async def test_an_unbounded_invite_walk_is_ambiguous_and_never_reinvites(
     """Running out of pages means we do not know whether an invitation is live, and the one thing
     that must never follow an unknown is a second invitation."""
     pool = store.pool
-    founder = await _completed_claim(pool, "founder@endlessinviteco.io", str(uuid4()))
+    founder = await _granted_domain(pool, "founder@endlessinviteco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set channel_id = $1, invite_attempted_at = now()", CHANNEL_ID
@@ -877,17 +1049,17 @@ async def test_an_unbounded_invite_walk_is_ambiguous_and_never_reinvites(
 
 async def test_the_operator_surface_rearms_only_a_failed_row(store: OnboardStore) -> None:
     pool = store.pool
-    failed = await _completed_claim(pool, "founder@failedco.io", str(uuid4()))
-    delivered = await _completed_claim(pool, "founder@doneco.io", str(uuid4()))
+    failed = await _granted_domain(pool, "founder@failedco.io")
+    delivered = await _granted_domain(pool, "founder@doneco.io")
     await pool.execute(gateway_slack_connect.MATERIALIZE)
     await pool.execute(
         f"update {TABLE} set state = 'failed', worker_id = 'gone', attempts = 4,"
         "  last_error = 'conversations.inviteShared: invalid_email'"
-        " where onboard_claim_id = $1",
+        " where email_domain = $1",
         failed,
     )
     await pool.execute(
-        f"update {TABLE} set state = 'delivered', delivered_at = now() where onboard_claim_id = $1",
+        f"update {TABLE} set state = 'delivered', delivered_at = now() where email_domain = $1",
         delivered,
     )
 
@@ -964,21 +1136,20 @@ def test_only_the_gateway_deployment_receives_the_slack_connect_token() -> None:
     assert projections == []
 
 
-async def _failed_and_delivered(dsn: str) -> tuple[UUID, UUID]:
+async def _failed_and_delivered(dsn: str) -> tuple[str, str]:
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
     try:
-        failed = await _completed_claim(pool, "founder@clico.io", str(uuid4()))
-        delivered = await _completed_claim(pool, "founder@clidoneco.io", str(uuid4()))
+        failed = await _granted_domain(pool, "founder@clico.io")
+        delivered = await _granted_domain(pool, "founder@clidoneco.io")
         await pool.execute(gateway_slack_connect.MATERIALIZE)
         await pool.execute(
             f"update {TABLE} set state = 'failed', worker_id = 'gone', attempts = 4,"
             "  last_error = 'conversations.inviteShared: invalid_email'"
-            " where onboard_claim_id = $1",
+            " where email_domain = $1",
             failed,
         )
         await pool.execute(
-            f"update {TABLE} set state = 'delivered', delivered_at = now()"
-            " where onboard_claim_id = $1",
+            f"update {TABLE} set state = 'delivered', delivered_at = now() where email_domain = $1",
             delivered,
         )
         return failed, delivered
@@ -986,12 +1157,12 @@ async def _failed_and_delivered(dsn: str) -> tuple[UUID, UUID]:
         await pool.close()
 
 
-async def _state(dsn: str, onboard_claim_id: UUID) -> str:
+async def _state(dsn: str, email_domain: str) -> str:
     connection = await asyncpg.connect(dsn)
     try:
         return str(
             await connection.fetchval(
-                f"select state from {TABLE} where onboard_claim_id = $1", onboard_claim_id
+                f"select state from {TABLE} where email_domain = $1", email_domain
             )
         )
     finally:
@@ -1004,16 +1175,16 @@ def test_the_retry_command_rearms_one_failed_row_and_nothing_else(gateway_postgr
     failed, delivered = asyncio.run(_failed_and_delivered(gateway_postgres))
     runner = CliRunner()
 
-    rearmed = runner.invoke(main, ["slack-connect-retry", str(failed)])
+    rearmed = runner.invoke(main, ["slack-connect-retry", failed])
     assert rearmed.exit_code == 0, rearmed.output
-    assert f"slack connect delivery {failed} re-armed, failed since " in rearmed.output
+    assert f"slack connect delivery for {failed} re-armed, failed since " in rearmed.output
     assert asyncio.run(_state(gateway_postgres, failed)) == "pending"
 
-    again = runner.invoke(main, ["slack-connect-retry", str(failed)])
+    again = runner.invoke(main, ["slack-connect-retry", failed])
     assert again.exit_code != 0
-    assert f"no failed slack connect delivery for claim {failed}" in again.output
+    assert f"no failed slack connect delivery for {failed}" in again.output
 
-    on_delivered = runner.invoke(main, ["slack-connect-retry", str(delivered)])
+    on_delivered = runner.invoke(main, ["slack-connect-retry", delivered])
     assert on_delivered.exit_code != 0
     assert asyncio.run(_state(gateway_postgres, delivered)) == "delivered"
 

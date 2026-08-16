@@ -88,6 +88,7 @@ async def store(gateway_postgres: str) -> AsyncIterator[OnboardStore]:
     async with pool.acquire() as connection:
         await connection.execute("truncate ufo_control.onboard_claim cascade")
         await connection.execute("truncate ufo_control.invite_code")
+        await connection.execute("truncate ufo_control.slack_connect_delivery")
         await connection.execute("delete from member")
         await connection.execute("delete from agent")
     try:

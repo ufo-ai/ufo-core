@@ -298,8 +298,9 @@ def test_http_onboarding_joins_and_returns_a_surface_verified_token(
 def test_signup_completes_and_delivery_runs_while_slack_is_unreachable(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The gateway lifespan owns the Slack Connect worker, and Slack owns none of signup: with the
-    Web API unreachable the member still signs in, and the delivery row records the outage."""
+    """The gateway lifespan owns the Slack Connect worker, and Slack owns none of signup: the grant
+    alone arms the delivery, and with the Web API unreachable the member still signs in while the
+    delivery row records the outage."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     monkeypatch.setenv(ENABLED_ENV, "true")
     monkeypatch.setenv(BOT_TOKEN_ENV, "xoxb-unreachable")
@@ -352,12 +353,7 @@ def _await_attempted_delivery(dsn: str, email: str) -> asyncpg.Record:
 async def _delivery_row(dsn: str, email: str) -> asyncpg.Record | None:
     connection = await asyncpg.connect(dsn)
     try:
-        return await connection.fetchrow(
-            f"select d.* from {TABLE} d"
-            " join ufo_control.onboard_claim c on c.id = d.onboard_claim_id"
-            " where c.email = $1",
-            email,
-        )
+        return await connection.fetchrow(f"select * from {TABLE} where email = $1", email)
     finally:
         await connection.close()
 

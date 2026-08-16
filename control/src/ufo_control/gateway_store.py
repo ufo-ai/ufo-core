@@ -20,6 +20,7 @@ DDL = (
     "  expires_at timestamptz not null,"
     "  verified_at timestamptz,"
     "  resulting_workspace_id text,"
+    "  created_workspace boolean not null default false,"
     "  invite_id uuid,"
     "  created_at timestamptz not null default now())",
     f"create unique index if not exists {ACTIVE_INDEX} on {TABLE} (surface, surface_ref)"
@@ -94,12 +95,19 @@ class OnboardStore:
             )
         return recorded is True
 
-    async def complete(self, claim_id: UUID, resulting_workspace_id: str) -> None:
+    async def complete(
+        self, claim_id: UUID, resulting_workspace_id: str, *, created_workspace: bool
+    ) -> None:
+        """Whether this claim opened the workspace or joined one already there. A join is not a new
+        customer — a contractor seated at their own email domain, or operator staff, resolves to a
+        workspace their domain does not name — so the two cannot share one mark."""
         async with self.pool.acquire() as connection:
             await connection.execute(
-                f"update {TABLE} set resulting_workspace_id = $2 where id = $1",
+                f"update {TABLE} set resulting_workspace_id = $2, created_workspace = $3"
+                " where id = $1",
                 claim_id,
                 resulting_workspace_id,
+                created_workspace,
             )
 
     async def delete_claim(self, claim_id: UUID) -> None:

@@ -177,13 +177,19 @@ class Onboarding:
                 refusal = await self._invite_gate(claim, install)
                 if refusal is not None:
                     return refusal
-            ensured = await self.workspaces.create(claim.email_domain, claim.email)
+            ensured, created = (
+                await self.workspaces.create(claim.email_domain, claim.email),
+                True,
+            )
         else:
             create_available = claim.invite_id is not None or await self.invites.available(
                 claim.email_domain
             )
             if len(choices) == 1 and not create_available:
-                ensured = await self.workspaces.join(choices[0], claim.email_domain, claim.email)
+                ensured, created = (
+                    await self.workspaces.join(choices[0], claim.email_domain, claim.email),
+                    False,
+                )
             else:
                 create_label = f"Create {claim.email_domain} workspace"
                 options = [choice.label for choice in choices]
@@ -193,7 +199,10 @@ class Onboarding:
                     refusal = await self._invite_gate(claim, install)
                     if refusal is not None:
                         return refusal
-                    ensured = await self.workspaces.create(claim.email_domain, claim.email)
+                    ensured, created = (
+                        await self.workspaces.create(claim.email_domain, claim.email),
+                        True,
+                    )
                 else:
                     selected = next((choice for choice in choices if choice.label == body), None)
                     if selected is None:
@@ -202,8 +211,11 @@ class Onboarding:
                             directive("say", "Choose a listed workspace.") if body else b"",
                             directive("choose", WORKSPACE_PROMPT, *options),
                         )
-                    ensured = await self.workspaces.join(selected, claim.email_domain, claim.email)
-        await self.store.complete(claim.claim_id, ensured.workspace_id)
+                    ensured, created = (
+                        await self.workspaces.join(selected, claim.email_domain, claim.email),
+                        False,
+                    )
+        await self.store.complete(claim.claim_id, ensured.workspace_id, created_workspace=created)
         return self._signed_in(claim, ensured, install)
 
     async def _invite_gate(self, claim: OnboardClaim, install: bytes) -> bytes | None:

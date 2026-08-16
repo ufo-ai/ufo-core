@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import uuid
 from datetime import UTC, datetime
 
 import asyncpg
@@ -117,22 +116,23 @@ async def _mint_invite(object_number: int, email: str) -> MintedInvite:
 
 
 @main.command(name="slack-connect-retry")
-@click.argument("onboard_claim_id", type=click.UUID)
-def slack_connect_retry(onboard_claim_id: uuid.UUID) -> None:
+@click.argument("email_domain")
+def slack_connect_retry(email_domain: str) -> None:
     """Re-arm one failed signup Slack Connect delivery once its cause is corrected."""
-    failed_at = asyncio.run(_rearm_slack_connect(onboard_claim_id))
+    domain = email_domain.strip().lower()
+    failed_at = asyncio.run(_rearm_slack_connect(domain))
     if failed_at is None:
-        raise click.ClickException(f"no failed slack connect delivery for claim {onboard_claim_id}")
+        raise click.ClickException(f"no failed slack connect delivery for {domain}")
     stamp = failed_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
-    click.echo(f"slack connect delivery {onboard_claim_id} re-armed, failed since {stamp} UTC")
+    click.echo(f"slack connect delivery for {domain} re-armed, failed since {stamp} UTC")
 
 
-async def _rearm_slack_connect(onboard_claim_id: uuid.UUID) -> datetime | None:
+async def _rearm_slack_connect(email_domain: str) -> datetime | None:
     dsn = owner_dsn()
     await require_control_schema(dsn)
     pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=1)
     try:
-        return await rearm_failed_delivery(pool, onboard_claim_id)
+        return await rearm_failed_delivery(pool, email_domain)
     finally:
         await pool.close()
 

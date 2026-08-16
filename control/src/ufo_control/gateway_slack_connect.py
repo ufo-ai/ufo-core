@@ -1,12 +1,25 @@
-"""The signup Slack Connect invitation: one operator-workspace channel per new customer.
+"""The signup Slack Connect invitation: one operator-workspace channel per approved customer.
 
-A completed invite-wall claim — one that both burned an invite code and created a workspace — earns
-one public channel in UFO's *own* Slack workspace and one Slack-generated Slack Connect invitation
-to the email that signed up. Signup never waits for any of it: the completed claim is the durable
-event source, so there is no enqueue transaction to lose, and this workflow polls in the background
-on either gateway replica. A member joining an existing workspace never burns a code, so the same
-eligibility test excludes them; only the earliest completed claim of a workspace materializes, so a
-customer gets exactly one channel and never a second invitation.
+A granted email domain — one `ufo-control invite` minted — earns one public channel in UFO's *own*
+Slack workspace and one Slack-generated Slack Connect invitation to the address the grant names.
+It lands at approval, before that customer signs up, so the channel is open by the time they read
+the invitation email. Approval never waits for any of it: the grant is the durable event source, so
+there is no enqueue transaction to lose, and this workflow polls in the background on either gateway
+replica. A member joining an existing workspace never earns a grant, so the same eligibility test
+excludes them.
+
+The domain is the key, not the grant. One domain is one customer and one channel, so re-granting a
+domain finds its row already there and sends nothing. Keying on the grant instead would resend on
+every re-grant, and would lose the row entirely when `InviteCodes.mint` clears an expired grant out
+of the way.
+
+That is one channel *and* one invitation, to the first granted address. A later grant naming a
+different colleague — because the first invitation expired, was declined, or went to someone who
+left — gets no invitation of its own. Slack cannot help us do better:
+`conversations.listConnectInvites` names the *inviter*, never the invitee, so nothing on their side
+can tell us whether a given address was already invited, and a per-recipient ledger would be ours
+alone to trust. The recovery is a few seconds of an operator's time in Slack, so this stays one
+row.
 
 The app behind `UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN` is UFO's own, installed only in the operator
 workspace, and makes outbound Web API calls only — no client id, client secret, signing secret,
@@ -17,7 +30,7 @@ before any channel is mutated; another team fails that delivery for operator rev
 The customer's channel is the idempotency boundary, and `CHANNEL_NAME_SQL` is what makes it one.
 The name it derives is `ext-<domain-label>-flyingobject` — the domain's first label only, never an
 email address, since the local part and the TLD both stay out of it — and it derives it where the
-claim lives, so materializing stays one statement and every replica reaches the same name. It is
+grant lives, so materializing stays one statement and every replica reaches the same name. It is
 bounded to 77 characters, inside Slack's 80-character limit.
 
 Dropping the TLD means the name is *not* unique across customers: `acme.com` and `acme.io` both
@@ -30,6 +43,13 @@ recovered by exact-name lookup, and `invite_attempted_at` is written *before* th
 so a lost `conversations.inviteShared` response is recovered from Slack's own outgoing-invite and
 channel-sharing state rather than a blind second invitation. When Slack cannot expose that state the
 row lands `failed` for operator review — never re-invited.
+
+The greeting inverts that rule on purpose. `greeted_at` is written *after* `chat.postMessage`
+returns, so a lost response reposts on the next attempt. An invitation is the one act a duplicate
+ruins — a second email to a customer who already joined — while a duplicate message costs a reader
+one repeated line, and the alternative is a channel that names nowhere to sign in. The invitation
+email carries the terminal installer alone, so this message is the only place the browser door
+appears.
 """
 
 import asyncio
@@ -39,12 +59,12 @@ import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
-from uuid import UUID
 
 import asyncpg
 import httpx
 
-from ufo_control import gateway_store
+from ufo_control import gateway_invite, gateway_store
+from ufo_control.gateway_email import public_apex_host
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +89,13 @@ HTTP_SERVER_ERROR = 500
 CHANNEL_PREFIX = "ext"
 CHANNEL_SUFFIX = "flyingobject"
 MAX_DOMAIN_LABEL_CHARS = 60
+MAX_MESSAGE_CHARS = 4000
+
+GREETING = (
+    "This channel is shared with ufo. Anyone at {email_domain} can sign in at "
+    "https://{apex_host}/login, or from a terminal with "
+    "`curl -fsSL https://{apex_host}/ufo | sh`."
+)
 
 POLL_INTERVAL_SECONDS = 15.0
 LEASE = timedelta(seconds=120)
@@ -109,12 +136,14 @@ CHANNEL_NAME_SQL = (
 
 DDL = (
     f"create table if not exists {TABLE} ("
-    f"  onboard_claim_id uuid primary key references {gateway_store.TABLE} (id) on delete cascade,"
+    "  email_domain text primary key,"
+    "  email text not null,"
     f"  state text not null check (state in ({STATE_LITERALS})),"
     "  channel_name text not null unique,"
     "  channel_id text,"
     "  slack_invitation_id text,"
     "  invite_attempted_at timestamptz,"
+    "  greeted_at timestamptz,"
     "  worker_id text,"
     "  claim_expires_at timestamptz,"
     "  next_attempt_at timestamptz,"
@@ -126,37 +155,41 @@ DDL = (
     f"create index if not exists {DUE_INDEX} on {TABLE} (state, next_attempt_at)",
 )
 
+EARNED = (
+    f"select email_domain, email, created_at from {gateway_invite.TABLE}"
+    "  where consumed_at is not null or expires_at > now()"
+    " union all"
+    f" select email_domain, email, created_at from {gateway_store.TABLE}"
+    "  where created_workspace"
+)
+
 MATERIALIZE = (
-    f"insert into {TABLE} (onboard_claim_id, state, channel_name)"
-    "  select distinct on (resulting_workspace_id)"
-    f"    id, '{STATE_PENDING}', {CHANNEL_NAME_SQL}"
-    f"  from {gateway_store.TABLE}"
-    "  where invite_id is not null and resulting_workspace_id is not null"
-    "  order by resulting_workspace_id, created_at, id"
+    f"insert into {TABLE} (email_domain, email, state, channel_name)"
+    f"  select distinct on ({CHANNEL_NAME_SQL})"
+    f"    email_domain, email, '{STATE_PENDING}', {CHANNEL_NAME_SQL}"
+    f"  from ({EARNED}) earned"
+    f"  order by {CHANNEL_NAME_SQL}, created_at, email"
     " on conflict do nothing"
 )
 
 CLAIM = (
     "with candidate as ("
-    f"  select onboard_claim_id from {TABLE}"
+    f"  select email_domain from {TABLE}"
     f"  where (state = '{STATE_PENDING}'"
     "         and (next_attempt_at is null or next_attempt_at <= now()))"
     f"     or (state = '{STATE_CLAIMED}' and claim_expires_at <= now())"
-    "  order by created_at, onboard_claim_id"
+    "  order by created_at, email_domain"
     "  for update skip locked"
     "  limit 1"
-    "), leased as ("
-    f"  update {TABLE} d"
-    f"  set state = '{STATE_CLAIMED}', worker_id = $1,"
-    "      claim_expires_at = now() + $2::interval,"
-    "      attempts = d.attempts + 1, updated_at = now()"
-    "  from candidate c"
-    "  where d.onboard_claim_id = c.onboard_claim_id"
-    "  returning d.onboard_claim_id, d.channel_name, d.channel_id, d.slack_invitation_id,"
-    "            d.invite_attempted_at, d.attempts"
     ")"
-    " select l.*, k.email from leased l"
-    f"  join {gateway_store.TABLE} k on k.id = l.onboard_claim_id"
+    f" update {TABLE} d"
+    f" set state = '{STATE_CLAIMED}', worker_id = $1,"
+    "     claim_expires_at = now() + $2::interval,"
+    "     attempts = d.attempts + 1, updated_at = now()"
+    " from candidate c"
+    " where d.email_domain = c.email_domain"
+    " returning d.email_domain, d.email, d.channel_name, d.channel_id, d.slack_invitation_id,"
+    "           d.invite_attempted_at, d.greeted_at, d.attempts"
 )
 
 
@@ -185,21 +218,21 @@ class SlackConnectConfigError(SlackTerminalError):
     it takes for the next signup to deliver and `slack-connect-retry` to re-arm the rows it hit."""
 
 
-async def rearm_failed_delivery(pool: asyncpg.Pool, onboard_claim_id: UUID) -> datetime | None:
+async def rearm_failed_delivery(pool: asyncpg.Pool, email_domain: str) -> datetime | None:
     """The operator recovery surface: re-arm one failed row once its cause is corrected, returning
     when it last changed so the verb can report how long it sat. None when nothing was re-armed — a
     delivered row is untouchable, and this never speaks to Slack itself."""
     return await pool.fetchval(
         f"with previous as ("
-        f"  select onboard_claim_id, updated_at from {TABLE}"
-        f"  where onboard_claim_id = $1 and state = '{STATE_FAILED}' for update"
+        f"  select email_domain, updated_at from {TABLE}"
+        f"  where email_domain = $1 and state = '{STATE_FAILED}' for update"
         ")"
         f" update {TABLE} d set state = '{STATE_PENDING}', worker_id = null,"
         "   claim_expires_at = null, next_attempt_at = null, attempts = 0, last_error = null,"
         "   updated_at = now()"
-        " from previous p where d.onboard_claim_id = p.onboard_claim_id"
+        " from previous p where d.email_domain = p.email_domain"
         " returning p.updated_at",
-        onboard_claim_id,
+        email_domain,
     )
 
 
@@ -280,6 +313,11 @@ class SlackConnectClient:
         channel = payload.get("channel", {})
         return bool(channel.get("is_ext_shared")) or bool(channel.get("is_pending_ext_shared"))
 
+    async def post_message(self, channel_id: str, text: str) -> None:
+        if len(text) > MAX_MESSAGE_CHARS:
+            raise SlackTerminalError(f"message exceeds {MAX_MESSAGE_CHARS} characters")
+        await self._call("chat.postMessage", {"channel": channel_id, "text": text})
+
     async def invite_shared(self, channel_id: str, email: str) -> str:
         if len(email) > MAX_EMAIL_CHARS:
             raise SlackTerminalError(f"recipient email exceeds {MAX_EMAIL_CHARS} characters")
@@ -340,12 +378,13 @@ def _retry_after(response: httpx.Response) -> float | None:
 
 @dataclass(frozen=True)
 class _Delivery:
-    onboard_claim_id: UUID
+    email_domain: str
     email: str
     channel_name: str
     channel_id: str | None
     slack_invitation_id: str | None
     invite_attempted_at: datetime | None
+    greeted_at: datetime | None
     attempts: int
 
 
@@ -358,6 +397,7 @@ class SlackConnectInviter:
     pool: asyncpg.Pool
     slack: SlackConnectClient
     team_id: str
+    apex_host: str
     worker_id: str
     poll_interval: float = POLL_INTERVAL_SECONDS
 
@@ -388,28 +428,28 @@ class SlackConnectInviter:
                 await asyncio.sleep(self.poll_interval)
 
     async def poll(self) -> bool:
-        """Materialize every completed invite-wall claim, then carry one due row as far as Slack
-        allows. True when a row was claimed, so a busy queue drains without waiting."""
+        """Materialize every granted domain, then carry one due row as far as Slack allows. True
+        when a row was leased, so a busy queue drains without waiting."""
         await self._materialize()
         delivery = await self._claim()
         if delivery is None:
             return False
-        renewal = asyncio.create_task(self._renew_lease(delivery.onboard_claim_id))
+        renewal = asyncio.create_task(self._renew_lease(delivery.email_domain))
         try:
             await self._advance(delivery)
         except _LeaseLost:
-            logger.warning("slack_connect.lease.lost claim=%s", delivery.onboard_claim_id)
+            logger.warning("slack_connect.lease.lost domain=%s", delivery.email_domain)
         finally:
             renewal.cancel()
             await asyncio.gather(renewal, return_exceptions=True)
         return True
 
     async def _materialize(self) -> None:
-        """One replica materializes at a time, and no single claim can poison the batch.
+        """One replica materializes at a time, and no single grant can poison the batch.
 
         `MATERIALIZE` is one `INSERT ... SELECT`, so any unique violation rolls back every row it
         was inserting rather than only the offender — and because the select re-enumerates every
-        eligible claim each cycle, one bad row stalls delivery for everyone forever. So the
+        grant each cycle, one bad row stalls delivery for everyone forever. So the
         conflict clause arbitrates *all* unique constraints, not only the primary key. That trades a
         loud failure for a skipped row, which is the accepted trade for a readable name: the name
         carries no workspace id, so two customers sharing a domain label derive one name and one of
@@ -425,16 +465,17 @@ class SlackConnectInviter:
         if row is None:
             return None
         return _Delivery(
-            onboard_claim_id=row["onboard_claim_id"],
+            email_domain=row["email_domain"],
             email=row["email"],
             channel_name=row["channel_name"],
             channel_id=row["channel_id"],
             slack_invitation_id=row["slack_invitation_id"],
             invite_attempted_at=row["invite_attempted_at"],
+            greeted_at=row["greeted_at"],
             attempts=int(row["attempts"]),
         )
 
-    async def _renew_lease(self, onboard_claim_id: UUID) -> None:
+    async def _renew_lease(self, email_domain: str) -> None:
         """Hold the lease across an in-flight Slack call. Losing the compare-and-set is silent — the
         delivery path's own writes discover it and abandon — but a renewal that cannot *reach* the
         database is reported and retried on the next tick rather than ending the task. A dead
@@ -448,21 +489,23 @@ class SlackConnectInviter:
                 await self.pool.execute(
                     f"update {TABLE} set claim_expires_at = now() + $3::interval,"
                     "  updated_at = now()"
-                    " where onboard_claim_id = $1 and worker_id = $2",
-                    onboard_claim_id,
+                    " where email_domain = $1 and worker_id = $2",
+                    email_domain,
                     self.worker_id,
                     LEASE,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("slack_connect.lease.renew_failed claim=%s", onboard_claim_id)
+                logger.exception("slack_connect.lease.renew_failed domain=%s", email_domain)
 
     async def _advance(self, delivery: _Delivery) -> None:
         try:
             await self._verify_team()
             channel_id = delivery.channel_id or await self._open_channel(delivery)
             invitation_id = delivery.slack_invitation_id or await self._invite(delivery, channel_id)
+            if delivery.greeted_at is None:
+                await self._greet(delivery, channel_id)
         except SlackTransientError as error:
             await self._reschedule(delivery, error)
             return
@@ -472,17 +515,17 @@ class SlackConnectInviter:
         except _LeaseLost:
             raise
         except Exception as unexpected:
-            logger.exception("slack_connect.unexpected claim=%s", delivery.onboard_claim_id)
+            logger.exception("slack_connect.unexpected domain=%s", delivery.email_domain)
             await self._fail(delivery, unexpected)
             return
         await self._write(
-            delivery.onboard_claim_id,
+            delivery.email_domain,
             f"state = '{STATE_DELIVERED}', delivered_at = now(), worker_id = null,"
             " claim_expires_at = null, next_attempt_at = null, last_error = null",
         )
         logger.info(
-            "slack_connect.delivered claim=%s channel=%s invitation=%s",
-            delivery.onboard_claim_id,
+            "slack_connect.delivered domain=%s channel=%s invitation=%s",
+            delivery.email_domain,
             channel_id,
             invitation_id,
         )
@@ -502,7 +545,7 @@ class SlackConnectInviter:
             channel_id = await self.slack.create_channel(delivery.channel_name)
         except SlackNameTakenError:
             channel_id = await self.slack.channel_id_by_name(delivery.channel_name)
-        await self._write(delivery.onboard_claim_id, "channel_id = $3", channel_id)
+        await self._write(delivery.email_domain, "channel_id = $3", channel_id)
         return channel_id
 
     async def _invite(self, delivery: _Delivery, channel_id: str) -> str | None:
@@ -516,16 +559,26 @@ class SlackConnectInviter:
             if await self.slack.is_externally_shared(channel_id):
                 return None
             logger.info(
-                "slack_connect.reconcile.no_live_invite claim=%s channel=%s",
-                delivery.onboard_claim_id,
+                "slack_connect.reconcile.no_live_invite domain=%s channel=%s",
+                delivery.email_domain,
                 channel_id,
             )
-        await self._write(delivery.onboard_claim_id, "invite_attempted_at = now()")
+        await self._write(delivery.email_domain, "invite_attempted_at = now()")
         invitation_id = await self.slack.invite_shared(channel_id, delivery.email)
         return await self._persist_invitation(delivery, invitation_id)
 
+    async def _greet(self, delivery: _Delivery, channel_id: str) -> None:
+        """One message naming where this customer signs in, posted before the row settles so a
+        transient failure retries it. The marker is written after Slack answers — see the module
+        docstring for why this one act accepts a duplicate rather than risking a silent miss."""
+        await self.slack.post_message(
+            channel_id,
+            GREETING.format(email_domain=delivery.email_domain, apex_host=self.apex_host),
+        )
+        await self._write(delivery.email_domain, "greeted_at = now()")
+
     async def _persist_invitation(self, delivery: _Delivery, invitation_id: str) -> str:
-        await self._write(delivery.onboard_claim_id, "slack_invitation_id = $3", invitation_id)
+        await self._write(delivery.email_domain, "slack_invitation_id = $3", invitation_id)
         return invitation_id
 
     async def _reschedule(self, delivery: _Delivery, error: SlackTransientError) -> None:
@@ -536,42 +589,42 @@ class SlackConnectInviter:
             RETRY_BACKOFF_SECONDS * 2 ** (delivery.attempts - 1), RETRY_BACKOFF_MAX_SECONDS
         )
         await self._write(
-            delivery.onboard_claim_id,
+            delivery.email_domain,
             f"state = '{STATE_PENDING}', worker_id = null, claim_expires_at = null,"
             "  next_attempt_at = now() + $3::interval, last_error = $4",
             timedelta(seconds=delay),
             self.slack.redact(str(error)),
         )
         logger.warning(
-            "slack_connect.retry claim=%s attempts=%s in=%ss",
-            delivery.onboard_claim_id,
+            "slack_connect.retry domain=%s attempts=%s in=%ss",
+            delivery.email_domain,
             delivery.attempts,
             delay,
         )
 
     async def _fail(self, delivery: _Delivery, error: Exception) -> None:
         await self._write(
-            delivery.onboard_claim_id,
+            delivery.email_domain,
             f"state = '{STATE_FAILED}', worker_id = null, claim_expires_at = null,"
             "  next_attempt_at = null, last_error = $3",
             self.slack.redact(str(error)),
         )
         logger.error(
-            "slack_connect.failed claim=%s error=%s",
-            delivery.onboard_claim_id,
+            "slack_connect.failed domain=%s error=%s",
+            delivery.email_domain,
             self.slack.redact(str(error)),
         )
 
-    async def _write(self, onboard_claim_id: UUID, assignment: str, *values: object) -> None:
+    async def _write(self, email_domain: str, assignment: str, *values: object) -> None:
         owned = await self.pool.fetchval(
             f"update {TABLE} set {assignment}, updated_at = now()"
-            " where onboard_claim_id = $1 and worker_id = $2 returning true",
-            onboard_claim_id,
+            " where email_domain = $1 and worker_id = $2 returning true",
+            email_domain,
             self.worker_id,
             *values,
         )
         if not owned:
-            raise _LeaseLost(f"{onboard_claim_id} is no longer leased by {self.worker_id}")
+            raise _LeaseLost(f"{email_domain} is no longer leased by {self.worker_id}")
 
 
 def slack_connect_from_env(pool: asyncpg.Pool) -> SlackConnectInviter | None:
@@ -586,6 +639,7 @@ def slack_connect_from_env(pool: asyncpg.Pool) -> SlackConnectInviter | None:
                 pool=pool,
                 slack=SlackConnectClient(bot_token=_require_env(BOT_TOKEN_ENV)),
                 team_id=_require_env(TEAM_ID_ENV),
+                apex_host=public_apex_host(),
                 worker_id=f"{socket.gethostname()}.{os.getpid()}",
             )
         case other:

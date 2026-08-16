@@ -146,9 +146,10 @@ async def test_the_verb_rebuilds_an_unbound_invite_ledger(empty_database: str) -
 
 
 async def test_the_verb_drops_the_columns_a_verification_code_needed(empty_database: str) -> None:
-    """WorkOS holds the code now, so the claim ledger keeps no hash and counts no attempts. The
-    reshape lives with the shaping verb, and a claim written afterwards reads back through the
-    store, which names neither column."""
+    """WorkOS holds the code now, so the claim ledger keeps no hash and counts no attempts, and it
+    gains the mark that says whether a claim opened its workspace or joined one. The reshape lives
+    with the shaping verb, so a claim written afterwards reads back through the store — and
+    completes through it, which is the write every signup ends on."""
     connection = await asyncpg.connect(empty_database)
     try:
         await connection.execute(f"create schema {SCHEMA}")
@@ -199,6 +200,143 @@ async def test_the_verb_drops_the_columns_a_verification_code_needed(empty_datab
         )
         claim = await store.live_claim("ufo", "reshape-proof")
         assert claim is not None and claim.verified_at is None
+        await store.complete(claim.claim_id, str(uuid4()), created_workspace=True)
+        assert (
+            await pool.fetchval(
+                f"select created_workspace from {SCHEMA}.onboard_claim where id = $1",
+                claim.claim_id,
+            )
+            is True
+        ), (
+            "a live claim ledger gains created_workspace only through RESHAPE; without it every "
+            "signup raises after the workspace, the member and the agent are already written"
+        )
+    finally:
+        await pool.close()
+
+
+async def test_the_verb_carries_a_claim_keyed_delivery_across_to_its_domain(
+    empty_database: str,
+) -> None:
+    """Delivery rows are the only record of which customers Slack has already invited, so the shape
+    that re-keys them to the granted domain must translate rather than rebuild: a rebuilt ledger
+    would re-materialize every delivered customer as pending and send each a second invitation. The
+    proof is the delivered row surviving with its channel, its invitation, and its state — and the
+    head shape's own due index surviving the name the old table's index held."""
+    connection = await asyncpg.connect(empty_database)
+    try:
+        await connection.execute(f"create schema {SCHEMA}")
+        await connection.execute(
+            f"create table {SCHEMA}.onboard_claim ("
+            "  id uuid primary key,"
+            "  email text not null,"
+            "  email_domain text not null,"
+            "  surface text not null,"
+            "  surface_ref text not null,"
+            "  expires_at timestamptz not null,"
+            "  verified_at timestamptz,"
+            "  resulting_workspace_id text,"
+            "  invite_id uuid,"
+            "  created_at timestamptz not null default now())"
+        )
+        await connection.execute(
+            f"create table {SCHEMA}.slack_connect_delivery ("
+            "  onboard_claim_id uuid primary key"
+            f"    references {SCHEMA}.onboard_claim (id) on delete cascade,"
+            "  state text not null,"
+            "  channel_name text not null unique,"
+            "  channel_id text,"
+            "  slack_invitation_id text,"
+            "  invite_attempted_at timestamptz,"
+            "  worker_id text,"
+            "  claim_expires_at timestamptz,"
+            "  next_attempt_at timestamptz,"
+            "  attempts integer not null default 0,"
+            "  last_error text,"
+            "  created_at timestamptz not null default now(),"
+            "  updated_at timestamptz not null default now(),"
+            "  delivered_at timestamptz)"
+        )
+        await connection.execute(
+            f"create index {DUE_INDEX} on {SCHEMA}.slack_connect_delivery (state, next_attempt_at)"
+        )
+        claim_id = uuid4()
+        await connection.execute(
+            f"insert into {SCHEMA}.onboard_claim (id, email, email_domain, surface, surface_ref,"
+            "  expires_at, verified_at, resulting_workspace_id, invite_id)"
+            " values ($1, 'founder@carried.io', 'carried.io', 'ufo', $2,"
+            "  now() + interval '1 hour', now(), $3, $4)",
+            claim_id,
+            str(claim_id),
+            str(uuid4()),
+            uuid4(),
+        )
+        await connection.execute(
+            f"insert into {SCHEMA}.slack_connect_delivery (onboard_claim_id, state, channel_name,"
+            "  channel_id, slack_invitation_id, invite_attempted_at, delivered_at)"
+            " values ($1, 'delivered', 'ext-carried-flyingobject', 'C0CARRIED', 'I0CARRIED',"
+            "  now(), now())",
+            claim_id,
+        )
+        flight_id = uuid4()
+        await connection.execute(
+            f"insert into {SCHEMA}.onboard_claim (id, email, email_domain, surface, surface_ref,"
+            "  expires_at, verified_at, resulting_workspace_id, invite_id)"
+            " values ($1, 'founder@inflight.io', 'inflight.io', 'ufo', $2,"
+            "  now() + interval '1 hour', now(), $3, $4)",
+            flight_id,
+            str(flight_id),
+            str(uuid4()),
+            uuid4(),
+        )
+        await connection.execute(
+            f"insert into {SCHEMA}.slack_connect_delivery (onboard_claim_id, state, channel_name,"
+            "  channel_id, invite_attempted_at, worker_id, claim_expires_at)"
+            " values ($1, 'claimed', 'ext-inflight-flyingobject', 'C0FLIGHT', now(),"
+            "  'pod-that-is-about-to-die', now() + interval '2 minutes')",
+            flight_id,
+        )
+    finally:
+        await connection.close()
+
+    await shape_control_schema(empty_database)
+
+    pool = await asyncpg.create_pool(empty_database, min_size=1, max_size=2)
+    try:
+        row = await pool.fetchrow(
+            f"select * from {SCHEMA}.slack_connect_delivery where email_domain = $1", "carried.io"
+        )
+        assert row is not None, "the delivered customer was dropped and will be invited again"
+        assert row["email"] == "founder@carried.io"
+        assert row["state"] == "delivered"
+        assert row["channel_id"] == "C0CARRIED"
+        assert row["slack_invitation_id"] == "I0CARRIED"
+        assert await pool.fetchval(
+            "select indexdef from pg_indexes where schemaname = $1 and indexname = $2",
+            SCHEMA,
+            DUE_INDEX,
+        ), "the head shape lost its due index to the old table's index name"
+        assert (
+            await pool.fetchval(
+                "select to_regclass($1)", f"{SCHEMA}.slack_connect_delivery_by_claim"
+            )
+            is None
+        )
+
+        flight = await pool.fetchrow(
+            f"select * from {SCHEMA}.slack_connect_delivery where email_domain = $1", "inflight.io"
+        )
+        assert flight is not None
+        assert flight["state"] == "pending", (
+            "a row claimed by a worker the deploy killed must come back claimable; "
+            "'claimed' with no lease can never be claimed again"
+        )
+        assert flight["worker_id"] is None
+        assert flight["claim_expires_at"] is None
+        assert flight["channel_id"] == "C0FLIGHT"
+        assert flight["invite_attempted_at"] is not None, (
+            "the marker that makes the next worker reconcile instead of inviting twice"
+        )
     finally:
         await pool.close()
 
@@ -238,7 +376,7 @@ def test_operator_verbs_refuse_an_unshaped_schema(migrate: CliRunner) -> None:
     """Every verb that reads a ledger states the same precondition the same way, so an operator who
     reaches for one before the deploy has shaped the schema is told which verb to run instead of
     reading a raw `UndefinedTableError`."""
-    for argv in (["invite", "1", "cli@mintco.io"], ["slack-connect-retry", str(uuid4())]):
+    for argv in (["invite", "1", "cli@mintco.io"], ["slack-connect-retry", "unshaped.io"]):
         result = migrate.invoke(main, argv)
         assert result.exit_code != 0, result.output
         assert "run `ufo-control migrate`" in str(result.exception)

@@ -162,38 +162,54 @@ claim keeps its verified email, so re-running the installer after a grant lands 
 
 ## Signup Slack Connect invitation
 
-A claim that both burned a grant and created a workspace — `invite_id` and
-`resulting_workspace_id` both set — earns one public channel in UFO's *own* Slack workspace and one
-Slack-generated Slack Connect invitation to the email that signed up. A member joining an existing
-workspace never burns a grant, so the same test excludes them, and only the earliest completed claim
-of a workspace materializes: one channel per customer, never a second invitation.
+A customer earns one public channel in UFO's *own* Slack workspace and one Slack-generated Slack
+Connect invitation, from either of two durable facts: a granted email domain, or a signup that
+created a workspace. The grant fires while signup is invite-gated, at approval — before that
+customer signs up — so the channel is open by the time they read the invitation email. The signup that
+*created* a workspace fires once the gate comes off and no grant exists to key on, so
+`UFO_INVITE_REQUIRED=false` costs this feature nothing. Creating is the whole test, not merely
+completing — a contractor, an advisor, or operator staff joining a workspace their own domain does
+not name is no customer, and counting them would open a channel for a domain the invite gate would
+then refuse.
 
-The completed claim is the durable event source. `gateway_slack_connect.py` polls it on both gateway
-replicas, materializes `ufo_control.slack_connect_delivery` rows, and claims one due row under a
-lease (`FOR UPDATE SKIP LOCKED`, compare-and-set on `worker_id` for every write). Signup itself
-never waits: `Onboarding._resolve` signs the member in whether or not Slack is reachable.
+The domain is the key, and neither fact is: a granted customer who then signs up satisfies both and
+still lands on one row, so nobody is invited twice. Re-granting a domain whose first grant lapsed
+likewise finds its row already there and sends nothing. Slack cannot help us do better either way, since
+`conversations.listConnectInvites` names the inviter and never the invitee.
+
+`gateway_slack_connect.py` polls both facts on either gateway replica, materializes
+`ufo_control.slack_connect_delivery` rows, and claims one due row under a lease (`FOR UPDATE SKIP
+LOCKED`, compare-and-set on `worker_id` for every write). Approval itself never waits:
+`ufo-control invite` mints the grant and mails the invitation whether or not Slack is reachable.
 
 ```text
-completed invite-wall claim
+a granted domain, or a signup that created a workspace
   |
   +-- materialize   one delivery row, channel name ext-<domain-label>-flyingobject
   +-- claim         lease one due row; an expired lease is another replica's to recover
   +-- auth.test     the token must name UFO_CONTROL_SLACK_CONNECT_TEAM_ID, else the row fails
   +-- create        the deterministic channel; name_taken resolves by exact-name lookup
   +-- reconcile     only when invite_attempted_at is set: outgoing invite, else channel sharing
-  +-- inviteShared  the claim's email, external_limited=false — Post and invite, not post-only
+  +-- inviteShared  the grant's email, external_limited=false — Post and invite, not post-only
+  +-- greet         one chat.postMessage naming the browser and terminal doors
   +-- delivered     invitation id persisted, then the row settles
 ```
+
+The invitation email carries the terminal installer alone, so the channel message is the only place
+`/login` appears. It is the one act that accepts a duplicate: `greeted_at` is written *after* Slack
+answers, so a lost response reposts rather than leaving a channel that names nowhere to sign in.
 
 The unique channel is the idempotency boundary: a lost create response recovers by name, a lost
 invitation response recovers from Slack's own state, and ambiguity Slack will not expose lands
 `failed` rather than sending a blind duplicate. Transport failures, 429 (bounded `Retry-After`),
 5xx, and documented transient Slack errors return the row to `pending` behind a bounded schedule;
 authentication, scope, plan, policy, invalid-email, and inconsistent-channel errors are terminal.
-`ufo-control slack-connect-retry <claim-id>` re-arms one failed row after its cause is fixed — it
-never sends directly and never touches a delivered row.
+`ufo-control slack-connect-retry <email-domain>` re-arms one failed row after its cause is fixed —
+it never sends directly and never touches a delivered row.
 
-UFO's app here (`control/slack-connect-app.yaml`) is not the customer-installed Slack app below. It
+UFO's app here (`control/slack-connect-app.yaml`) is not the customer-installed Slack app below. Its
+declared scopes are asserted against the Web API methods this workflow calls, since a missing scope
+fails nowhere but production. It
 lives only in the operator workspace, makes outbound Web API calls only, and holds one gateway-only
 bot token (`UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN`, its own Secret through an explicit `secretKeyRef`
 — never `ufo-platform-secrets`, `ufo-serve`, an extension, or a workspace `CredentialSlot`).
