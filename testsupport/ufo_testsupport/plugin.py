@@ -53,6 +53,7 @@ TIMINGS_DIR_ENV = "UFO_TEST_TIMINGS_DIR"
 DEFAULT_TIMINGS_DIR = ".pytest-timings"
 TIMINGS_SCHEMA = 1
 SLOWEST_IN_SUMMARY = 10
+MEMORY_PER_WORKER_MB = 1500
 ROW_FIELDS = (
     "nodeid",
     "file",
@@ -69,6 +70,72 @@ ROW_FIELDS = (
     "start",
     "stop",
 )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+    """How many workers `-n auto` gets: what the machine's memory affords, never what its core
+    count suggests.
+
+    `tryfirst` is what makes this the answer at all: the hook is `firstresult`, and xdist ships its
+    own implementation returning the core count, so without an explicit order the two race on
+    registration order and the core count wins.
+
+    A worker is a whole second copy of this application — every module the collection imports, and
+    the engines, DBOS client and caches the tests build on top. Measured on the full suite it
+    settles near 600 MB of its own and holds there, so cores are the wrong unit: a container sized
+    for four of them by CPU has room for two. Asking for one per core is how a 3931 MB sandbox
+    reached 99.4% and stopped answering — its kernel took the whole box down with the run, and
+    every later command on it hung until its own deadline rather than failing.
+
+    `MEMORY_PER_WORKER_MB` is total RAM per worker, not the worker's own footprint: the balance is
+    the room its page cache, its temporary databases and the session's own process need to keep the
+    box off its ceiling. Sized from the box that died — four workers over 3931 MB — so the same box
+    now runs two.
+
+    Only `-n auto` passes through here. An explicit `-n 8` is a caller who has said what they want
+    and gets it. Where the total cannot be read the core count stands, which is the honest answer
+    for a platform whose memory this cannot see."""
+    workers = os.cpu_count() or 1
+    total_mb = _total_memory_mb()
+    if total_mb is None:
+        return workers
+    return max(1, min(workers, total_mb // MEMORY_PER_WORKER_MB))
+
+
+def _total_memory_mb() -> int | None:
+    """The memory this process may actually use, which is the smaller of what the machine has and
+    what its cgroup allows. None on a platform with neither — a developer's laptop, whose spare
+    memory is not this suite's to size by anyway.
+
+    Both readings are needed because neither is right alone. `/proc/meminfo` is what a VM reports
+    and the only reading a sandbox has, its cgroup being unlimited; inside a container it reports
+    the *host* instead — measured at 7936 MB against a 1 GB limit — so trusting it there would size
+    a 1 GB box for five workers. The cgroup file is the container's true ceiling and says `max`
+    where there is none."""
+    limits = [_meminfo_total_mb(), _cgroup_limit_mb()]
+    known = [value for value in limits if value is not None]
+    return min(known) if known else None
+
+
+def _meminfo_total_mb() -> int | None:
+    meminfo = Path("/proc/meminfo")
+    if not meminfo.exists():
+        return None
+    for line in meminfo.read_text().splitlines():
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) // 1024
+    return None
+
+
+def _cgroup_limit_mb() -> int | None:
+    """The cgroup v2 memory ceiling, or None where the kernel is v1, the file is absent, or the
+    group is unlimited (`max`)."""
+    limit = Path("/sys/fs/cgroup/memory.max")
+    if not limit.exists():
+        return None
+    text = limit.read_text().strip()
+    return None if text == "max" else int(text) // (1024 * 1024)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
