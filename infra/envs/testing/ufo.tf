@@ -3,9 +3,10 @@
 data "aws_caller_identity" "current" {}
 
 locals {
-  # The sandbox cache (RFC 0032) is off until its image is built and the UFO_CACHE_CONTROL_TOKEN
-  # secret exists; testing flips it first. See prod/ufo.tf for the enable checklist.
-  cache_enabled = false
+  # The sandbox cache (RFC 0032): git mirrors + package registries, on for testing. The image builds
+  # every deploy and the UFO_CACHE_CONTROL_TOKEN secret is provisioned, so the sidecar has both when
+  # it rolls. `cache_s3_bucket` stays empty — disk-only, cold on each pod roll. Prod stays off.
+  cache_enabled = true
 
   # https://www.cloudflare.com/ips-v4 — the edge ranges Cloudflare connects to origins from. The NLB
   # admits only these, so the ingress is unreachable except through Cloudflare's proxy (DDoS/WAF edge).
