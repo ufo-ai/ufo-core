@@ -187,7 +187,7 @@ def test_background_jobs_model_defaults_to_the_cheap_one_shot_model(tmp_path: Pa
     path = tmp_path / "ufo.toml"
     path.write_text(VALID)
     config = load_config(path)
-    assert config.models.background_jobs_model == "gpt-5.6-luna"
+    assert config.models.background_jobs_model == "claude-haiku-4-5"
     assert config.models.auto_model == "claude-opus-5"
 
 
