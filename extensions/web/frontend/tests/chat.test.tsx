@@ -227,6 +227,25 @@ test("a conversation reloaded while its turn runs shows the prompt, says so, and
   expect(StreamFake.last().closed).toBe(true);
 });
 
+test("the working mark is not taken down when the turn's first step lands", async () => {
+  wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  const opening = await screen.findByText("Thinking…");
+  const mark = opening.closest("[data-slot=marker]")!.querySelector("[data-slot=orbit]");
+  expect(mark).toBeTruthy();
+  // Nothing stands behind the line yet, so it offers no disclosure to open.
+  expect(opening.closest("[data-slot=marker]")!.querySelector("svg")).toBeNull();
+
+  StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
+  expect(await screen.findByText("bash gh pr view")).toBeTruthy();
+
+  // The same element, not one that replaced it: a remount here restarts the orbit mid-turn.
+  expect(document.querySelector("[data-slot=orbit]")).toBe(mark);
+  expect(document.querySelector("[data-slot=marker] svg")).toBeTruthy();
+});
+
 test("a running turn opens onto the calls behind its latest, and keeps working", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();
@@ -240,7 +259,7 @@ test("a running turn opens onto the calls behind its latest, and keeps working",
 
   await userEvent.click(summary);
   expect(screen.getByText("bash gh pr view")).toBeTruthy();
-  expect(document.querySelector(".shimmer")).toBeTruthy();
+  expect(document.querySelector("[data-slot=decode-text]")).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -251,7 +270,7 @@ test("a running turn opens onto the calls behind its latest, and keeps working",
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
   expect(screen.getByText("Completed 2 steps")).toBeTruthy();
-  expect(document.querySelector(".shimmer")).toBeNull();
+  expect(document.querySelector("[data-slot=decode-text]")).toBeNull();
 });
 
 test("a live subagent run nests under the reply it produced", async () => {
@@ -2042,7 +2061,7 @@ test("a streamed chunk never steals focus from where the member put it", async (
   );
   elsewhere.focus();
   StreamFake.last().emit("message", { text: "chunk" });
-  await screen.findByText("chunk");
+  await screen.findByText(saying("chunk"));
   expect(document.activeElement).toBe(elsewhere);
 });
 
@@ -2343,7 +2362,7 @@ test("a reader inside the tolerance band still counts as at the bottom", async (
   );
 
   StreamFake.last().emit("message", { text: "nudged" });
-  await screen.findByText("nudged");
+  await screen.findByText(saying("nudged"));
   lands(log);
   await waitFor(() => expect(log.scrollTop).toBe(FOOT));
 });

@@ -58,7 +58,7 @@ test("a dropped stream reattaches and the replay rebuilds the reply without dupl
   });
   const first = await streaming();
   first.emit("message", { text: "one " });
-  await screen.findByText("one");
+  await screen.findByText(saying("one"));
 
   fatal(first);
   expect(await screen.findByText("Reconnecting…")).toBeTruthy();
@@ -67,7 +67,7 @@ test("a dropped stream reattaches and the replay rebuilds the reply without dupl
   pending[0]();
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
   const second = StreamFake.last();
-  expect(await screen.findByText("one")).toBeTruthy();
+  expect(await screen.findByText(saying("one"))).toBeTruthy();
   second.emit("open", {});
   second.emit("message", { text: "one " });
   second.emit("message", { text: "two" });
@@ -130,7 +130,7 @@ test("a send during the backoff rebuilds the reply from the replay it reattached
       }),
   });
   first.emit("message", { text: "one " });
-  await screen.findByText("one");
+  await screen.findByText(saying("one"));
   fatal(first);
   await screen.findByText("Reconnecting…");
 
@@ -194,7 +194,7 @@ test("returning to a tab with a dead stream reattaches without waiting out the b
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
   StreamFake.last().emit("open", {});
   StreamFake.last().emit("message", { text: "rejoined" });
-  expect(await screen.findByText("rejoined")).toBeTruthy();
+  expect(await screen.findByText(saying("rejoined"))).toBeTruthy();
 });
 
 test("returning to an idle tab refetches the transcript", async () => {
@@ -287,7 +287,7 @@ test("the terminal's full text overrides a gap-truncated replay", async () => {
   const second = StreamFake.last();
   second.emit("open", {});
   second.emit("message", { text: "two" });
-  await screen.findByText("two");
+  await screen.findByText(saying("two"));
   second.emit("terminal", {
     status: "done",
     text: "one two final",
@@ -312,7 +312,7 @@ test("a native blip on a reattached source never wipes the rebuilt text", async 
   const second = StreamFake.last();
   second.emit("open", {});
   second.emit("message", { text: "rebuilt" });
-  await screen.findByText("rebuilt");
+  await screen.findByText(saying("rebuilt"));
 
   second.fail();
   second.emit("open", {});

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import { IconChevronRight } from "@tabler/icons-react";
 
@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/message-scroller";
 import { Reveal } from "@/components/ui/reveal";
 import { speakerName } from "@/lib/audience";
+import { brailleOf, randomCell } from "@/lib/braille";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 import { subagentConversationHash } from "@/lib/route";
@@ -357,23 +358,21 @@ export function Meta({ children }: { children: ReactNode }) {
   );
 }
 
-/** What the agent is doing, said as a status line rather than as a bubble — it is about the
- *  conversation, not in it. It is not a live region: the log it stands in already announces what is
- *  added to it, and a marker that replaced its own words on every tool call would read the whole
- *  run of a turn out over whatever else the page had to say. */
-function Working({ children }: { children: ReactNode }) {
-  return (
-    <Marker className="mt-2xs font-mono text-small">
-      <MarkerContent className="shimmer">{children}</MarkerContent>
-    </Marker>
-  );
-}
-
-/** The reply's activity disclosure. Live it leads with what is happening — `Awaiting N subagents`
- *  while runs are open, else the current step — and opens itself the moment a run appears, so the
- *  member watches the rows work; settled it collapses to `Completed N steps`: the reply's own
- *  steps, a run counting as one however much it did inside. A member's own toggle wins over the
- *  default from then on. */
+/** The reply's activity disclosure, and while the turn runs the one line saying what the agent is
+ *  doing. Live it leads with what is happening — `Awaiting N subagents` while runs are open, else
+ *  the current step — and opens itself the moment a run appears, so the member watches the rows
+ *  work; settled it collapses to `Completed N steps`: the reply's own steps, a run counting as one
+ *  however much it did inside. A member's own toggle wins over the default from then on.
+ *
+ *  A turn opens on this line with nothing yet behind it, and the first tool call arrives into the
+ *  same line rather than replacing it. That is why the disclosure is drawn whether or not it has
+ *  steps to disclose: swapping the element the moment the first step lands would take the mark and
+ *  the words down with it, restarting an orbit mid-turn and cutting the glyphing short. With
+ *  nothing behind it the line carries no chevron and does not open.
+ *
+ *  It is not a live region: the log it stands in already announces what is added to it, and a
+ *  marker that replaced its own words on every tool call would read the whole run of a turn out
+ *  over whatever else the page had to say. */
 function Activity({
   events,
   runs,
@@ -388,33 +387,39 @@ function Activity({
   working?: string;
 }) {
   const [open, setOpen] = useState<boolean | null>(null);
-  if (!events.length && !runs.length) {
-    return working === undefined ? null : <Working>{working}</Working>;
-  }
-  const openRuns = runs.filter((run) => run.running).length;
   const steps = events.length + runs.length;
+  if (!steps && working === undefined) return null;
+  const openRuns = runs.filter((run) => run.running).length;
   const summary = live
     ? openRuns > 0
       ? "Awaiting " + openRuns + " subagent" + (openRuns === 1 ? "" : "s")
       : (working ?? latestActivity(events, runs))
     : "Completed " + steps + " step" + (steps === 1 ? "" : "s");
-  const shown = open ?? (live && openRuns > 0);
+  const shown = steps > 0 && (open ?? (live && openRuns > 0));
   return (
     <details
       className="group/activity mt-2xs font-mono text-small text-ink-soft"
       open={shown}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <Marker render={<summary className="cursor-pointer list-none" />}>
-        <MarkerContent className={cn(live && "shimmer")}>{summary}</MarkerContent>
-        <IconChevronRight
-          aria-hidden
-          className="size-icon shrink-0 transition-transform group-open/activity:rotate-90"
-        />
+      <Marker
+        render={
+          <summary
+            className={cn("list-none", steps ? "cursor-pointer" : "cursor-default")}
+            onClick={steps ? undefined : (event) => event.preventDefault()}
+          />
+        }
+      >
+        {live ? <OrbitMark /> : null}
+        <MarkerContent>{live ? <DecodeLine text={summary} /> : summary}</MarkerContent>
+        {steps ? (
+          <IconChevronRight
+            aria-hidden
+            className="size-icon shrink-0 transition-transform group-open/activity:rotate-90"
+          />
+        ) : null}
       </Marker>
-      {shown ? (
-        <ActivityTree events={events} runs={runs} root={root} live={live} />
-      ) : null}
+      {shown ? <ActivityTree events={events} runs={runs} root={root} live={live} /> : null}
     </details>
   );
 }
@@ -496,9 +501,7 @@ function RunRow({
           >
             {run.name || "Subagent · " + run.profile}
           </a>
-          {current ? (
-            <span className="shimmer min-w-0 truncate">{"· " + current}</span>
-          ) : null}
+          {current ? <span className="min-w-0 truncate">{"· " + current}</span> : null}
           <IconChevronRight
             aria-hidden
             className="size-icon shrink-0 transition-transform group-open/run:rotate-90"
@@ -534,3 +537,257 @@ function ConnectLink({ url }: { url: string }) {
   );
 }
 
+/** The mark the portal draws while the agent is working: three lights turning on one ellipse seen
+ *  nearly edge-on. They spread out of the ∵ triangle, gather back onto its vertices, hold a beat,
+ *  and set off again; under reduced motion they sit parked on the triangle. `theme.css` holds the
+ *  motion, the palette composites, and `--s`, the one length every dimension is a fraction of. */
+export function OrbitMark({ className }: { className?: string }) {
+  return (
+    <span aria-hidden data-slot="orbit" className={cn("shrink-0", className)}>
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
+/** The mark surfaces in the static oftener than the rest of the pool, so the shape a member already
+ *  reads as ufo keeps coming back out of the noise. */
+const ACCENTS = Array.from("∴∵∷⁘⁙⋮⋰⋱∧∨⊻⊼△▽◁▷⊳⊲⊙⊚⊛⊕⌾");
+const ACCENT_MARK = "∵";
+const ACCENT_MARK_WEIGHT = 2.5;
+const ACCENT_SHARE = 0.14;
+
+/** One cycle: the decode, then the line held in plain sight before it runs again. The decode splits
+ *  by fraction of its own length — ciphertext, then a churn the accents drop out of, then a resolve
+ *  front travelling left to right. */
+const DECODE_MS = 1_500;
+const HOLD_MS = 1_200;
+const FRAME_MS = 90;
+const STATIC_END = 0.35;
+const CHURN_END = 0.7;
+
+/** Where a line restarts when the wait it names changes under it. A turn goes from `Thinking…` to
+ *  its first tool step without the marker moving, and snapping straight to the new message's
+ *  ciphertext reads as a cut. Entering at the churn instead takes the old words apart and builds the
+ *  new ones out of the same noise, which is the one moment the effect has to carry. */
+const CHURN_FRAME = Math.ceil((STATIC_END * DECODE_MS) / FRAME_MS);
+
+/** The accents breathe on their own period, offset per cell so the line shimmers rather than blinks
+ *  in unison; every other unresolved cell takes a slow wave travelling along the line. */
+const PULSE_PERIOD_S = 2.6;
+const PULSE_CELL_PHASE = 0.11;
+const RIPPLE_CELLS_PER_WAVE = 7;
+
+export type DecodeCell = {
+  glyph: string;
+  resolved: boolean;
+  accent: boolean;
+  /** How far along its channel this cell sits, 0 to 100, for `color-mix`. */
+  mix: number;
+};
+
+/** The glyph a cell shows whenever it is not churning, and whether it is one of the ember few. */
+export type SettledCell = { glyph: string; accent: boolean };
+
+function weightedAccent(): string {
+  const total = ACCENTS.length - 1 + ACCENT_MARK_WEIGHT;
+  let ticket = Math.random() * total;
+  for (const accent of ACCENTS) {
+    ticket -= accent === ACCENT_MARK ? ACCENT_MARK_WEIGHT : 1;
+    if (ticket < 0) return accent;
+  }
+  return ACCENT_MARK;
+}
+
+/** The line every phase but the churn draws, settled once: which cells carry an accent and which
+ *  accent each carries, and the one cell a character with no braille of its own — a digit, a
+ *  bracket — stands behind. Rolling either per frame would leave the static phase twitching and
+ *  would multiply the ember. A space is never an accent, and never anything but itself. */
+export function settle(text: string): SettledCell[] {
+  const places = Array.from(text, (character, index) => (character === " " ? -1 : index)).filter(
+    (index) => index !== -1,
+  );
+  const wanted = Math.round(places.length * ACCENT_SHARE);
+  const chosen = new Set<number>();
+  while (chosen.size < wanted && chosen.size < places.length) {
+    chosen.add(places[Math.floor(Math.random() * places.length)]);
+  }
+  return Array.from(text, (character, index) => {
+    if (character === " ") return { glyph: character, accent: false };
+    if (chosen.has(index)) return { glyph: weightedAccent(), accent: true };
+    return { glyph: brailleOf(character) ?? randomCell(), accent: false };
+  });
+}
+
+function pulseMix(index: number, now: number): number {
+  return ((Math.sin((now * 2 * Math.PI) / PULSE_PERIOD_S + index * PULSE_CELL_PHASE) + 1) / 2) * 100;
+}
+
+function rippleMix(index: number, now: number): number {
+  return (
+    ((Math.sin((index / RIPPLE_CELLS_PER_WAVE - now) * 2 * Math.PI) + 1) / 2) * 100
+  );
+}
+
+/** The line as it stands at progress `t` through the decode, on a clock of `now` seconds. Pure: the
+ *  same arguments draw the same line, so the phases can be asserted without a timer. */
+export function decodeFrame(
+  text: string,
+  t: number,
+  now: number,
+  settled: SettledCell[],
+): DecodeCell[] {
+  const characters = Array.from(text);
+  const churning = t >= STATIC_END && t < CHURN_END;
+  const resolved =
+    t >= CHURN_END ? Math.floor(((t - CHURN_END) / (1 - CHURN_END)) * characters.length) : 0;
+  return characters.map((character, index) => {
+    if (character === " ") return { glyph: character, resolved: true, accent: false, mix: 0 };
+    if (index < resolved) return { glyph: character, resolved: true, accent: false, mix: 0 };
+    if (churning) {
+      return { glyph: randomCell(), resolved: false, accent: false, mix: rippleMix(index, now) };
+    }
+    const cell = settled[index];
+    return {
+      glyph: cell.glyph,
+      resolved: false,
+      accent: cell.accent,
+      mix: cell.accent ? pulseMix(index, now) : rippleMix(index, now),
+    };
+  });
+}
+
+/** A wait, spelled. The label arrives as the braille that spells it, churns, and resolves left to
+ *  right — the portal's one indeterminate loading state, in place of a spinner or a skeleton rather
+ *  than beside one.
+ *
+ *  `delay` staggers a line against the ones above it. `loop` runs the cycle until the wait ends; a
+ *  wait with a known end takes `loop={false}` and decodes once. `color` drops the two channels for a
+ *  dense or low-priority context, leaving the glyphs in the resting tone.
+ *
+ *  Reduced motion renders the words and starts no timer at all, and a hidden tab stops the one that
+ *  is running: a line nobody is watching does not churn. */
+export function DecodeLine({
+  text,
+  delay = 0,
+  loop = true,
+  color = true,
+  className,
+}: {
+  text: string;
+  delay?: number;
+  loop?: boolean;
+  color?: boolean;
+  className?: string;
+}) {
+  const still = useReducedMotion();
+  const settled = useMemo(() => settle(text), [text]);
+  const [shown, setShown] = useState(text);
+  const [tick, setTick] = useState(0);
+  const frames = useRef(0);
+
+  /** A new wait glyphs in from the churn rather than inheriting how far the one before it had got,
+   *  which would show a stranger's words already half resolved. */
+  if (shown !== text) {
+    setShown(text);
+    setTick(CHURN_FRAME);
+    frames.current = CHURN_FRAME;
+  }
+
+  useEffect(() => {
+    if (still) return;
+    let timer: number | undefined;
+    let spent = false;
+    const advance = () => {
+      frames.current += 1;
+      if (!loop && frames.current * FRAME_MS >= DECODE_MS) {
+        spent = true;
+        window.clearInterval(timer);
+      }
+      setTick(frames.current);
+    };
+    const start = () => {
+      window.clearInterval(timer);
+      if (!spent) timer = window.setInterval(advance, FRAME_MS);
+    };
+    const opening = window.setTimeout(start, delay);
+    const watch = () => (document.hidden ? window.clearInterval(timer) : start());
+    document.addEventListener("visibilitychange", watch);
+    return () => {
+      window.clearTimeout(opening);
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", watch);
+    };
+  }, [still, text, delay, loop]);
+
+  if (still) return <span className={className}>{text}</span>;
+
+  const elapsed = tick * FRAME_MS;
+  const t = Math.min(1, (loop ? elapsed % (DECODE_MS + HOLD_MS) : elapsed) / DECODE_MS);
+  return (
+    <span className={className}>
+      <span className="sr-only">{text}</span>
+      <Cells cells={decodeFrame(text, t, elapsed / 1_000, settled)} color={color} />
+    </span>
+  );
+}
+
+/** Cells are pinned to one column and grouped by word, so the line breaks where the words do and the
+ *  box a member reads is the same box before and after the resolve. */
+function Cells({ cells, color }: { cells: DecodeCell[]; color: boolean }) {
+  const words: { cell: DecodeCell; at: number }[][] = [[]];
+  cells.forEach((cell, at) => {
+    if (cell.glyph === " ") words.push([]);
+    else words[words.length - 1].push({ cell, at });
+  });
+  return (
+    <span aria-hidden data-slot="decode-text">
+      {words.map((word, index) => (
+        <span key={index}>
+          {index > 0 ? " " : null}
+          <span className="inline-block whitespace-pre">
+            {word.map(({ cell, at }) => (
+              <span
+                key={at}
+                data-slot="decode-cell"
+                data-resolved={cell.resolved ? "" : undefined}
+                data-accent={cell.accent ? "" : undefined}
+                style={
+                  color && !cell.resolved
+                    ? ({ "--f": cell.mix.toFixed(1) } as CSSProperties)
+                    : undefined
+                }
+                className={cn(
+                  "inline-block w-(--size-decode-cell) text-center",
+                  cell.resolved
+                    ? "font-medium text-foreground"
+                    : color
+                      ? cell.accent
+                        ? "decode-pulse"
+                        : "decode-ripple"
+                      : "text-muted-foreground",
+                )}
+              >
+                {cell.glyph}
+              </span>
+            ))}
+          </span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function useReducedMotion(): boolean {
+  const [still, setStill] = useState(
+    () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const answer = () => setStill(query.matches);
+    query.addEventListener("change", answer);
+    return () => query.removeEventListener("change", answer);
+  }, []);
+  return still;
+}

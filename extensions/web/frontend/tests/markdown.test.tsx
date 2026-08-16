@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 
+import { brailleOf } from "@/lib/braille";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 
 test("raw html in agent prose renders as text instead of vanishing", () => {
@@ -210,6 +211,51 @@ test("a streaming word animates on the frame that adds it, and never again", () 
   expect(then[0]).toBe(first[0]);
   expect(then[1]).toBe(first[1]);
   expect(then[2]).not.toBe(first[1]);
+});
+
+test("a word that has just landed carries the cell hiding each of its letters", () => {
+  const { container, rerender } = render(<StreamingBody text={"alpha beta"} />);
+  rerender(<StreamingBody text={"alpha beta gamma"} />);
+
+  const landed = Array.from(container.querySelectorAll("[data-arrive]")).at(-1)!;
+  const cells = Array.from(landed.querySelectorAll("[data-glyph]"));
+  expect(cells.map((cell) => cell.textContent).join("")).toBe("gamma");
+  expect(cells.map((cell) => cell.getAttribute("data-glyph")).join("")).toBe(
+    Array.from("gamma", (character) => brailleOf(character)).join(""),
+  );
+  // One step per character along the word, so it resolves left to right.
+  expect(cells.map((cell) => cell.getAttribute("style"))).toEqual([
+    "--cell: 0;",
+    "--cell: 1;",
+    "--cell: 2;",
+    "--cell: 3;",
+    "--cell: 4;",
+  ]);
+
+  // The cell is the theme's to draw, never the document's: what a member copies is what was written.
+  expect(landed.textContent).toBe("gamma");
+});
+
+test("a word left behind by the head settles to plain letters", () => {
+  const tail = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor";
+  const { container, rerender } = render(<StreamingBody text={"alpha"} />);
+  expect(container.querySelector("[data-glyph]")).toBeTruthy();
+
+  // Past the trailing window a word is prose again, so a long reply is not a span per character.
+  rerender(<StreamingBody text={"alpha " + tail + " " + tail} />);
+  const words = Array.from(container.querySelectorAll("[data-arrive]"));
+  expect(words[0].textContent).toBe("alpha ");
+  expect(words[0].querySelector("[data-glyph]")).toBeNull();
+  expect(container.querySelectorAll("[data-glyph]").length).toBeGreaterThan(0);
+});
+
+test("a space is never given a cell of its own", () => {
+  const { container, rerender } = render(<StreamingBody text={"alpha"} />);
+  rerender(<StreamingBody text={"alpha beta gamma"} />);
+  for (const cell of container.querySelectorAll("[data-glyph]")) {
+    expect(cell.textContent?.trim()).not.toBe("");
+  }
+  expect(container.querySelector("p")!.textContent).toBe("alpha beta gamma");
 });
 
 test("the words of one frame land in order, each numbered against the frame before it", () => {

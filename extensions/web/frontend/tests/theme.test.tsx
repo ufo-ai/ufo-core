@@ -243,6 +243,20 @@ test("the working pulse yields to reduced motion in the built sheet", () => {
 test("the reading plane's tokens survive into the built sheet", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(css).toContain("--leading-reading:1.65");
+  expect(css).toContain("--size-decode-cell:1ch");
+  // Both channels are declared, and each mix resolves on the cell that carries `--f` rather than at
+  // the root, where there is no such value to read. The weights themselves are taste and move.
+  for (const end of ["--ripple-lo", "--ripple-hi", "--pulse-lo", "--pulse-hi"]) {
+    expect(css).toContain(end + ":");
+  }
+  expect(css).toContain(
+    ".decode-ripple{color:color-mix(insrgb,var(--ripple-hi)calc(var(--f)*1%),var(--ripple-lo))}",
+  );
+  expect(css).toContain(
+    ".decode-pulse{color:color-mix(insrgb,var(--pulse-hi)calc(var(--f)*1%),var(--pulse-lo))}",
+  );
+  // Every colour is the palette's own steps: the ember channel names no gold of its own.
+  expect(css).toContain("--pulse-hi:color-mix(insrgb,var(--accent-secondary)");
   expect(css).toContain("--shadow-raised:");
   expect(css).toContain("box-shadow:var(--shadow-raised)");
   expect(css).toContain("--color-link:var(--accent-primary)");
@@ -250,6 +264,30 @@ test("the reading plane's tokens survive into the built sheet", () => {
   expect(css).toContain("--color-affirm:color-mix(insrgb,var(--accent-primary)15%,var(--bkgd-100))");
   expect(css).toContain(
     "--color-attention:color-mix(insrgb,var(--accent-secondary)15%,var(--bkgd-100))",
+  );
+});
+
+test("the orbit mark's motion and palette composites survive into the built sheet", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  // The three lights' travel is precomputed keyframes, and each frame is a fraction of `--s`.
+  for (const name of ["ufo-orbit-0", "ufo-orbit-1", "ufo-orbit-2"]) {
+    expect(css).toContain(`@keyframes${name}{0%{transform:translate(calc(var(--s)*`);
+  }
+  expect(css).toContain("--s:var(--size-glyph)");
+  // The lights are the warm accent laid over the primary text tone, which flips with the scheme.
+  expect(css).toContain(
+    "--orbit-core:color-mix(insrgb,var(--accent-secondary)20%,var(--text-primary))",
+  );
+  expect(css).toContain(
+    "--orbit-mid:color-mix(insrgb,var(--accent-secondary)40%,var(--text-primary))",
+  );
+  // The static pose is the keyframes' 0% — the lights parked on the ∵ triangle — and the travel
+  // is granted by name only where motion is welcome, so reduced motion keeps the parked triangle.
+  expect(css).toContain(
+    "[data-slot=orbit]>span:first-child{transform:translate(calc(var(--s)*-.28),calc(var(--s)*-.15))}",
+  );
+  expect(css).toMatch(
+    /@media\(prefers-reduced-motion:no-preference\)\{\[data-slot=orbit\]>span:first-child\{animation-name:ufo-orbit-0\}/,
   );
 });
 

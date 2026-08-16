@@ -34,11 +34,21 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("a tool frame reports its description, and its tool and preview when it has none", async () => {
+test("a tool frame decodes its complete description, and uses its tool and preview when absent", async () => {
   const stream = await streaming();
   stream.emit("tool", { description: "Reading the calendar", tool: "cal", preview: "list" });
   const dock = await screen.findByText("Reading the calendar");
-  expect(dock.className).toContain("shimmer");
+  const decoded = dock.parentElement!.querySelector("[data-slot=decode-text]")!;
+  expect(decoded.textContent).toHaveLength("Reading the calendar".length);
+  expect(decoded.textContent).not.toBe("Reading the calendar");
+  expect(decoded.textContent?.replaceAll(" ", "")).not.toMatch(/[A-Za-z]/);
+  // A space is a break between words rather than a cell, so it is the only character without one.
+  expect(decoded.querySelectorAll("[data-slot=decode-cell]")).toHaveLength(
+    "Reading the calendar".replaceAll(" ", "").length,
+  );
+  expect(decoded.querySelector("[data-slot=decode-cell]")?.className).toContain(
+    "w-(--size-decode-cell)",
+  );
   stream.emit("tool", { tool: "bash", preview: "ls -la" });
   expect(await screen.findByText("bash ls -la")).toBeTruthy();
 });

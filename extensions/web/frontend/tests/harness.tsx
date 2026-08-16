@@ -102,10 +102,12 @@ export class StreamFake {
   }
 }
 
-/** A streaming reply is drawn word by word, so one line of prose lives in more than one element.
- *  `saying` matches the innermost element whose whole text is that line. */
+/** A streaming reply is drawn word by word and, at its head, character by character, so one line of
+ *  prose lives in more than one element and a word carries the space beside it. `saying` matches the
+ *  innermost element whose whole text is that line. */
 export function saying(line: string | RegExp) {
-  const matches = (text: string) => (typeof line === "string" ? text === line : line.test(text));
+  const matches = (text: string) =>
+    typeof line === "string" ? text.trim() === line : line.test(text);
   return (_content: string, node: Element | null) =>
     node !== null &&
     matches(node.textContent ?? "") &&
