@@ -107,6 +107,10 @@ class LocalCarrier:
                 "REQUESTS_CA_BUNDLE": str(ca_path),
                 "CURL_CA_BUNDLE": str(ca_path),
                 "NODE_EXTRA_CA_CERTS": str(ca_path),
+                # git and cargo (libcurl) ignore CURL_CA_BUNDLE when they set their own CAINFO, so a
+                # MITM'd host (a cache-fronted registry, or git rewritten to the cache) needs these.
+                "GIT_SSL_CAINFO": str(ca_path),
+                "CARGO_HTTP_CAINFO": str(ca_path),
                 **spec.env,
             },
         )

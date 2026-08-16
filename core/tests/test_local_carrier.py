@@ -258,12 +258,23 @@ async def test_exec_carries_the_egress_environment(tmp_path: Path) -> None:
     handle = await carrier.create(_spec(tmp_path / "workspace"))
 
     result = await carrier.exec(
-        handle, ("bash", "-lc", 'printf "%s|%s" "$HTTPS_PROXY" "$ANTHROPIC_API_KEY"'), 30
+        handle,
+        (
+            "bash",
+            "-lc",
+            'printf "%s|%s|%s|%s" "$HTTPS_PROXY" "$ANTHROPIC_API_KEY" '
+            '"$GIT_SSL_CAINFO" "$CARGO_HTTP_CAINFO"',
+        ),
+        30,
     )
 
-    proxy, sentinel = result.stdout.split("|")
+    proxy, sentinel, git_ca, cargo_ca = result.stdout.split("|")
     assert proxy == f"http://{RUN_TOKEN}:@127.0.0.1:{PROXY_PORT}"
     assert sentinel == SENTINEL_MODEL_KEY
+    # git and cargo (libcurl) ignore CURL_CA_BUNDLE, so they get their own CAINFO or a MITM'd host
+    # fails their TLS. Both point at the same proxy CA the other consumers do.
+    assert git_ca and git_ca == handle.egress_env["SSL_CERT_FILE"]
+    assert cargo_ca == git_ca
 
 
 async def test_the_serve_environment_does_not_reach_a_command(

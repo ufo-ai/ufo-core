@@ -14,11 +14,16 @@ use base64::Engine;
 const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
 const TRUST_BUNDLE_FILE: &str = "trust-bundle.pem";
 const PEM_LINE_BYTES: usize = 64;
-const CA_CERT_CONSUMERS: [&str; 4] = [
+// The CA-bundle env vars the toolchains read. libcurl tools (git, cargo) ignore CURL_CA_BUNDLE when
+// they set their own CAINFO, so each needs its own override or a MITM'd host (a cache-fronted
+// registry, or git rewritten to the cache) fails with "unable to get local issuer certificate".
+const CA_CERT_CONSUMERS: [&str; 6] = [
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE",
     "NODE_EXTRA_CA_CERTS",
+    "GIT_SSL_CAINFO",
+    "CARGO_HTTP_CAINFO",
 ];
 const SPAWN_FAILED_CODE: i32 = 127;
 const EXIT_POLL: Duration = Duration::from_millis(20);
@@ -304,8 +309,10 @@ mod tests {
     #[test]
     fn materializes_the_trust_bundle() {
         let dir = scratch("ca");
+        // The `test` guards prove git and cargo see the same bundle as curl/openssl; if either var
+        // is unset or points elsewhere the `cat` is skipped and the certificate assertions fail.
         let reply = run(
-            r#"{"argv":["/bin/sh","-c","cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
+            r#"{"argv":["/bin/sh","-c","test \"$GIT_SSL_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$CARGO_HTTP_CAINFO\" = \"$SSL_CERT_FILE\" && cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
             &dir,
             Path::new("/tmp"),
             30,
