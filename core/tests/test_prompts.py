@@ -56,7 +56,7 @@ def test_shell_asks_for_the_source_without_naming_a_surface() -> None:
         assert surface not in SHELL
 
 
-def test_shell_splits_long_delivery_between_chat_and_one_markdown_report() -> None:
+def test_shell_writes_the_report_and_sends_it_only_when_the_member_asks() -> None:
     assert SHELL.count(DELIVERY_REGISTER_BLOCK) == 1
     prose = " ".join(SHELL.split())
     assert "A delivery crosses an agent boundary" in prose
@@ -70,6 +70,22 @@ def test_shell_splits_long_delivery_between_chat_and_one_markdown_report() -> No
     assert "distinguish the rule from the instance" in prose
     assert "put the full report in one Markdown artifact" in prose
     assert "never duplicate its body inline" in prose
+    assert "Write that artifact to /workspace" in prose
+    assert "say in the inline delivery that the fuller write-up is there and can be sent" in prose
+    assert (
+        "Share it with share_file only when the member asked for a file, a document, or a format, "
+        "or when they ask for proof, evidence, or a fuller explanation the artifact answers"
+    ) in prose
+    assert "says the full write-up is written and can be sent" in prose
+    assert (
+        "Send it with share_file when the member asks for it, for proof, or for a fuller "
+        "explanation, or when they asked for a file or a format"
+    ) in prose
+    assert "then the remedy, and name the written record" in prose
+    assert "Every inline delivery is plain prose with no header" in prose
+    assert "write the report in the message itself" not in prose
+    assert "A written answer nobody asked to receive as a file" not in prose
+    assert "reasoning in the same message below it" not in prose
     assert "Send it a task-register objective" in prose
     assert "Keep a spawn foreground when your next step needs its result" in prose
     assert "A subagent's return is a short text summary" not in SHELL

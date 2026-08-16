@@ -6,14 +6,16 @@ description: Load before writing findings, notes, or sources up into a report or
 
 Markdown report artifacts produce research reports in standard GitHub-Flavored Markdown (GFM) format with inline citations.
 
-### Output File
+### Where the report goes
 
-**Always write the report to a file with a `.md` extension.**
+**Always write the report to a file with a `.md` extension. Share that file only when the user asked
+for a file or a format, or when they ask for proof, evidence, or a fuller explanation.**
 
 - Derive the filename from the query topic: `<topic>.md`
 - Use lowercase kebab-case for filenames
 - Write the file to the workspace directory using the file writing tool
-- After writing, share the file with the user so they can view the rendered report
+- Do not share the file by default — tell the user the full write-up is written and can be sent
+- When a file is asked for, share it so the user can view the rendered report
 - The chat response should contain a brief summary — the full report lives in the `.md` file
 
 ### Content Format
@@ -283,7 +285,8 @@ Adapt structure to what the query actually requires—do not force a template on
 
 ### Quality Checklist
 
-- [ ] Report written to a `<topic>.md` file and shared with user
+- [ ] Report written to a `<topic>.md` file, named in the chat response, and shared only when the
+      user asked for a file or asked for proof or a fuller explanation
 - [ ] Valid GFM syntax, appropriate heading hierarchy
 - [ ] Markdown tables for comparisons and structured data
 - [ ] No MMD syntax — plain GFM only (LaTeX math allowed per `<mathematical_expressions>`)

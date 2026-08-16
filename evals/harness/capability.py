@@ -274,7 +274,8 @@ class CapabilityCase:
     inbound from the first turn's output and durable state; returning None grades the first turn.
     `rubric` judges the answer text — with `answer_spans_artifacts`, the Markdown the turn shared
     joins that answer, for a case whose reply is expected to carry its detail in a shared file
-    rather than inline; `artifact_rubric` judges the Markdown files the turn shared;
+    rather than inline; `artifact_rubric` judges the Markdown files the turn shared, or, when
+    `written_report` names a workspace glob, the Markdown the turn wrote there without sharing;
     `visual_rubric` judges its rendered page images. Each reaches the model judge only after the
     deterministic grader passes and requires a judge model on the task. `seed`, when set, receives
     (workspace_id, agent_id, blob) before the case's conversation opens and establishes the state
@@ -292,6 +293,7 @@ class CapabilityCase:
     digest_tag: str = ""
     rubric: tuple[str, ...] = ()
     artifact_rubric: tuple[str, ...] = ()
+    written_report: str = ""
     answer_spans_artifacts: bool = False
     visual_rubric: tuple[str, ...] = ()
     member_key: str | None = None
@@ -326,6 +328,8 @@ class CapabilityCase:
             payload["visualRubric"] = list(self.visual_rubric)
         if self.artifact_rubric:
             payload["artifactRubric"] = list(self.artifact_rubric)
+        if self.written_report:
+            payload["writtenReport"] = self.written_report
         if self.answer_spans_artifacts:
             payload["answerSpansArtifacts"] = True
         if self.rubric or self.artifact_rubric or self.visual_rubric:
@@ -567,20 +571,25 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
             answer = _answer_spanning_artifacts(answer, result.output.artifacts)
         verdicts.append(await rubric_pass(case.message, answer, case.rubric, target.judge))
     if case.artifact_rubric:
-        markdown = tuple(
-            artifact
-            for artifact in result.output.artifacts
-            if artifact.name.lower().endswith(".md")
-        )
+        if case.written_report:
+            markdown = written_markdown(result.output, case.written_report)
+            missing = f"no written Markdown report matching {case.written_report} to judge"
+        else:
+            markdown = tuple(
+                artifact
+                for artifact in result.output.artifacts
+                if artifact.name.lower().endswith(".md")
+            )
+            missing = "no shared Markdown artifact to judge"
         if not markdown:
-            verdicts.append(RubricVerdict(False, "no shared Markdown artifact to judge"))
+            verdicts.append(RubricVerdict(False, missing))
         else:
             try:
                 answer = "\n\n".join(
                     f"# {artifact.name}\n\n{artifact.content.decode()}" for artifact in markdown
                 )
             except UnicodeDecodeError:
-                verdicts.append(RubricVerdict(False, "shared Markdown artifact is not UTF-8"))
+                verdicts.append(RubricVerdict(False, "the Markdown report is not UTF-8"))
             else:
                 verdicts.append(
                     await rubric_pass(case.message, answer, case.artifact_rubric, target.judge)
@@ -598,6 +607,19 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
         ),
         result.trajectory,
         judge=tuple(criterion for verdict in verdicts for criterion in verdict.criteria),
+    )
+
+
+def written_markdown(output: CapabilityOutput, pattern: str) -> tuple[SharedArtifact, ...]:
+    """The Markdown the turn wrote into its own workspace, whether or not it shared it. A case whose
+    report is written for the member to ask for has no shared artifact to judge, so the file on disk
+    is the record, and the deterministic grader and the judge read the same bytes."""
+    if output.workspace_dir is None:
+        return ()
+    return tuple(
+        SharedArtifact(path.name, path.read_bytes())
+        for path in sorted(output.workspace_dir.glob(pattern))
+        if path.is_file()
     )
 
 

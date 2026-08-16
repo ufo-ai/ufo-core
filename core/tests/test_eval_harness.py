@@ -35,6 +35,7 @@ from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
+from evals.closing_message import CASES as CLOSING_CASES
 from evals.closing_message import (
     brief_scorer,
     inlined_scorer,
@@ -128,12 +129,13 @@ from evals.response_register import CASES as REGISTER_CASES
 from evals.response_register import (
     CHANGE_NOTE,
     DELEGATED_CASES,
+    REPORT_GLOB,
     SOURCE_CREDENTIALS,
     Shape,
     conversational_scorer,
-    delegated_split_delivery_scorer,
+    delegated_written_report_scorer,
     measure,
-    split_delivery_scorer,
+    written_report_scorer,
 )
 from ufo.accounting import Pricing
 from ufo.agents import AGENT_KIND
@@ -1213,10 +1215,17 @@ class ArtifactTarget:
 
     artifacts: tuple[SharedArtifact, ...]
     judge: JudgeLeg | None = None
+    workspace_dir: Path | None = None
 
     async def run(self, case: CapabilityCase) -> TargetResult:
         return TargetResult(
-            CapabilityOutput("ANSWER: shared", (), artifacts=self.artifacts), clean=True
+            CapabilityOutput(
+                "ANSWER: shared",
+                (),
+                artifacts=self.artifacts,
+                workspace_dir=self.workspace_dir,
+            ),
+            clean=True,
         )
 
 
@@ -3203,29 +3212,25 @@ async def test_conversational_scorer_flags_a_reply_spread_over_too_many_lines() 
     assert "words over" not in verdict.reason
 
 
-async def test_split_delivery_scorer_requires_a_short_summary_and_shared_report() -> None:
-    scorer = split_delivery_scorer(25, 120, 6, 200, 3)
-    inline = CapabilityOutput(" ".join(["word"] * 250), ())
-    verdict = await scorer(inline)
-    assert not verdict.passed
-    assert "summary has 250 words over the 120 budget" in verdict.reason
-    assert "did not deliver exactly one Markdown report" in verdict.reason
-    body = " ".join(["word"] * 70)
-    report = f"## One\n{body}\n\n## Two\n{body}\n\n## Three\n{body}".encode()
-    summary = " ".join(["summary"] * 40)
-    delivered = CapabilityOutput(
-        summary,
-        (
-            ToolInvocation(
-                "share_file",
-                {"file_path": "/workspace/report.md"},
-                '{"name":"report.md"}',
-                has_result=True,
-            ),
-        ),
-        artifacts=(SharedArtifact("report.md", report),),
-    )
-    passing = await scorer(delivered)
+def _written_report(directory: Path, name: str, headers: int, words: int) -> Path:
+    """One Markdown report on disk, of a measured shape: the file a written delivery leaves in the
+    workspace for the member to ask for."""
+    body = " ".join(["word"] * (words // headers))
+    report = directory / name
+    report.write_text("\n\n".join(f"## Section {index}\n{body}" for index in range(1, headers + 1)))
+    return report
+
+
+async def test_written_report_scorer_requires_a_short_summary_naming_an_unsent_report(
+    tmp_path: Path,
+) -> None:
+    scorer = written_report_scorer(25, 120, 6, 200, 3)
+    _written_report(tmp_path, "report.md", headers=3, words=210)
+    summary = " ".join(["summary"] * 39) + " report.md"
+    written = CapabilityOutput(summary, (), workspace_dir=tmp_path)
+
+    passing = await scorer(written)
+
     assert passing.passed
     assert passing.evidence["summary"] == {
         "words": 40,
@@ -3235,62 +3240,81 @@ async def test_split_delivery_scorer_requires_a_short_summary_and_shared_report(
     }
     assert passing.evidence["report"] == {
         "name": "report.md",
-        "words": 216,
+        "words": 219,
         "lines": 6,
         "headers": 3,
         "bullets": 0,
     }
+    assert passing.evidence["sharedFiles"] == 0
+    assert "written to the workspace and never shared" in grading_statement(scorer)
+    unnamed = await scorer(replace(written, response=" ".join(["summary"] * 40)))
+    assert not unnamed.passed
+    assert "summary does not name the report.md write-up" in unnamed.reason
 
 
-async def test_split_delivery_scorer_rejects_a_stub_report() -> None:
-    scorer = split_delivery_scorer(25, 120, 6, 200, 3)
-    stub = b"## One\nshort\n\n## Two\nshort\n\n## Three\nshort"
-    output = CapabilityOutput(
-        " ".join(["summary"] * 40),
+async def test_written_report_scorer_fails_a_report_the_member_received(tmp_path: Path) -> None:
+    scorer = written_report_scorer(25, 120, 6, 200, 3)
+    report = _written_report(tmp_path, "report.md", headers=3, words=210)
+    shared = CapabilityOutput(
+        " ".join(["summary"] * 39) + " report.md",
         (
             ToolInvocation(
                 "share_file",
-                {"file_path": "/workspace/report.md"},
+                {"file_path": str(report)},
                 '{"name":"report.md"}',
                 has_result=True,
             ),
         ),
-        artifacts=(SharedArtifact("report.md", stub),),
+        artifacts=(SharedArtifact("report.md", report.read_bytes()),),
+        workspace_dir=tmp_path,
     )
 
-    verdict = await scorer(output)
+    verdict = await scorer(shared)
 
     assert not verdict.passed
-    assert "report has 9 words under the 200 floor" in verdict.reason
+    assert "shared 1 files for an ask that named none" in verdict.reason
 
 
-async def test_split_delivery_scorer_keeps_the_summary_and_header_floors() -> None:
-    scorer = split_delivery_scorer(25, 120, 6, 200, 3)
-    report = " ".join(["word"] * 210).encode()
-    output = CapabilityOutput(
-        " ".join(["summary"] * 10),
-        (
-            ToolInvocation(
-                "share_file",
-                {"file_path": "/workspace/report.md"},
-                '{"name":"report.md"}',
-                has_result=True,
-            ),
-        ),
-        artifacts=(SharedArtifact("report.md", report),),
+async def test_written_report_scorer_rejects_a_missing_or_stub_report(tmp_path: Path) -> None:
+    scorer = written_report_scorer(25, 120, 6, 200, 3)
+    summary = " ".join(["summary"] * 39) + " report.md"
+
+    unwritten = await scorer(CapabilityOutput(summary, (), workspace_dir=tmp_path))
+
+    assert not unwritten.passed
+    assert "wrote 0 Markdown reports to the workspace, expected one" in unwritten.reason
+    (tmp_path / "report.md").write_text("## One\nshort\n\n## Two\nshort\n\n## Three\nshort")
+    stub = await scorer(CapabilityOutput(summary, (), workspace_dir=tmp_path))
+    assert not stub.passed
+    assert "report has 9 words under the 200 floor" in stub.reason
+    _written_report(tmp_path, "notes.md", headers=3, words=210)
+    doubled = await scorer(CapabilityOutput(summary, (), workspace_dir=tmp_path))
+    assert not doubled.passed
+    assert "wrote 2 Markdown reports to the workspace, expected one" in doubled.reason
+
+
+async def test_written_report_scorer_keeps_the_summary_budget_and_the_header_floor(
+    tmp_path: Path,
+) -> None:
+    scorer = written_report_scorer(25, 120, 6, 200, 3)
+    (tmp_path / "report.md").write_text(" ".join(["word"] * 210))
+
+    verdict = await scorer(
+        CapabilityOutput(" ".join(["word"] * 130) + " report.md", (), workspace_dir=tmp_path)
     )
 
-    verdict = await scorer(output)
-
     assert not verdict.passed
-    assert "summary has 10 words under the 25 floor" in verdict.reason
+    assert "summary has 131 words over the 120 budget" in verdict.reason
     assert "report has 0 headers under the 3 floor" in verdict.reason
+    clipped = await scorer(CapabilityOutput("report.md", (), workspace_dir=tmp_path))
+    assert not clipped.passed
+    assert "summary has 1 words under the 25 floor" in clipped.reason
 
 
-async def test_delegated_split_delivery_scorer_proves_all_three_hops() -> None:
-    report_path = "/workspace/evidence.md"
+async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: Path) -> None:
+    report_path = str(tmp_path / "evidence.md")
     sources = ("/workspace/note.md", "/workspace/code.py")
-    scorer = delegated_split_delivery_scorer(report_path, sources, 160, 100, 6, 25, 120, 6, 200, 3)
+    scorer = delegated_written_report_scorer(report_path, sources, 160, 100, 6, 25, 120, 6, 200, 3)
     report = (
         "## Evidence\n"
         + " ".join(["fact"] * 70)
@@ -3320,29 +3344,37 @@ async def test_delegated_split_delivery_scorer_proves_all_three_hops() -> None:
     write = ToolInvocation(
         "write", {"file_path": report_path, "content": report}, "ok", has_result=True
     )
-    output = CapabilityOutput(
-        (
-            "A matching connected account takes precedence over the workspace key. These files "
-            "do not establish what happened to this incident. The evidence is in evidence.md."
-        ),
-        (spawn, share, write),
-        artifacts=(SharedArtifact("evidence.md", report.encode()),),
+    (tmp_path / "evidence.md").write_text(report)
+    member_reply = (
+        "A matching connected account takes precedence over the workspace key. These files do "
+        "not establish what happened to this incident. The complete evidence is written to "
+        "evidence.md and I can send it."
     )
+    output = CapabilityOutput(member_reply, (spawn, write), workspace_dir=tmp_path)
 
     verdict = await scorer(output)
 
     assert verdict.passed
     assert verdict.evidence["delegatedSummary"]["words"] == 10
     assert verdict.evidence["subagentSummary"]["words"] == 20
-    child_shared = await scorer(replace(output, calls=(spawn, write, share)))
-    assert not child_shared.passed
-    assert "parent did not share" in child_shared.reason
+    parent_shared = await scorer(
+        replace(
+            output,
+            calls=(spawn, share, write),
+            artifacts=(SharedArtifact("evidence.md", report.encode()),),
+        )
+    )
+    assert not parent_shared.passed
+    assert "shared 1 files for an ask that named none" in parent_shared.reason
+    silent = await scorer(replace(output, response=" ".join(["evidence"] * 40)))
+    assert not silent.passed
+    assert "summary does not name the evidence.md write-up" in silent.reason
     background = replace(
         spawn,
         input={**spawn.input, "background": True},
         result="spawned general_purpose subagent (turn child-id)",
     )
-    not_collected = await scorer(replace(output, calls=(background, share, write)))
+    not_collected = await scorer(replace(output, calls=(background, write)))
     assert not not_collected.passed
     assert "delegation returned no prose result" in not_collected.reason
 
@@ -3357,7 +3389,6 @@ async def test_delegated_split_delivery_scorer_proves_all_three_hops() -> None:
             output,
             calls=(
                 with_task(f"Write the complete report to {report_path}."),
-                share,
                 write,
             ),
         )
@@ -3366,63 +3397,59 @@ async def test_delegated_split_delivery_scorer_proves_all_three_hops() -> None:
         assert f"does not reference {path}" in missing_sources.reason
 
     failures = (
-        (replace(output, calls=(share, write)), "expected one general-purpose delegation"),
+        (replace(output, calls=(write,)), "expected one general-purpose delegation"),
         (
-            replace(output, calls=(with_task(None), share, write)),
+            replace(output, calls=(with_task(None), write)),
             "delegation has no prose task",
         ),
         (
             replace(
                 output,
-                calls=(with_task(f"{task} " + " ".join(["word"] * 160)), share, write),
+                calls=(with_task(f"{task} " + " ".join(["word"] * 160)), write),
             ),
             "delegated summary has 170 words over the 160 budget",
         ),
         (
-            replace(output, calls=(with_task(f"# Work\n{task}"), share, write)),
+            replace(output, calls=(with_task(f"# Work\n{task}"), write)),
             "delegated summary uses document structure",
         ),
         (
-            replace(output, calls=(with_task("Read note.md and repo/code.py."), share, write)),
+            replace(output, calls=(with_task("Read note.md and repo/code.py."), write)),
             f"does not reference {report_path}",
         ),
         (
             replace(
                 output,
-                calls=(
-                    with_result(" ".join(["result"] * 100) + f" {report_path}"),
-                    share,
-                    write,
-                ),
+                calls=(with_result(" ".join(["result"] * 100) + f" {report_path}"), write),
             ),
             "subagent summary has 101 words over the 100 budget",
         ),
         (
             replace(
                 output,
-                calls=(with_result("\n".join(["line"] * 6 + [report_path])), share, write),
+                calls=(with_result("\n".join(["line"] * 6 + [report_path])), write),
             ),
             "subagent summary has 7 lines over the 6 budget",
         ),
         (
             replace(
                 output,
-                calls=(with_result(f"# Result\nComplete report: {report_path}"), share, write),
+                calls=(with_result(f"# Result\nComplete report: {report_path}"), write),
             ),
             "subagent summary uses document structure",
         ),
         (
-            replace(output, calls=(with_result("Done."), share, write)),
+            replace(output, calls=(with_result("Done."), write)),
             "subagent summary does not reference its report",
         ),
-        (replace(output, calls=(spawn, share)), "expected one subagent report write"),
-        (replace(output, calls=(spawn, write)), "expected one parent report share"),
+        (replace(output, calls=(spawn,)), "expected one subagent report write"),
         (
-            replace(
-                output,
-                artifacts=(SharedArtifact("evidence.md", report.encode() + b" changed"),),
-            ),
-            "member did not receive the subagent's report bytes",
+            replace(output, calls=(write, spawn)),
+            "the report was not written by the delegated subagent",
+        ),
+        (
+            replace(output, response="Precedence is in evidence.md."),
+            "summary has 4 words under the 25 floor",
         ),
     )
     for changed, reason in failures:
@@ -3534,7 +3561,20 @@ def test_register_length_floors_keep_brevity_from_rewarding_clipped_disputes() -
     gradings = [grading_statement(case.grader) for case in REGISTER_CASES]
     assert sum("at most" in grading for grading in gradings) == 10
     assert sum("at least" in grading for grading in gradings) == 5
-    assert sum("shared Markdown report" in grading for grading in gradings) == 5
+    assert sum("written to the workspace and never shared" in grading for grading in gradings) == 5
+    assert sum("that names the write-up" in grading for grading in gradings) == 5
+    written = [case for case in REGISTER_CASES if case.written_report]
+    assert [case.written_report for case in written] == [REPORT_GLOB] * 5
+    assert all(case.artifact_rubric for case in written)
+
+
+def test_an_explicit_file_request_still_produces_one_shared_markdown() -> None:
+    """The register suite now fails a file nobody asked for, so the kept half of the rule needs its
+    own guard: an ask that names a markdown document still has to deliver one."""
+    (case,) = [item for item in CLOSING_CASES if item.name == "shared-file-stays-shared"]
+
+    assert "markdown timeline document" in case.message
+    assert "share_file delivers a durable .md artifact" in grading_statement(case.grader)
 
 
 def test_formatting_suite_runs_by_default_and_grades_both_shape_directions() -> None:
@@ -3583,14 +3623,24 @@ def test_the_grounding_case_stages_a_note_its_code_contradicts() -> None:
 def test_delegated_register_grades_the_unknown_incident_and_exact_task_budget() -> None:
     (case,) = DELEGATED_CASES
 
-    assert "at most 100 words" in grading_statement(case.grader)
-    assert "one parent-facing subagent result of at most 60 words" in grading_statement(case.grader)
-    assert "over at most 6 lines" in grading_statement(case.grader)
-    assert "at most 80 words" in grading_statement(case.grader)
+    grading = grading_statement(case.grader)
+
+    assert "at most 100 words" in grading
+    assert "one parent-facing subagent result of at most 60 words" in grading
+    assert "over at most 6 lines" in grading
+    assert "summary of at most 80 words" in grading
+    assert "names the subagent's written report without sharing it" in grading
     assert "member-visible terms" in case.rubric[0]
     assert "do not establish what happened to this Drive sync" in case.rubric[1]
-    assert "That rule is not implementation evidence" in case.rubric[2]
+    assert (
+        "the summary contains only the member-facing answer, the unknown boundary, and the report "
+        "reference" in case.rubric[2]
+    )
     assert "possible causes are implementation evidence or hypotheses" in case.rubric[2]
+    assert (
+        "separates evidence about credential precedence from hypotheses" in case.artifact_rubric[2]
+    )
+    assert case.written_report == REPORT_GLOB
 
 
 async def test_rubric_parser_accepts_an_exactly_fenced_verdict() -> None:
@@ -4107,6 +4157,48 @@ async def test_an_answer_not_spanning_artifacts_judges_only_the_reply() -> None:
     assert isinstance(prompt, str)
     assert loads(prompt.splitlines()[1])["candidateAnswer"] == "ANSWER: shared"
     assert "answerSpansArtifacts" not in case.payload()
+
+
+async def test_artifact_case_judges_a_report_written_to_the_workspace_and_never_shared(
+    tmp_path: Path,
+) -> None:
+    judge = RecordingJudge()
+    (tmp_path / "analysis.md").write_text("## Evidence\n\nDetailed finding.")
+    case = CapabilityCase(
+        "report",
+        "write the analysis",
+        exact_scorer("shared"),
+        artifact_rubric=("develops the evidence",),
+        written_report=REPORT_GLOB,
+    )
+
+    result = await run_capability_case(case, ArtifactTarget((), judge, workspace_dir=tmp_path))
+
+    assert result.passed
+    prompt = judge.messages[0].content
+    assert isinstance(prompt, str)
+    payload = loads(prompt.splitlines()[1])
+    assert payload["candidateAnswer"] == "# analysis.md\n\n## Evidence\n\nDetailed finding."
+    assert case.payload()["writtenReport"] == REPORT_GLOB
+
+
+async def test_artifact_case_fails_before_the_model_without_a_written_report(
+    tmp_path: Path,
+) -> None:
+    case = CapabilityCase(
+        "report",
+        "write the analysis",
+        exact_scorer("shared"),
+        artifact_rubric=("develops the evidence",),
+        written_report=REPORT_GLOB,
+    )
+
+    result = await run_capability_case(
+        case, ArtifactTarget((), UncalledJudge(), workspace_dir=tmp_path)
+    )
+
+    assert not result.passed
+    assert f"no written Markdown report matching {REPORT_GLOB} to judge" in result.reason
 
 
 async def test_artifact_case_fails_before_the_model_without_shared_markdown() -> None:
