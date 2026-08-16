@@ -361,16 +361,22 @@ export function ConversationTranscript({
   conversationId,
   title,
   messages,
+  onOpenArtifacts,
 }: {
   conversationId: string;
   title: ReactNode;
   messages: Message[];
+  onOpenArtifacts?: () => void;
 }) {
   return (
     <Section title={title}>
       {messages.length ? (
         <TranscriptScroll>
-          <MessageLog messages={messages} conversationId={conversationId} />
+          <MessageLog
+            messages={messages}
+            conversationId={conversationId}
+            onOpenArtifacts={onOpenArtifacts}
+          />
         </TranscriptScroll>
       ) : (
         <PanelBlank body="No messages in this conversation yet." />
@@ -383,10 +389,12 @@ export function ConversationDetail({
   agent,
   conversation,
   onBack,
+  onOpenArtifacts,
 }: {
   agent: Agent;
   conversation: Conversation;
   onBack: () => void;
+  onOpenArtifacts?: () => void;
 }) {
   const path = "/agents/" + agent.id + "/conversations/" + conversation.id;
   const state = usePanelRead<{ messages: Message[] }>(path + "/transcript");
@@ -401,6 +409,7 @@ export function ConversationDetail({
             conversationId={conversation.id}
             title={conversationTitle(conversation, viewer)}
             messages={payload.messages}
+            onOpenArtifacts={onOpenArtifacts}
           />
         )}
       </Panel>

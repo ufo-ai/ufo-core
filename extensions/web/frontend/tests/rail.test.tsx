@@ -574,6 +574,87 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
   expect(within(out).getByText("↗").className).toContain("text-ink-soft");
 });
 
+/** A conversation another surface holds shares files the same way the chat does, so its markdown
+ *  cards open the artifacts sidebar there too — a read-only transcript is not a pane without a
+ *  sidebar. */
+test("a markdown file in a Slack conversation opens the artifacts sidebar", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({
+        type: "artifacts",
+        artifacts: [
+          {
+            filename: "notes.md",
+            subject: null,
+            media_type: "text/markdown",
+            size_bytes: 512,
+            created_at: "2026-08-16T12:00:00Z",
+            url: "/dl/notes.md",
+            preview: null,
+          },
+        ],
+        truncated: false,
+      }),
+    ["/conversations/" + CONVO_ID + "/transcript"]: () =>
+      json({
+        messages: [
+          { role: "user", text: "from Slack" },
+          {
+            role: "assistant",
+            text: "wrote it up",
+            files: [
+              {
+                filename: "notes.md",
+                url: "/dl/notes.md",
+                size_bytes: 512,
+                preview_url: null,
+                media_type: "text/markdown",
+              },
+            ],
+          },
+        ],
+      }),
+    "/dl/notes.md": () => new Response("# Notes"),
+    "/slots": () =>
+      json({
+        slots: [
+          { id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifacts", count: 1 },
+        ],
+      }),
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({
+            chats: [],
+            conversation: {
+              id: CONVO_ID,
+              agent: { id: AGENT_ID, name: AGENT.name },
+              surface: "slack",
+              surface_label: "#ops-warehouse",
+              audience: "shared",
+              member_email: null,
+              source: "https://acme.slack.com/archives/C1/p1700000000000100",
+              turn_count: 1,
+              created_at: "2026-08-01T08:00:00Z",
+              last_turn_at: "2026-08-01T08:01:00Z",
+              readable: true,
+              disclosable: false,
+            },
+          })
+        : json({ chats: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const card = await screen.findByRole("button", { name: "notes.md" });
+  expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
+  await userEvent.click(card);
+  expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
+  const pane = await screen.findByRole("complementary", { name: "Artifacts" });
+  expect(await within(pane).findByText("notes.md")).toBeTruthy();
+  await userEvent.click(within(pane).getByRole("button", { name: "Close slot" }));
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
+});
+
 test("the new-conversation control targets the main agent, or picks among several", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);

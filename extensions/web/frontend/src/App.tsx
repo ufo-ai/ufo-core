@@ -599,6 +599,8 @@ function RoutedPane({
           key={linkedConversation.id}
           agent={linkedAgent}
           conversation={linkedConversation}
+          slot={route.slot}
+          onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
           onOpenAgent={onOpenAgent}
         />
       );
@@ -664,33 +666,61 @@ function RoutedPane({
 function LinkedPane({
   agent,
   conversation,
+  slot,
+  onSelectSlot,
   onOpenAgent,
 }: {
   agent: Agent;
   conversation: OwnedConversation;
+  slot?: string;
+  onSelectSlot: (slot: string | null) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
 }) {
   const [disclosed, setDisclosed] = useState(false);
   const back = () => onOpenAgent(agent.id, "conversations");
+  const readable = conversation.readable || disclosed;
   return (
-    <Pane className={COLUMN}>
-      <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
-        {conversation.readable || disclosed ? (
-          <>
-            <ConversationDetail agent={agent} conversation={conversation} onBack={back} />
-            <p className="max-w-hint text-ink-soft">
-              This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
-              continue it.
-            </p>
-          </>
-        ) : (
-          <Disclose
-            agent={agent}
-            conversation={conversation}
-            onBack={back}
-            onOpened={() => setDisclosed(true)}
-          />
+    <Pane>
+      <div
+        className={cn(
+          "relative grid min-h-0 flex-1 grid-cols-1",
+          readable && slot && "grid-cols-(--grid-slot) max-narrow:grid-cols-1",
         )}
+      >
+        <div className="flex min-h-0 min-w-0 flex-col">
+          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
+            {readable ? (
+              <>
+                <ConversationDetail
+                  agent={agent}
+                  conversation={conversation}
+                  onBack={back}
+                  onOpenArtifacts={() => onSelectSlot("artifacts")}
+                />
+                <p className="max-w-hint text-ink-soft">
+                  This conversation is read-only here. Reply in {surfaceWord(conversation.surface)}{" "}
+                  to continue it.
+                </p>
+              </>
+            ) : (
+              <Disclose
+                agent={agent}
+                conversation={conversation}
+                onBack={back}
+                onOpened={() => setDisclosed(true)}
+              />
+            )}
+          </div>
+        </div>
+        {readable && slot ? (
+          <ConversationSlotPane
+            agent={agent}
+            conversationId={conversation.id}
+            slot={slot}
+            embedded
+            onClose={() => onSelectSlot(null)}
+          />
+        ) : null}
       </div>
     </Pane>
   );
