@@ -58,7 +58,9 @@ def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
 
 def test_app_s3_role_name_is_plan_known_and_shared() -> None:
     platform = Path(__file__).resolve().parents[2] / "infra/modules/platform"
-    assert 'app_s3_role_name = "${local.name}-app-s3"' in (platform / "main.tf").read_text()
+    assert re.search(
+        r'app_s3_role_name\s+= "\$\{local\.name\}-app-s3"', (platform / "main.tf").read_text()
+    )
     iam = IAM_MODULE.read_text()
     assert "name   = local.app_s3_role_name" in iam
     assert "role_name        = local.app_s3_role_name" in iam
@@ -68,14 +70,41 @@ def test_app_s3_role_name_is_plan_known_and_shared() -> None:
     )
 
 
-def test_platform_iam_grants_no_sandbox_identity() -> None:
-    """The sandbox reaches nothing under a cloud role: the workspace lives on the carrier's own
-    filesystem and artifact PUTs are presigned serve-side, so the platform carries no sandbox-fs
-    role, no proxy AssumeRole policy, and no proxy IRSA identity."""
+def test_cache_outputs_are_plan_known() -> None:
+    """The cache bucket name and role ARN render into the hosted manifest, whose keys feed a
+    for_each that must be known at plan time. So the outputs are built from plan-known inputs, never
+    from an apply-time attribute like `aws_s3_bucket.cache.id` that would break the plan on a fresh
+    bucket."""
+    outputs = (
+        Path(__file__).resolve().parents[2] / "infra/modules/platform/outputs.tf"
+    ).read_text()
+
+    def value_line(name: str) -> str:
+        block = outputs.split(f'output "{name}"', maxsplit=1)[1].split("output", 1)[0]
+        return next(line for line in block.splitlines() if line.strip().startswith("value"))
+
+    bucket = value_line("cache_s3_bucket")
+    assert "aws_s3_bucket.cache.id" not in bucket
+    assert "${local.name}-ufo-cache-${data.aws_caller_identity.current.account_id}" in bucket
+    assert "role/${local.cache_s3_role_name}" in value_line("cache_s3_role_arn")
+
+
+def test_platform_grants_the_proxy_only_cache_scoped_s3() -> None:
+    """The sandbox itself reaches nothing under a cloud role — its workspace lives on the carrier's
+    filesystem and artifact PUTs are presigned serve-side, so there is no sandbox-fs role and no
+    hand-rolled AssumeRole policy. The proxy pod's one cloud grant is the cache sidecar's durable
+    tier: an IRSA role bound to ufo-sandbox-proxy, scoped to the cache bucket alone — never the blob
+    bucket serve reaches."""
     module = IAM_MODULE.read_text()
     assert "sandbox_fs" not in module
-    assert "sandbox_proxy" not in module
     assert not re.search(r"sts:AssumeRole\b", module)
+    cache_role = module.split('module "irsa_cache_s3" {', maxsplit=1)[1]
+    assert 'namespace_service_accounts = ["ufo-*:ufo-sandbox-proxy"]' in cache_role
+    cache_policy = module.split('data "aws_iam_policy_document" "cache_s3" {', maxsplit=1)[1].split(
+        'resource "aws_iam_policy" "cache_s3"', maxsplit=1
+    )[0]
+    assert "aws_s3_bucket.cache.arn" in cache_policy
+    assert "aws_s3_bucket.blob" not in cache_policy
 
 
 def test_hosted_serve_receives_the_bedrock_region() -> None:
@@ -270,16 +299,20 @@ def test_hosted_proxy_has_resource_bounds() -> None:
     assert 'limits: {cpu: "2", memory: 768Mi}' in PROXY_DEPLOYMENT
 
 
-def test_hosted_proxy_carries_no_aws_identity() -> None:
-    """The proxy pod holds no cloud role: artifact PUTs are presigned serve-side and travel on
-    their own URL authority, so the proxy's service account carries no role-arn annotation and
-    the rendered template needs no role input for it."""
+def test_hosted_proxy_carries_only_the_cache_scoped_identity() -> None:
+    """The proxy pod holds no broad cloud role: artifact PUTs are presigned serve-side, so it needs
+    no blob access and there is no `proxy_role_arn` input. Its one cloud grant is the cache
+    sidecar's — the cache-bucket-scoped IRSA role, annotated on the SA only when the cache is
+    enabled, so a disk-only or cache-off deploy carries no identity at all."""
+    template = HOSTED_TEMPLATE.read_text()
     assert "serviceAccountName: ufo-sandbox-proxy" in PROXY_DEPLOYMENT
-    assert "proxy_role_arn" not in HOSTED_TEMPLATE.read_text()
-    proxy_account = HOSTED_TEMPLATE.read_text().split(
+    assert "proxy_role_arn" not in template
+    proxy_account = template.split(
         "kind: ServiceAccount\nmetadata:\n  name: ufo-sandbox-proxy", maxsplit=1
-    )[1]
-    assert "role-arn" not in proxy_account.split("---", maxsplit=1)[0]
+    )[1].split("---", maxsplit=1)[0]
+    assert "app_s3_role_arn" not in proxy_account
+    assert "%{ if cache_enabled }" in proxy_account
+    assert "eks.amazonaws.com/role-arn: ${cache_s3_role_arn}" in proxy_account
 
 
 def test_sites_answer_one_label_under_the_apex_behind_the_proxy() -> None:

@@ -250,10 +250,11 @@ data "kubectl_file_documents" "hosted" {
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
 
     # The sandbox cache (RFC 0032). `cache_enabled` gates the daemon sidecar; `cache_s3_bucket` empty
-    # runs it disk-only (cold on every pod roll) until the bucket and the proxy SA's IRSA policy for
-    # it are applied.
-    cache_enabled   = local.cache_enabled
-    cache_s3_bucket = ""
+    # runs it disk-only (cold on every pod roll). The bucket and IRSA role exist (created by the
+    # platform module); set `cache_s3_bucket = module.platform.cache_s3_bucket` to turn on durability.
+    cache_enabled     = local.cache_enabled
+    cache_s3_bucket   = ""
+    cache_s3_role_arn = module.platform.cache_s3_role_arn
 
     ses_sender           = var.ses_sender
     ses_region           = var.region

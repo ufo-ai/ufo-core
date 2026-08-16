@@ -235,6 +235,12 @@ kind: ServiceAccount
 metadata:
   name: ufo-sandbox-proxy
   namespace: ${namespace}
+%{ if cache_enabled }
+  # The cache sidecar assumes this IRSA role to reach its durable S3 tier; the proxy itself needs no
+  # AWS, so the grant rides only when the cache is on.
+  annotations:
+    eks.amazonaws.com/role-arn: ${cache_s3_role_arn}
+%{ endif }
 ---
 apiVersion: apps/v1
 kind: Deployment

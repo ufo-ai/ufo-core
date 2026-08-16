@@ -253,9 +253,10 @@ data "kubectl_file_documents" "hosted" {
     region        = var.region
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
 
-    # The sandbox cache (RFC 0032), off until its image and the UFO_CACHE_CONTROL_TOKEN secret exist.
-    cache_enabled   = local.cache_enabled
-    cache_s3_bucket = ""
+    # The sandbox cache (RFC 0032), on for testing with the durable S3 tier so it survives pod rolls.
+    cache_enabled     = local.cache_enabled
+    cache_s3_bucket   = module.platform.cache_s3_bucket
+    cache_s3_role_arn = module.platform.cache_s3_role_arn
 
     # Onboarding email uses the gateway's SES identity.
     ses_sender           = var.ses_sender
