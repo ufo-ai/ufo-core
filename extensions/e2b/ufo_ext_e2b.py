@@ -104,6 +104,8 @@ SESSION_LEADER_CMD = "setsid"
 envd runs every command in one shared group of its own, so the group a command is born into is the
 carrier's other commands — signalling that would stop the very call doing the signalling."""
 EXEC_STOP_TIMEOUT_SECONDS = 15
+SILENT_PROBE_CMD = "true"
+SILENT_PROBE_SECONDS = 10
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
 E2B_NETWORK: SandboxNetworkOpts = {"allow_public_traffic": False}
@@ -296,6 +298,10 @@ class E2BCarrier:
     resume_total_timeout_seconds: float = RESUME_TOTAL_TIMEOUT_SECONDS
     """The ceiling on a whole retried resume, attempts and backoff together."""
     _live: dict[UUID, _Lease] = field(default_factory=dict)
+    _silent: set[str] = field(default_factory=set)
+    """Containers whose command channel did not answer the stop after their own deadline fired. A
+    box that reaches this has already failed to answer twice, and every later command on it would
+    otherwise pay its whole deadline before saying so."""
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Open the conversation's sandbox: the one `spec.resume_id` names, else the one this
@@ -606,6 +612,7 @@ class E2BCarrier:
         so this is never retried — it is reported, and the lease is
         dropped so the next call reattaches rather than trust a deadline the provider abandoned."""
         sandbox = await self._sandbox(handle, timeout_s + LEASE_MARGIN_SECONDS)
+        await self._still_there(sandbox, handle.container_id)
         command = f"{SESSION_LEADER_CMD} {shlex.join(argv)}"
         running: E2BCommandHandle | None = None
         try:
@@ -622,7 +629,7 @@ class E2BCarrier:
         except TimeoutException as error:
             emit_metric("sandbox_exec_timeout_total", carrier=CARRIER_NAME)
             if running is not None:
-                await self._stop_group(sandbox, running.pid)
+                await self._stop_group(sandbox, handle.container_id, running.pid)
             return ExecResult(
                 stdout="",
                 stderr=str(error),
@@ -634,7 +641,7 @@ class E2BCarrier:
             raise
         return ExecResult(stdout=result.stdout, stderr=result.stderr, exit_code=result.exit_code)
 
-    async def _stop_group(self, sandbox: E2BSandbox, pid: int) -> None:
+    async def _stop_group(self, sandbox: E2BSandbox, container_id: str, pid: int) -> None:
         """Signal the stopped command's whole process group, which `setsid` made the pid's own —
         the negation is what reaches the descendants rather than the leader alone. It carries no
         `--`: the signal already took the option slot, so the negative pid is unambiguous without
@@ -642,11 +649,40 @@ class E2BCarrier:
         happens to give a command — rejects the separator outright (`Illegal number: -`), which
         would leave every descendant running behind a stop that reported nothing. A sandbox that
         cannot answer leaves the group running and says so in the counter; raising here would
-        replace the caller's timeout with an error about the cleanup after it."""
+        replace the caller's timeout with an error about the cleanup after it.
+
+        A stop the box never answers is also the reading that outlives this call. The command is
+        one word against a container that has just failed to finish another, so a deadline here is
+        the channel being gone rather than the work being slow — the two the vitals probe was
+        written to separate, and the counter alone separates nowhere. That container is remembered,
+        so the next command asks whether it is there before agreeing to wait for it."""
         try:
             await sandbox.commands.run(f"kill -9 -{pid}", timeout=EXEC_STOP_TIMEOUT_SECONDS)
+        except TimeoutException:
+            self._silent.add(container_id)
+            emit_metric("sandbox_exec_stop_failed_total", carrier=CARRIER_NAME)
         except Exception:
             emit_metric("sandbox_exec_stop_failed_total", carrier=CARRIER_NAME)
+
+    async def _still_there(self, sandbox: E2BSandbox, container_id: str) -> None:
+        """One bounded word to a container that stopped answering, before another command commits
+        its whole deadline to it. A box wedged past its own kernel keeps its provider record — the
+        control plane answers `running` for one that has not run anything in twenty minutes — so
+        the container itself is the only thing worth asking, and what it costs to ask is seconds
+        against the ten minutes a caller would otherwise wait to learn the same thing.
+
+        Answering clears the mark: a channel that came back is a working box, and nothing here
+        should outlive the fault it recorded."""
+        if container_id not in self._silent:
+            return
+        try:
+            await sandbox.commands.run(SILENT_PROBE_CMD, timeout=SILENT_PROBE_SECONDS)
+        except Exception as error:
+            emit_metric("sandbox_unreachable_total", carrier=CARRIER_NAME)
+            raise SandboxUnreachable(
+                f"sandbox {container_id} stopped answering commands"
+            ) from error
+        self._silent.discard(container_id)
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """Upload through the sandbox's filesystem API, which creates the parent directories and

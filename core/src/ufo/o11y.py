@@ -63,6 +63,7 @@ METRICS = (
     "sandbox_prepare_retried_total",
     "sandbox_exec_timeout_total",
     "sandbox_exec_stop_failed_total",
+    "sandbox_unreachable_total",
     "sandbox_tool_output_dir_reclaimed_total",
     "tool_offload_failed_total",
     "db_tx_unavailable_total",

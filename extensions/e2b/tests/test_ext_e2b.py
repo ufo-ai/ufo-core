@@ -61,6 +61,7 @@ from ufo_ext_e2b import (
     RESUME_TRANSPORT_RETRIES,
     SANDBOX_LEASE_SECONDS,
     SENTINEL_MODEL_KEY,
+    SILENT_PROBE_CMD,
     SYSTEM_CA_BUNDLE,
     WORKSPACE_ENSURE_TIMEOUT_SECONDS,
     E2BCarrier,
@@ -161,6 +162,7 @@ class _Commands:
     timeout_counts: dict[str, int] = field(default_factory=dict)
     alive: dict[int, str] = field(default_factory=dict)
     stops_fail: bool = False
+    stops_reject: bool = False
     launch_never_answers: bool = False
     _next_pid: int = 2000
 
@@ -200,6 +202,10 @@ class _Commands:
         if signalled:
             if self.stops_fail:
                 raise TimeoutException("stop hung")
+            if self.stops_reject:
+                raise CommandExitException(
+                    stderr="No such process", stdout="", exit_code=1, error="no such process"
+                )
             self.alive.pop(int(signalled.group(1)), None)
             return _Result("", "", 0)
         self.users.append(user)
@@ -1268,6 +1274,72 @@ async def test_a_stop_the_sandbox_refuses_still_reports_the_deadline(
     assert _counted(reader, "ufo.sandbox_exec_stop_failed_total") == [
         (1, {"carrier": CARRIER_NAME})
     ]
+
+
+async def test_a_box_that_stopped_answering_refuses_the_next_command_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of remembering it. A container whose kernel went down keeps its provider
+    record — the control plane answers `running` for one that has not run a command in twenty
+    minutes — so without this every later call in the turn waits its own full deadline to learn
+    what the one before it already established."""
+    reader = _counters(monkeypatch)
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.raises = TimeoutException("timed out")
+    commands.stops_fail = True
+    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
+    before = len(commands.runs)
+
+    with pytest.raises(SandboxUnreachable):
+        await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
+
+    assert [cmd for cmd, _, _ in commands.runs[before:]] == [SILENT_PROBE_CMD]
+    assert _counted(reader, "ufo.sandbox_unreachable_total") == [(1, {"carrier": CARRIER_NAME})]
+
+
+async def test_a_box_that_answers_again_is_used_again() -> None:
+    """The mark records a fault, never a verdict: a channel that comes back is a working box, and
+    the command that proved it goes on to run."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.raises = TimeoutException("timed out")
+    commands.stops_fail = True
+    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
+    commands.raises = None
+    commands.stops_fail = False
+    commands.result = _Result("back\n", "", 0)
+
+    recovered = await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
+
+    assert recovered.exit_code == 0
+    assert recovered.stdout == "back\n"
+    settled = len(commands.runs)
+    again = await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
+    assert again.exit_code == 0
+    assert SILENT_PROBE_CMD not in [cmd for cmd, _, _ in commands.runs[settled:]]
+
+
+async def test_a_stop_the_box_answers_leaves_nothing_to_recheck() -> None:
+    """A group already gone exits non-zero, which is the box answering. Only silence is the fault
+    worth remembering, so the next command is not made to pay a probe for it."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.raises = TimeoutException("timed out")
+    commands.stops_reject = True
+    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
+    commands.raises = None
+    before = len(commands.runs)
+
+    await carrier.exec(handle, ("bash", "-lc", "echo hi"), 600)
+
+    assert SILENT_PROBE_CMD not in [cmd for cmd, _, _ in commands.runs[before:]]
 
 
 async def test_a_command_that_ends_on_its_own_is_not_signalled() -> None:
