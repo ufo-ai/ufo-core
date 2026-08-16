@@ -16,7 +16,10 @@ permissions:
 
 jobs:
   integration:
-    runs-on: ubuntu-latest
+    # An org-hosted larger runner (4 vCPU, 16 GB, ~87 GB free disk), bought for its disk: the
+    # ~6-7 GB sandbox image plus build scratch outgrow ubuntu-latest's ~14 GB free, and the serial
+    # pass below gains nothing from cores.
+    runs-on: linux-4-core
     timeout-minutes: 45
     services:
       postgres:
@@ -39,58 +42,31 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
-      # The sandbox image (e2b base + libreoffice + chromium + playwright + pip/npm) is ~6-7 GB and
-      # its build peaks near the runner's ~14 GB free disk. Reclaim the large preinstalled toolchains
-      # this build never touches so the docker-gated tests can build instead of stalling on space.
-      #
-      # The docker-gated tests need that image, and building it is ~3.3 minutes of this job.
-      # `sandbox-image.yml` publishes it from main under a tag keyed by the pinned Dockerfile, so a
-      # tag that exists was built from this commit's definition on this base: pull it and name it for
-      # the fixture. Every miss — this PR changes the definition, the base tag moved, the package was
-      # evicted, the key does not derive at all — leaves the env unset and the fixture builds exactly
-      # as before. Every call here that leaves the runner is walled — the derivation resolves the
-      # floating base tag against an unauthenticated registry, the login talks to ghcr.io, and the
-      # pull moves gigabytes — because an unwalled one that never returns burns `timeout-minutes: 45`
-      # and takes every test below down with it. Walled, each ends as a miss.
-      #
-      # Reclaiming and pulling are one step because neither reads the other's output and both are
-      # minutes long: the pull runs in the background while the `rm -rf` deletes, so the job pays
-      # `max()` instead of the sum. `docker image prune -af` is the one ordering constraint — it
-      # would delete a freshly pulled image — so it runs to completion before the pull starts, and
-      # again if the pull fails, so bytes a half-finished pull left behind cannot leave the build
-      # below short of the disk this step exists to free. The pull's output is captured and printed
-      # after the wait rather than interleaved with the deletions' into an unreadable log.
-      - name: Reclaim runner disk and reuse the published sandbox image
+      # The docker-gated tests need the ~6-7 GB sandbox image, and building it is ~3.3 minutes of
+      # this job. `sandbox-image.yml` publishes it from main under a tag keyed by the pinned
+      # Dockerfile, so a tag that exists was built from this commit's definition on this base: pull
+      # it and name it for the fixture. Every miss — this PR changes the definition, the base tag
+      # moved, the package was evicted, the key does not derive at all — leaves the env unset and
+      # the fixture builds exactly as before. Every call here that leaves the runner is walled —
+      # the derivation resolves the floating base tag against an unauthenticated registry, the
+      # login talks to ghcr.io, and the pull moves gigabytes — because an unwalled one that never
+      # returns burns `timeout-minutes: 45` and takes every test below down with it. Walled, each
+      # ends as a miss.
+      - name: Reuse the published sandbox image
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/ufo-sandbox
           REGISTRY_USER: ${{ github.actor }}
         run: |
-          df -h /
-          docker system df || true
-          docker image prune -af || true
           DOCKERFILE="$RUNNER_TEMP/sandbox.Dockerfile"
           KEY="$(timeout 300 bash .github/scripts/sandbox_image_key.sh "$DOCKERFILE")" || KEY=""
-          PULL_LOG="$RUNNER_TEMP/sandbox-image-pull.log"
-          PULL_PID=""
-          if [ -n "$KEY" ]; then
-            {
-              echo "$GH_TOKEN" | timeout 60 docker login ghcr.io -u "$REGISTRY_USER" --password-stdin \
-                && timeout 300 docker pull -q "$IMAGE_REPOSITORY:$KEY"
-            } >"$PULL_LOG" 2>&1 &
-            PULL_PID="$!"
-          fi
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
-          PULLED=""
-          if [ -n "$PULL_PID" ] && wait "$PULL_PID"; then PULLED=1; fi
-          cat "$PULL_LOG" 2>/dev/null || true
-          if [ -n "$PULLED" ]; then
+          if [ -n "$KEY" ] \
+            && echo "$GH_TOKEN" | timeout 60 docker login ghcr.io -u "$REGISTRY_USER" --password-stdin \
+            && timeout 300 docker pull -q "$IMAGE_REPOSITORY:$KEY"; then
             echo "UFO_SANDBOX_TEST_IMAGE=$IMAGE_REPOSITORY:$KEY" >>"$GITHUB_ENV"
           else
             echo "no published image for ${KEY:-an underivable key} — the fixture builds it"
-            docker image prune -af || true
           fi
-          df -h /
       # Serial pass: the container/image-build/live turns run one process, no xdist — the ~6-7 GB
       # sandbox image build, the fixed-name MinIO container, and the live integration turns each need
       # a single owner of their shared resource. `integration` tests needing an absent key (a live
