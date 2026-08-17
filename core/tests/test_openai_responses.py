@@ -123,6 +123,7 @@ def _request() -> ModelRequest:
         system="s",
         messages=(Message(role="user", content="hi"),),
         max_tokens=64,
+        conversation_cache_ttl="5m",
     )
 
 
@@ -254,6 +255,7 @@ async def test_responses_path_translates_images_tools_and_usage() -> None:
         model="gpt-5.6-terra",
         system="be terse",
         max_tokens=128,
+        conversation_cache_ttl="5m",
         tools=(ToolSchema(name="read", description="read it", input_schema={"type": "object"}),),
         messages=(
             Message(
@@ -414,6 +416,7 @@ def test_responses_request_leaves_retention_to_a_wire_that_refuses_the_none_mode
         model="openai.gpt-5.6-luna",
         system="be terse",
         max_tokens=128,
+        conversation_cache_ttl="5m",
         messages=(Message(role="user", content=(TextBlock(text="look"),)),),
     )
     kwargs = responses_request(request, None, False)
@@ -426,6 +429,7 @@ def test_responses_request_preserves_input_controls_and_disables_storage() -> No
         model="gpt-5.6-terra",
         system="be terse",
         max_tokens=128,
+        conversation_cache_ttl="5m",
         tools=(ToolSchema(name="read", description="read it", input_schema={"type": "object"}),),
         messages=(
             Message(

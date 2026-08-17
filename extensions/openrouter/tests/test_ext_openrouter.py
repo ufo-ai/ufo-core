@@ -62,6 +62,7 @@ REQUEST = ModelRequest(
     system="be terse",
     messages=(Message(role="user", content="hi"),),
     max_tokens=64,
+    conversation_cache_ttl="5m",
 )
 
 

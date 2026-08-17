@@ -2809,6 +2809,7 @@ class ThreadProgress:
     thread: MirroredThread
     cadence: ProgressCadence
     started_at: datetime
+    armed_at: datetime
 
     async def run(self) -> None:
         bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -2821,7 +2822,7 @@ class ThreadProgress:
         return (datetime.now(UTC) - self.started_at).total_seconds()
 
     async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None:
-        first = self._elapsed() < self.cadence.base_seconds
+        first = (self.armed_at - self.started_at).total_seconds() < self.cadence.base_seconds
         checkpoints = self.cadence.checkpoints_after(self._elapsed())
         deadline = next(checkpoints)
         activity = TurnActivity()
@@ -2978,6 +2979,7 @@ def _track_progress(
             base_seconds=PROGRESS_BASE_SECONDS, cap_seconds=PROGRESS_CAP_SECONDS
         ),
         started_at=started_at,
+        armed_at=datetime.now(UTC),
     )
     task = asyncio.create_task(_run_progress(progress))
     _PROGRESS_TASKS[turn_id] = task

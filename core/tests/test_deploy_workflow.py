@@ -3766,7 +3766,7 @@ def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
     assert "ufo.model_cache_round_total" in dashboard
     assert "ufo.model_cache_tokens_total" in dashboard
     assert "ufo.model_first_visible_event_ms" in dashboard
-    assert "by {round,kind,ttl}" in dashboard
+    assert "by {round,kind,conversation_ttl}" in dashboard
     assert "by {result,gap}" in dashboard
     assert "gap:5m_1h,kind:cache_read" in dashboard
     assert 'name     = "provider"' in dashboard

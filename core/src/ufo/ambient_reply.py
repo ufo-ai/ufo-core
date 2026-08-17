@@ -123,6 +123,7 @@ class AmbientReplyClassifier:
                 system=AMBIENT_REPLY_SYSTEM,
                 messages=(Message(role="user", content=self._payload(message, history)),),
                 max_tokens=AMBIENT_REPLY_MAX_TOKENS,
+                conversation_cache_ttl="5m",
                 reasoning=AMBIENT_REPLY_REASONING,
             )
         )

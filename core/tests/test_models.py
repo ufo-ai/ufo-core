@@ -12,6 +12,7 @@ import pytest
 from anthropic.types.raw_message_delta_event import Delta
 from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
+from pydantic import ValidationError
 
 from ufo.config import (
     DEFAULT_BACKGROUND_JOBS_MODEL,
@@ -66,6 +67,7 @@ REQUEST = ModelRequest(
     system="be terse",
     messages=(Message(role="user", content="hi"),),
     max_tokens=64,
+    conversation_cache_ttl="5m",
 )
 
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -82,8 +84,17 @@ ANTHROPIC_SPEC = ModelSpec(
 )
 
 
-def test_model_request_defaults_conversation_cache_to_5m() -> None:
-    assert REQUEST.prompt_cache_ttl == "5m"
+def test_model_request_carries_an_explicit_conversation_cache_ttl() -> None:
+    assert REQUEST.conversation_cache_ttl == "5m"
+    with pytest.raises(ValidationError, match="conversation_cache_ttl"):
+        ModelRequest.model_validate(
+            {
+                "model": "claude-opus-4-8",
+                "system": "be terse",
+                "messages": ({"role": "user", "content": "hi"},),
+                "max_tokens": 64,
+            }
+        )
 
 
 OPENAI_SPEC = ModelSpec(
@@ -304,6 +315,7 @@ IMAGE_REQUEST = ModelRequest(
     model="claude-opus-4-8",
     system="be terse",
     max_tokens=64,
+    conversation_cache_ttl="5m",
     messages=(
         Message(
             role="user",
@@ -358,7 +370,7 @@ async def test_anthropic_caches_tools_system_and_growing_conversation(ttl: str) 
     )
     request = REQUEST.model_copy(
         update={
-            "prompt_cache_ttl": ttl,
+            "conversation_cache_ttl": ttl,
             "tools": (
                 ToolSchema(name="first", description="one", input_schema={"type": "object"}),
                 ToolSchema(name="last", description="two", input_schema={"type": "object"}),
@@ -514,7 +526,7 @@ async def test_anthropic_prices_cache_creation_without_ttl_detail_at_1h(ttl: str
             None,
         )
     )
-    request = REQUEST.model_copy(update={"prompt_cache_ttl": ttl})
+    request = REQUEST.model_copy(update={"conversation_cache_ttl": ttl})
     client = AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC)
     events = [event async for event in client.complete(request)]
     assert events[-1] == Usage(output_tokens=1, cache_write_1h_tokens=7)
@@ -1239,6 +1251,7 @@ REASONING_REQUEST = ModelRequest(
     model="claude-opus-4-8",
     system="be terse",
     max_tokens=64,
+    conversation_cache_ttl="5m",
     messages=(
         Message(role="user", content="hi"),
         Message(
@@ -1568,6 +1581,7 @@ def test_model_request_rejects_a_forced_choice_that_names_no_offered_tool() -> N
             system="s",
             messages=(),
             max_tokens=1,
+            conversation_cache_ttl="5m",
             tool_choice="finish",
             reasoning="off",
         )
@@ -1577,13 +1591,20 @@ def test_model_request_forced_choice_requires_reasoning_off() -> None:
     tool = ToolSchema(name="finish", description="d", input_schema={"type": "object"})
     with pytest.raises(ValueError, match="reasoning off"):
         ModelRequest(
-            model="m", system="s", messages=(), max_tokens=1, tools=(tool,), tool_choice="finish"
+            model="m",
+            system="s",
+            messages=(),
+            max_tokens=1,
+            conversation_cache_ttl="5m",
+            tools=(tool,),
+            tool_choice="finish",
         )
     forced = ModelRequest(
         model="m",
         system="s",
         messages=(),
         max_tokens=1,
+        conversation_cache_ttl="5m",
         tools=(tool,),
         tool_choice="finish",
         reasoning="off",

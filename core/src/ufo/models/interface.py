@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort, Usage
 
-PromptCacheTtl = Literal["5m", "1h"]
+ConversationCacheTtl = Literal["5m", "1h"]
 
 
 class TextBlock(BaseModel):
@@ -132,18 +132,18 @@ class ModelRequest(BaseModel):
     the OpenAI wire sends effort `none` and OpenRouter `enabled: false` — a wire that reads an
     absent parameter as its default effort has to state it. `tool_choice` compels the named tool as
     the round's single act — it must name an offered tool, and the request runs with reasoning off
-    (Anthropic rejects a forced tool choice under extended thinking). `prompt_cache_ttl` is how long
-    the changing conversation tail stays warm; the Anthropic client keeps the tools and system
-    prefix for one hour, and clients whose provider caches on its own ignore it."""
+    (Anthropic rejects a forced tool choice under extended thinking). `conversation_cache_ttl` is
+    how long the changing conversation tail stays warm; the Anthropic client keeps the tools and
+    system prefix for one hour, and clients whose provider caches on its own ignore it."""
 
     model: str
     system: str
     messages: tuple[Message, ...]
     max_tokens: int
+    conversation_cache_ttl: ConversationCacheTtl
     tools: tuple[ToolSchema, ...] = ()
     tool_choice: str | None = None
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
-    prompt_cache_ttl: PromptCacheTtl = "5m"
 
     @model_validator(mode="after")
     def _forced_choice_names_an_offered_tool_with_reasoning_off(self) -> "ModelRequest":

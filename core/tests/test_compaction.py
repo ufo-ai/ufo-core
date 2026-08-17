@@ -80,12 +80,12 @@ class CapturingSummaryModel:
     """Records the summarizer input it is handed, so a test can assert what `_prepare` rendered."""
 
     seen: list[str] = field(default_factory=list)
-    seen_cache_ttl: list[str] = field(default_factory=list)
+    seen_conversation_cache_ttl: list[str] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         content = request.messages[0].content
         self.seen.append(content if isinstance(content, str) else "")
-        self.seen_cache_ttl.append(request.prompt_cache_ttl)
+        self.seen_conversation_cache_ttl.append(request.conversation_cache_ttl)
         yield TextDelta(text=FIXED_SUMMARY.model_dump_json())
         yield Usage(input_tokens=1, output_tokens=1)
 
@@ -407,7 +407,7 @@ async def test_head_images_become_markers_in_the_summarizer_input(tmp_path: Path
     assert "SECRETBASE64" not in model.seen[0]
 
 
-async def test_summarizer_requests_the_5m_prompt_cache_ttl(tmp_path: Path) -> None:
+async def test_summarizer_requests_the_5m_conversation_cache_ttl(tmp_path: Path) -> None:
     model = CapturingSummaryModel()
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
     messages = (
@@ -416,7 +416,7 @@ async def test_summarizer_requests_the_5m_prompt_cache_ttl(tmp_path: Path) -> No
         Message(role="user", content="tail " + "x" * 40),
     )
     await compaction.maybe_compact(messages)
-    assert model.seen_cache_ttl == ["5m"]
+    assert model.seen_conversation_cache_ttl == ["5m"]
 
 
 async def test_summarizer_input_closes_with_the_format_restatement(tmp_path: Path) -> None:

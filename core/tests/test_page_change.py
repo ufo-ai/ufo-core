@@ -249,6 +249,7 @@ async def test_a_consumer_meters_its_model_call_under_its_own_page_change_job(
                 system="distill",
                 messages=(Message(role="user", content="one page"),),
                 max_tokens=64,
+                conversation_cache_ttl="5m",
             )
         )
         return None

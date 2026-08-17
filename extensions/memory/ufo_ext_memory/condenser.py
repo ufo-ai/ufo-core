@@ -212,6 +212,7 @@ class FactDeriver:
             system=FACT_EXTRACT_SYSTEM,
             messages=(Message(role="user", content=json.dumps(payload, separators=(",", ":"))),),
             max_tokens=FACT_EXTRACT_MAX_TOKENS,
+            conversation_cache_ttl="5m",
             tools=(
                 ToolSchema(
                     name=FACT_EXTRACT_TOOL,
@@ -438,6 +439,7 @@ class MemoryConsolidator:
             system=CONSOLIDATE_SYSTEM,
             messages=(Message(role="user", content=json.dumps(payload, separators=(",", ":"))),),
             max_tokens=CONSOLIDATE_MAX_TOKENS,
+            conversation_cache_ttl="5m",
             reasoning=CONSOLIDATE_REASONING,
         )
         return (await model.complete(request)).strip()[:MAX_SUMMARY_CHARS]

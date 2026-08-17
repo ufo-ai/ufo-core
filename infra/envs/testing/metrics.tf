@@ -37,14 +37,14 @@ resource "datadog_metric_tag_configuration" "model_first_visible_event_ms" {
   metric_name         = "ufo.model_first_visible_event_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "gap", "host", "model", "profile", "provider", "result", "round", "service", "ttl"]
+  tags                = ["conversation_ttl", "env", "gap", "host", "model", "profile", "provider", "result", "round", "service"]
 }
 
 resource "datadog_metric_tag_configuration" "model_provider_start_ms" {
   metric_name         = "ufo.model_provider_start_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "gap", "host", "model", "profile", "provider", "result", "round", "service", "ttl"]
+  tags                = ["conversation_ttl", "env", "gap", "host", "model", "profile", "provider", "result", "round", "service"]
 }
 
 resource "datadog_metric_tag_configuration" "tool_call_ms" {

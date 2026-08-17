@@ -209,6 +209,7 @@ async def test_a_job_model_call_meters_its_tokens_and_latency_under_the_key_that
                 system="summarize",
                 messages=(Message(role="user", content="two facts"),),
                 max_tokens=64,
+                conversation_cache_ttl="5m",
             )
         )
 

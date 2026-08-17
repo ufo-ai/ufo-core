@@ -87,7 +87,6 @@ from ufo.models.interface import (
     ModelRequest,
     ModelResponseTruncated,
     ModelStreamStart,
-    PromptCacheTtl,
     ReasoningBlock,
     ReasoningItemBlock,
     RedactedThinkingBlock,
@@ -937,11 +936,6 @@ class TurnEngine:
         agent child, or `main`."""
         return turn_profile(self.turn.subagent_profile, self.turn.spawned)
 
-    @property
-    def cache_ttl(self) -> PromptCacheTtl:
-        """The TTL every model call in this turn uses for its cache breakpoints."""
-        return "5m"
-
     async def run(self) -> TerminalFrame | None:
         meter = _TurnMeter(started=time.monotonic(), profile=self.profile)
         emit_metric("turn_started_total", profile=self.profile)
@@ -967,8 +961,8 @@ class TurnEngine:
                 system=system,
                 messages=(Message(role="user", content=user),),
                 max_tokens=FIND_MAX_TOKENS,
+                conversation_cache_ttl="5m",
                 reasoning="off",
-                prompt_cache_ttl=self.cache_ttl,
             )
             parts: list[str] = []
             async for event in self.model.complete(request):
@@ -1938,10 +1932,10 @@ class TurnEngine:
             system=round_input.system,
             messages=round_input.messages,
             max_tokens=MAX_OUTPUT_TOKENS,
+            conversation_cache_ttl="5m" if self.turn.spawned else "1h",
             tools=tools,
             tool_choice=FINISH_TOOL if round_input.force_finish else None,
             reasoning="off" if round_input.force_finish else self.agent.reasoning,
-            prompt_cache_ttl=self.cache_ttl,
         )
         if not round_input.first_round:
             gap = "within_turn"
@@ -1958,7 +1952,7 @@ class TurnEngine:
         cache_dimensions = {
             "provider": self.provider,
             "profile": self.profile,
-            "ttl": request.prompt_cache_ttl,
+            "conversation_ttl": request.conversation_cache_ttl,
             "round": "first" if round_input.first_round else "later",
             "gap": gap,
         }

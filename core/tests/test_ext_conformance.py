@@ -862,6 +862,7 @@ async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Pa
         system="",
         messages=(Message(role="user", content="hi"),),
         max_tokens=16,
+        conversation_cache_ttl="5m",
     )
     events = [event async for event in client.complete(request)]
     assert TextDelta(text=sample.SAMPLE_MODEL_REPLY) in events

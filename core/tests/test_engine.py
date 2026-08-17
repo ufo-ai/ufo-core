@@ -108,6 +108,7 @@ from ufo.loop.queue import _previous_turn_ended_at
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemoryMatch, MemorySearch
 from ufo.models.interface import (
+    ConversationCacheTtl,
     ImageBlock,
     ImageSource,
     Message,
@@ -115,7 +116,6 @@ from ufo.models.interface import (
     ModelRequest,
     ModelResponseTruncated,
     ModelStreamStart,
-    PromptCacheTtl,
     ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
@@ -186,12 +186,12 @@ class CapturingModel:
 
     seen: list[tuple[Message, ...]] = field(default_factory=list)
     seen_system: list[str] = field(default_factory=list)
-    seen_cache_ttl: list[PromptCacheTtl] = field(default_factory=list)
+    seen_conversation_cache_ttl: list[ConversationCacheTtl] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen.append(request.messages)
         self.seen_system.append(request.system)
-        self.seen_cache_ttl.append(request.prompt_cache_ttl)
+        self.seen_conversation_cache_ttl.append(request.conversation_cache_ttl)
         yield TextDelta(text="ok")
         yield Usage(input_tokens=1, output_tokens=1)
 
@@ -352,6 +352,25 @@ class ToolCallingModel:
             id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
         )
         yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class FindCallingModel:
+    seen_conversation_cache_ttl: list[ConversationCacheTtl] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.seen_conversation_cache_ttl.append(request.conversation_cache_ttl)
+        if request.system == "rank":
+            yield TextDelta(text="first")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        if _tool_results(request):
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="rank")
+        yield ToolCallDelta(id="c1", partial_json="{}")
+        yield Usage(input_tokens=1, output_tokens=1)
 
 
 @dataclass
@@ -1671,14 +1690,14 @@ async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
         (
             point.attributes["round"],
             point.attributes["gap"],
-            point.attributes["ttl"],
+            point.attributes["conversation_ttl"],
             point.attributes["result"],
             point.value,
         )
         for point in points["ufo.model_cache_round_total"]
     } == {
-        ("first", "5m_1h", "5m", "miss", 1),
-        ("later", "within_turn", "5m", "miss", 1),
+        ("first", "5m_1h", "1h", "miss", 1),
+        ("later", "within_turn", "1h", "miss", 1),
     }
     assert {
         (point.attributes["round"], point.attributes["gap"], point.attributes["kind"], point.value)
@@ -1777,7 +1796,7 @@ async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_s
             "model": "claude-opus-4-8",
             "provider": "anthropic",
             "profile": "main",
-            "ttl": "5m",
+            "conversation_ttl": "1h",
             "round": "first",
             "gap": "new",
             "result": "hit",
@@ -4931,17 +4950,42 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
     assert child_model.seen[0][-1].content == "hi"
 
 
-async def test_every_turn_requests_the_5m_prompt_cache_ttl(db: None, tmp_path: Path) -> None:
+async def test_main_turn_requests_1h_cache_and_spawned_turns_request_5m(
+    db: None, tmp_path: Path
+) -> None:
     main_model = CapturingModel()
     await _engine(await _seed_turn("queued", None), main_model, tmp_path).run()
-    assert main_model.seen_cache_ttl == ["5m"]
+    assert main_model.seen_conversation_cache_ttl == ["1h"]
+
+    agent = (await _seed_turn("queued", None)).model_copy(update={"parent_turn_id": uuid4()})
+    agent_model = CapturingModel()
+    await _engine(agent, agent_model, tmp_path).run()
+    assert agent_model.seen_conversation_cache_ttl == ["5m"]
 
     child = (await _seed_turn("queued", None)).model_copy(
         update={"subagent_profile": "probe", "parent_turn_id": uuid4()}
     )
     child_model = CapturingModel()
     await _engine(child, child_model, tmp_path).run()
-    assert child_model.seen_cache_ttl == ["5m"]
+    assert child_model.seen_conversation_cache_ttl == ["5m"]
+
+
+async def test_find_ranking_keeps_5m_cache_inside_a_main_turn(db: None, tmp_path: Path) -> None:
+    async def rank(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        if ctx.find is None:
+            raise RuntimeError("find is not wired")
+        return ToolResult(content=(TextContent(text=await ctx.find("rank", "page")),))
+
+    model = FindCallingModel()
+    engine = replace(
+        _engine(await _seed_turn("queued", None), model, tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="rank", description="d", input_model=_NoArgs, handler=rank),)
+        ),
+    )
+    frame = await engine.run()
+    assert frame is not None and frame.status == "done"
+    assert model.seen_conversation_cache_ttl == ["1h", "5m", "1h"]
 
 
 async def test_done_turn_persists_the_system_string_and_injected_context(

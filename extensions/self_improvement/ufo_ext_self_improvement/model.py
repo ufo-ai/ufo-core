@@ -32,6 +32,7 @@ class ModelAccessLeg:
                 system=system,
                 messages=messages,
                 max_tokens=MAX_OUTPUT_TOKENS,
+                conversation_cache_ttl="5m",
                 reasoning="off",
             )
         )
@@ -45,6 +46,7 @@ class ModelAccessLeg:
                 system=system,
                 messages=messages,
                 max_tokens=MAX_OUTPUT_TOKENS,
+                conversation_cache_ttl="5m",
                 tools=tools,
                 reasoning="off",
             )

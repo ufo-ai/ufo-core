@@ -505,6 +505,7 @@ async def summarize_chat_titles(ctx: ExtensionContext) -> None:
                     system=TITLE_SYSTEM_PROMPT,
                     messages=(Message(role="user", content=excerpt),),
                     max_tokens=TITLE_MAX_TOKENS,
+                    conversation_cache_ttl="5m",
                     reasoning="off",
                 )
             ),

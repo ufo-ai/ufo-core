@@ -398,8 +398,8 @@ class Compaction:
             system=COMPACTION_SYSTEM_PROMPT,
             messages=(Message(role="user", content=self._prepare(rounds, missed)),),
             max_tokens=self.summary_max_tokens,
+            conversation_cache_ttl="5m",
             reasoning="off",
-            prompt_cache_ttl="5m",
         )
         parts: list[str] = []
         usage: Usage | None = None

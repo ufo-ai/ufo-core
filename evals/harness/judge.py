@@ -118,6 +118,7 @@ class ModelJudge:
                 system=system,
                 messages=messages,
                 max_tokens=self.max_tokens,
+                conversation_cache_ttl="5m",
                 reasoning=self.reasoning,
             )
         )

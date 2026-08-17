@@ -116,6 +116,7 @@ class McpAtlasTarget:
                     system=self.system,
                     messages=tuple(messages),
                     max_tokens=MAX_OUTPUT_TOKENS,
+                    conversation_cache_ttl="5m",
                     tools=schemas,
                     reasoning=self.reasoning,
                 )

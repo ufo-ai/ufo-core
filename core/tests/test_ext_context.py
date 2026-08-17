@@ -198,6 +198,7 @@ async def _turn(model: ModelClient, job: str = JOB) -> Message:
                 system="be terse",
                 messages=(Message(role="user", content="hi"),),
                 max_tokens=64,
+                conversation_cache_ttl="5m",
             )
         )
 

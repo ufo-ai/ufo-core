@@ -176,6 +176,7 @@ class KnowledgeCutoffEval:
             system=system,
             messages=(Message(role="user", content=user),),
             max_tokens=max_tokens,
+            conversation_cache_ttl="5m",
         )
         parts = [
             event.text

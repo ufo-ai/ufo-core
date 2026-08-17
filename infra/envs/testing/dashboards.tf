@@ -995,8 +995,9 @@ resource "datadog_dashboard" "prompt_cache" {
     note_definition {
       content          = <<-EOT
         Anthropic charges 1.25x base input for a 5-minute write, 2x for a 1-hour write, and
-        0.1x for a read. Tools and the system prompt use 1 hour. The changing conversation tail
-        uses 5 minutes. A read refreshes the entry.
+        0.1x for a read. Tools and the system prompt use 1 hour. A non-spawned turn's changing
+        conversation tail uses 1 hour. Spawned turns use 5 minutes. Auxiliary calls such as find,
+        compaction, titles, classifiers, and jobs use 5 minutes. A read refreshes the entry.
 
         `gap` is the time from the prior turn's terminal write to this turn's first model request.
         `within_turn` marks later rounds and `new` marks a conversation's first turn. A hit after
@@ -1077,7 +1078,7 @@ resource "datadog_dashboard" "prompt_cache" {
     timeseries_definition {
       title = "cache tokens by round, kind, and conversation TTL"
       request {
-        q            = "sum:ufo.model_cache_tokens_total{$env,$profile,$provider} by {round,kind,ttl}.as_count()"
+        q            = "sum:ufo.model_cache_tokens_total{$env,$profile,$provider} by {round,kind,conversation_ttl}.as_count()"
         display_type = "bars"
       }
     }
@@ -1101,7 +1102,7 @@ resource "datadog_dashboard" "prompt_cache" {
     timeseries_definition {
       title = "model requests by round and conversation TTL"
       request {
-        q            = "sum:ufo.model_cache_round_total{$env,$profile,$provider} by {round,ttl}.as_count()"
+        q            = "sum:ufo.model_cache_round_total{$env,$profile,$provider} by {round,conversation_ttl}.as_count()"
         display_type = "bars"
       }
     }

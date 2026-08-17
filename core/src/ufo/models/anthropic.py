@@ -38,7 +38,7 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
-SYSTEM_PROMPT_CACHE_TTL = "1h"
+STABLE_PREFIX_CACHE_TTL = "1h"
 STREAM_TRANSPORT_ERRORS = (
     anthropic.APITimeoutError,
     httpx.TimeoutException,
@@ -159,8 +159,8 @@ class AnthropicClient:
             cache_write_1h_tokens = 0
             output_tokens: int | None = None
             stop_reason: str | None = None
-            system_cache = {"type": "ephemeral", "ttl": SYSTEM_PROMPT_CACHE_TTL}
-            conversation_cache = {"type": "ephemeral", "ttl": request.prompt_cache_ttl}
+            system_cache = {"type": "ephemeral", "ttl": STABLE_PREFIX_CACHE_TTL}
+            conversation_cache = {"type": "ephemeral", "ttl": request.conversation_cache_ttl}
             create_kwargs: dict[str, Any] = {
                 "model": request.model,
                 "system": [
