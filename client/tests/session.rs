@@ -1709,7 +1709,7 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
 
     let settled = session.screen();
     assert!(
-        settled.contains("\u{25b8} Completed 4 steps"),
+        settled.contains("Completed 4 steps \u{25b8}"),
         "the answer rolls two thoughts and two calls up: {settled}"
     );
     let line = settled.find("Completed 4 steps").expect("the rollup line");
@@ -1725,12 +1725,12 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
     session.press(b"\x14");
     let opened = session.screen();
     assert!(
-        opened.contains("\u{25be} Completed 4 steps"),
+        opened.contains("Completed 4 steps \u{25be}"),
         "Ctrl+T opens the rollup: {opened}"
     );
     assert!(
-        opened.contains("running read: the notes"),
-        "the opened rollup states every step: {opened}"
+        opened.contains("  the notes") && opened.contains("  the calendar"),
+        "the opened rollup states each call's work, indented: {opened}"
     );
 
     session.press(b"\x03");
@@ -1767,7 +1767,7 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
 
     let settled = session.screen();
     assert!(
-        settled.contains("\u{25b8} Completed 2 steps"),
+        settled.contains("Completed 2 steps \u{25b8}"),
         "the spawn and the run are the two steps: {settled}"
     );
     let line = settled.find("Completed 2 steps").expect("the rollup line");
@@ -1776,7 +1776,7 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         .expect("the answer the turn streamed stays on the transcript");
     assert!(line < answer, "{settled}");
 
-    let (row, col) = locate(&settled, "\u{25b8} Completed 2 steps");
+    let (row, col) = locate(&settled, "Completed 2 steps \u{25b8}");
     assert!(
         !cell_underlined(&session, row, col),
         "an unhovered rollup line carries no underline"
@@ -1797,25 +1797,26 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
     session.press(click(row, col).as_bytes());
     let opened = session.screen();
     assert!(
-        opened.contains("\u{25be} Completed 2 steps"),
+        opened.contains("Completed 2 steps \u{25be}"),
         "a click opens the rollup: {opened}"
     );
     assert!(
-        opened.contains("running spawn: reviewer") && opened.contains("\u{25b8} reviewer"),
+        opened.lines().any(|line| line.trim_end() == "  reviewer")
+            && opened.contains("reviewer \u{25b8}"),
         "the run stands as one closed row among the steps: {opened}"
     );
     assert!(
-        !opened.contains("running read: the diff"),
+        !opened.contains("the diff"),
         "the run's rows stand behind its own fold: {opened}"
     );
 
-    let (run_row, run_col) = locate(&opened, "\u{25b8} reviewer");
+    let (run_row, run_col) = locate(&opened, "reviewer \u{25b8}");
     session.press(click(run_row, run_col).as_bytes());
     let run_opened = session.screen();
     assert!(
-        run_opened.contains("\u{25be} reviewer")
-            && run_opened.contains("  running read: the diff")
-            && run_opened.contains("  running bash: cargo test"),
+        run_opened.contains("reviewer \u{25be}")
+            && run_opened.contains("    the diff")
+            && run_opened.contains("    cargo test"),
         "the run's row opens to everything it narrated: {run_opened}"
     );
     assert!(
@@ -1825,14 +1826,14 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
 
     session.press(click(run_row, run_col).as_bytes());
     assert!(
-        !session.screen().contains("running read: the diff"),
+        !session.screen().contains("the diff"),
         "a second click closes the run: {}",
         session.screen()
     );
     session.press(click(row, col).as_bytes());
     let closed = session.screen();
     assert!(
-        closed.contains("\u{25b8} Completed 2 steps") && !closed.contains("spawn"),
+        closed.contains("Completed 2 steps \u{25b8}") && !closed.contains("reviewer \u{25b8}"),
         "a click on the opened rollup line rolls the turn back up: {closed}"
     );
 
