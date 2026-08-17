@@ -384,6 +384,17 @@ test("a cli row draws the terminal glyph and reads as CLI, never as the surface'
   expect((await screen.findByRole("tooltip")).textContent).toBe("CLI");
 });
 
+test("the surface glyph is drawn at the sidebar's glyph size, not at the row's text size", async () => {
+  const slack = { ...CHAT_ROW, surface: "slack", surface_label: "#ops", title: "Slack question" };
+  wire({ "/api/chats": () => json({ chats: [slack] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const railRow = await screen.findByRole("button", { name: /Slack question/ });
+  const drawn = railRow.querySelector(".tabler-icon-brand-slack")!.getAttribute("class")!.split(" ");
+  expect(drawn).toContain("size-(--size-glyph)");
+  expect(drawn).not.toContain("size-icon");
+});
+
 test("a portal row draws no glyph — the rail is read where those conversations happen", async () => {
   wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);

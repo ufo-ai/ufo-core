@@ -1053,12 +1053,16 @@ function RailRow({
   );
 }
 
-const SURFACE_GLYPH = "size-icon shrink-0 text-ink-soft";
+const SURFACE_GLYPH = "size-(--size-glyph) shrink-0 text-ink-soft";
 
 /** The surface a conversation came in on, drawn before its title. The portal draws none: the rail
  *  is read in the portal, so a glyph on every row would state where the member already is. The
  *  words for the same fact stay in the row's tooltip, which is what a reader unable to see the
- *  glyph gets. */
+ *  glyph gets.
+ *
+ *  It is drawn at `--size-glyph`, the size every other mark in the sidebar takes, rather than at the
+ *  row's own text size: a glyph scaled to a 13px label is read as a smudge beside a title that runs
+ *  the width of the rail, and a mark nobody can name states no surface. */
 function SurfaceGlyph({ surface }: { surface: string }) {
   if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_GLYPH} aria-hidden />;
   if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_GLYPH} aria-hidden />;
