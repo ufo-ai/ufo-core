@@ -17,6 +17,8 @@ fn config(state: PathBuf, pkg_hosts: Vec<String>) -> Config {
         allowed_git_hosts: vec![],
         allowed_pkg_hosts: pkg_hosts,
         pkg_disk_limit_bytes: 1 << 30,
+        git_fresh_ttl_secs: 0,
+        pack_cache_bytes: 0,
     }
 }
 

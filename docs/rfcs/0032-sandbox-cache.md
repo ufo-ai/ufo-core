@@ -120,10 +120,33 @@ origin <sha>` works). git cannot serve from an object store — it needs a POSIX
 proxy pod rolling on every deploy would leave a cold cache. Durability is therefore a **bundle**
 (`git bundle create --all`) pushed to S3 (per-principal key prefix; a local directory in dev/tests;
 off when neither is set) after a clone and on a snapshot interval; a cold daemon **restores** the
-bundle to disk instead of re-cloning origin. **Ref discovery refreshes the mirror every time** (a
-delta fetch, best-effort — an upstream blip serves the existing mirror), so a read right after a push
-is never stale, while the objects still come from the local mirror. A rate-limited sweep evicts the
-least-recently-used mirrors to keep the tree under its ceiling.
+bundle to disk instead of re-cloning origin. **Ref discovery always refreshes the mirror** (a delta
+fetch, best-effort — an upstream blip serves the existing mirror), so a clone that starts after a push
+sees the new head. Ref discovery is the `info/refs` GET *and* a protocol-v2 `ls-refs` POST, which is
+the advertisement itself: a window that covered it would let a replica whose mirror predates the push
+advertise the older head, and the client would check it out with no error. The `fetch` negotiation
+that follows skips the refresh while the same mirror's last successful fetch is inside a **bounded
+freshness window** (`UFO_CACHE_GIT_FRESH_TTL_SECS`, default 15 s; `0` fetches every time) *and* the
+mirror already holds every object it wants, so the negotiation rounds of one clone cost no further
+upstream trip. The wants condition is what makes the window safe across replicas: a negotiation can
+land on a pod other than the one whose advertisement it answers, and a want that pod's mirror cannot
+back forces its fetch instead of a refused want. A cold or evicted mirror always clones
+or restores first, an authenticated mirror is never served without a successful fetch inside the
+window, and the authorization decision is still per request in the control plane — the window bounds
+the object refresh only, so an upstream revocation is honoured up to the TTL late on the negotiation of
+a clone whose ref discovery was still authorized. A rate-limited sweep evicts the least-recently-used
+mirrors to keep the tree under its ceiling.
+
+The mirror does not make pack generation cheaper, so `git-upload-pack` responses are **cached on
+disk** beside the mirrors (`UFO_CACHE_PACK_CACHE_MB`, default 4096; `0` disables it) and replayed
+byte-identically for an identical request. The key is a sha256 of the principal, host, repo,
+negotiation body, the request headers the backend reads, and a **ref-state fingerprint** (every ref's
+target plus `HEAD`), so any ref movement is a miss; entries also live under the principal's own
+directory, so no principal can address another's pack. Only a `200` from a clean backend run is
+stored, and a sweep of the same shape as the mirrors' keeps the tier under its ceiling. One entry is
+capped, and the cap stops the capture rather than judging it afterwards: a response past the cap is
+served from the bytes captured plus the rest of the backend's pipe, so a response no entry could keep
+never takes a full copy of the volume.
 
 ### Seams
 

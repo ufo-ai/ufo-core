@@ -1,18 +1,23 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use filetime::{set_file_mtime, FileTime};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
-use crate::cgi::response_from_cgi;
+use crate::cgi::{read_head, response_from_cgi, CgiHead, READ_CHUNK};
+use crate::config::Config;
 use crate::creds::{CredentialClient, Resolved};
 use crate::durable::Durable;
 use crate::inuse::InUse;
@@ -21,17 +26,43 @@ use crate::inuse::InUse;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(600);
 /// The mirror tree is swept back under its ceiling at most this often.
 const MIRROR_SWEEP_INTERVAL: Duration = Duration::from_secs(120);
+/// The pack cache tree is swept back under its ceiling at most this often.
+const PACK_SWEEP_INTERVAL: Duration = Duration::from_secs(120);
 const MAX_UPLOAD_PACK_BYTES: usize = 128 * 1024 * 1024;
+/// A single cached upload-pack response never exceeds this, whatever the ceiling: one outsized pack
+/// must not be able to evict every other entry to fit.
+const MAX_CACHED_PACK_BYTES: u64 = 512 * 1024 * 1024;
+/// A `.writing` temp older than this had no writer for an hour — far past any pack generation — so the
+/// sweep reclaims it as a crashed capture's orphan. Mirrors the package cache's grace.
+const PACK_WRITING_ORPHAN_GRACE_SECS: u64 = 3600;
+
+/// A temp path unique to this capture: `<path>.<pid>.<seq>.writing`, so two concurrent captures of
+/// one key never share a file. Same convention as `pkg::writing_temp` and `durable::restore_temp`.
+static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn writing_temp(path: &Path) -> PathBuf {
+    let seq = WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{}.{}.writing", std::process::id(), seq));
+    PathBuf::from(name)
+}
 
 #[derive(Clone, Copy)]
 enum Endpoint {
     Info,
+    /// A protocol-v2 `ls-refs` POST. It arrives on the `git-upload-pack` path but it is the ref
+    /// advertisement, which protocol v2 moves off the `info/refs` GET.
+    LsRefs,
     UploadPack,
 }
 
 #[derive(Default)]
 struct MirrorState {
     last_snapshot: Option<Instant>,
+    /// When this mirror last completed a successful upstream fetch (or clone). The bounded-freshness
+    /// window is measured from here, per mirror path — and the path carries the principal, so one
+    /// principal's fetch never marks another's mirror fresh.
+    last_fetch: Option<Instant>,
 }
 
 /// Serves the git smart-HTTP fetch protocol from per-principal bare mirrors. All wire-protocol work
@@ -40,31 +71,37 @@ struct MirrorState {
 /// mirror tree's disk.
 pub struct GitStrategy {
     state_root: PathBuf,
+    pack_root: PathBuf,
     creds: Arc<CredentialClient>,
     scheme: String,
     durable: Arc<Durable>,
     mirror_limit: u64,
+    pack_limit: u64,
+    fresh_ttl: Duration,
     mirrors: Mutex<HashMap<PathBuf, Arc<Mutex<MirrorState>>>>,
     last_sweep: Mutex<Option<Instant>>,
+    last_pack_sweep: Mutex<Option<Instant>>,
     in_use: InUse,
 }
 
 impl GitStrategy {
-    pub fn new(
-        state_root: PathBuf,
-        creds: Arc<CredentialClient>,
-        scheme: String,
-        durable: Arc<Durable>,
-        mirror_limit: u64,
-    ) -> Self {
+    /// The mirror tree and the pack cache are sibling roots under the state root, bounded and swept
+    /// separately: a mirror is re-clonable and a cached pack is re-generable, but a pack replays whole
+    /// while a mirror serves many different requests, so packs must not charge against the mirror
+    /// ceiling (nor the reverse).
+    pub fn new(config: &Config, creds: Arc<CredentialClient>, durable: Arc<Durable>) -> Self {
         Self {
-            state_root,
+            state_root: config.state_root.join("git"),
+            pack_root: config.state_root.join("pack"),
             creds,
-            scheme,
+            scheme: config.upstream_scheme.clone(),
             durable,
-            mirror_limit,
+            mirror_limit: config.disk_limit_bytes,
+            pack_limit: config.pack_cache_bytes,
+            fresh_ttl: Duration::from_secs(config.git_fresh_ttl_secs),
             mirrors: Mutex::new(HashMap::new()),
             last_sweep: Mutex::new(None),
+            last_pack_sweep: Mutex::new(None),
             in_use: InUse::default(),
         }
     }
@@ -82,7 +119,7 @@ impl GitStrategy {
         workspace: &str,
         user: &str,
     ) -> Response {
-        let Some((endpoint, repo)) = classify(tail) else {
+        let Some((endpoint, repo)) = classify(tail, &body) else {
             return (StatusCode::NOT_FOUND, "unsupported git path").into_response();
         };
         let resolved = match self.creds.resolve(workspace, user, host, &repo).await {
@@ -103,23 +140,51 @@ impl GitStrategy {
         // evict the directory this request is reading. Dropped when the response is built.
         let _in_use = self.in_use.guard(&mirror);
 
-        // Every request refreshes the mirror: a read right after a push is never stale, and — since
-        // `info/refs` and `git-upload-pack` are separate connections that a load balancer may route
-        // to different replicas — the pod serving upload-pack must fetch the refs it will serve
-        // rather than trust a peer's mirror.
-        if let Err(e) = self.ensure_fresh(&mirror, host, &repo, &resolved).await {
+        // Ref discovery always refreshes the mirror from origin — the `info/refs` GET and the
+        // protocol-v2 `ls-refs` POST alike; only the negotiation POSTs that follow it may be served
+        // inside the freshness window, and only when the mirror already holds every object they
+        // want. So a clone that starts after a push sees the new head, and the negotiation it then
+        // sends costs no second upstream round trip. Across replicas the requests are separate
+        // connections, so a negotiation can reach a replica whose window is open on an older mirror
+        // than the advertising replica's: the want that mirror cannot back forces its fetch, and the
+        // clone completes there too.
+        let wants = match endpoint {
+            Endpoint::UploadPack => negotiation_wants(headers, &body),
+            Endpoint::Info | Endpoint::LsRefs => None,
+        };
+        if let Err(e) = self
+            .ensure_fresh(endpoint, wants.as_deref(), &mirror, host, &repo, &resolved)
+            .await
+        {
             tracing::warn!(error = %e, host, repo, "mirror ensure failed");
             return (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response();
         }
 
         let path_info = match endpoint {
             Endpoint::Info => format!("/{repo}.git/info/refs"),
-            Endpoint::UploadPack => format!("/{repo}.git/git-upload-pack"),
+            Endpoint::LsRefs | Endpoint::UploadPack => format!("/{repo}.git/git-upload-pack"),
         };
-        match self
-            .serve(&host_root, &path_info, method, query, headers, body)
-            .await
-        {
+        // Only the `git-upload-pack` endpoint is cached. The `info/refs` GET is a few hundred bytes
+        // the backend builds from the refs it just refreshed, so replaying it would save nothing worth
+        // a lookup. (Under protocol v2 a client's `ls-refs` arrives as an upload-pack POST, so that
+        // one is cached — keyed by the same ref-state fingerprint, so moved refs miss.)
+        let served = match endpoint {
+            Endpoint::LsRefs | Endpoint::UploadPack if self.pack_limit > 0 => {
+                self.serve_pack_cached(
+                    &host_root, &mirror, &path_info, method, query, headers, body, &resolved, host,
+                    &repo,
+                )
+                .await
+            }
+            _ => match self
+                .spawn_backend(&host_root, &path_info, method, query, headers, &body)
+                .await
+            {
+                Ok(child) => response_from_cgi(child).await,
+                Err(e) => Err(e),
+            },
+        };
+        match served {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::warn!(error = %e, "http-backend failed");
@@ -130,14 +195,24 @@ impl GitStrategy {
 
     async fn ensure_fresh(
         &self,
+        endpoint: Endpoint,
+        wants: Option<&[String]>,
         mirror: &Path,
         host: &str,
         repo: &str,
         resolved: &Resolved,
     ) -> Result<(), String> {
-        // An authenticated mirror must never be served without a current successful fetch: a token
-        // the org has since revoked would otherwise keep reading a cached private history. An
-        // anonymous mirror (public repo) may serve stale through an upstream blip.
+        // An authenticated mirror must never be served without a successful fetch inside the
+        // freshness window: a token the org has since revoked would otherwise keep reading a cached
+        // private history indefinitely. An anonymous mirror (public repo) may serve stale through an
+        // upstream blip.
+        //
+        // What the window bounds is the *object refresh*, not the authorization decision: every
+        // request still resolves its credential through the control plane
+        // (`/internal/git-credential`), which is what decides whether this principal may read this
+        // repo at all. Residual risk: an upstream revocation that the control plane keeps granting is
+        // honoured up to `fresh_ttl` seconds late on the upload-pack POSTs of a clone whose ref
+        // discovery was still authorized. `UFO_CACHE_GIT_FRESH_TTL_SECS=0` removes the window.
         let authenticated = resolved.token.is_some();
         let entry = {
             let mut map = self.mirrors.lock().await;
@@ -150,23 +225,36 @@ impl GitStrategy {
         // Reclaim space before a write may add to the tree.
         self.maybe_sweep_mirrors().await;
         if !mirror.join("HEAD").exists() {
+            // A cold or evicted mirror is never served from the window: it must clone, or restore from
+            // the durable tier and then fetch, before this request reads a single object from it.
             if self.restore_mirror(mirror, host, repo, resolved).await? {
                 // A restore trusts a bundle taken under a past authorization; re-confirm access.
-                if let Err(e) = self.fetch_mirror(mirror, resolved).await {
-                    if authenticated {
-                        let _ = tokio::fs::remove_dir_all(mirror).await;
-                        return Err(format!("restore re-auth failed: {e}"));
+                match self.fetch_mirror(mirror, resolved).await {
+                    Ok(()) => state.last_fetch = Some(now),
+                    Err(e) => {
+                        if authenticated {
+                            let _ = tokio::fs::remove_dir_all(mirror).await;
+                            return Err(format!("restore re-auth failed: {e}"));
+                        }
+                        tracing::warn!(error = %e, "restored mirror serves stale (anonymous)");
                     }
-                    tracing::warn!(error = %e, "restored mirror serves stale (anonymous)");
                 }
             } else {
                 self.clone_mirror(mirror, host, repo, resolved).await?;
+                state.last_fetch = Some(now);
                 self.spawn_snapshot(mirror, resolved.principal.clone(), host, repo);
             }
             state.last_snapshot = Some(now);
+        } else if self.is_fresh(endpoint, &state) && mirror_holds(mirror, wants).await {
+            tracing::debug!(
+                host,
+                repo,
+                "mirror inside the freshness window holds the wants; skipping fetch"
+            );
         } else {
             match self.fetch_mirror(mirror, resolved).await {
                 Ok(()) => {
+                    state.last_fetch = Some(now);
                     if state
                         .last_snapshot
                         .is_none_or(|t| t.elapsed() >= SNAPSHOT_INTERVAL)
@@ -182,6 +270,26 @@ impl GitStrategy {
             }
         }
         Ok(())
+    }
+
+    /// True when the freshness window applies to this request: a negotiation POST whose mirror
+    /// completed a successful fetch inside the window. The caller still requires the mirror to hold
+    /// every object the negotiation wants (`mirror_holds`) before it skips the fetch — the window
+    /// alone proves the mirror is recent, not that it is the mirror whose advertisement this
+    /// negotiation answers, and across replicas those differ.
+    ///
+    /// Both forms of ref discovery are excluded — the `info/refs` GET and the protocol-v2 `ls-refs`
+    /// POST — because that is where a client learns which head to ask for: a window that covered
+    /// either would advertise the previous head to a clone that started after the push, and the client
+    /// would check that head out with no error. Skipping only the negotiation still collapses the
+    /// refreshes of one clone into one. A zero TTL is never fresh, so every request fetches — the
+    /// behaviour before the window existed.
+    fn is_fresh(&self, endpoint: Endpoint, state: &MirrorState) -> bool {
+        matches!(endpoint, Endpoint::UploadPack)
+            && !self.fresh_ttl.is_zero()
+            && state
+                .last_fetch
+                .is_some_and(|t| t.elapsed() < self.fresh_ttl)
     }
 
     /// Rate-limited, off the request path: evict least-recently-used bare mirrors when the mirror
@@ -324,15 +432,119 @@ impl GitStrategy {
         run_git(&args, Some(mirror)).await
     }
 
-    async fn serve(
+    /// Cache the `git-upload-pack` response bytes and replay them for an identical request against an
+    /// unmoved mirror. Generating a pack is the expensive half of a clone the mirror cannot make
+    /// cheaper; a repeat clone of the same head — a subagent fan-out, a retried turn, a rebuilt
+    /// sandbox — is the same wants and haves against the same refs, so the bytes are reusable.
+    ///
+    /// A miss captures the response to disk before answering, rather than teeing a stream, so a
+    /// dropped client never commits a truncated pack. The captured file is what gets served, so the
+    /// miss pays one disk write and every hit pays one read. The capture stops at the cap the tier can
+    /// hold: a larger response is served from the bytes already captured plus the rest of the pipe, so
+    /// the volume never takes a full copy of a response no entry could keep.
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_pack_cached(
+        &self,
+        host_root: &Path,
+        mirror: &Path,
+        path_info: &str,
+        method: &Method,
+        query: Option<&str>,
+        headers: &HeaderMap,
+        body: Bytes,
+        resolved: &Resolved,
+        host: &str,
+        repo: &str,
+    ) -> Result<Response, String> {
+        let fingerprint = ref_fingerprint(mirror).await?;
+        let key = pack_key(
+            &resolved.principal,
+            host,
+            repo,
+            &fingerprint,
+            &body,
+            headers,
+        );
+        // The entry also lives under the principal's own directory, so isolation does not rest on the
+        // key alone: one principal's packs are a subtree another principal's requests never address.
+        let dir = self.pack_root.join(sanitize(&resolved.principal));
+        let body_path = dir.join(format!("{key}.body"));
+        let meta_path = dir.join(format!("{key}.meta"));
+        // Held across the replay and the capture, so the pack sweep cannot evict the entry this
+        // request is reading or has just written.
+        let _in_use = self.in_use.guard(&body_path);
+
+        if let Some(resp) = replay_pack(&meta_path, &body_path).await {
+            return Ok(resp);
+        }
+
+        // Reclaim space before a write may add to the tree.
+        self.maybe_sweep_packs().await;
+        let mut child = self
+            .spawn_backend(host_root, path_info, method, query, headers, &body)
+            .await?;
+        let mut stdout = child.stdout.take().ok_or("cgi child has no stdout")?;
+        let head = read_head(&mut stdout).await?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| format!("create pack cache dir: {e}"))?;
+        let tmp = writing_temp(&body_path);
+        // The cap bounds the capture itself, not just what is committed: a response the tier cannot
+        // hold must never sit on the volume in full, or one clone of an outsized repo takes the cache
+        // volume past its `sizeLimit` and the kubelet evicts the pod that carries all sandbox egress.
+        let cap = MAX_CACHED_PACK_BYTES.min(self.pack_limit);
+        let captured = capture_body(&mut stdout, &head.leftover, &tmp, cap).await;
+        match captured {
+            Ok(Capture::Complete) => {}
+            Ok(Capture::PastTheCap) => return stream_past_the_cap(head, &tmp, stdout, child).await,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(e);
+            }
+        }
+        let exited_clean = child.wait().await.map(|s| s.success()).unwrap_or(false);
+
+        let meta = PackMeta::from_head(&head);
+        // Never cache a failed backend run or a non-200 — a hit must never replay an error.
+        let cacheable = exited_clean && head.status == StatusCode::OK;
+        let serve_path = if cacheable && commit_pack(&meta, &tmp, &meta_path, &body_path).await {
+            body_path
+        } else {
+            tmp.clone()
+        };
+        let resp = serve_pack_file(&meta, &serve_path, "MISS").await;
+        if serve_path == tmp {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        resp.ok_or_else(|| "pack serve failed".to_string())
+    }
+
+    async fn maybe_sweep_packs(&self) {
+        {
+            let mut last = self.last_pack_sweep.lock().await;
+            if last.is_some_and(|t| t.elapsed() < PACK_SWEEP_INTERVAL) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let root = self.pack_root.clone();
+        let limit = self.pack_limit;
+        let in_use = self.in_use.clone();
+        tokio::task::spawn_blocking(move || sweep_packs(&root, limit, &in_use));
+    }
+
+    /// Spawn `git http-backend` over the principal's mirror tree with the request's CGI environment,
+    /// its negotiation body written to stdin. The caller decides what to do with the response: stream
+    /// it, or capture it for the pack cache.
+    async fn spawn_backend(
         &self,
         host_root: &Path,
         path_info: &str,
         method: &Method,
         query: Option<&str>,
         headers: &HeaderMap,
-        body: Bytes,
-    ) -> Result<Response, String> {
+        body: &Bytes,
+    ) -> Result<Child, String> {
         if body.len() > MAX_UPLOAD_PACK_BYTES {
             return Err("upload-pack request too large".into());
         }
@@ -366,22 +578,134 @@ impl GitStrategy {
             .map_err(|e| format!("spawn http-backend: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin
-                .write_all(&body)
+                .write_all(body)
                 .await
                 .map_err(|e| format!("write cgi stdin: {e}"))?;
         }
-        response_from_cgi(child).await
+        Ok(child)
     }
 }
 
-fn classify(tail: &str) -> Option<(Endpoint, String)> {
+fn classify(tail: &str, body: &[u8]) -> Option<(Endpoint, String)> {
     if let Some(repo) = tail.strip_suffix("/info/refs") {
         return Some((Endpoint::Info, safe_repo(repo)?));
     }
     if let Some(repo) = tail.strip_suffix("/git-upload-pack") {
-        return Some((Endpoint::UploadPack, safe_repo(repo)?));
+        let endpoint = if is_ls_refs(body) {
+            Endpoint::LsRefs
+        } else {
+            Endpoint::UploadPack
+        };
+        return Some((endpoint, safe_repo(repo)?));
     }
     None
+}
+
+/// True when a `git-upload-pack` body is a protocol-v2 `ls-refs` request, read from the first
+/// `command=` pkt-line. A protocol-v0 body carries no command line, so it is negotiation.
+fn is_ls_refs(body: &[u8]) -> bool {
+    let mut rest = body;
+    while rest.len() >= 4 {
+        let Ok(hex) = std::str::from_utf8(&rest[..4]) else {
+            return false;
+        };
+        let Ok(len) = usize::from_str_radix(hex, 16) else {
+            return false;
+        };
+        // `0000`, `0001` and `0002` are the flush, delimiter and response-end markers: four bytes and
+        // no payload.
+        if len < 4 {
+            rest = &rest[4..];
+            continue;
+        }
+        if len > rest.len() {
+            return false;
+        }
+        let payload = &rest[4..len];
+        let line = std::str::from_utf8(payload).unwrap_or("").trim_end();
+        if let Some(command) = line.strip_prefix("command=") {
+            return command == "ls-refs";
+        }
+        rest = &rest[len..];
+    }
+    false
+}
+
+/// The object ids a `git-upload-pack` negotiation asks for — `want <oid>` pkt-lines, protocol v0
+/// and v2 alike — or None when they cannot be read positively: a compressed body, a `want-ref`, a
+/// malformed pkt-line, or no `want` at all. None means the freshness window cannot prove the mirror
+/// can back the request, so the caller fetches.
+fn negotiation_wants(headers: &HeaderMap, body: &[u8]) -> Option<Vec<String>> {
+    if header(headers, "content-encoding").is_some() {
+        return None;
+    }
+    let mut wants = Vec::new();
+    let mut rest = body;
+    while rest.len() >= 4 {
+        let hex = std::str::from_utf8(&rest[..4]).ok()?;
+        let len = usize::from_str_radix(hex, 16).ok()?;
+        if len < 4 {
+            rest = &rest[4..];
+            continue;
+        }
+        let payload = rest.get(4..len)?;
+        rest = &rest[len..];
+        let line = std::str::from_utf8(payload).ok()?.trim_end();
+        if line.starts_with("want-ref ") {
+            return None;
+        }
+        if let Some(want) = line.strip_prefix("want ") {
+            let oid = want.split_whitespace().next()?;
+            if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            wants.push(oid.to_string());
+        }
+    }
+    if wants.is_empty() {
+        return None;
+    }
+    Some(wants)
+}
+
+/// True when the mirror already holds every object the negotiation wants — the condition under
+/// which `upload-pack` can answer without a fetch, and exactly what it accepts under
+/// `allowAnySHA1InWant`. One `cat-file --batch-check` run answers all wants; unreadable wants or
+/// any failure to run the check reads as not held, so the caller fetches.
+async fn mirror_holds(mirror: &Path, wants: Option<&[String]>) -> bool {
+    let Some(wants) = wants else {
+        return false;
+    };
+    let mut cmd = Command::new("git");
+    cmd.arg("--git-dir")
+        .arg(mirror)
+        .args(["cat-file", "--batch-check"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        return false;
+    };
+    // Written concurrently with the read: a want list large enough to fill the pipe while
+    // `batch-check` is still answering earlier lines must not deadlock the request.
+    let feed: String = wants.iter().map(|w| format!("{w}\n")).collect();
+    let writer = tokio::spawn(async move {
+        let _ = stdin.write_all(feed.as_bytes()).await;
+    });
+    let output = child.wait_with_output().await;
+    let _ = writer.await;
+    let Ok(output) = output else {
+        return false;
+    };
+    output.status.success()
+        && output
+            .stdout
+            .split(|&b| b == b'\n')
+            .all(|line| !line.ends_with(b" missing"))
 }
 
 /// The canonical `org/repo` path, or None when it could escape its principal/host directory. A
@@ -414,6 +738,10 @@ fn git_auth_args(resolved: &Resolved) -> Vec<String> {
 }
 
 async fn run_git(args: &[String], git_dir: Option<&Path>) -> Result<(), String> {
+    git_output(args, git_dir).await.map(|_| ())
+}
+
+async fn git_output(args: &[String], git_dir: Option<&Path>) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new("git");
     if let Some(dir) = git_dir {
         cmd.arg("--git-dir").arg(dir);
@@ -421,7 +749,7 @@ async fn run_git(args: &[String], git_dir: Option<&Path>) -> Result<(), String> 
     cmd.args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = cmd.output().await.map_err(|e| format!("spawn git: {e}"))?;
     if !output.status.success() {
@@ -431,7 +759,7 @@ async fn run_git(args: &[String], git_dir: Option<&Path>) -> Result<(), String> 
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(())
+    Ok(output.stdout)
 }
 
 /// Let a fetch ask for an exact commit that is not a ref tip (e.g. `git fetch origin <base_sha>`);
@@ -467,6 +795,298 @@ fn basename(mirror: &Path) -> &str {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("repo")
+}
+
+/// The response head a cached pack replays. Byte-identical: the status and the headers `http-backend`
+/// itself produced, so a hit is indistinguishable from a fresh run to the git client.
+#[derive(Serialize, Deserialize)]
+struct PackMeta {
+    status: u16,
+    headers: Vec<(String, String)>,
+}
+
+impl PackMeta {
+    fn from_head(head: &CgiHead) -> Self {
+        Self {
+            status: head.status.as_u16(),
+            headers: head
+                .headers
+                .iter()
+                .filter(|(name, _)| name.as_str() != "content-length")
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|v| (name.as_str().to_string(), v.to_string()))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Everything that decides the response bytes, hashed into one entry name: the principal (so no
+/// principal can address another's entry), the repo it came from, the mirror's ref state, the
+/// negotiation body (the wants and haves), and the request headers the backend reads.
+/// `accept-encoding` is keyed although the backend is not given it — keying it now means a future
+/// change that does forward it cannot replay a body in the wrong encoding.
+fn pack_key(
+    principal: &str,
+    host: &str,
+    repo: &str,
+    fingerprint: &str,
+    body: &[u8],
+    headers: &HeaderMap,
+) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        principal,
+        host,
+        repo,
+        fingerprint,
+        header(headers, "git-protocol").unwrap_or(""),
+        header(headers, "content-type").unwrap_or(""),
+        header(headers, "content-encoding").unwrap_or(""),
+        header(headers, "accept-encoding").unwrap_or(""),
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.update(body);
+    hex::encode(hasher.finalize())
+}
+
+/// An exact fingerprint of what the mirror can serve: every ref's target object, plus `HEAD`. Any ref
+/// movement — a new commit, a force-push, a deleted branch — changes it, so a cached pack is a miss
+/// rather than a replay of history the mirror no longer has. Never an mtime: a fetch that changes
+/// nothing still rewrites files, and a repack changes files without changing what is servable.
+async fn ref_fingerprint(mirror: &Path) -> Result<String, String> {
+    let refs = git_output(
+        &[
+            "for-each-ref".into(),
+            "--format=%(objectname) %(refname)".into(),
+        ],
+        Some(mirror),
+    )
+    .await?;
+    let head = tokio::fs::read(mirror.join("HEAD"))
+        .await
+        .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(&refs);
+    hasher.update(b"\n");
+    hasher.update(&head);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// How a capture ended: with the whole response on disk, or at the cap with the rest still on the
+/// pipe.
+enum Capture {
+    Complete,
+    PastTheCap,
+}
+
+/// Drain the backend's remaining stdout into `path`. Fails loud on a read or write error so a truncated
+/// pack is never committed. Stops on the first chunk that takes the file past `cap`, so a response the
+/// tier could never hold is never written whole and the capture holds at most `cap` plus one chunk.
+async fn capture_body(
+    stdout: &mut tokio::process::ChildStdout,
+    leftover: &Bytes,
+    path: &Path,
+    cap: u64,
+) -> Result<Capture, String> {
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| format!("create {path:?}: {e}"))?;
+    let mut size = 0u64;
+    file.write_all(leftover)
+        .await
+        .map_err(|e| format!("write pack: {e}"))?;
+    size += leftover.len() as u64;
+    let mut chunk = vec![0u8; READ_CHUNK];
+    let mut ended = false;
+    while size <= cap {
+        let n = stdout
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("read backend stdout: {e}"))?;
+        if n == 0 {
+            ended = true;
+            break;
+        }
+        file.write_all(&chunk[..n])
+            .await
+            .map_err(|e| format!("write pack: {e}"))?;
+        size += n as u64;
+    }
+    file.flush().await.map_err(|e| format!("flush pack: {e}"))?;
+    if ended {
+        Ok(Capture::Complete)
+    } else {
+        Ok(Capture::PastTheCap)
+    }
+}
+
+/// Serve a response the pack tier cannot hold: the bytes already captured, then the rest straight from
+/// the backend's pipe. The capture is unlinked before the first byte goes out, so its disk is reclaimed
+/// when the response ends — including when the client drops mid-stream.
+async fn stream_past_the_cap(
+    head: CgiHead,
+    capture: &Path,
+    stdout: tokio::process::ChildStdout,
+    mut child: Child,
+) -> Result<Response, String> {
+    let file = tokio::fs::File::open(capture)
+        .await
+        .map_err(|e| format!("open {capture:?}: {e}"))?;
+    tokio::fs::remove_file(capture)
+        .await
+        .map_err(|e| format!("unlink {capture:?}: {e}"))?;
+    let mut source = file.chain(stdout);
+    let stream = async_stream::stream! {
+        let mut chunk = vec![0u8; READ_CHUNK];
+        loop {
+            match source.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&chunk[..n])),
+                Err(e) => {
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+        let _ = child.wait().await;
+    };
+    let mut builder = Response::builder().status(head.status);
+    for (name, value) in head.headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .header("x-ufo-cache", "MISS")
+        .body(Body::from_stream(stream))
+        .map_err(|e| format!("build response: {e}"))
+}
+
+/// Rename the captured pack and its head into place. The body lands first and the meta commits the
+/// entry, so a crash between the two leaves a body no lookup can find rather than a meta pointing at
+/// nothing. False on any failure — the caller then serves the capture uncommitted.
+async fn commit_pack(meta: &PackMeta, tmp: &Path, meta_path: &Path, body_path: &Path) -> bool {
+    let Ok(meta_bytes) = serde_json::to_vec(meta) else {
+        return false;
+    };
+    let tmp_meta = writing_temp(meta_path);
+    if tokio::fs::write(&tmp_meta, &meta_bytes).await.is_err()
+        || tokio::fs::rename(tmp, body_path).await.is_err()
+    {
+        let _ = tokio::fs::remove_file(&tmp_meta).await;
+        return false;
+    }
+    tokio::fs::rename(&tmp_meta, meta_path).await.is_ok()
+}
+
+/// Replay a cached pack, or None when this request has no entry — including a meta whose body the
+/// sweep has since evicted, which the caller treats as a plain miss.
+async fn replay_pack(meta_path: &Path, body_path: &Path) -> Option<Response> {
+    let bytes = tokio::fs::read(meta_path).await.ok()?;
+    let meta: PackMeta = serde_json::from_slice(&bytes).ok()?;
+    serve_pack_file(&meta, body_path, "HIT").await
+}
+
+async fn serve_pack_file(
+    meta: &PackMeta,
+    body_path: &Path,
+    cache_status: &str,
+) -> Option<Response> {
+    let file = tokio::fs::File::open(body_path).await.ok()?;
+    let len = file.metadata().await.ok()?.len();
+    // The sweep ranks entries by mtime, so a replay is a use that must postpone eviction.
+    let _ = set_file_mtime(body_path, FileTime::now());
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK));
+    for (name, value) in &meta.headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .header("content-length", len)
+        .header("x-ufo-cache", cache_status)
+        .body(Body::from_stream(stream))
+        .ok()
+}
+
+/// Evict least-recently-used cached packs until the pack tree is under `limit`. Mirrors the mirror
+/// sweep and the package sweep: reserve each victim with an atomic rename-aside taken only while
+/// `in_use` shows no holder, then delete the body and its meta outside the lock, so an entry a live
+/// request is replaying is never removed mid-serve. A cached pack is re-generable from the mirror, so
+/// eviction only costs one backend run.
+fn sweep_packs(root: &Path, limit: u64, in_use: &InUse) {
+    let mut entries: Vec<(PathBuf, u64, u64)> = Vec::new();
+    let mut total = 0u64;
+    collect_packs(root, &mut entries, &mut total);
+    if total <= limit {
+        return;
+    }
+    entries.sort_by_key(|(_, _, mtime)| *mtime);
+    let mut remaining = total;
+    for (body_path, size, _) in entries {
+        if remaining <= limit {
+            break;
+        }
+        let evicting = body_path.with_extension("evicting");
+        let _ = std::fs::remove_file(&evicting);
+        let reserved = in_use.reserve_if_free(&body_path, || {
+            std::fs::rename(&body_path, &evicting).is_ok()
+        });
+        if reserved {
+            remaining = remaining.saturating_sub(size);
+            let _ = std::fs::remove_file(&evicting);
+            let _ = std::fs::remove_file(body_path.with_extension("meta"));
+        }
+    }
+}
+
+/// Total the pack tree and list its evictable bodies. A capture underway (`.writing`) is charged
+/// against the ceiling but never evicted; one left by a crash is reclaimed after its grace.
+fn collect_packs(dir: &Path, out: &mut Vec<(PathBuf, u64, u64)>, total: &mut u64) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            collect_packs(&path, out, total);
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("body") => {
+                *total += meta.len();
+                out.push((path, meta.len(), mtime));
+            }
+            Some("meta") => *total += meta.len(),
+            Some("writing")
+                if now_secs().saturating_sub(mtime) > PACK_WRITING_ORPHAN_GRACE_SECS =>
+            {
+                let _ = std::fs::remove_file(&path);
+            }
+            Some("writing") => *total += meta.len(),
+            _ => {}
+        }
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Evict oldest bare mirrors until the whole tree is under `limit`. The size counted is the entire
@@ -579,8 +1199,101 @@ mod tests {
 
     use filetime::{set_file_mtime, FileTime};
 
-    use super::{safe_repo, sweep_mirrors};
+    use axum::http::HeaderMap;
+
+    use super::{is_ls_refs, negotiation_wants, pack_key, safe_repo, sweep_mirrors, sweep_packs};
     use crate::inuse::InUse;
+
+    fn pkt(line: &str) -> String {
+        format!("{:04x}{line}", line.len() + 4)
+    }
+
+    #[test]
+    fn a_protocol_v2_ls_refs_body_is_ref_discovery_and_nothing_else_is() {
+        let ls_refs = format!(
+            "{}{}0001{}0000",
+            pkt("command=ls-refs\n"),
+            pkt("agent=git/2.47.3\n"),
+            pkt("peel\n")
+        );
+        assert!(is_ls_refs(ls_refs.as_bytes()));
+
+        // The other v2 command on this path is the negotiation, which the freshness window may serve.
+        let fetch = format!(
+            "{}{}0001{}0000",
+            pkt("command=fetch\n"),
+            pkt("agent=git/2.47.3\n"),
+            pkt("want 0123456789012345678901234567890123456789\n")
+        );
+        assert!(!is_ls_refs(fetch.as_bytes()));
+
+        // Protocol v0 carries no command line: the wants arrive straight away, and its advertisement was
+        // the `info/refs` GET.
+        let v0 = format!(
+            "{}0000{}",
+            pkt("want 0123456789012345678901234567890123456789\n"),
+            pkt("done\n")
+        );
+        assert!(!is_ls_refs(v0.as_bytes()));
+        assert!(!is_ls_refs(b""));
+        assert!(!is_ls_refs(b"not a pkt-line at all"));
+    }
+
+    #[test]
+    fn negotiation_wants_reads_both_protocols_and_refuses_what_it_cannot_prove() {
+        let h = HeaderMap::new();
+        let sha = "0123456789012345678901234567890123456789";
+        let other = "a".repeat(40);
+
+        // Protocol v0: the first want carries the capability list after the oid.
+        let v0 = format!(
+            "{}{}0000{}",
+            pkt(&format!("want {sha} multi_ack_detailed side-band-64k\n")),
+            pkt(&format!("want {other}\n")),
+            pkt("done\n")
+        );
+        assert_eq!(
+            negotiation_wants(&h, v0.as_bytes()).as_deref(),
+            Some(&[sha.to_string(), other.clone()][..])
+        );
+
+        let v2 = format!(
+            "{}{}0001{}{}{}0000",
+            pkt("command=fetch\n"),
+            pkt("agent=git/2.47.3\n"),
+            pkt("thin-pack\n"),
+            pkt(&format!("want {sha}\n")),
+            pkt("done\n")
+        );
+        assert_eq!(
+            negotiation_wants(&h, v2.as_bytes()).as_deref(),
+            Some(&[sha.to_string()][..])
+        );
+
+        // A `want-ref` names a ref, not an object: nothing in the mirror proves where the ref points
+        // upstream, so the whole body is unprovable.
+        let want_ref = format!(
+            "{}0001{}{}0000",
+            pkt("command=fetch\n"),
+            pkt(&format!("want {sha}\n")),
+            pkt("want-ref refs/heads/main\n")
+        );
+        assert_eq!(negotiation_wants(&h, want_ref.as_bytes()), None);
+
+        // A compressed body cannot be read here; `http-backend` decodes it, the window must not.
+        let mut gzip = HeaderMap::new();
+        gzip.insert("content-encoding", "gzip".parse().unwrap());
+        assert_eq!(negotiation_wants(&gzip, v0.as_bytes()), None);
+
+        let ls_refs = format!("{}0001{}0000", pkt("command=ls-refs\n"), pkt("peel\n"));
+        assert_eq!(negotiation_wants(&h, ls_refs.as_bytes()), None);
+        assert_eq!(negotiation_wants(&h, b""), None);
+        assert_eq!(negotiation_wants(&h, b"not a pkt-line at all"), None);
+        assert_eq!(
+            negotiation_wants(&h, pkt("want notanoid\n").as_bytes()),
+            None
+        );
+    }
 
     #[test]
     fn accepts_a_normal_repo_and_strips_trailing_git_and_slashes() {
@@ -650,6 +1363,173 @@ mod tests {
             state.join("git/host/repo.git").join("HEAD").exists(),
             "the git sweep must ignore the sibling package tree's bytes"
         );
+    }
+
+    fn plant_pack(root: &Path, principal: &str, key: &str, bytes: usize, mtime_secs: i64) {
+        let dir = root.join(principal);
+        fs::create_dir_all(&dir).unwrap();
+        let body = dir.join(format!("{key}.body"));
+        let meta = dir.join(format!("{key}.meta"));
+        fs::write(&body, vec![0u8; bytes]).unwrap();
+        fs::write(&meta, br#"{"status":200,"headers":[]}"#).unwrap();
+        let stamp = FileTime::from_unix_time(mtime_secs, 0);
+        set_file_mtime(&body, stamp).unwrap();
+        set_file_mtime(&meta, stamp).unwrap();
+    }
+
+    #[test]
+    fn the_pack_key_separates_principals_repos_ref_states_and_negotiations() {
+        let h = HeaderMap::new();
+        let base = pack_key(
+            "w1-u-alice",
+            "github.com",
+            "acme/widget",
+            "reffp",
+            b"want a",
+            &h,
+        );
+
+        // The principal is in the key, so one principal cannot address another's cached pack even if
+        // it asks for the identical repo, refs, and wants.
+        assert_ne!(
+            base,
+            pack_key(
+                "w1-u-bob",
+                "github.com",
+                "acme/widget",
+                "reffp",
+                b"want a",
+                &h
+            )
+        );
+        assert_ne!(
+            base,
+            pack_key(
+                "w1-u-alice",
+                "gitlab.com",
+                "acme/widget",
+                "reffp",
+                b"want a",
+                &h
+            )
+        );
+        assert_ne!(
+            base,
+            pack_key(
+                "w1-u-alice",
+                "github.com",
+                "acme/other",
+                "reffp",
+                b"want a",
+                &h
+            )
+        );
+        // A ref that moved is a different fingerprint, so the entry is a miss.
+        assert_ne!(
+            base,
+            pack_key(
+                "w1-u-alice",
+                "github.com",
+                "acme/widget",
+                "moved",
+                b"want a",
+                &h
+            )
+        );
+        assert_ne!(
+            base,
+            pack_key(
+                "w1-u-alice",
+                "github.com",
+                "acme/widget",
+                "reffp",
+                b"want b",
+                &h
+            )
+        );
+
+        let mut protocol = HeaderMap::new();
+        protocol.insert("git-protocol", "version=2".parse().unwrap());
+        assert_ne!(
+            base,
+            pack_key(
+                "w1-u-alice",
+                "github.com",
+                "acme/widget",
+                "reffp",
+                b"want a",
+                &protocol
+            )
+        );
+
+        assert_eq!(
+            base,
+            pack_key(
+                "w1-u-alice",
+                "github.com",
+                "acme/widget",
+                "reffp",
+                b"want a",
+                &h
+            ),
+            "the same request against the same ref state must be one key"
+        );
+    }
+
+    #[test]
+    fn the_pack_sweep_evicts_the_oldest_entry_until_under_the_ceiling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant_pack(root, "w1-u-alice", "old", 4096, 1_000);
+        plant_pack(root, "w1-u-alice", "new", 4096, 2_000);
+
+        sweep_packs(root, 5000, &InUse::default());
+
+        assert!(
+            !root.join("w1-u-alice/old.body").exists(),
+            "the oldest cached pack should be evicted"
+        );
+        assert!(
+            !root.join("w1-u-alice/old.meta").exists(),
+            "an evicted body must take its meta with it, or a lookup finds a head with no pack"
+        );
+        assert!(
+            root.join("w1-u-alice/new.body").exists(),
+            "the newest cached pack should survive"
+        );
+    }
+
+    #[test]
+    fn the_pack_sweep_spares_an_entry_a_request_is_replaying() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant_pack(root, "w1-u-alice", "old", 4096, 1_000);
+        plant_pack(root, "w1-u-alice", "new", 4096, 2_000);
+
+        let in_use = InUse::default();
+        let _held = in_use.guard(&root.join("w1-u-alice/old.body"));
+
+        sweep_packs(root, 5000, &in_use);
+
+        assert!(
+            root.join("w1-u-alice/old.body").exists(),
+            "an entry being replayed must survive even as the LRU"
+        );
+        assert!(
+            !root.join("w1-u-alice/new.body").exists(),
+            "an idle entry is evicted to reclaim space instead"
+        );
+    }
+
+    #[test]
+    fn the_pack_sweep_leaves_a_tree_under_its_ceiling_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        plant_pack(root, "w1-u-alice", "one", 4096, 1_000);
+
+        sweep_packs(root, 1 << 20, &InUse::default());
+
+        assert!(root.join("w1-u-alice/one.body").exists());
     }
 
     #[test]

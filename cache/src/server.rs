@@ -29,15 +29,10 @@ pub fn app(config: &Config, durable: Durable) -> Router {
     ));
     let durable = Arc::new(durable);
     let state = AppState {
-        // Sibling roots, swept independently: the git sweep totals its own tree and the package
-        // sweep its own, so package bytes never charge against the git ceiling (nor the reverse).
-        git: Arc::new(GitStrategy::new(
-            config.state_root.join("git"),
-            creds,
-            config.upstream_scheme.clone(),
-            durable.clone(),
-            config.disk_limit_bytes,
-        )),
+        // Sibling roots, swept independently: the git strategy totals its mirror tree and its pack
+        // cache separately, and the package sweep totals its own, so no tier's bytes charge against
+        // another tier's ceiling.
+        git: Arc::new(GitStrategy::new(config, creds, durable.clone())),
         pkg: Arc::new(PkgCache::new(
             config.state_root.join("pkg"),
             durable,

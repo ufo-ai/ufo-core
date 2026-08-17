@@ -52,6 +52,22 @@ pub fn control_plane(body: serde_json::Value) -> (Router, Arc<AtomicUsize>) {
     (router, hits)
 }
 
+/// A control plane that derives the isolation principal from the request's own `user_id`, so one
+/// daemon serves two principals the way two workspaces' sandboxes drive it.
+pub fn control_plane_per_user() -> Router {
+    Router::new().route(
+        "/internal/git-credential",
+        post(|Json(body): Json<serde_json::Value>| async move {
+            let user = body
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("anon")
+                .to_string();
+            Json(serde_json::json!({ "principal": format!("w1-u-{user}") }))
+        }),
+    )
+}
+
 /// A registry-like host: an immutable artifact (long max-age) and a no-store metadata document,
 /// counting every upstream fetch so a test can prove the artifact was fetched once.
 pub fn registry() -> (Router, Arc<AtomicUsize>) {

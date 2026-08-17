@@ -2,17 +2,58 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use tokio::io::AsyncReadExt;
-use tokio::process::Child;
+use tokio::process::{Child, ChildStdout};
 
+pub const READ_CHUNK: usize = 64 * 1024;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
-const READ_CHUNK: usize = 64 * 1024;
+
+/// A CGI child's parsed response head, plus the body bytes already read while finding the header
+/// boundary. Whoever reads the head owns the body that follows.
+pub struct CgiHead {
+    pub status: StatusCode,
+    pub headers: Vec<(HeaderName, HeaderValue)>,
+    pub leftover: Bytes,
+}
 
 /// Translate a CGI child's stdout into an HTTP response: read the header block, then stream the
 /// body straight from the pipe so a packfile is never buffered in memory. The child is owned by the
 /// body stream and reaped at EOF.
 pub async fn response_from_cgi(mut child: Child) -> Result<Response, String> {
     let mut stdout = child.stdout.take().ok_or("cgi child has no stdout")?;
+    let head = read_head(&mut stdout).await?;
 
+    let leftover = head.leftover;
+    let stream = async_stream::stream! {
+        if !leftover.is_empty() {
+            yield Ok::<Bytes, std::io::Error>(leftover);
+        }
+        let mut chunk = vec![0u8; READ_CHUNK];
+        loop {
+            match stdout.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => yield Ok(Bytes::copy_from_slice(&chunk[..n])),
+                Err(e) => {
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+        let _ = child.wait().await;
+    };
+
+    let mut builder = Response::builder().status(head.status);
+    for (name, value) in head.headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(Body::from_stream(stream))
+        .map_err(|e| format!("build response: {e}"))
+}
+
+/// Read and parse the CGI header block, leaving the body unread on `stdout`. Split out from
+/// `response_from_cgi` so a caller that must capture the body — the pack cache writing an
+/// upload-pack response to disk — reads the same head the streaming path does.
+pub async fn read_head(stdout: &mut ChildStdout) -> Result<CgiHead, String> {
     let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
     let boundary = loop {
         if let Some(pos) = find_boundary(&buf) {
@@ -57,32 +98,11 @@ pub async fn response_from_cgi(mut child: Child) -> Result<Response, String> {
         }
     }
 
-    let leftover = Bytes::copy_from_slice(&buf[header_bytes + sep_len..]);
-    let stream = async_stream::stream! {
-        if !leftover.is_empty() {
-            yield Ok::<Bytes, std::io::Error>(leftover);
-        }
-        let mut chunk = vec![0u8; READ_CHUNK];
-        loop {
-            match stdout.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(n) => yield Ok(Bytes::copy_from_slice(&chunk[..n])),
-                Err(e) => {
-                    yield Err(e);
-                    break;
-                }
-            }
-        }
-        let _ = child.wait().await;
-    };
-
-    let mut builder = Response::builder().status(status);
-    for (name, value) in headers {
-        builder = builder.header(name, value);
-    }
-    builder
-        .body(Body::from_stream(stream))
-        .map_err(|e| format!("build response: {e}"))
+    Ok(CgiHead {
+        status,
+        headers,
+        leftover: Bytes::copy_from_slice(&buf[header_bytes + sep_len..]),
+    })
 }
 
 /// Position of the header/body separator and its length, supporting `\r\n\r\n` and `\n\n`.

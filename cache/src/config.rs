@@ -28,12 +28,28 @@ pub struct Config {
     /// Soft ceiling for the package cache tree; its eviction runs above it. Separate from the git
     /// ceiling because the package cache is shared across every workspace and grows differently.
     pub pkg_disk_limit_bytes: u64,
+    /// How long a mirror's last *successful* upstream fetch keeps it fresh: inside the window a
+    /// negotiation POST whose wants the mirror already holds serves it without another origin round
+    /// trip; a want the mirror does not hold fetches regardless. Ref discovery always fetches,
+    /// window or not — the `info/refs` GET and the protocol-v2 `ls-refs` POST alike. `0` fetches on
+    /// every request.
+    pub git_fresh_ttl_secs: u64,
+    /// Soft ceiling for the cached `git-upload-pack` responses (`state_root/pack`); its eviction runs
+    /// above it. `0` disables the pack cache, so every request runs the backend as before.
+    pub pack_cache_bytes: u64,
 }
 
 // Per-tier ceiling (the package cache and git mirrors are bounded separately), so the cache volume
 // must hold both plus headroom.
 const DEFAULT_DISK_LIMIT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DEFAULT_PKG_DISK_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+// Long enough that one clone's `fetch` negotiation rides the fetch its own ref discovery just did, and
+// that a subagent fan-out cloning one repo pays one negotiation; short enough that a negotiation
+// arriving on its own is not far behind origin.
+const DEFAULT_GIT_FRESH_TTL_SECS: u64 = 15;
+// The hosted cache volume is 24Gi against 4 GiB of mirrors and 8 GiB of packages, so this tier takes
+// the bound to 16 GiB and leaves headroom: exceeding an `emptyDir` `sizeLimit` evicts the proxy pod.
+const DEFAULT_PACK_CACHE_MB: u64 = 4096;
 
 // Public registries and their download CDNs for Node, Python, Rust, and Go — the build/test time
 // sinks. More ecosystems (apt, apk, RubyGems, Maven) drop in through UFO_CACHE_PKG_HOSTS.
@@ -76,6 +92,19 @@ impl Config {
                     .parse()
                     .map_err(|e| format!("UFO_CACHE_PKG_DISK_LIMIT_BYTES: {e}"))?,
                 Err(_) => DEFAULT_PKG_DISK_LIMIT_BYTES,
+            },
+            git_fresh_ttl_secs: match std::env::var("UFO_CACHE_GIT_FRESH_TTL_SECS") {
+                Ok(v) => v
+                    .parse()
+                    .map_err(|e| format!("UFO_CACHE_GIT_FRESH_TTL_SECS: {e}"))?,
+                Err(_) => DEFAULT_GIT_FRESH_TTL_SECS,
+            },
+            pack_cache_bytes: match std::env::var("UFO_CACHE_PACK_CACHE_MB") {
+                Ok(v) => v
+                    .parse::<u64>()
+                    .map_err(|e| format!("UFO_CACHE_PACK_CACHE_MB: {e}"))?
+                    .saturating_mul(1024 * 1024),
+                Err(_) => DEFAULT_PACK_CACHE_MB.saturating_mul(1024 * 1024),
             },
         })
     }
