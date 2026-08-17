@@ -207,6 +207,7 @@ pub struct App {
     reply_open: bool,
     view_rows: usize,
     window_start: usize,
+    hover: Option<(u16, u16)>,
     exit_images: Vec<String>,
     selection: Option<Selection>,
     clicks: ClickTracker,
@@ -254,6 +255,7 @@ impl App {
             reply_open: false,
             view_rows: 1,
             window_start: 0,
+            hover: None,
             exit_images: Vec::new(),
             selection: None,
             clicks: ClickTracker::new(),
@@ -334,11 +336,21 @@ impl App {
                 self.step(Step::Note(text.to_string()), true);
                 return;
             };
-            let step = match self.runs_counted.insert(label.to_string()) {
-                true => Step::Note(text.to_string()),
-                false => Step::Under(text.to_string()),
-            };
-            self.step(step, false);
+            let row = text[label.len() + ": ".len()..].to_string();
+            match self.runs_counted.insert(label.to_string()) {
+                true => self.step(
+                    Step::Run {
+                        label: label.to_string(),
+                        rows: vec![row],
+                        opened: false,
+                    },
+                    false,
+                ),
+                false => {
+                    self.flush_stream();
+                    self.retained.push_under(label, row);
+                }
+            }
             return;
         }
         self.flush_stream();
@@ -483,6 +495,9 @@ impl App {
 
     pub fn set_focus(&mut self, focused: bool) {
         self.focused = focused;
+        if !focused {
+            self.hover = None;
+        }
     }
 
     pub fn reconnecting(&mut self, attempt: u32, of: u32, retry_in_s: u64) {
@@ -979,13 +994,15 @@ impl App {
         self.screen.invalidate();
     }
 
-    /// Every mouse event: the wheel scrolls; a press anchors a selection at the grain repeated
-    /// clicks cycle to; a drag extends it, scrolling at the window's edges; releasing a drag or a
-    /// widened grain copies it. A plain click opens the URL under it, or clears the selection.
+    /// Every mouse event: the wheel scrolls; a press flips the fold it lands on, or anchors a
+    /// selection at the grain repeated clicks cycle to; a drag extends it, scrolling at the
+    /// window's edges; releasing a drag or a widened grain copies it. A plain click opens the URL
+    /// under it, or clears the selection. Motion is held for the fold affordance the paint draws.
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll(3),
             MouseEventKind::ScrollDown => self.scroll(-3),
+            MouseEventKind::Moved => self.hover = Some((mouse.row, mouse.column)),
             MouseEventKind::Down(MouseButton::Left) => {
                 if (mouse.row as usize) >= self.view_rows {
                     self.selection = None;
@@ -995,6 +1012,10 @@ impl App {
                     self.window_start + mouse.row as usize,
                     mouse.column as usize,
                 );
+                if self.retained.toggle(at.0, at.1, &self.theme) {
+                    self.selection = None;
+                    return;
+                }
                 let grain = self.clicks.press(at);
                 self.selection = Some(Selection::begin(at.0, at.1, grain));
             }
@@ -1100,6 +1121,12 @@ impl App {
                 if let Some((from, to)) = selection.cols_for(at, &text) {
                     *line = highlight_columns(line.clone(), from, to);
                 }
+            }
+        }
+        if let Some((row, col)) = self.hover {
+            let row = row as usize;
+            if row < avail && retained.is_toggle(window.start + row, col as usize, theme) {
+                frame[row] = underline_line(frame[row].clone());
             }
         }
         frame.extend(dock);
@@ -1302,6 +1329,19 @@ impl App {
             self.splice_raw("\r\n");
         }
     }
+}
+
+/// `line` underlined whole — the affordance a hovered fold row takes.
+fn underline_line(line: Line<'static>) -> Line<'static> {
+    let spans = line
+        .spans
+        .into_iter()
+        .map(|span| {
+            let style = span.style.add_modifier(Modifier::UNDERLINED);
+            Span::styled(span.content, style)
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans).style(line.style.add_modifier(Modifier::UNDERLINED))
 }
 
 /// `line` with the span between two display columns drawn in reverse video.

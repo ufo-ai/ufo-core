@@ -14,6 +14,7 @@ const KEEP_DRAWN: usize = 16;
 const SCHEMES: [&str; 2] = ["https://", "http://"];
 const FOLD_ROLLED: &str = "▸";
 const FOLD_OPENED: &str = "▾";
+const RUN_INDENT: &str = "  ";
 
 /// One retained transcript element, held as its source.
 pub enum Entry {
@@ -29,14 +30,19 @@ pub enum Entry {
     Raw(Vec<Line<'static>>),
 }
 
-/// One step of a turn: a thought the agent wrote between its calls, or the one line a call or a
-/// skill load narrated.
+/// One step of a turn: a thought the agent wrote between its calls, the one line a call or a
+/// skill load narrated, or a subagent run.
 pub enum Step {
     Thought(String),
     Note(String),
-    /// A dispatch of a subagent run that already stands as a step: its own row, counted with the
-    /// run it belongs to, so one run is one step however much it did — the count the web states.
-    Under(String),
+    /// One subagent run: its name, the rows it narrated, and whether the member opened it. A run
+    /// is one step however much it did — the count the web states — and its rows stand behind
+    /// its own fold, like the web's run row.
+    Run {
+        label: String,
+        rows: Vec<String>,
+        opened: bool,
+    },
 }
 
 /// How a turn's steps stand: written into while the turn runs, rolled up behind
@@ -56,13 +62,11 @@ pub fn rollup_line(steps: usize) -> String {
     }
 }
 
-/// How many steps a turn's rows count as: a run's further dispatches ride with the run, so the
-/// count does not grow with what a child did inside its own turn.
-fn counted(steps: &[Step]) -> usize {
-    steps
-        .iter()
-        .filter(|step| !matches!(step, Step::Under(_)))
-        .count()
+/// What a click on one rendered row of a steps entry toggles.
+#[derive(Clone, Copy)]
+enum Toggle {
+    Fold,
+    Run(usize),
 }
 
 /// What one paint of the transcript region shows.
@@ -166,6 +170,32 @@ impl Retained {
         self.grew = true;
     }
 
+    /// A row a counted run narrated: it joins that run's step, or opens a fresh run where the
+    /// rollup that counted it already settled.
+    pub fn push_under(&mut self, label: &str, row: String) {
+        if let Some(at) = self.live_steps {
+            if let Entry::Steps { steps, .. } = &mut self.entries[at] {
+                let run = steps.iter_mut().rev().find_map(|step| match step {
+                    Step::Run {
+                        label: held, rows, ..
+                    } if held == label => Some(rows),
+                    _ => None,
+                });
+                if let Some(rows) = run {
+                    rows.push(row);
+                    self.invalidate(at);
+                    self.grew = true;
+                    return;
+                }
+            }
+        }
+        self.push_step(Step::Run {
+            label: label.to_string(),
+            rows: vec![row],
+            opened: false,
+        });
+    }
+
     /// The open reply's source, taken off the transcript with the entry it grew in — so words the
     /// turn wrote before a call can be held as the step they are.
     pub fn take_reply(&mut self) -> Option<String> {
@@ -210,6 +240,57 @@ impl Retained {
             };
         }
         self.invalidate(at);
+    }
+
+    /// Flip the fold a click landed on: the rollup line opens or closes its turn, a run's row
+    /// opens or closes the run. True where the click was such a toggle.
+    pub fn toggle(&mut self, line: usize, col: usize, theme: &Theme) -> bool {
+        let Some((index, toggle)) = self.toggle_target(line, col, theme) else {
+            return false;
+        };
+        if let Entry::Steps { steps, fold } = &mut self.entries[index] {
+            match toggle {
+                Toggle::Fold => {
+                    *fold = match fold {
+                        Fold::Opened => Fold::Rolled,
+                        _ => Fold::Opened,
+                    };
+                }
+                Toggle::Run(at) => {
+                    if let Some(Step::Run { opened, .. }) = steps.get_mut(at) {
+                        *opened = !*opened;
+                    }
+                }
+            }
+        }
+        self.invalidate(index);
+        true
+    }
+
+    /// Whether a toggle stands under this position — the hover query behind the affordance.
+    pub fn is_toggle(&mut self, line: usize, col: usize, theme: &Theme) -> bool {
+        self.toggle_target(line, col, theme).is_some()
+    }
+
+    /// The toggle one absolute rendered line carries at a display column: the rollup line and a
+    /// run's row toggle, and only within their visible text.
+    fn toggle_target(&mut self, line: usize, col: usize, theme: &Theme) -> Option<(usize, Toggle)> {
+        self.layout(theme);
+        if line >= self.total {
+            return None;
+        }
+        let index = self.entry_at(line);
+        let Entry::Steps { steps, fold } = &self.entries[index] else {
+            return None;
+        };
+        let place = self.places[index];
+        let at = place.from + (line - place.start);
+        let rows = collapse(steps_rows(steps, *fold, theme, self.width), |(line, _)| {
+            line
+        });
+        let (row, toggle) = rows.get(at)?;
+        let toggle = (*toggle)?;
+        (col < wrap::width(&plain_text(row))).then_some((index, toggle))
     }
 
     fn invalidate(&mut self, at: usize) {
@@ -383,7 +464,7 @@ impl Retained {
         if let Some(shape) = self.shapes[at] {
             return shape;
         }
-        let lines = collapse(render(&self.entries[at], theme, self.width));
+        let lines = collapse(render(&self.entries[at], theme, self.width), |line| line);
         let shape = Shape::of(&lines);
         self.shapes[at] = Some(shape);
         shape
@@ -391,7 +472,7 @@ impl Retained {
 
     fn draw(&mut self, at: usize, theme: &Theme) -> &[Line<'static>] {
         if self.drawn[at].is_none() {
-            let lines = collapse(render(&self.entries[at], theme, self.width));
+            let lines = collapse(render(&self.entries[at], theme, self.width), |line| line);
             self.shapes[at] = Some(Shape::of(&lines));
             self.drawn[at] = Some(lines);
         }
@@ -457,26 +538,63 @@ fn render(entry: &Entry, theme: &Theme, width: u16) -> Vec<Line<'static>> {
 /// A turn's steps: the rows alone while the turn writes them, the count alone once it rolled up,
 /// and the count over the rows the member opened again.
 fn steps_lines(steps: &[Step], fold: Fold, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    let summary = |mark: &str| {
-        Line::styled(
-            format!("{mark} {}", rollup_line(counted(steps))),
-            theme.muted,
-        )
-    };
-    let mut lines = match fold {
+    steps_rows(steps, fold, theme, width)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// The same rows with the toggle each carries, so a click and the rendering read one traversal.
+fn steps_rows(
+    steps: &[Step],
+    fold: Fold,
+    theme: &Theme,
+    width: u16,
+) -> Vec<(Line<'static>, Option<Toggle>)> {
+    let summary =
+        |mark: &str| Line::styled(format!("{mark} {}", rollup_line(steps.len())), theme.muted);
+    let mut rows = match fold {
         Fold::Live => Vec::new(),
-        Fold::Rolled => return vec![summary(FOLD_ROLLED)],
-        Fold::Opened => vec![summary(FOLD_OPENED)],
+        Fold::Rolled => return vec![(summary(FOLD_ROLLED), Some(Toggle::Fold))],
+        Fold::Opened => vec![(summary(FOLD_OPENED), Some(Toggle::Fold))],
     };
-    for step in steps {
+    for (index, step) in steps.iter().enumerate() {
         match step {
-            Step::Thought(source) => lines.extend(markdown::render(source, theme, width)),
-            Step::Note(text) | Step::Under(text) => {
-                lines.push(Line::styled(text.clone(), theme.muted))
+            Step::Thought(source) => rows.extend(
+                markdown::render(source, theme, width)
+                    .into_iter()
+                    .map(|line| (line, None)),
+            ),
+            Step::Note(text) => rows.push((Line::styled(text.clone(), theme.muted), None)),
+            Step::Run {
+                label,
+                rows: narrated,
+                opened,
+            } => {
+                let row = run_row(label, narrated, *opened, fold);
+                rows.push((Line::styled(row, theme.muted), Some(Toggle::Run(index))));
+                if *opened {
+                    for held in narrated {
+                        rows.push((
+                            Line::styled(format!("{RUN_INDENT}{held}"), theme.muted),
+                            None,
+                        ));
+                    }
+                }
             }
         }
     }
-    lines
+    rows
+}
+
+/// A run's own row: its name behind a fold mark and — closed while the turn still runs — the
+/// latest thing it narrated, the way the web's run row states what it is doing.
+fn run_row(label: &str, rows: &[String], opened: bool, fold: Fold) -> String {
+    match (opened, fold, rows.last()) {
+        (false, Fold::Live, Some(latest)) => format!("{FOLD_ROLLED} {label} · {latest}"),
+        (false, ..) => format!("{FOLD_ROLLED} {label}"),
+        (true, ..) => format!("{FOLD_OPENED} {label}"),
+    }
 }
 
 fn member_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
@@ -499,13 +617,13 @@ fn member_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
-fn collapse(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
-    for line in lines {
-        if is_blank(&line) && out.last().is_some_and(is_blank) {
+fn collapse<T>(rows: Vec<T>, line: impl Fn(&T) -> &Line<'static>) -> Vec<T> {
+    let mut out: Vec<T> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if is_blank(line(&row)) && out.last().is_some_and(|held| is_blank(line(held))) {
             continue;
         }
-        out.push(line);
+        out.push(row);
     }
     out
 }
@@ -936,8 +1054,12 @@ mod tests {
         let theme = theme();
         let mut retained = Retained::new(40);
         retained.push_step(Step::Note("running spawn: reviewer".into()));
-        retained.push_step(Step::Note("reviewer: running read: the diff".into()));
-        retained.push_step(Step::Under("reviewer: running bash: cargo test".into()));
+        retained.push_step(Step::Run {
+            label: "reviewer".into(),
+            rows: vec!["running read: the diff".into()],
+            opened: false,
+        });
+        retained.push_under("reviewer", "running bash: cargo test".into());
         retained.roll_up_steps();
         assert_eq!(texts(&retained.document(&theme)), ["▸ Completed 2 steps"]);
         retained.toggle_steps();
@@ -946,9 +1068,103 @@ mod tests {
             [
                 "▾ Completed 2 steps",
                 "running spawn: reviewer",
-                "reviewer: running read: the diff",
-                "reviewer: running bash: cargo test",
+                "▸ reviewer",
             ]
+        );
+        assert!(retained.toggle(2, 0, &theme));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "▾ Completed 2 steps",
+                "running spawn: reviewer",
+                "▾ reviewer",
+                "  running read: the diff",
+                "  running bash: cargo test",
+            ]
+        );
+        assert!(retained.toggle(2, 0, &theme));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "▾ Completed 2 steps",
+                "running spawn: reviewer",
+                "▸ reviewer",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_live_runs_row_states_its_latest_call_and_opens_to_them_all() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.push_step(Step::Run {
+            label: "reviewer".into(),
+            rows: vec!["running read: the diff".into()],
+            opened: false,
+        });
+        retained.push_under("reviewer", "running bash: cargo test".into());
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["▸ reviewer · running bash: cargo test"]
+        );
+        assert!(retained.toggle(0, 2, &theme));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "▾ reviewer",
+                "  running read: the diff",
+                "  running bash: cargo test",
+            ]
+        );
+        assert!(retained.toggle(0, 2, &theme));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["▸ reviewer · running bash: cargo test"]
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_rollup_line_opens_and_closes_the_turn() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push_step(Step::Note("running bash: ls".into()));
+        retained.push(Entry::Markdown("the answer".into()));
+        retained.roll_up_steps();
+        assert!(retained.is_toggle(0, 3, &theme));
+        assert!(!retained.is_toggle(0, 30, &theme));
+        assert!(!retained.is_toggle(1, 0, &theme));
+        assert!(retained.toggle(0, 0, &theme));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["▾ Completed 1 step", "running bash: ls", "the answer"]
+        );
+        assert!(retained.toggle(0, 5, &theme));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["▸ Completed 1 step", "the answer"]
+        );
+        assert!(!retained.toggle(0, 30, &theme));
+        assert!(!retained.toggle(1, 0, &theme));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["▸ Completed 1 step", "the answer"]
+        );
+    }
+
+    #[test]
+    fn a_late_row_of_a_settled_run_opens_a_fresh_run() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.push_step(Step::Run {
+            label: "reviewer".into(),
+            rows: vec!["running read: x".into()],
+            opened: false,
+        });
+        retained.roll_up_steps();
+        retained.push_under("reviewer", "running bash: late".into());
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["▸ Completed 1 step", "▸ reviewer · running bash: late"]
         );
     }
 

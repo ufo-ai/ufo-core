@@ -1741,7 +1741,8 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
 }
 
 /// A background run narrates while the parent writes its closing answer. The answer is the
-/// reply — the run's row never takes it into the rollup.
+/// reply — the run's row never takes it into the rollup — and the rollup line and the run's own
+/// row open and close on a click, the run's rows standing behind its fold the way the web's do.
 #[cfg(unix)]
 #[test]
 fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
@@ -1752,6 +1753,7 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
             "note\trunning spawn: reviewer",
             "txt\tThe reviewer is on it.",
             "note\treviewer: running read: the diff",
+            "note\treviewer: running bash: cargo test",
             "ask\t>",
         ],
     }]);
@@ -1774,15 +1776,64 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         .expect("the answer the turn streamed stays on the transcript");
     assert!(line < answer, "{settled}");
 
-    session.press(b"\x14");
+    let (row, col) = locate(&settled, "\u{25b8} Completed 2 steps");
+    assert!(
+        !cell_underlined(&session, row, col),
+        "an unhovered rollup line carries no underline"
+    );
+    session.press(hover(row, col).as_bytes());
+    assert!(
+        cell_underlined(&session, row, col),
+        "hovering the rollup line underlines it: {}",
+        session.screen()
+    );
+    let (answer_row, answer_col) = locate(&settled, "The reviewer is on it.");
+    session.press(hover(answer_row, answer_col).as_bytes());
+    assert!(
+        !cell_underlined(&session, row, col),
+        "the affordance follows the pointer off the line"
+    );
+
+    session.press(click(row, col).as_bytes());
     let opened = session.screen();
     assert!(
-        opened.contains("reviewer: running read: the diff"),
-        "the run's call is a step of the rollup: {opened}"
+        opened.contains("\u{25be} Completed 2 steps"),
+        "a click opens the rollup: {opened}"
     );
     assert!(
-        opened.contains("The reviewer is on it."),
-        "the answer is no step of it: {opened}"
+        opened.contains("running spawn: reviewer") && opened.contains("\u{25b8} reviewer"),
+        "the run stands as one closed row among the steps: {opened}"
+    );
+    assert!(
+        !opened.contains("running read: the diff"),
+        "the run's rows stand behind its own fold: {opened}"
+    );
+
+    let (run_row, run_col) = locate(&opened, "\u{25b8} reviewer");
+    session.press(click(run_row, run_col).as_bytes());
+    let run_opened = session.screen();
+    assert!(
+        run_opened.contains("\u{25be} reviewer")
+            && run_opened.contains("  running read: the diff")
+            && run_opened.contains("  running bash: cargo test"),
+        "the run's row opens to everything it narrated: {run_opened}"
+    );
+    assert!(
+        run_opened.contains("The reviewer is on it."),
+        "the answer is no row of the run: {run_opened}"
+    );
+
+    session.press(click(run_row, run_col).as_bytes());
+    assert!(
+        !session.screen().contains("running read: the diff"),
+        "a second click closes the run: {}",
+        session.screen()
+    );
+    session.press(click(row, col).as_bytes());
+    let closed = session.screen();
+    assert!(
+        closed.contains("\u{25b8} Completed 2 steps") && !closed.contains("spawn"),
+        "a click on the opened rollup line rolls the turn back up: {closed}"
     );
 
     session.press(b"\x03");
@@ -1790,6 +1841,38 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
     let _ = served.handle.join();
     let _ = session.child.wait();
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The 1-based screen cell a line of text starts at, for aiming a mouse report.
+#[cfg(unix)]
+fn locate(screen: &str, needle: &str) -> (u16, u16) {
+    for (row, line) in screen.lines().enumerate() {
+        if let Some(byte) = line.find(needle) {
+            let col = line[..byte].chars().count();
+            return ((row + 1) as u16, (col + 1) as u16);
+        }
+    }
+    panic!("{needle} is not on the screen: {screen}");
+}
+
+#[cfg(unix)]
+fn click(row: u16, col: u16) -> String {
+    format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m")
+}
+
+#[cfg(unix)]
+fn hover(row: u16, col: u16) -> String {
+    format!("\x1b[<35;{col};{row}M")
+}
+
+#[cfg(unix)]
+fn cell_underlined(session: &OnPty, row: u16, col: u16) -> bool {
+    let mut parser = vt100::Parser::new(24, 100, 0);
+    parser.process(&session.painted.lock().unwrap());
+    parser
+        .screen()
+        .cell(row - 1, col - 1)
+        .is_some_and(|cell| cell.underline())
 }
 
 #[test]
