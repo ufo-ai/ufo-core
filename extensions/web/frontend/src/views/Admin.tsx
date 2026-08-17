@@ -19,7 +19,7 @@ import {
 import { Page, PageHeader, Pane, RecordPanel } from "@/kernel/pane";
 import { DataTable, OPEN } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
-import { webAudienceLabel } from "@/lib/audience";
+import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { money } from "@/lib/money";
 import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
 
@@ -256,7 +256,7 @@ function AgentRecord({
         rows={[
           { label: "Model", value: agent.model },
           { label: "Public Internet", value: allowance(agent.internet_access_allowed) },
-          { label: "Surfaces", value: agent.installations.join(", ") || "—" },
+          { label: "Surfaces", value: agent.installations.map(surfaceWord).join(", ") || "—" },
           { label: "Web Audience", value: webAudienceLabel(agent.main, agent.web_audience) },
         ]}
       />

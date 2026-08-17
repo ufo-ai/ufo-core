@@ -43,7 +43,7 @@ const OVERVIEW = {
   agent: {
     name: "assistant",
     main: true,
-    surfaces: ["web"],
+    surfaces: ["web", "ufo"],
     updated_at: "2026-07-30T12:00:00",
     prompt: "be useful",
     prompt_digest: "abc123",
@@ -101,7 +101,7 @@ test("the overview states the agent's facts, renders its schema, and submits a s
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Main agent")).toBeTruthy();
-  expect(fact("Installations")).toBe("web");
+  expect(fact("Installations")).toBe("Portal, Terminal");
   expect(fact("Updated")).toBe("Jul 30 2026");
   expect(fact("Prompt digest")).toBe("abc123");
   expect(fact("Web audience")).toBe("Every member");

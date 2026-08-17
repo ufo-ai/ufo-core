@@ -9,7 +9,7 @@ import { type NoticeState, OutcomeNotice, Panel, QUIET, outcomeNotice, usePanelR
 import { postIntent } from "@/lib/api";
 import { newChatHash } from "@/lib/route";
 import { setPendingAsk } from "@/lib/pendingAsk";
-import { webAudienceLabel } from "@/lib/audience";
+import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { day } from "@/lib/moments";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
@@ -162,7 +162,9 @@ export function Overview({ agent }: { agent: Agent }) {
                   { label: "Role", value: ready.agent.main ? "Main agent" : "Agent" },
                   {
                     label: "Installations",
-                    value: ready.agent.surfaces.length ? ready.agent.surfaces.join(", ") : "None",
+                    value: ready.agent.surfaces.length
+                      ? ready.agent.surfaces.map(surfaceWord).join(", ")
+                      : "None",
                   },
                   { label: "Updated", value: day(ready.agent.updated_at) },
                   {

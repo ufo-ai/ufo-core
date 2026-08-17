@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { PanelEmpty, PanelSkeleton, usePanelRead } from "@/kernel/panel";
-import { WEB_SURFACE } from "@/lib/audience";
+import { WEB_SURFACE, surfaceWord } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { workspaceHash } from "@/lib/route";
 import type { Agent, Subagent } from "@/lib/types";
@@ -322,10 +322,10 @@ export function AgentGraph({
             key={name}
             data-node
             {...held(surfaceKey(name))}
-            className={cn(CAPSULE, (unsaid(name) || away(surfaceKey(name))) && DIM)}
+            className={cn(CAPSULE, (unsaid(surfaceWord(name)) || away(surfaceKey(name))) && DIM)}
             style={at(surfaceKey(name))}
           >
-            {name}
+            {surfaceWord(name)}
           </div>
         ))}
         {agents.map((agent) => (

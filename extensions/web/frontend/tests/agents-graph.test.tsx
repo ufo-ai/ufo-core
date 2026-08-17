@@ -11,7 +11,12 @@ const SUBAGENTS = [
   { name: "deep_research", model: "claude-opus-4-8" },
   { name: "general_purpose", model: null },
 ];
-const INSTALLATIONS = { installations: [{ surface: "slack", agent_id: AGENT_ID }] };
+const INSTALLATIONS = {
+  installations: [
+    { surface: "slack", agent_id: AGENT_ID },
+    { surface: "ufo", agent_id: AGENT_ID },
+  ],
+};
 const CONNECTIONS = {
   connections: [
     {
@@ -129,8 +134,9 @@ test("the graph states what the workspace runs and what each agent reaches", asy
   renderAgents();
   const graph = await openGraph();
 
-  expect(within(graph).getByText("web")).toBeTruthy();
-  expect(within(graph).getByText("slack")).toBeTruthy();
+  expect(within(graph).getByText("Portal")).toBeTruthy();
+  expect(within(graph).getByText("Slack")).toBeTruthy();
+  expect(within(graph).getByText("Terminal")).toBeTruthy();
   expect(node(graph, "assistant").tagName).toBe("BUTTON");
   expect(node(graph, "research").tagName).toBe("BUTTON");
   expect(node(graph, "deep_research").tagName).toBe("BUTTON");
@@ -141,7 +147,7 @@ test("the graph states what the workspace runs and what each agent reaches", asy
   expect(node(graph, "github").getAttribute("href")).toBe("#/workspace/connectors");
   expect(node(graph, "support-mail").getAttribute("href")).toBe("#/workspace/sources");
 
-  expect(edges("surface")).toBe(3);
+  expect(edges("surface")).toBe(4);
   expect(edges("connector")).toBe(1);
   expect(edges("memory")).toBe(2);
   expect(edges("subagent")).toBe(2);
@@ -156,7 +162,7 @@ test("hovering a node holds its own reach lit and dims the rest", async () => {
 
   expect(box(graph, "assistant").className).toContain("opacity-40");
   expect(box(graph, "github").className).toContain("opacity-40");
-  expect(box(graph, "web").className).not.toContain("opacity-40");
+  expect(box(graph, "Portal").className).not.toContain("opacity-40");
   expect(box(graph, "Memory").className).not.toContain("opacity-40");
   expect(box(graph, "deep_research").className).not.toContain("opacity-40");
   const connector = document.querySelector('[data-edge="connector"]');

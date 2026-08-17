@@ -183,7 +183,7 @@ const SECOND_AGENT = {
   id: SECOND_ID,
   name: "second",
   main: false,
-  installations: ["slack"],
+  installations: ["slack", "ufo"],
 };
 
 const ADMIN_TABLES = {
@@ -268,12 +268,12 @@ test("an agent's record carries its surfaces and the web access grant, and the r
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   await screen.findByText("second");
   expect(screen.queryByPlaceholderText("email@work.com")).toBeNull();
-  expect(screen.queryByText("slack")).toBeNull();
+  expect(screen.queryByText("Slack, Terminal")).toBeNull();
 
   await pressRow("second");
   const record = await screen.findByRole("complementary", { name: "second" });
   expect(within(record).getByText("Surfaces")).toBeTruthy();
-  expect(within(record).getByText("slack")).toBeTruthy();
+  expect(within(record).getByText("Slack, Terminal")).toBeTruthy();
 
   await userEvent.type(within(record).getByLabelText("Web Access Address"), "new@work.com");
   await userEvent.click(within(record).getByRole("button", { name: "Grant" }));

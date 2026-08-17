@@ -20,7 +20,7 @@ export function isPortalChat(surface: string): boolean {
 const SURFACE_WORDS: Record<string, string> = {
   [WEB_SURFACE]: "Portal",
   [SLACK_SURFACE]: "Slack",
-  [UFO_SURFACE]: "CLI",
+  [UFO_SURFACE]: "Terminal",
 };
 
 /** The member's word for a surface. A surface the map does not name reads as its own word rather

@@ -373,7 +373,7 @@ test("a row from another surface draws its glyph and states the surface's own na
   expect((await screen.findByRole("tooltip")).textContent).toBe("Direct message");
 });
 
-test("a cli row draws the terminal glyph and reads as CLI, never as the surface's own name", async () => {
+test("a cli row draws the terminal glyph and reads as Terminal, never as the surface's own name", async () => {
   const cli = { ...CHAT_ROW, surface: "ufo", surface_label: null, title: "Deploy the branch" };
   wire({ "/api/chats": () => json({ chats: [cli] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
@@ -381,7 +381,7 @@ test("a cli row draws the terminal glyph and reads as CLI, never as the surface'
   const railRow = await screen.findByRole("button", { name: /Deploy the branch/ });
   expect(railRow.querySelector(".tabler-icon-terminal-2")).not.toBeNull();
   fireEvent.focus(railRow);
-  expect((await screen.findByRole("tooltip")).textContent).toBe("CLI");
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Terminal");
 });
 
 test("the surface glyph is drawn at the sidebar's glyph size, not at the row's text size", async () => {
