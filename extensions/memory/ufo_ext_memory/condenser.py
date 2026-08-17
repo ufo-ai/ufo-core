@@ -199,8 +199,9 @@ class FactDeriver:
         is validated on its own, so an entry the contract does not satisfy drops without taking the
         rest with it, while a reply carrying no recorded facts at all raises: it is not the same
         answer as "these pages hold nothing", and the caller must settle nothing for the group.
-        A forced tool choice runs with reasoning off — the provider rejects it under extended
-        thinking."""
+        The request asks for reasoning off to avoid paying for optional background thinking; a
+        model that requires reasoning uses its minimum adaptive effort, which supports forced tool
+        use."""
         payload = {
             "pages": [
                 {"page_id": str(page.page_id), "body": page.body[:MAX_PAGE_BODY_CHARS]}

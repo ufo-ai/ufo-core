@@ -29,6 +29,14 @@ class ReasoningSupport:
 
     supported: bool
     tools_with_reasoning: bool
+    default_on: bool = False
+    can_disable: bool = True
+    minimum: ReasoningEffort = "low"
+
+    def internal_effort(self) -> ReasoningEffort:
+        if not self.supported or self.can_disable:
+            return "off"
+        return self.minimum
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,8 @@ class ModelSpec:
             raise ValueError(
                 f"model {self.id!r} declares tools_with_reasoning without reasoning support"
             )
+        if self.reasoning.default_on and not self.reasoning.supported:
+            raise ValueError(f"model {self.id!r} declares default reasoning without reasoning")
 
     def key_rejected(self) -> CredentialValueInvalid:
         """The credential fault a provider's 401 is: the key this spec resolved is not one it
@@ -85,9 +95,12 @@ class ModelSpec:
         """The reasoning setting this request carries, or None when it carries no setting at all:
         the model does not reason, or its api surface refuses reasoning alongside this request's
         tools. `off` is a setting the request states, never the absence of one — a wire that reads
-        an absent parameter as the provider's own default effort cannot say `off` by omission."""
+        an absent parameter as the provider's own default effort cannot say `off` by omission. A
+        model that cannot disable reasoning clamps `off` to its declared minimum."""
         if not self.reasoning.supported:
             return None
         if tools and not self.reasoning.tools_with_reasoning:
             return None
+        if requested == "off" and self.reasoning.default_on and not self.reasoning.can_disable:
+            return self.reasoning.minimum
         return requested

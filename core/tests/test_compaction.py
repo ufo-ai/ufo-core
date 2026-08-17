@@ -41,6 +41,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.models.spec import ReasoningSupport
 from ufo.schema.records import Agent, Usage
 from ufo.skills.runtime import LoadedSkills, RuntimeSkill, SkillRegistry
 from ufo.transcript import Anchor, CompactionSummary, FileRef
@@ -81,11 +82,13 @@ class CapturingSummaryModel:
 
     seen: list[str] = field(default_factory=list)
     seen_conversation_cache_ttl: list[str] = field(default_factory=list)
+    seen_reasoning: list[str] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         content = request.messages[0].content
         self.seen.append(content if isinstance(content, str) else "")
         self.seen_conversation_cache_ttl.append(request.conversation_cache_ttl)
+        self.seen_reasoning.append(request.reasoning)
         yield TextDelta(text=FIXED_SUMMARY.model_dump_json())
         yield Usage(input_tokens=1, output_tokens=1)
 
@@ -417,6 +420,27 @@ async def test_summarizer_requests_the_5m_conversation_cache_ttl(tmp_path: Path)
     )
     await compaction.maybe_compact(messages)
     assert model.seen_conversation_cache_ttl == ["5m"]
+
+
+async def test_summarizer_uses_required_reasoning_minimum(tmp_path: Path) -> None:
+    model = CapturingSummaryModel()
+    compaction = _compaction(
+        tmp_path,
+        model=model,
+        trigger_tokens=1,
+        keep_messages=2,
+        reasoning=ReasoningSupport(
+            supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
+        ),
+    )
+    await compaction.maybe_compact(
+        (
+            Message(role="user", content="begin " + "x" * 40),
+            Message(role="assistant", content="working " + "x" * 40),
+            Message(role="user", content="tail " + "x" * 40),
+        )
+    )
+    assert model.seen_reasoning == ["low"]
 
 
 async def test_summarizer_input_closes_with_the_format_restatement(tmp_path: Path) -> None:

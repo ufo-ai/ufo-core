@@ -13,6 +13,7 @@ from ufo.models.interface import (
     Message,
     TextBlock,
     ToolResultBlock,
+    ToolUseBlock,
 )
 from ufo.transcript import (
     CompactionSummary,
@@ -20,6 +21,7 @@ from ufo.transcript import (
     Conversation,
     compaction_key,
     decode,
+    encode,
     read_compaction_records,
     transcript_key,
 )
@@ -136,8 +138,25 @@ async def test_stored_bytes_are_lz4_compact_json(tmp_path: Path) -> None:
     raw = await blob.get(transcript_key(conversation_id))
     decoded = lz4.frame.decompress(raw).decode()
     assert decoded == (
-        '{"injected":null,"messages":[{"content":"hi","role":"user"}],"seq":1,"system":null}'
+        '{"seq":1,"messages":[{"role":"user","content":"hi"}],"system":null,"injected":null}'
     )
+
+
+def test_stored_tool_input_keeps_provider_key_order() -> None:
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(
+                role="assistant",
+                content=(ToolUseBlock(id="t1", name="probe", input={"zeta": 1, "alpha": 2}),),
+            ),
+        ),
+    )
+    raw = lz4.frame.decompress(encode(conversation)).decode()
+    assert raw.index('"zeta"') < raw.index('"alpha"')
+    block = decode(encode(conversation)).messages[0].content[0]
+    assert isinstance(block, ToolUseBlock)
+    assert tuple(block.input) == ("zeta", "alpha")
 
 
 async def test_writer_bytes_decode_through_the_shared_contract(tmp_path: Path) -> None:

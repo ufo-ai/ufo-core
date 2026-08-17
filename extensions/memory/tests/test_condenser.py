@@ -926,9 +926,10 @@ async def test_the_extraction_compels_the_recording_tool_instead_of_asking_for_j
     db: None, tmp_path: object
 ) -> None:
     """The facts are a tool contract, never structured data read out of a completion: the pass
-    offers the recording tool alone, compels it, and runs with reasoning off (a forced choice cannot
-    run under extended thinking), so the entries arrive as arguments the provider decoded. A body
-    carrying the quote and newline that break a hand-decoded reply lands verbatim."""
+    offers the recording tool alone, compels it, and asks for optional reasoning to stay off, so
+    the entries arrive as arguments the provider decoded. A required-reasoning model uses its
+    minimum adaptive effort. A body carrying the quote and newline that break a hand-decoded reply
+    lands verbatim."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     page_id, _source_id = await _seed_page(

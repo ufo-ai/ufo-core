@@ -1313,6 +1313,40 @@ async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
     assert "output_config" not in create.kwargs
 
 
+async def test_anthropic_default_reasoning_is_explicitly_disabled() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    spec = next(
+        spec
+        for spec in core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+        if spec.id == "claude-sonnet-5"
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=spec).complete(
+        REQUEST.model_copy(update={"model": spec.id, "reasoning": "off"})
+    ):
+        pass
+    assert create.kwargs["thinking"] == {"type": "disabled"}
+    assert "output_config" not in create.kwargs
+
+
+async def test_anthropic_required_reasoning_clamps_off_to_minimum() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    spec = next(
+        spec
+        for spec in core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+        if spec.id == "claude-fable-5"
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=spec).complete(
+        REQUEST.model_copy(update={"model": spec.id, "reasoning": "off"})
+    ):
+        pass
+    assert create.kwargs["thinking"] == {"type": "adaptive"}
+    assert create.kwargs["output_config"] == {"effort": "low"}
+
+
 REASONING_REQUEST = ModelRequest(
     model="claude-opus-4-8",
     system="be terse",
@@ -1653,18 +1687,19 @@ def test_model_request_rejects_a_forced_choice_that_names_no_offered_tool() -> N
         )
 
 
-def test_model_request_forced_choice_requires_reasoning_off() -> None:
+def test_model_request_forced_choice_accepts_required_reasoning() -> None:
     tool = ToolSchema(name="finish", description="d", input_schema={"type": "object"})
-    with pytest.raises(ValueError, match="reasoning off"):
-        ModelRequest(
-            model="m",
-            system="s",
-            messages=(),
-            max_tokens=1,
-            conversation_cache_ttl="5m",
-            tools=(tool,),
-            tool_choice="finish",
-        )
+    request = ModelRequest(
+        model="m",
+        system="s",
+        messages=(),
+        max_tokens=1,
+        conversation_cache_ttl="5m",
+        tools=(tool,),
+        tool_choice="finish",
+        reasoning="low",
+    )
+    assert request.reasoning == "low"
     forced = ModelRequest(
         model="m",
         system="s",
@@ -1701,6 +1736,38 @@ async def test_anthropic_forced_tool_choice_compels_the_named_tool() -> None:
         "disable_parallel_tool_use": True,
     }
     assert "thinking" not in create.kwargs
+
+
+async def test_anthropic_forced_tool_choice_uses_adaptive_thinking_for_required_reasoning() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    spec = replace(
+        ANTHROPIC_SPEC,
+        reasoning=ReasoningSupport(
+            supported=True,
+            tools_with_reasoning=True,
+            default_on=True,
+            can_disable=False,
+        ),
+    )
+    request = REQUEST.model_copy(
+        update={
+            "tools": (
+                ToolSchema(name="finish", description="one", input_schema={"type": "object"}),
+            ),
+            "tool_choice": "finish",
+            "reasoning": "low",
+        }
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=spec).complete(request):
+        pass
+    assert create.kwargs["thinking"] == {"type": "adaptive"}
+    assert create.kwargs["tool_choice"] == {
+        "type": "tool",
+        "name": "finish",
+        "disable_parallel_tool_use": True,
+    }
 
 
 async def test_openai_forced_tool_choice_compels_the_named_tool() -> None:
@@ -1763,6 +1830,26 @@ def test_model_spec_rejects_tools_with_reasoning_without_support() -> None:
             reasoning=ReasoningSupport(supported=False, tools_with_reasoning=True),
             api_surface="chat",
         )
+
+
+def test_required_reasoning_uses_minimum_for_internal_and_stored_off_requests() -> None:
+    support = ReasoningSupport(
+        supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
+    )
+    assert support.internal_effort() == "low"
+    assert (
+        ModelSpec(
+            id="required-reasoning",
+            provider="anthropic",
+            client=lambda spec, key: AnthropicClient(client=anthropic_sdk_client(key), spec=spec),
+            price=_PRICE,
+            knowledge_cutoff="2026-01",
+            context_window=1,
+            reasoning=support,
+            api_surface="chat",
+        ).wire_reasoning("off", ())
+        == "low"
+    )
 
 
 async def test_chat_omits_reasoning_when_the_model_does_not_support_it() -> None:

@@ -2073,6 +2073,19 @@ def test_sse_usage_parses_an_anthropic_stream() -> None:
     assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
 
 
+def test_anthropic_aggregate_cache_write_uses_the_conservative_ttl() -> None:
+    accumulator = HttpTokenUsage(MODEL_HOST)
+    accumulator.feed(
+        JSON_RESPONSE_HEAD + b'{"model":"claude-opus-4-8","usage":{"input_tokens":1000,'
+        b'"cache_read_input_tokens":0,"cache_creation_input_tokens":4000,'
+        b'"output_tokens":2000}}'
+    )
+    assert accumulator.usage() == (
+        "claude-opus-4-8",
+        Usage(input_tokens=1000, output_tokens=2000, cache_write_1h_tokens=4000),
+    )
+
+
 def test_sse_usage_reassembles_across_chunk_boundaries() -> None:
     accumulator = HttpTokenUsage(MODEL_HOST)
     for start in range(0, len(ANTHROPIC_SSE), 7):

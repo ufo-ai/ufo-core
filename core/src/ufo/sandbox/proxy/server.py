@@ -1881,7 +1881,7 @@ class HttpTokenUsage:
                 self._cache_write_5m = _int_field(creation, "ephemeral_5m_input_tokens")
                 self._cache_write_1h = _int_field(creation, "ephemeral_1h_input_tokens")
             else:
-                self._cache_write_5m = _int_field(usage, "cache_creation_input_tokens")
+                self._cache_write_1h = _int_field(usage, "cache_creation_input_tokens")
         output = usage.get("output_tokens")
         if isinstance(output, int) and not isinstance(output, bool):
             self._output = output

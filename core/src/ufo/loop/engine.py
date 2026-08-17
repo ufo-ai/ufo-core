@@ -14,7 +14,7 @@ import asyncio
 import json
 import time
 from base64 import b64decode, b64encode
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from html import escape
@@ -81,6 +81,7 @@ from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
+    AUTO_MODEL,
     ImageBlock,
     ImageSource,
     Message,
@@ -101,6 +102,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.pricing import Pricing
+from ufo.models.spec import ModelSpec, ReasoningSupport
 from ufo.o11y import (
     emit_histogram,
     emit_metric,
@@ -906,8 +908,13 @@ class TurnEngine:
     models: tuple[str, ...] = ()
     """The model ids this deploy serves, handed to every tool call so a write that stores a
     model can refuse an id the registry cannot answer."""
+    model_specs: Mapping[str, ModelSpec] = field(default_factory=dict)
+    auto_model: str = AUTO_MODEL
     pricing: Pricing = CORE_PRICING
     subagents: SubagentControl | None = None
+    reasoning: ReasoningSupport = field(
+        default_factory=lambda: ReasoningSupport(supported=True, tools_with_reasoning=True)
+    )
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
     skills: SkillRegistry = CORE_SKILL_REGISTRY
@@ -966,7 +973,7 @@ class TurnEngine:
                 messages=(Message(role="user", content=user),),
                 max_tokens=FIND_MAX_TOKENS,
                 conversation_cache_ttl="5m",
-                reasoning="off",
+                reasoning=self.reasoning.internal_effort(),
             )
             parts: list[str] = []
             async for event in self.model.complete(request):
@@ -998,6 +1005,8 @@ class TurnEngine:
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
             models=self.models,
+            model_specs=self.model_specs,
+            auto_model=self.auto_model,
         )
         try:
             if not await self._mark_running():
@@ -1170,6 +1179,8 @@ class TurnEngine:
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
             models=self.models,
+            model_specs=self.model_specs,
+            auto_model=self.auto_model,
         )
         try:
             if not await self._mark_running():
@@ -1935,8 +1946,8 @@ class TurnEngine:
 
         A subagent turn offers the finish tool beside the registry's set — its input schema is the
         profile's output model, so the return shape is a tool contract the model corrects against,
-        not a prose convention. `force_finish` offers finish alone and compels it via tool_choice
-        (reasoning off — a forced choice cannot run under extended thinking)."""
+        not a prose convention. `force_finish` offers finish alone and compels it via tool_choice,
+        keeping the model's supported internal reasoning effort."""
         finish = (
             None
             if self.output_model is None
@@ -1962,7 +1973,11 @@ class TurnEngine:
             conversation_cache_ttl="5m" if self.turn.spawned else "1h",
             tools=tools,
             tool_choice=FINISH_TOOL if round_input.force_finish else None,
-            reasoning="off" if round_input.force_finish else self.agent.reasoning,
+            reasoning=(
+                self.reasoning.internal_effort()
+                if round_input.force_finish
+                else self.agent.reasoning
+            ),
         )
         if not round_input.first_round:
             gap = "within_turn"

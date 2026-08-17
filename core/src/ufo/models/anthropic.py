@@ -179,7 +179,9 @@ class AnthropicClient:
                 "cache_control": conversation_cache,
             }
             effort = self.spec.wire_reasoning(request.reasoning, request.tools)
-            if effort not in (None, "off"):
+            if effort == "off" and self.spec.reasoning.default_on:
+                create_kwargs["thinking"] = {"type": "disabled"}
+            elif effort not in (None, "off"):
                 create_kwargs["thinking"] = {"type": "adaptive"}
                 if effort != "auto":
                     create_kwargs["output_config"] = {"effort": effort}

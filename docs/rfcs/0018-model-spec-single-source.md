@@ -53,6 +53,8 @@ a `Callable`, is never serialized). New home: `core/src/ufo/models/spec.py`.
 class ReasoningSupport:
     supported: bool                     # does the model reason at all; the client omits reasoning if not
     tools_with_reasoning: bool          # does reasoning compose with tools on the CHAT surface (#568)
+    default_on: bool = False            # does omission enable provider-default reasoning
+    can_disable: bool = True            # does the provider accept an explicit off value
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -60,7 +62,7 @@ class ModelSpec:
     provider: str                       # "anthropic" | "openai" | contributed — read in PR1 by
                                         #   registry.model_key_env (onboarding's eager key check)
     client: Callable[[ModelSpec, str], ModelClient]   # builds the client from (spec, key)
-    price: ModelPrice                   # input / output / cache_read / cache_write_5m / cache_write_1h
+    price: ModelPrice                   # input / output / cache_read / cache writes by TTL
     knowledge_cutoff: str               # MACHINE date "YYYY-MM" — rendered to "February 2026" at the seam
     context_window: int
     reasoning: ReasoningSupport
@@ -84,8 +86,10 @@ construction error, so "a complete spec" is enforced by the type, not a checklis
 exactly the facts that were scattered per-model and each of which a seam reads in this same unit —
 so nothing lands as a dead declaration. Facts that are process-global and identical across every
 model today (image caps applied to the canonical messages before client translation and the
-reasoning-effort *default*) keep their single existing home; they fold onto the spec the first time
-a model needs a non-global value. Per-model **output-cap enforcement** is
+reasoning-effort *request default*) keep their single existing home; they fold onto the spec the
+first time a model needs a non-global value. Provider-default reasoning is a model fact: a request
+for `off` sends the explicit provider value when omission would enable reasoning, and fails before
+the call when that model cannot disable it. Per-model **output-cap enforcement** is
 the RFC's designated later unit (see Resolved decisions), and its field is declared then, with its
 consumer — not now.
 
@@ -113,7 +117,8 @@ sets `api_surface="responses"`, so the OpenAI client renders the legal Responses
 the illegal chat one — that is terra's fix, no prefix special-case, no profile edit. The separate
 `reasoning.tools_with_reasoning` flag governs a *chat*-surface model that rejects `tools` and
 `reasoning_effort` together: the client drops the reasoning parameter for a tool round rather than
-400. terra needs only the surface; the flag is the general chat-surface capability. Research pins a
+400. `reasoning.default_on` and `reasoning.can_disable` govern whether `off` must be explicit or is
+invalid. terra needs only the surface; the flags are general model capabilities. Research pins a
 **role** the registry resolves (`registry.role("research")`), not a raw slug, so a re-point is a
 validated one-line change, never a slug swap that risks the fact tables.
 
@@ -144,8 +149,8 @@ support vision". So client normalization eliminates only the shape half — the 
   each spec stays flat and self-contained, one home per fact.
 - **Recorded as traps, deferred** (no current model needs them): tiered context pricing (Anthropic
   1M-context doubles past 200k) and dual-surface models. `api_surface` stays single-valued. Cache
-  writes keep separate 5m and 1h rates because subagent and main-agent turns use both. If tiered
-  context pricing is added, price becomes a tiered structure — noted, not built.
+  writes keep separate 5m, 30m, and 1h rates because the providers use all three. If tiered context
+  pricing is added, price becomes a tiered structure — noted, not built.
 
 ## Doctrine fit / implications
 

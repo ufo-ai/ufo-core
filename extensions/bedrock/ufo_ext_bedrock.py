@@ -38,6 +38,10 @@ ANTHROPIC_LONG_CONTEXT_WINDOW = 1_000_000
 OPENAI_CONTEXT_WINDOW = 272_000
 GPT_OSS_CONTEXT_WINDOW = 128_000
 REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
+DEFAULT_REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True, default_on=True)
+REQUIRED_REASONS = ReasoningSupport(
+    supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
+)
 
 
 def bedrock_region() -> str:
@@ -80,6 +84,7 @@ def _anthropic(
     cutoff: str,
     *,
     context_window: int = ANTHROPIC_CONTEXT_WINDOW,
+    reasoning: ReasoningSupport = REASONS,
 ) -> ModelSpec:
     return ModelSpec(
         id=id,
@@ -88,7 +93,7 @@ def _anthropic(
         price=price,
         knowledge_cutoff=cutoff,
         context_window=context_window,
-        reasoning=REASONS,
+        reasoning=reasoning,
         api_surface="chat",
         key_slot=BEDROCK_KEY_SLOT,
         key_env=BEDROCK_API_KEY_ENV,
@@ -118,12 +123,14 @@ BEDROCK_MODEL_SPECS = (
         "anthropic.claude-fable-5",
         ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000, 20_000_000),
         "2026-01",
+        reasoning=REQUIRED_REASONS,
     ),
     _anthropic(
         "anthropic.claude-opus-5",
         ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
         "2026-05",
         context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
+        reasoning=DEFAULT_REASONS,
     ),
     _anthropic(
         "anthropic.claude-opus-4-8",
@@ -139,6 +146,7 @@ BEDROCK_MODEL_SPECS = (
         "anthropic.claude-sonnet-5",
         ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
         "2026-01",
+        reasoning=DEFAULT_REASONS,
     ),
     _openai(
         "openai.gpt-oss-20b",

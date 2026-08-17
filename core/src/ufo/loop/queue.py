@@ -526,6 +526,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             system_prompt=system_prompt,
             model=model,
             provider=runtime.registry.spec(resolved.model).provider,
+            reasoning=runtime.registry.spec(resolved.model).reasoning,
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
             compaction=Compaction(
                 client=model,
@@ -537,6 +538,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 turn=turn,
                 agent=resolved,
                 speaker_member_id=None,
+                reasoning=runtime.registry.spec(resolved.model).reasoning,
             ),
             hub=runtime.hub,
             lineage=lineage,
@@ -567,6 +569,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 )
             ),
             models=(AUTO_MODEL, *sorted(runtime.registry.specs)),
+            model_specs=runtime.registry.specs,
+            auto_model=runtime.registry.auto_model,
             public_base_url=runtime.config.connect.public_base_url,
             hooks=hooks,
             blob=runtime.blob,

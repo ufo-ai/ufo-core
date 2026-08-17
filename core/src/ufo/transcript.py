@@ -39,7 +39,7 @@ def transcript_key(conversation_id: UUID) -> str:
 
 
 def encode(conversation: Conversation) -> bytes:
-    body = json.dumps(conversation.model_dump(), separators=(",", ":"), sort_keys=True).encode()
+    body = json.dumps(conversation.model_dump(), separators=(",", ":")).encode()
     return lz4.frame.compress(body)
 
 

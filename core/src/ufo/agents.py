@@ -117,15 +117,24 @@ class AgentSpec(BaseModel):
         return value
 
 
-def _known_model(ctx: ToolContext, model: str) -> None:
+def _known_model(ctx: ToolContext, model: str, reasoning: ReasoningEffort) -> None:
     """Refuse a model id this deploy's registry cannot answer, where it is written.
 
     `ModelRegistry.spec` raises on an unknown id, and a turn reads the stored model at setup before
     it dispatches anything — so an id that reaches the row fails every later turn of that agent, on
     every surface, and the repair turn fails the same way. The write is the only place a member can
     still be told."""
+    resolved = ctx.auto_model if model == AUTO_MODEL else model
     if ctx.models and model not in ctx.models:
         raise ValueError(f"no model named {model!r}")
+    model_spec = ctx.model_specs.get(resolved)
+    if (
+        model_spec is not None
+        and reasoning == "off"
+        and model_spec.reasoning.default_on
+        and not model_spec.reasoning.can_disable
+    ):
+        raise ValueError(f"model {resolved!r} requires reasoning when reasoning is 'off'")
 
 
 @dataclass(frozen=True)
@@ -228,7 +237,7 @@ class AgentObjects:
         owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
         if not owned and not await ctx.speaker_is_admin():
             raise AdminRequired(AGENT_EDIT_GATE)
-        _known_model(ctx, spec.model)
+        _known_model(ctx, spec.model, spec.reasoning)
         next_prompt = row.prompt if spec.prompt is None else spec.prompt
         prompt_changed = next_prompt != row.prompt
         next_sandbox_size = (
@@ -287,7 +296,7 @@ class AgentObjects:
             raise ValueError(AGENT_CREATE_GATE)
         if spec.prompt is None or not spec.prompt.strip():
             raise ValueError(AGENT_PROMPT_REQUIRED)
-        _known_model(ctx, spec.model)
+        _known_model(ctx, spec.model, spec.reasoning)
         async with workspace_tx() as connection:
             try:
                 await connection.execute(

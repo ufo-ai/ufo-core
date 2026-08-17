@@ -19,6 +19,12 @@ ANTHROPIC_LONG_CONTEXT_WINDOW = 1_000_000
 OPENAI_CONTEXT_WINDOW = 272_000
 
 REASONS_WITH_TOOLS = ReasoningSupport(supported=True, tools_with_reasoning=True)
+DEFAULT_REASONS_WITH_TOOLS = ReasoningSupport(
+    supported=True, tools_with_reasoning=True, default_on=True
+)
+REQUIRED_REASONS_WITH_TOOLS = ReasoningSupport(
+    supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
+)
 
 
 def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient:
@@ -36,6 +42,7 @@ def _anthropic(
     key_env: str,
     *,
     context_window: int = ANTHROPIC_CONTEXT_WINDOW,
+    reasoning: ReasoningSupport = REASONS_WITH_TOOLS,
 ) -> ModelSpec:
     return ModelSpec(
         id=id,
@@ -44,7 +51,7 @@ def _anthropic(
         price=price,
         knowledge_cutoff=cutoff,
         context_window=context_window,
-        reasoning=REASONS_WITH_TOOLS,
+        reasoning=reasoning,
         api_surface="chat",
         key_slot=ANTHROPIC_KEY_SLOT,
         key_env=key_env,
@@ -88,6 +95,7 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000, 20_000_000),
             "2026-01",
             anthropic_key_env,
+            reasoning=REQUIRED_REASONS_WITH_TOOLS,
         ),
         _anthropic(
             "claude-opus-5",
@@ -95,6 +103,7 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             "2026-05",
             anthropic_key_env,
             context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
+            reasoning=DEFAULT_REASONS_WITH_TOOLS,
         ),
         _anthropic(
             "claude-opus-4-8",
@@ -119,6 +128,7 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
             "2026-01",
             anthropic_key_env,
+            reasoning=DEFAULT_REASONS_WITH_TOOLS,
         ),
         _anthropic(
             "claude-sonnet-4-6",

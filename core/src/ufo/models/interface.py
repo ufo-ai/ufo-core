@@ -131,8 +131,7 @@ class ModelRequest(BaseModel):
     reasoning off, which each wire says in its own shape: Anthropic omits the thinking parameters,
     the OpenAI wire sends effort `none` and OpenRouter `enabled: false` — a wire that reads an
     absent parameter as its default effort has to state it. `tool_choice` compels the named tool as
-    the round's single act — it must name an offered tool, and the request runs with reasoning off
-    (Anthropic rejects a forced tool choice under extended thinking). `conversation_cache_ttl` is
+    the round's single act — it must name an offered tool. `conversation_cache_ttl` is
     how long the changing conversation tail stays warm; the Anthropic client keeps the tools and
     system prefix for one hour, and clients whose provider caches on its own ignore it."""
 
@@ -146,13 +145,11 @@ class ModelRequest(BaseModel):
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
 
     @model_validator(mode="after")
-    def _forced_choice_names_an_offered_tool_with_reasoning_off(self) -> "ModelRequest":
+    def _forced_choice_names_an_offered_tool(self) -> "ModelRequest":
         if self.tool_choice is None:
             return self
         if all(tool.name != self.tool_choice for tool in self.tools):
             raise ValueError(f"tool_choice {self.tool_choice!r} names no offered tool")
-        if self.reasoning != "off":
-            raise ValueError("a forced tool_choice request must run with reasoning off")
         return self
 
 

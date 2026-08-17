@@ -9923,6 +9923,7 @@ async def test_a_thread_is_named_once_from_the_exchange_that_opened_it(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
+    status_task = slack._STATUS_TASKS[turn_id]
     assert conversation.title == f"<@{BOT_USER_ID}> read the March totals"
 
     async with workspace_tx() as connection:
@@ -9936,6 +9937,7 @@ async def test_a_thread_is_named_once_from_the_exchange_that_opened_it(
             )
             .where(tables.turn.c.id == turn_id)
         )
+    await status_task
     marker = mint_marker()
     digest = (
         f"<{AMBIENT_CONTEXT_ELEMENT}_{marker}>\nsomeone else asked about the offsite\n"

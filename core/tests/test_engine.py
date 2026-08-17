@@ -127,6 +127,7 @@ from ufo.models.interface import (
     ToolSchema,
     ToolUseBlock,
 )
+from ufo.models.spec import ReasoningSupport
 from ufo.objects import ObjectRef
 from ufo.sandbox.session import (
     ExecResult,
@@ -556,8 +557,7 @@ class FinishCallingModel:
 @dataclass
 class ProseThenForcedFinishModel:
     """Stops on a prose answer; when the engine compels finish it complies — recording the forced
-    request so a test can assert the compulsion (finish offered alone, tool_choice set, reasoning
-    off)."""
+    request so a test can assert the compulsion."""
 
     forced: ModelRequest | None = None
 
@@ -995,6 +995,7 @@ def _engine(
     model_id: str = "claude-opus-4-8",
     handle: SandboxHandle | None = None,
     byok: bool = False,
+    reasoning: ReasoningSupport | None = None,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -1007,6 +1008,7 @@ def _engine(
         system_prompt=rendered_prompt("p"),
         model=model,
         provider=provider,
+        reasoning=reasoning or ReasoningSupport(supported=True, tools_with_reasoning=True),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=compaction
         or Compaction(
@@ -4081,19 +4083,29 @@ async def test_a_subagent_prose_ending_closes_through_one_forced_finish_round(
 ) -> None:
     turn = await _seed_turn("queued", None)
     model = ProseThenForcedFinishModel()
-    engine = replace(_engine(turn, model, tmp_path), output_model=_Report)
+    engine = replace(
+        _engine(
+            turn,
+            model,
+            tmp_path,
+            reasoning=ReasoningSupport(
+                supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
+            ),
+        ),
+        output_model=_Report,
+    )
     frame = await engine.run()
     assert frame.status == "done"
     assert frame.text == _Report(summary="wrapped").model_dump_json()
     assert model.forced is not None
     assert tuple(tool.name for tool in model.forced.tools) == (FINISH_TOOL,)
-    (finish,) = model.forced.tools
+    finish = model.forced.tools[-1]
     assert finish.description == FINISH_DESCRIPTION
     assert finish.input_schema["properties"]["summary"]["description"] == (
         REPORT_SUMMARY_DESCRIPTION
     )
     assert model.forced.tool_choice == FINISH_TOOL
-    assert model.forced.reasoning == "off"
+    assert model.forced.reasoning == "low"
     assert model.forced.messages[-1] == Message(role="user", content=FINISH_PROMPT)
     assert model.forced.messages[-2] == Message(role="assistant", content="here is my prose answer")
 

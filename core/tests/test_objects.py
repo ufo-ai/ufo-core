@@ -9,7 +9,7 @@ name-grammar refusals, spec validation naming its field, handler-raised `VerbNot
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -70,7 +70,9 @@ from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
 from ufo.ext.manifest import Manifest
 from ufo.loop.transcript import Transcript
 from ufo.members import MEMBER_OBJECT
+from ufo.models.catalog import core_model_specs
 from ufo.models.interface import Message, TextBlock, ToolUseBlock
+from ufo.models.spec import ModelSpec
 from ufo.object_name import (
     OBJECT_NAME_MAX_LENGTH,
     OBJECT_NAME_PATTERN,
@@ -185,6 +187,8 @@ def _tool_context(
     speaker_member_id: UUID | None = None,
     agent_model: str = "claude-opus-4-8",
     agent_id: UUID | None = None,
+    model_specs: Mapping[str, ModelSpec] | None = None,
+    auto_model: str = "auto",
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -208,6 +212,8 @@ def _tool_context(
         audience=conversation_audience(None),
         artifact_token_secret="",
         models=DEPLOY_MODELS,
+        model_specs=model_specs or {},
+        auto_model=auto_model,
     )
 
 
@@ -3304,3 +3310,42 @@ async def test_an_agent_write_refuses_a_model_the_deploy_does_not_serve(db: None
                 )
             ).scalar_one()
         assert stored == "claude-opus-4-8"
+
+
+async def test_an_agent_write_refuses_off_reasoning_for_a_required_reasoning_model(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    fable = next(spec for spec in core_model_specs("", "") if spec.id == "claude-fable-5")
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        ctx = _tool_context(
+            workspace_id,
+            speaker_member_id=owner,
+            model_specs={"claude-fable-5": fable},
+            auto_model="claude-fable-5",
+        )
+        invalid = AgentSpec(
+            model="claude-fable-5",
+            internet_access_allowed=False,
+            reasoning="off",
+            prompt="be brief",
+        )
+        with pytest.raises(ValueError, match="requires reasoning"):
+            await AgentObjects().apply(ctx, "fable-agent", invalid, None, expected_generation=None)
+        valid = invalid.model_copy(update={"reasoning": "low"})
+        await AgentObjects().apply(ctx, "fable-agent", valid, None, expected_generation=None)
+        with pytest.raises(ValueError, match="requires reasoning"):
+            await AgentObjects().apply(ctx, "fable-agent", invalid, valid, expected_generation=None)
+        auto_invalid = invalid.model_copy(update={"model": "auto"})
+        with pytest.raises(ValueError, match="requires reasoning"):
+            await AgentObjects().apply(
+                ctx, "auto-fable-agent", auto_invalid, None, expected_generation=None
+            )
+        await AgentObjects().apply(
+            replace(ctx, auto_model="claude-opus-5"),
+            "auto-opus-agent",
+            auto_invalid,
+            None,
+            expected_generation=None,
+        )

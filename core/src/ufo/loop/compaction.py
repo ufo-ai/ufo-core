@@ -40,6 +40,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.models.spec import ReasoningSupport
 from ufo.o11y import emit_metric, log, warn
 from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
 from ufo.schema.records import Agent, Turn, Usage
@@ -213,6 +214,9 @@ class Compaction:
     turn: Turn | None = None
     agent: Agent | None = None
     speaker_member_id: UUID | None = None
+    reasoning: ReasoningSupport = field(
+        default_factory=lambda: ReasoningSupport(supported=True, tools_with_reasoning=True)
+    )
 
     def __repr__(self) -> str:
         return f"Compaction(conversation_id={self.conversation_id}, model={self.model})"
@@ -399,7 +403,7 @@ class Compaction:
             messages=(Message(role="user", content=self._prepare(rounds, missed)),),
             max_tokens=self.summary_max_tokens,
             conversation_cache_ttl="5m",
-            reasoning="off",
+            reasoning=self.reasoning.internal_effort(),
         )
         parts: list[str] = []
         usage: Usage | None = None

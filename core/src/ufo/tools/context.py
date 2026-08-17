@@ -26,7 +26,7 @@ turn's ledger: metering is core's, so a provider extension prices its own call a
 here. An extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a
 builtin tool gets `ext=None`."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
@@ -44,6 +44,8 @@ from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, SourceReader
 from ufo.grants import ConnectUnavailable, Grant, GrantStore
+from ufo.models.interface import AUTO_MODEL
+from ufo.models.spec import ModelSpec
 from ufo.o11y import log
 from ufo.sandbox.session import SandboxSession
 from ufo.schema import tables
@@ -259,6 +261,8 @@ class ToolContext:
     """The model ids this deploy serves, `auto` first — the closed set a write that stores a
     model must hold to, since an id the registry cannot answer fails at every later turn's
     setup and leaves no member-reachable repair."""
+    model_specs: Mapping[str, ModelSpec] = field(default_factory=dict)
+    auto_model: str = AUTO_MODEL
     public_base_url: str | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
 
