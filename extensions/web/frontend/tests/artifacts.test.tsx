@@ -147,9 +147,10 @@ test("a text artifact opens in the viewer, reads its body, and closes back to th
 
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("hello from the file")).toBeTruthy();
-  expect(
-    screen.getByText("notes · member@example.com · text/plain · 12 B · Jul 31 2026"),
-  ).toBeTruthy();
+  const sheet = screen.getByRole("dialog");
+  expect(within(sheet).getByText(/^notes · member@example.com/).textContent).toBe(
+    "notes · member@example.com · text/plain · 12 B · Jul 31 2026",
+  );
 
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByText("hello from the file")).toBeNull());

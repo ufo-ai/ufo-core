@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Facts, Group } from "@/components/ui/facts";
@@ -10,7 +10,7 @@ import { postIntent } from "@/lib/api";
 import { newChatHash } from "@/lib/route";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
-import { day } from "@/lib/moments";
+import { Moment } from "@/lib/moments";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
 
@@ -43,11 +43,15 @@ export function Settings({ agent }: { agent: Agent }) {
   const [reloads, setReloads] = useState(0);
   const state = usePanelRead<SettingsPayload>("/agents/" + agent.id + "/settings", reloads);
   const [values, setValues] = useState<Record<string, SpecValue>>({});
-  const [settingsDirty, setSettingsDirty] = useState(false);
-  const [settingsSaved, setSettingsSaved] = useState<Record<string, SpecValue> | null>(null);
   const [prompt, setPrompt] = useState("");
-  const [promptDirty, setPromptDirty] = useState(false);
-  const [promptSaved, setPromptSaved] = useState<string | null>(null);
+  // What the member has edited and what they have sent, held outside state on purpose: the seeding
+  // effect below has to read them as they are when it runs, not as they were when the render that
+  // scheduled it closed over them. An effect already scheduled when the member's first keystroke
+  // commits would otherwise re-seed the field from the payload and swallow that keystroke.
+  const settingsDirty = useRef(false);
+  const settingsSaved = useRef<Record<string, SpecValue> | null>(null);
+  const promptDirty = useRef(false);
+  const promptSaved = useRef<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
 
@@ -62,25 +66,26 @@ export function Settings({ agent }: { agent: Agent }) {
         initialSpecValue(properties[key], payload.spec[key]),
       ]),
     );
+    const sent = settingsSaved.current;
     const settingsLanded =
-      settingsSaved !== null &&
-      Object.keys(properties).every((key) => projected[key] === settingsSaved[key]);
-    if (!settingsDirty || settingsLanded) {
+      sent !== null && Object.keys(properties).every((key) => projected[key] === sent[key]);
+    if (!settingsDirty.current || settingsLanded) {
       setValues(projected);
       if (settingsLanded) {
-        setSettingsDirty(false);
-        setSettingsSaved(null);
+        settingsDirty.current = false;
+        settingsSaved.current = null;
       }
     }
-    const promptLanded = promptSaved !== null && payload.agent.prompt === promptSaved;
-    if (!promptDirty || promptLanded) {
+    const promptLanded =
+      promptSaved.current !== null && payload.agent.prompt === promptSaved.current;
+    if (!promptDirty.current || promptLanded) {
       setPrompt(payload.agent.prompt);
       if (promptLanded) {
-        setPromptDirty(false);
-        setPromptSaved(null);
+        promptDirty.current = false;
+        promptSaved.current = null;
       }
     }
-  }, [payload, promptDirty, promptSaved, settingsDirty, settingsSaved]);
+  }, [payload]);
 
   return (
     <Panel state={state} shape="form">
@@ -100,7 +105,7 @@ export function Settings({ agent }: { agent: Agent }) {
           setBusy(false);
           setNotice(outcomeNotice(outcome));
           if (outcome.applied) {
-            setSettingsSaved({ ...values });
+            settingsSaved.current = { ...values };
             setReloads((count) => count + 1);
           }
         }
@@ -118,7 +123,7 @@ export function Settings({ agent }: { agent: Agent }) {
           setBusy(false);
           setNotice(outcomeNotice(outcome));
           if (outcome.applied) {
-            setPromptSaved(prompt);
+            promptSaved.current = prompt;
             setReloads((count) => count + 1);
           }
         }
@@ -166,7 +171,7 @@ export function Settings({ agent }: { agent: Agent }) {
                       ? ready.agent.surfaces.map(surfaceWord).join(", ")
                       : "None",
                   },
-                  { label: "Updated", value: day(ready.agent.updated_at) },
+                  { label: "Updated", value: <Moment at={ready.agent.updated_at} /> },
                   {
                     label: "Prompt digest",
                     value: ready.agent.prompt_digest,
@@ -196,8 +201,8 @@ export function Settings({ agent }: { agent: Agent }) {
                   )}
                   options={{ model: ready.models }}
                   onChange={(key, value) => {
-                    setSettingsDirty(true);
-                    setSettingsSaved(null);
+                    settingsDirty.current = true;
+                    settingsSaved.current = null;
                     setValues((current) => ({ ...current, [key]: value }));
                   }}
                 />
@@ -224,8 +229,8 @@ export function Settings({ agent }: { agent: Agent }) {
                       required
                       value={prompt}
                       onChange={(event) => {
-                        setPromptDirty(true);
-                        setPromptSaved(null);
+                        promptDirty.current = true;
+                        promptSaved.current = null;
                         setPrompt(event.target.value);
                       }}
                     />

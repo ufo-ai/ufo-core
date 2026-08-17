@@ -1297,7 +1297,8 @@ test("automations slot renders cadence, state, and visible description", async (
   expect(screen.getByText("Send the morning brief.")).toBeTruthy();
   expect(screen.getByText("Running")).toBeTruthy();
   expect(screen.getByText("Brief delivered.")).toBeTruthy();
-  expect(screen.getByText(/Last .* · done/)).toBeTruthy();
+  const lastRun = document.querySelector('time[datetime="2026-08-07T09:00:00Z"]')!.parentElement!;
+  expect(lastRun.textContent).toMatch(/^Last .+ · done$/);
   expect(screen.getByText(/0 9 \* \* \* · Next/)).toBeTruthy();
   expect(document.querySelector('[data-slot-icon="calendar"]')).toBeTruthy();
 });

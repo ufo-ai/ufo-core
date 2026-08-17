@@ -2,7 +2,7 @@ import { Button, ConfirmButton } from "@/components/ui/button";
 import { ACTS } from "@/components/ui/table";
 import type { ListingSpec } from "@/kernel/listing";
 import { ownerLabel } from "@/lib/audience";
-import { day } from "@/lib/moments";
+import { Moment } from "@/lib/moments";
 
 export type Source = {
   name: string | null;
@@ -73,7 +73,7 @@ function rows(payload: SourcesPayload): SourceRow[] {
       owner: first.owner_email,
       access: access(first.shared),
       errors: String(streams.reduce((total, entry) => total + entry.consecutive_errors, 0)),
-      next_sync: day(streams.map((entry) => entry.next_sync_at).sort()[0]),
+      next_sync: streams.map((entry) => entry.next_sync_at).sort()[0],
       shared: first.shared,
       own: first.own,
       apply: {
@@ -96,7 +96,7 @@ function rows(payload: SourcesPayload): SourceRow[] {
       owner: entry.owner_email,
       access: access(entry.shared),
       errors: String(entry.consecutive_errors),
-      next_sync: day(entry.next_sync_at),
+      next_sync: entry.next_sync_at,
       shared: entry.shared,
       own: entry.own,
       apply: null,
@@ -123,7 +123,11 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
     },
     { field: "access", label: "Access" },
     { field: "errors", label: "Errors" },
-    { field: "next_sync", label: "Next Sync" },
+    {
+      field: "next_sync",
+      label: "Next Sync",
+      render: (at) => <Moment at={at} />,
+    },
   ],
   empty:
     "Register a source in chat. The agent connects the account or credential it needs as part " +

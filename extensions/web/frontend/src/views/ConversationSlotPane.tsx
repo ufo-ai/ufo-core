@@ -5,7 +5,7 @@ import { COLUMN, Pane } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
-import { day } from "@/lib/moments";
+import { Moment } from "@/lib/moments";
 import type { Agent } from "@/lib/types";
 import { formatSize } from "@/lib/size";
 
@@ -331,12 +331,12 @@ function AutomationsContent({ payload }: { payload: AutomationsPayload }) {
             </span>
           </div>
           <p className="m-0 mt-sm font-mono text-mono text-ink-soft">
-            {automation.schedule} · Next {day(automation.next_run_at)} · Updated{" "}
-            {day(automation.updated_at)}
+            {automation.schedule} · Next <Moment at={automation.next_run_at} /> · Updated{" "}
+            <Moment at={automation.updated_at} />
           </p>
           {automation.last_run_at ? (
             <p className="m-0 mt-xs font-mono text-mono text-ink-soft">
-              Last {day(automation.last_run_at)}
+              Last <Moment at={automation.last_run_at} />
               {automation.latest_status ? " · " + automation.latest_status : ""}
             </p>
           ) : null}
@@ -364,7 +364,8 @@ function SitesContent({ payload }: { payload: SitesPayload }) {
             <div className="min-w-0 flex-1">
               <h2 className="m-0 break-all font-mono text-label font-strong">{site.name}</h2>
               <p className="m-0 mt-xs font-mono text-mono text-ink-soft">
-                {site.visibility} · Created {day(site.created_at)} · Updated {day(site.updated_at)}
+                {site.visibility} · Created <Moment at={site.created_at} /> · Updated{" "}
+                <Moment at={site.updated_at} />
               </p>
             </div>
             <a href={site.url} target="_blank" rel="noreferrer">
@@ -424,7 +425,8 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
       </h2>
       {artifact.subject ? <p className="m-0 mt-sm break-words">{artifact.subject}</p> : null}
       <p className="m-0 mt-sm font-mono text-mono text-ink-soft">
-        {artifact.media_type} · {formatSize(artifact.size_bytes)} · {day(artifact.created_at)}
+        {artifact.media_type} · {formatSize(artifact.size_bytes)} ·{" "}
+        <Moment at={artifact.created_at} />
       </p>
       {textUrl && markdown ? (
         <div className="mt-sm">

@@ -7,7 +7,7 @@ import { App } from "@/App";
 import { ObjectPane } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { Viewer } from "@/lib/audience";
-import { relativeMoment } from "@/lib/moments";
+import { friendlyMoment, fullMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { Radar } from "@/views/Radar";
 
@@ -200,12 +200,21 @@ function mountRadar() {
   );
 }
 
-test("a moment reads as elapsed behind now and as remaining ahead of it", () => {
-  expect(relativeMoment("2026-08-01T11:59:30Z", NOW)).toBe("now");
-  expect(relativeMoment("2026-08-01T11:30:00Z", NOW)).toBe("30m ago");
-  expect(relativeMoment("2026-07-29T12:00:00Z", NOW)).toBe("3d ago");
-  expect(relativeMoment("2026-08-01T15:00:00Z", NOW)).toBe("in 3h");
-  expect(relativeMoment("not a moment", NOW)).toBe("not a moment");
+test("a moment reads as its distance from now, and as its date once it is old", () => {
+  expect(friendlyMoment("2026-08-01T11:59:30Z", NOW)).toBe("now");
+  expect(friendlyMoment("2026-08-01T11:30:00Z", NOW)).toBe("30m ago");
+  expect(friendlyMoment("2026-08-01T09:00:00Z", NOW)).toBe("3h ago");
+  expect(friendlyMoment("2026-07-31T11:00:00Z", NOW)).toBe("Yesterday");
+  expect(friendlyMoment("2026-07-29T12:00:00Z", NOW)).toBe("3d ago");
+  expect(friendlyMoment("2026-07-25T12:00:00Z", NOW)).toBe("Jul 25 2026");
+  expect(friendlyMoment("2026-08-01T15:00:00Z", NOW)).toBe("in 3h");
+  expect(friendlyMoment("2026-08-02T13:00:00Z", NOW)).toBe("Tomorrow");
+  expect(friendlyMoment("2026-09-01T12:00:00Z", NOW)).toBe("Sep 1 2026");
+  expect(friendlyMoment("not a moment", NOW)).toBe("not a moment");
+});
+
+test("the whole stamp behind a friendly one names the day and the time it fell on", () => {
+  expect(fullMoment("2026-08-01T09:05:00Z")).toBe("Aug 1 2026 at 09:05 UTC");
 });
 
 /** The prompt is not a column: every row cut it mid-word, so the kind carries no prose at all and
@@ -261,6 +270,18 @@ test("whether a task is stopped reads beside its own name", async () => {
  *  or every member scrolls to reach `Open`. It measures the pane a list has to itself; a record
  *  opened beside one takes its own column out of that width, and a list read under one is narrower
  *  than any floor. */
+/** The column is read to tell what is recent, so it says the distance from now rather than a
+ *  date every row of a busy day repeats. The exact day and minute is one hover away. */
+test("a record's time reads as its distance from now and keeps the whole stamp on hover", async () => {
+  wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
+  mount();
+
+  await screen.findByText("daily-brief");
+  const stamp = screen.getByText("in 3h", { selector: "time" });
+  expect(stamp.getAttribute("datetime")).toBe(IN_THREE_HOURS);
+  expect(stamp.getAttribute("title")).toBe(fullMoment(IN_THREE_HOURS));
+});
+
 test("an index fits the desktop it is read on, so the row's act never scrolls off", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
   mount();
@@ -581,7 +602,7 @@ test("a detail renders spec, then status, then links, then when the row was made
   expect(await screen.findByText("write the daily brief")).toBeTruthy();
   expect(fact("Created By")).toBe("mel@example.com");
   expect(screen.queryByText("Owner Email")).toBeNull();
-  expect(screen.getByText(/^Created Jul/)).toBeTruthy();
+  expect(screen.getByText("Created").textContent).toBe("Created Jul 1 2026");
 });
 
 test("a spec value longer than its row stands under its label, wrapped, and clears its neighbours", async () => {

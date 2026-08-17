@@ -40,7 +40,7 @@ test("the search heads the page and the filter stands with the table", async () 
 
   const header = screen.getByRole("heading", { level: 1, name: "Workspace" }).parentElement!;
   expect(header.contains(await screen.findByPlaceholderText("Search"))).toBe(true);
-  expect(header.contains(screen.getByRole("table"))).toBe(false);
+  expect(header.contains(await screen.findByRole("table"))).toBe(false);
 
   const filter = await screen.findByRole("tab", { name: "Fact" });
   const table = screen.getByRole("table");

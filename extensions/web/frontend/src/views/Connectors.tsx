@@ -42,7 +42,7 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import { DataTable, OPEN } from "@/kernel/table";
-import { day } from "@/lib/moments";
+import { Moment } from "@/lib/moments";
 import { BASE, postIntent } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents } from "@/lib/mainAgent";
@@ -113,7 +113,7 @@ function connectionName(entry: Connection): string {
 function connectionFacts(entry: Connection, viewer: string | null): Fact[] {
   return [
     { label: "Owner", value: ownerLabel(entry.owner_email, viewer) },
-    { label: "Connected", value: day(entry.connected_at) },
+    { label: "Connected", value: <Moment at={entry.connected_at} /> },
   ];
 }
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
-import { day } from "@/lib/moments";
+import { Moment } from "@/lib/moments";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import {
   type NoticeState,
@@ -191,9 +191,16 @@ function turns(count: number): string {
  *  the member is scanning for what moved most recently has to say which of the two it shows — a
  *  conversation nobody has spoken in yet is the one row showing a creation date, and it reads as
  *  one rather than as activity that stopped there. */
-function moment(entry: Conversation): string {
-  const active = day(entry.last_turn_at);
-  return active ? "Last turn " + active : "Created " + day(entry.created_at);
+function moment(entry: Conversation) {
+  return entry.last_turn_at ? (
+    <>
+      Last turn <Moment at={entry.last_turn_at} />
+    </>
+  ) : (
+    <>
+      Created <Moment at={entry.created_at} />
+    </>
+  );
 }
 
 /** The way out of a conversation Slack holds, drawn the same wherever it appears: the channel it is

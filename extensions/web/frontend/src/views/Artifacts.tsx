@@ -25,7 +25,7 @@ import {
 import { ownerLabel, slackLink, useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
-import { day } from "@/lib/moments";
+import { Moment } from "@/lib/moments";
 import { chatHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
@@ -89,7 +89,7 @@ type Card = {
   key: string;
   name: string;
   time: number;
-  status: string | null;
+  status: ReactNode;
   body: string | null;
   meta: string;
   image: string | null;
@@ -123,7 +123,7 @@ function siteCard(row: ObjectRow, viewer: string | null): Card {
     key: OBJECT_PREFIX + SITE_KIND + "/" + row.name,
     name: row.name,
     time: moment(createdAt),
-    status: day(createdAt),
+    status: <Moment at={createdAt} />,
     body: typeof row.summary === "string" ? row.summary : null,
     meta: [
       "Site",
@@ -171,7 +171,7 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
     key: entry.created_at + "|" + entry.filename,
     name: entry.filename,
     time: moment(entry.created_at),
-    status: day(entry.created_at),
+    status: <Moment at={entry.created_at} />,
     body: entry.subject,
     meta: ownerLabel(entry.owner_email, viewer),
     image: entry.preview_url ?? (isImage(entry) ? entry.url : null),
@@ -417,7 +417,6 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
     entry.origin,
     entry.media_type,
     formatSize(entry.size_bytes),
-    day(entry.created_at),
   ]
     .filter((part) => part)
     .join(" · ");
@@ -439,7 +438,9 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
         ) : null
       }
     >
-      <div className="font-mono text-small text-ink-soft">{meta}</div>
+      <div className="font-mono text-small text-ink-soft">
+        {meta} · <Moment at={entry.created_at} />
+      </div>
       <div className="flex flex-wrap gap-x-lg font-mono text-small text-ink-soft">
         <a href={chatHash(entry.conversation_id)} className={out}>
           Conversation

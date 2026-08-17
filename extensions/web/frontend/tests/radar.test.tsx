@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
 
@@ -84,8 +84,15 @@ const STOPPED_RUN = {
   artifacts: [],
 };
 
+/** A run's dateline reads as its distance from now, so the runs these fixtures hold have to
+ *  stand at a fixed distance from it. */
 beforeEach(() => {
   useStreamFake();
+  vi.setSystemTime(new Date("2026-08-14T12:00:00Z"));
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 function mountRadarSection() {

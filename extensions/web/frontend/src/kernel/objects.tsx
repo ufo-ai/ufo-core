@@ -29,7 +29,7 @@ import { DataTable, OPEN, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
-import { day, isMoment, relativeMoment } from "@/lib/moments";
+import { Moment, isMoment } from "@/lib/moments";
 import type { Agent } from "@/lib/types";
 
 const AGENT_FIELD = "object-agent";
@@ -144,18 +144,14 @@ function Chip({ children }: { children: ReactNode }) {
 
 /** One value of an index cell or a status row. The column or the label already carries the field's
  *  name, so the value stands alone — and a value the record does not hold takes an em dash rather
- *  than an empty cell, which reads as a table that failed to draw. A moment still ahead is one the
- *  member is waiting on and reads as the wait; a moment already past is the calendar day it fell
- *  on, which is how every other date in the portal reads. Only the comparison goes through `Date`;
- *  the day is still read off the ISO string, so no reader's zone moves it. */
-function cell(field: string, value: ObjectValue, schema: SpecSchema | null, now: Date): ReactNode {
+ *  than an empty cell, which reads as a table that failed to draw. A moment reads as its distance
+ *  from now — the wait the member is holding for, or how lately the row moved — and holds the
+ *  whole stamp for the pointer. */
+function cell(field: string, value: ObjectValue, schema: SpecSchema | null): ReactNode {
   if (value === null || value === "") return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") return String(value);
-  if (isMoment(value))
-    return new Date(value).getTime() > now.getTime()
-      ? relativeMoment(value, now)
-      : (day(value) ?? value);
+  if (isMoment(value)) return <Moment at={value} />;
   if (enumerated(schema, field)) return <Chip>{value}</Chip>;
   return value;
 }
@@ -250,7 +246,6 @@ function ObjectIndex({
   if (cursor) params.set("cursor", cursor);
   if (narrowed) params.set(narrowed, "true");
   const state = usePanelRead<IndexPayload>("/objects/" + kind + "?" + params.toString(), reloads);
-  const now = new Date();
   const owner = agentId ?? mainAgent?.id ?? agents[0]?.id ?? null;
 
   async function submit(lane: string, envelope: unknown) {
@@ -415,7 +410,7 @@ function ObjectIndex({
                     {led.map((field) => (
                       <TdFact key={field}>
                         <span className="block truncate">
-                          {cell(field, row[field] ?? null, payload.spec_schema, now)}
+                          {cell(field, row[field] ?? null, payload.spec_schema)}
                           {field === RUN_FIELD ? ending(row) : null}
                         </span>
                       </TdFact>
@@ -516,7 +511,6 @@ export function ObjectDetail({
     "/objects/" + kind + "/" + encodeURIComponent(name) + "?agent=" + agentId,
     reloads,
   );
-  const now = new Date();
   const [editing, setEditing] = useState<DetailPayload | null>(null);
 
   async function submit(envelope: unknown) {
@@ -581,7 +575,7 @@ export function ObjectDetail({
                     ? { label: OWNER_HEADING, value: creator(payload.status[field], viewer) }
                     : {
                         label: heading(field, payload.spec_schema),
-                        value: cell(field, payload.status[field] ?? null, payload.spec_schema, now),
+                        value: cell(field, payload.status[field] ?? null, payload.spec_schema),
                       },
                 )}
               />
@@ -613,12 +607,17 @@ export function ObjectDetail({
               )}
             </Section>
             <div className="mb-2xl text-small text-ink-soft">
-              {[
-                payload.created_at ? "Created " + day(payload.created_at) : null,
-                payload.updated_at ? "Updated " + day(payload.updated_at) : null,
-              ]
-                .filter((line) => line !== null)
-                .join(" · ")}
+              {payload.created_at ? (
+                <span>
+                  Created <Moment at={payload.created_at} />
+                </span>
+              ) : null}
+              {payload.created_at && payload.updated_at ? " · " : null}
+              {payload.updated_at ? (
+                <span>
+                  Updated <Moment at={payload.updated_at} />
+                </span>
+              ) : null}
             </div>
             {payload.deletes ? (
               <div className="flex flex-wrap gap-sm">
@@ -640,14 +639,9 @@ export function ObjectDetail({
 
 function specFact(field: string, value: ObjectValue, schema: SpecSchema | null): Fact | null {
   if (value === null) return null;
-  const rendered =
-    typeof value === "boolean"
-      ? value
-        ? "Yes"
-        : "No"
-      : typeof value === "string" && isMoment(value)
-        ? (day(value) ?? value)
-        : String(value);
+  if (typeof value === "string" && isMoment(value))
+    return { label: heading(field, schema), value: <Moment at={value} /> };
+  const rendered = typeof value === "boolean" ? (value ? "Yes" : "No") : String(value);
   if (enumerated(schema, field)) {
     return { label: heading(field, schema), value: <Chip>{rendered}</Chip> };
   }

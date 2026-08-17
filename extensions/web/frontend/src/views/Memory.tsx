@@ -24,7 +24,7 @@ import {
   type NoticeState,
 } from "@/kernel/panel";
 import { DataTable, type Column } from "@/kernel/table";
-import { day } from "@/lib/moments";
+import { Moment } from "@/lib/moments";
 import { postIntent } from "@/lib/api";
 import { subjectLabel } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
@@ -142,7 +142,7 @@ export function Memory({
                       <Td>{match.text}</Td>
                       <Td>{kindLabel(match.kind)}</Td>
                       <Td>{subjectLabel(match.subject)}</Td>
-                      <Td>{day(match.created_at) ?? "—"}</Td>
+                      <Td>{match.created_at ? <Moment at={match.created_at} /> : "—"}</Td>
                     </>
                   )}
                 </DataTable>

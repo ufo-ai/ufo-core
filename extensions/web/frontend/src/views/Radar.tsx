@@ -6,7 +6,7 @@ import { PageHeader, PageToolbar } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { slackLink } from "@/lib/audience";
 import { Markdown } from "@/lib/markdown";
-import { day, relativeMoment } from "@/lib/moments";
+import { Moment, day } from "@/lib/moments";
 import { chatHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
@@ -155,7 +155,6 @@ function Feed({
               ) : null}
             </>
           );
-        const now = new Date();
         return (
           <>
             <div className="flex flex-col gap-4xl">
@@ -169,7 +168,7 @@ function Feed({
                   </div>
                   <ol className="m-0 flex list-none flex-col p-0">
                     {edition.runs.map((run) => (
-                      <Story key={run.turn_id} run={run} now={now} onPlace={onPlace} />
+                      <Story key={run.turn_id} run={run} onPlace={onPlace} />
                     ))}
                   </ol>
                 </section>
@@ -223,11 +222,9 @@ function isDocument(artifact: RadarArtifact): boolean {
  *  conversation, one link away. */
 function Story({
   run,
-  now,
   onPlace,
 }: {
   run: RadarRun;
-  now: Date;
   onPlace: (place: Placement) => void;
 }) {
   const note = STATUS_NOTES[run.status];
@@ -263,7 +260,7 @@ function Story({
         )}
       </h3>
       <p className="m-0 flex flex-wrap gap-x-lg font-mono text-mono text-ink-soft">
-        <span>{relativeMoment(run.fired_at, now)}</span>
+        <Moment at={run.fired_at} />
         <a href={chatHash(run.conversation_id)} className={out}>
           Conversation
         </a>

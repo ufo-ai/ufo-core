@@ -679,7 +679,9 @@ test("a conversation row names what it is about and whose it is, and the keyboar
   expect(row.querySelector("[data-part='meta']")!.textContent).toBe(
     "mel@example.com · Slack · Mel Okafor, pat · 4 turns · Workspace",
   );
-  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Last turn Aug 7 2026");
+  const when = row.querySelector("[data-part='when']")!;
+  expect(when.textContent).toBe("Last turn Aug 7 2026");
+  expect(when.querySelector("time")!.getAttribute("title")).toBe("Aug 7 2026 at 11:00 UTC");
 
   row.focus();
   expect(document.activeElement).toBe(row);
