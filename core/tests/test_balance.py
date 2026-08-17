@@ -3,8 +3,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.accounting import ALLOW, PARK, SpendEvaluator
-from ufo.balance import BALANCE_HELD_MESSAGE, balance_absent, credit, read_balance, set_reserve
+from ufo.balance import balance_absent, credit, read_balance, set_reserve
 from ufo.db import workspace_tx
 from ufo.schema import tables
 
@@ -90,30 +89,6 @@ async def test_a_reserve_needs_a_balance_to_sit_on(db: None) -> None:
         current = await read_balance(connection, workspace_id)
     assert current is not None
     assert current.reserve_micro_usd == 2_000_000
-
-
-async def test_a_balance_below_its_reserve_parks_new_work(db: None) -> None:
-    """The gate `reserve_micro_usd` exists for: a workspace whose balance fell under its reserve
-    holds work — parked, never rejected, so a credit resumes everything the hold parked."""
-    agent_id = uuid4()
-    async with workspace_tx() as connection:
-        workspace_id = await _workspace(connection)
-        await credit(connection, workspace_id, 1_000_000, 1_000_000, "first")
-        await set_reserve(connection, workspace_id, 2_000_000)
-        held = await SpendEvaluator(workspace_id, None, agent_id).decide(connection, 0)
-        await credit(connection, workspace_id, 5_000_000, 5_000_000, "top-up")
-        resumed = await SpendEvaluator(workspace_id, None, agent_id).decide(connection, 0)
-    assert held.outcome == PARK
-    assert held.message == BALANCE_HELD_MESSAGE
-    assert resumed.outcome == ALLOW
-
-
-async def test_decide_notes_an_absent_balance_for_the_fast_path(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id = await _workspace(connection)
-        decision = await SpendEvaluator(workspace_id, None, uuid4()).decide(connection, 0)
-    assert decision.outcome == ALLOW
-    assert balance_absent(workspace_id)
 
 
 async def test_a_later_credit_leaves_the_reserve_alone(db: None) -> None:

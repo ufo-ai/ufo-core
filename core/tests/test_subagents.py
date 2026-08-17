@@ -15,6 +15,7 @@ from ufo.audience import (
     foreign_room_audience,
     room_audience,
 )
+from ufo.balance import BalanceExhausted, credit, set_reserve
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
@@ -27,6 +28,7 @@ from ufo.loop.queue import _commit_failed_terminal, _load_turn, _subagent_tools
 from ufo.loop.subagents import (
     FINISH_CONTRACT,
     PRELOAD_PROMPT_CHAR_BOUND,
+    SubagentParked,
     SubagentRegistry,
     SubagentResult,
     Subagents,
@@ -2486,3 +2488,106 @@ async def test_a_profile_childs_continuation_keeps_its_profile_and_delivery(
     assert continuation.parent_turn_id == parent.id
     assert continuation.subagent_profile == "research"
     assert continuation.result_delivery == "pending"
+
+
+async def test_a_fan_out_stops_at_the_first_child_an_exhausted_balance_cannot_cover(
+    db: None, dbos_launched: Config
+) -> None:
+    """A spawn is new work, so it asks the balance. Without this a turn already admitted buys a
+    free round per helper: one exhausted workspace fanning out ten children spends ten rounds it
+    has no credit for, and the gate the turn passed once is bypassed by every child it starts."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    async with workspace_tx() as connection:
+        await credit(connection, workspace_id, 1, 0, "opening")
+        await set_reserve(connection, workspace_id, 1)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    with pytest.raises(BalanceExhausted):
+        await subagents.spawn("research", {"task": "a"}, background=True)
+    async with workspace_tx() as connection:
+        children = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.parent_turn_id == parent.id)
+            )
+        ).scalar_one()
+    assert children == 0
+    async with workspace_tx() as connection:
+        await credit(connection, workspace_id, 5_000_000, 0, "top-up")
+    assert (await subagents.spawn("research", {"task": "a"}, background=True)).turn_id is not None
+
+
+async def test_a_child_pinned_to_another_provider_is_not_exempted_by_its_agents_key(
+    db: None, dbos_launched: Config
+) -> None:
+    """The own-key exemption asks whether the workspace pays for the model that will answer. A
+    profile may pin a different provider than its agent, and the workspace need not hold that
+    provider's key — so weighing the child under the agent's model would start a child the platform
+    pays for in full on a balance that cannot cover it."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    async with workspace_tx() as connection:
+        await credit(connection, workspace_id, 1, 0, "opening")
+        await set_reserve(connection, workspace_id, 1)
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    own = replace(_profile("own"), model="anthropic-model")
+    other = replace(_profile("other"), model="openai-model")
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((own, other)),
+        parent=parent,
+        audience=conversation_audience(None),
+        key_slot_for=lambda model: (
+            "anthropic_api_key" if model == "anthropic-model" else "openai_api_key"
+        ),
+    )
+    assert (await subagents.spawn("own", {"task": "a"}, background=True)).turn_id is not None
+    with pytest.raises(BalanceExhausted):
+        await subagents.spawn("other", {"task": "b"}, background=True)
+
+
+async def test_a_foreground_child_that_parks_does_not_hold_its_parent_open(
+    db: None, dbos_launched: Config
+) -> None:
+    """A park writes no terminal and clears on nothing the parent can do, so waiting through one
+    holds the member's turn open for the life of the process. The child is cancelled rather than
+    left parked: the dispatcher would otherwise resume it, re-run it at full cost, and finish it
+    into a caller long gone. A park stores no reason, so the parent never names one."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    spawned = await subagents.spawn("research", {"task": "a"}, background=True)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == spawned.turn_id)
+            .values(status="parked", updated_at=sa.func.now())
+        )
+    with pytest.raises(SubagentParked):
+        await asyncio.wait_for(subagents._await_terminal(spawned.turn_id), timeout=5)
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == spawned.turn_id)
+            )
+        ).scalar_one()
+    assert status == "cancelled"

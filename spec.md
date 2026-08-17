@@ -748,6 +748,26 @@ A workspace with no balance row is unaffected, which is the self-host case. Ther
 turn that overshoots lands a negative balance the next credit absorbs, because failing the write
 instead would lose the record of money already spent.
 
+A turn the workspace's own provider key will serve is admitted below the reserve, because its model
+rounds debit nothing: held at that line the balance could never rise to clear it and the refusal
+would be permanent, including against the documented way to keep working without buying credit. The
+exemption stops at zero all the same. Such a turn still generates media and still makes in-sandbox
+calls on the platform's key, and those debit — so an exemption that ignored the balance entirely
+would let an overdrawn workspace spend the platform's money one turn at a time without bound. A
+workspace that has spent past zero owes for that work and is refused like any other until it is
+credited; what it owes is real money, not the model rounds its own key paid for.
+
+A workspace whose balance is spent is refused at admission with a line the member reads, and a
+running turn parks rather than spending past zero. The two lines are deliberately different:
+`reserve_micro_usd` is the headroom a turn needs to **begin**, tested at admission, at a fold, and
+when the dispatcher resumes a parked turn; a running turn stops at **zero**. Were they one line, a
+balance just above the reserve would admit a turn the first round's spend pushed straight back
+under, so a small credit would buy a park-resume-park cycle rather than progress. Overshoot is
+bounded by one round below zero per turn. Turns running at once are not bounded against each other:
+each measures its own spend against a balance the others have not been charged against yet, because
+spend reaches the ledger at park or terminal, so a request fanning out into helpers can overshoot by
+a round per helper. The reserve is the headroom that absorbs it, and it is sized by the deploy.
+
 Seats decide who the agent
 answers, and nothing bounds how many hold one: the plan is one flat fee per workspace with
 unlimited members, so the daily member count a billing extension ships is for outreach, never

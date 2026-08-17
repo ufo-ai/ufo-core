@@ -33,6 +33,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.accounting import (
     ALLOW,
     TOKENS_DIMENSION,
+    BalanceGate,
     SpendEvaluator,
     TurnCost,
     applicable_caps_absent,
@@ -1879,7 +1880,15 @@ class TurnEngine:
         arrival. It costs one indexed read per round whatever the turn
         absorbed, deliberately and with no fast-path: a seat is what an admin revokes to cut someone
         off, so a cached answer would keep answering them for as long as it was held, and a
-        running turn is the case the revoke most needs to reach."""
+        running turn is the case the revoke most needs to reach.
+
+        The balance stops at zero rather than at the reserve — the reserve is the headroom a turn
+        needs to begin, so testing it again mid-run would park a turn the moment it dipped under a
+        line it was only ever required to clear once, and the credit that resumed it would buy one
+        round and park again. What is held against the balance is what the burn costs — and a
+        burn the workspace's own key pays for costs it nothing, so the balance does not gate it.
+        Holding a BYOK turn against a balance it never debits would park it, leave the balance
+        untouched, let the dispatcher resume it, and park it again at the same point forever."""
         members = {
             message.member_id for message in requesters.values() if message.member_id is not None
         }
@@ -1890,15 +1899,24 @@ class TurnEngine:
                 if not await Seats(self.turn.workspace_id).all_seated(connection, members):
                     raise TurnParked(SEAT_REVOKED_MESSAGE)
         member_id = audience_member(self.audience)
-        if applicable_caps_absent(
-            self.turn.workspace_id, member_id, self.turn.agent_id
-        ) and balance_absent(self.turn.workspace_id):
+        pending = (
+            0 if self.byok else self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
+        )
+        if not balance_absent(self.turn.workspace_id):
+            async with workspace_tx() as connection:
+                sustained = await BalanceGate(self.turn.workspace_id).sustains(
+                    connection, pending, self.turn.id
+                )
+            if sustained.outcome != ALLOW:
+                raise TurnParked(sustained.message)
+        if applicable_caps_absent(self.turn.workspace_id, member_id, self.turn.agent_id):
             return
-        pending = self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
         async with workspace_tx() as connection:
             decision = await SpendEvaluator(
                 self.turn.workspace_id, member_id, self.turn.agent_id
-            ).decide(connection, pending)
+            ).decide(
+                connection, self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
+            )
         if decision.outcome != ALLOW:
             raise TurnParked(decision.message)
 

@@ -397,6 +397,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             registry=runtime.subagents,
             parent=turn,
             audience=audience,
+            key_slot_for=runtime.registry.key_slot_for,
         )
 
         def subagents_for(

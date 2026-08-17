@@ -53,6 +53,7 @@ from starlette.responses import Response
 from ufo.accounting import (
     ALLOW,
     AgentSpendReport,
+    BalanceGate,
     MemberSpendReport,
     SpendEvaluator,
     SpendReport,
@@ -1095,6 +1096,7 @@ class SurfaceContext:
     _subagents: tuple[SubagentDetail, ...]
     _declared_slots: tuple[DeclaredSlot, ...]
     _ambient_reply: AmbientReplyClassifier
+    _key_slot_for: Callable[[str], str | None] | None = None
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
     _sandbox_sizes: tuple[str, ...] = ()
@@ -1820,9 +1822,15 @@ class SurfaceContext:
         Admission takes the same decision again under the conversation lock, so this is a read of
         the moment and never an authority. It answers the founding cases it must not miss: the
         conversation's oldest live turn is the one a fold lands on, a parked turn absorbs nothing
-        because it is held rather than running, and the fold carries the same spend decision the
-        arrival is admitted under, so a held balance or a breached cap answers None here exactly as
-        it refuses the fold there."""
+        because it is held rather than running, and the fold carries both gates the arrival is
+        admitted under — the caps and the prepaid balance — so a spent balance or a breached cap
+        answers None here rather than promising a fold admission then refuses.
+
+        The balance is read with the same model resolution admission uses, so a workspace serving
+        its turns with its own provider key is answered the same way in both places. Without it this
+        read hides a live turn admission does fold into, and a surface that takes None as "no live
+        turn" — Slack hands the reply to its ambient classifier — can drop the member's message in
+        silence."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -1847,7 +1855,10 @@ class SurfaceContext:
             decision = await SpendEvaluator(self.workspace_id, row.member_id, row.agent_id).decide(
                 connection, 0
             )
-        return row.id if decision.outcome == ALLOW else None
+            balance = await BalanceGate(self.workspace_id).admits(
+                connection, row.agent_id, self._key_slot_for
+            )
+        return row.id if ALLOW == decision.outcome == balance.outcome else None
 
     def tail(
         self, turn_id: UUID, since: str = ""

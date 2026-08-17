@@ -42,6 +42,7 @@ speaker never resolved to a member is refused rather than answered as a ghost â€
 because every member surface resolves its speaker, so one that did not is a stranger."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -49,7 +50,7 @@ import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
 from opentelemetry.trace import SpanKind
 
-from ufo.accounting import ALLOW, SpendEvaluator
+from ufo.accounting import ALLOW, BalanceGate, SpendEvaluator
 from ufo.db import workspace_tx
 from ufo.ext.surface import Admitted, conversation_name
 from ufo.o11y import current_traceparent, log, span
@@ -102,6 +103,7 @@ def _refused(
 class Admission:
     dbos: DBOSClient
     durable_surfaces: frozenset[str]
+    key_slot_for: Callable[[str], str | None] | None = None
 
     async def admit_member(
         self,
@@ -482,10 +484,17 @@ class Admission:
                         workspace_id, conversation.member_id, agent_id
                     ).decide(connection, 0)
                 )
+                fold_balance = (
+                    None
+                    if fold_decision is None or fold_decision.outcome != ALLOW
+                    else await BalanceGate(workspace_id).admits(
+                        connection, agent_id, self.key_slot_for
+                    )
+                )
                 if (
                     live_turn is not None
-                    and fold_decision is not None
-                    and fold_decision.outcome == ALLOW
+                    and fold_balance is not None
+                    and fold_balance.outcome == ALLOW
                 ):
                     message_seq = (
                         await connection.execute(
@@ -588,7 +597,12 @@ class Admission:
                     decision = await SpendEvaluator(
                         workspace_id, conversation.member_id, agent_id
                     ).decide(connection, 0)
+                    balance = await BalanceGate(workspace_id).admits(
+                        connection, agent_id, self.key_slot_for
+                    )
                     match decision.outcome:
+                        case _ if balance.outcome != ALLOW:
+                            status, terminal = _refused(holds_work_already_done, balance.message)
                         case "allow":
                             status, terminal = QUEUED, None
                         case "park":

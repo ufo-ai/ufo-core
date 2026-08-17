@@ -28,7 +28,7 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput, SetEnqueueOptions
 from dbos import error as dbos_error
 
-from ufo.accounting import ALLOW, SpendEvaluator
+from ufo.accounting import ALLOW, BalanceGate, SpendEvaluator
 from ufo.blob import WorkspaceBlobStore
 from ufo.candidates import WorkspaceCandidates
 from ufo.db import owner_tx, workspace_tx
@@ -111,8 +111,8 @@ class TurnDispatcher:
     eligible, so a later turn cannot overtake an earlier offer that has not started. A never-claimed
     QUEUED turn's DBOS workflow id is the turn id, making an ambiguous duplicate offer safe.
 
-    PARKED rows share the same scanner and advisory dispatch stamp, but remain spend- and
-    seat-gated: a parked turn stays held while its founder, scheduled creator, or any pending
+    PARKED rows share the same scanner and advisory dispatch stamp, but remain spend-, balance-
+    and seat-gated: a parked turn stays held while its founder, scheduled creator, or any pending
     absorbed speaker holds no seat, and resumes when every one is seated. A row
     that has ever been claimed — a PARKED one, or a QUEUED one a fold resumed from park — needs a
     fresh DBOS workflow id because the run that claimed it consumed its original id; the choice
@@ -128,6 +128,7 @@ class TurnDispatcher:
 
     client: DBOSClient
     dispatch_batch: int = TURN_DISPATCH_BATCH_TURNS
+    key_slot_for: Callable[[str], str | None] | None = None
 
     async def run(self) -> None:
         for turn in await self._dispatchable_turns():
@@ -158,7 +159,10 @@ class TurnDispatcher:
                     decision = await SpendEvaluator(
                         turn.workspace_id, turn.member_id, turn.agent_id
                     ).decide(connection, 0)
-                if not seated or decision.outcome != ALLOW:
+                    balance = await BalanceGate(turn.workspace_id).admits(
+                        connection, turn.agent_id, self.key_slot_for, turn.id
+                    )
+                if not seated or decision.outcome != ALLOW or balance.outcome != ALLOW:
                     continue
             await self._enqueue(turn)
 

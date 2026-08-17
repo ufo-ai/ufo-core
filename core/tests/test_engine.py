@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo import o11y
 from ufo.accounting import record_turn_usage
 from ufo.audience import Audience, audience_subjects, conversation_audience
-from ufo.balance import credit, set_reserve
+from ufo.balance import credit, debit, set_reserve
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import (
@@ -5006,18 +5006,29 @@ async def test_per_round_seat_gate_parks_an_internal_turn_acting_for_an_unseated
 
 async def test_per_round_balance_hold_parks_a_running_turn(db: None, tmp_path: Path) -> None:
     """No cap applies, so the caps fast-path alone would skip the mid-run decision; the balance
-    gate must still hold the next round when the balance falls under its reserve mid-turn."""
+    gate must still hold the next round once the turn's spend takes the balance to zero. It stops
+    at zero rather than at the reserve, which is what keeps the reserve headroom to begin with — a
+    turn held at the reserve would park, be readmitted by the same reserve, and cycle."""
     turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await credit(connection, turn.workspace_id, 1_000_000, 1_000_000, "first")
+        await set_reserve(connection, turn.workspace_id, 2_000_000)
 
     class _DrainingModel(ToolCallingModel):
         async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
             async with workspace_tx() as connection:
-                await credit(connection, turn.workspace_id, 1_000_000, 1_000_000, "first")
-                await set_reserve(connection, turn.workspace_id, 2_000_000)
+                await record_turn_usage(
+                    connection,
+                    turn.workspace_id,
+                    turn.id,
+                    "claude-opus-4-8",
+                    Usage(input_tokens=2_000_000, output_tokens=2_000_000),
+                    "drain",
+                )
             async for event in super().complete(request):
                 yield event
 
-    with pytest.raises(TurnParked, match="balance"):
+    with pytest.raises(TurnParked, match="out of credit"):
         await _engine(turn, _DrainingModel(), tmp_path).run()
     async with workspace_tx() as connection:
         status = (
@@ -6136,3 +6147,45 @@ async def test_commit_retries_a_transient_failure_and_keeps_the_error(
     assert frame is not None
     assert frame.error_class == "APIStatusError"
     assert frame.error_message == "boom"
+
+
+async def test_a_depleted_balance_parks_the_running_turn(db: None, tmp_path: Path) -> None:
+    """The balance stops a turn at zero, not at the reserve — a running turn already cleared the
+    reserve to begin, and holding it to that line again would make a top-up buy one round."""
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await credit(connection, turn.workspace_id, 1_000_000, 1_000_000, "seed")
+        await debit(connection, turn.workspace_id, 1_000_000)
+        await set_reserve(connection, turn.workspace_id, 10_000_000)
+    engine = _engine(turn, EchoModel(), tmp_path)
+    with pytest.raises(TurnParked, match="out of credit"):
+        await engine._enforce_spend([Usage(input_tokens=1_000_000)], {})
+
+
+async def test_a_funded_balance_does_not_park_the_running_turn(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await credit(connection, turn.workspace_id, 100_000_000, 100_000_000, "seed")
+        await set_reserve(connection, turn.workspace_id, 10_000_000)
+    engine = _engine(turn, EchoModel(), tmp_path)
+    await engine.run()
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert status == "done"
+
+
+async def test_a_byok_turn_is_never_parked_by_an_empty_balance(db: None, tmp_path: Path) -> None:
+    """A burn the workspace's own key pays for debits nothing, so the balance must not hold it.
+    Held anyway, the turn parks, the balance stays where it was, the dispatcher resumes it, and it
+    parks at the same point forever — re-spending real provider tokens on every attempt."""
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await credit(connection, turn.workspace_id, 1_000_000, 1_000_000, "seed")
+        await debit(connection, turn.workspace_id, 1_000_000)
+        await set_reserve(connection, turn.workspace_id, 10_000_000)
+    engine = _engine(turn, EchoModel(), tmp_path, byok=True)
+    await engine._enforce_spend([Usage(input_tokens=1_000_000)], {})

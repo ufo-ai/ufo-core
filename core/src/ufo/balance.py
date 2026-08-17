@@ -21,10 +21,6 @@ from ufo.schema import tables
 
 BALANCE_PRESENCE_TTL_SECONDS = 5.0
 BALANCE_PRESENCE_CACHE_MAX = 4096
-BALANCE_HELD_MESSAGE = (
-    "This turn is parked: the workspace balance is below its reserve. It resumes when the "
-    "balance is credited."
-)
 _no_balance: dict[UUID, float] = {}
 
 
@@ -47,26 +43,10 @@ def _note_absent_balance(workspace_id: UUID) -> None:
     _no_balance[workspace_id] = now + BALANCE_PRESENCE_TTL_SECONDS
 
 
-async def held_below_reserve(connection: AsyncConnection, workspace_id: UUID) -> bool:
-    """The gate `reserve_micro_usd` exists for, read before every model round through the spend
-    decision: True when a balance row exists and the balance is under its reserve, so an operator
-    setting a reserve above the balance holds the workspace's work until a credit lands. A
-    workspace that was never credited answers False through the absence cache, so a self-host
-    deploy pays nothing here."""
-    if balance_absent(workspace_id):
-        return False
-    row = (
-        await connection.execute(
-            sa.select(
-                tables.workspace_balance.c.balance_micro_usd,
-                tables.workspace_balance.c.reserve_micro_usd,
-            ).where(tables.workspace_balance.c.workspace_id == workspace_id)
-        )
-    ).one_or_none()
-    if row is None:
-        _note_absent_balance(workspace_id)
-        return False
-    return row.balance_micro_usd < row.reserve_micro_usd
+def _forget_absent_balance(workspace_id: UUID) -> None:
+    """Drop the absent mark once a balance row is seen, so the fast path never suppresses a gate
+    for a workspace that has since been credited."""
+    _no_balance.pop(workspace_id, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +58,36 @@ class Balance:
     granted_micro_usd: int
     charged_micro_usd: int
     last_purchase_at: datetime | None
+
+
+BALANCE_REFUSAL_MESSAGE = "This workspace is out of credit. An admin can add more."
+
+
+@dataclass(frozen=True, slots=True)
+class Headroom:
+    """The two figures a gate decides on."""
+
+    balance_micro_usd: int
+    reserve_micro_usd: int
+
+
+async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Headroom | None:
+    """What is left and what must stay, without the lifetime aggregate `read_balance` pays for —
+    this read runs before every model round."""
+    row = (
+        await connection.execute(
+            sa.select(
+                tables.workspace_balance.c.balance_micro_usd,
+                tables.workspace_balance.c.reserve_micro_usd,
+            ).where(tables.workspace_balance.c.workspace_id == workspace_id)
+        )
+    ).one_or_none()
+    if row is None:
+        _note_absent_balance(workspace_id)
+        return None
+    return Headroom(
+        balance_micro_usd=row.balance_micro_usd, reserve_micro_usd=row.reserve_micro_usd
+    )
 
 
 async def read_balance(connection: AsyncConnection, workspace_id: UUID) -> Balance | None:
@@ -167,7 +177,7 @@ async def credit(
             },
         )
     )
-    _no_balance.pop(workspace_id, None)
+    _forget_absent_balance(workspace_id)
     return True
 
 
@@ -206,3 +216,9 @@ async def set_reserve(
         .values(reserve_micro_usd=reserve_micro_usd, updated_at=sa.func.now())
     )
     return updated.rowcount == 1
+
+
+class BalanceExhausted(RuntimeError):
+    """Raised where the balance refuses work the workspace asked for outside a turn's own
+    admission — a spawn. The tool that asked answers the model with this text, so a fan-out that
+    cannot be paid for stops at the first child rather than starting every one of them."""

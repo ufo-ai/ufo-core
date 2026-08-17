@@ -161,7 +161,7 @@ def test_serve_verifies_the_owner_database_before_it_seats_the_instance(
 
 def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     manifests = (Manifest(name="jobs", version="1"),)
-    registry = object()
+    registry = SimpleNamespace(key_slot_for=lambda _model: None)
     page_runner = object()
     captured: dict[str, object] = {}
     runtime = SimpleNamespace(
@@ -214,7 +214,7 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
 ) -> None:
     """Both jobs runners carry the configured background-jobs model, so a handler's own metered
     call runs on it — the boot registry stays the deploy default a member turn resolves through."""
-    registry = object()
+    registry = SimpleNamespace(key_slot_for=lambda model: None)
     captured: dict[str, object] = {}
     runtime = SimpleNamespace(
         config=_local_config(),
@@ -575,3 +575,14 @@ def test_reserved_host_prefixes_guard_fails_loud_on_a_gateway_route() -> None:
     app.add_route("/v1/onboard/web", _endpoint)
     with pytest.raises(RuntimeError, match="reserved"):
         serve._assert_no_reserved_routes(app)
+
+
+def test_every_admission_carries_the_model_resolution() -> None:
+    """The balance gate's own-key exemption needs the model an agent runs, and `Admission` is the
+    only thing that can supply it. Built without it on any surface, a workspace serving its own
+    provider key is refused there while exempt everywhere else — and the surface most members
+    speak on is the shared-fleet one, not the local mount."""
+    source = (Path(serve.__file__)).read_text()
+    blocks = [block.split("\n    )")[0] for block in source.split("admission = Admission(")[1:]]
+    assert len(blocks) == 2
+    assert all("key_slot_for=" in block for block in blocks), blocks

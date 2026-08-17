@@ -12,12 +12,17 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.balance import BALANCE_HELD_MESSAGE, debit, held_below_reserve
+from ufo.balance import (
+    BALANCE_REFUSAL_MESSAGE,
+    _forget_absent_balance,
+    debit,
+    read_headroom,
+)
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
 from ufo.schema import tables
-from ufo.schema.records import Usage, ledger_id_for
+from ufo.schema.records import TurnStatus, Usage, ledger_id_for
 
 MICRO_USD_PER_USD = 1_000_000
 
@@ -35,6 +40,9 @@ AGENT_SCOPE: CapScope = "agent"
 OnBreach = Literal["park", "reject"]
 PARK: OnBreach = "park"
 REJECT: OnBreach = "reject"
+
+QUEUED: TurnStatus = "queued"
+
 
 SpendOutcome = Literal["allow", "park", "reject"]
 ALLOW: SpendOutcome = "allow"
@@ -693,21 +701,19 @@ class SpendDecision:
 
 @dataclass(frozen=True)
 class SpendEvaluator:
-    """Decide whether a turn may run under the workspace's balance and caps: a balance under its
-    reserve parks outright, then every cap that applies to this turn's workspace, member, and
-    agent is read, the priced ledger summed over each cap's rolling window, and the answer is
-    allow / park / reject. Every applicable cap must have headroom (the tightest binds); a breach
-    parks unless any breached cap rejects, in which case reject wins. `decide` is the whole
-    workflow, its `_` steps beneath it in execution order; the caller supplies the connection so
-    the same decision runs inside an admission transaction or a fresh read at a mid-turn step."""
+    """Decide whether a turn may run under the workspace's caps: every cap that applies to this
+    turn's workspace, member, and agent is read, the priced ledger summed over each cap's rolling
+    window, and the answer is allow / park / reject. Every applicable cap must have headroom (the
+    tightest binds); a breach parks unless any breached cap rejects, in which case reject wins.
+    `decide` is the whole workflow, its `_` steps beneath it in execution order; the caller supplies
+    the connection so the same decision runs inside an admission transaction or a fresh read at a
+    mid-turn step."""
 
     workspace_id: UUID
     member_id: UUID | None
     agent_id: UUID
 
     async def decide(self, connection: AsyncConnection, pending_micro_usd: int) -> SpendDecision:
-        if await held_below_reserve(connection, self.workspace_id):
-            return SpendDecision(outcome=PARK, message=BALANCE_HELD_MESSAGE)
         caps = await self._applicable_caps(connection)
         key = (self.workspace_id, self.member_id, self.agent_id)
         if not caps:
@@ -1360,3 +1366,134 @@ class SpendRollup:
                 now,
             ),
         )
+
+
+@dataclass(frozen=True)
+class BalanceGate:
+    """Whether a workspace's prepaid balance lets a turn begin, and whether it lets a running one
+    continue. The two are deliberately different lines.
+
+    A single threshold thrashes. If entry and continuation both tested against the reserve, a
+    balance sitting just above it would admit or resume a turn, the first round's spend would push
+    it back under, and the turn would park again — burning a round per cycle and answering nothing,
+    so a small credit would buy a loop rather than progress.
+
+    So `reserve_micro_usd` means one thing: the headroom a turn needs to *begin*. Stopping happens
+    at zero. Overshoot is then bounded by one round below zero rather than running unbounded beneath
+    the reserve, and a credit smaller than the reserve cannot resume anything.
+
+    A workspace with no balance row allows both, which is the self-host path."""
+
+    workspace_id: UUID
+
+    async def admits(
+        self,
+        connection: AsyncConnection,
+        agent_id: UUID | None = None,
+        key_slot_for: Callable[[str], str | None] | None = None,
+        turn_id: UUID | None = None,
+        model: str | None = None,
+    ) -> SpendDecision:
+        """Whether a turn may be admitted, folded into a live one, or resumed after a park.
+
+        A turn the workspace's own provider key will serve is admitted while the balance is not
+        overdrawn: its model rounds debit nothing, so the balance can never rise to clear the
+        reserve and refusing at that line would lock the workspace out for good — including out of
+        the documented way to keep working without buying credit. Deciding it needs the model that
+        will run, which is why the caller supplies the resolution rather than the gate reaching for
+        a registry it has no business holding; `model` names that model where the caller already
+        knows it, because a spawned child runs its profile's model rather than its agent's.
+
+        The exemption stops at zero all the same. A turn served by the workspace's own key still
+        generates media and still makes in-sandbox calls on the platform's key, and those debit — so
+        an exemption that ignored the balance would let an overdrawn workspace spend the platform's
+        money without bound, one turn at a time, forever.
+
+        The own-key exemption starts free work; it does not resume a turn that already charged. A
+        parked turn that took something off the balance would otherwise be readmitted every sweep,
+        park again on its next real charge, and cycle without answering."""
+        headroom = await read_headroom(connection, self.workspace_id)
+        if headroom is None:
+            return SpendDecision(outcome=ALLOW, message="")
+        _forget_absent_balance(self.workspace_id)
+        if headroom.balance_micro_usd > headroom.reserve_micro_usd:
+            return SpendDecision(outcome=ALLOW, message="")
+        if turn_id is not None and await self._turn_has_debited(connection, turn_id):
+            return SpendDecision(outcome=REJECT, message=BALANCE_REFUSAL_MESSAGE)
+        if headroom.balance_micro_usd > 0 and await self._workspace_serves_itself(
+            connection, agent_id, key_slot_for, model
+        ):
+            return SpendDecision(outcome=ALLOW, message="")
+        return SpendDecision(outcome=REJECT, message=BALANCE_REFUSAL_MESSAGE)
+
+    async def _workspace_serves_itself(
+        self,
+        connection: AsyncConnection,
+        agent_id: UUID | None,
+        key_slot_for: Callable[[str], str | None] | None,
+        model: str | None = None,
+    ) -> bool:
+        if key_slot_for is None:
+            return False
+        if model is None:
+            if agent_id is None:
+                return False
+            model = (
+                await connection.execute(
+                    sa.select(tables.agent.c.model).where(
+                        tables.agent.c.id == agent_id,
+                        tables.agent.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if model is None:
+                return False
+        return await workspace_owns_the_key(connection, self.workspace_id, key_slot_for(model))
+
+    async def sustains(
+        self,
+        connection: AsyncConnection,
+        pending_micro_usd: int,
+        turn_id: UUID | None = None,
+    ) -> SpendDecision:
+        """Whether a running turn may take another round, with this attempt's unbilled spend priced
+        in. It stops at zero, not at the reserve, so the reserve stays headroom to start with.
+
+        A round that will debit nothing is never held: parking a turn whose spend the balance does
+        not fund leaves the balance exactly where it was, so the resume that follows parks it again
+        at the same point, forever. Only spend that would actually push the balance under stops
+        it."""
+        headroom = await read_headroom(connection, self.workspace_id)
+        if headroom is None:
+            return SpendDecision(outcome=ALLOW, message="")
+        _forget_absent_balance(self.workspace_id)
+        if headroom.balance_micro_usd - pending_micro_usd > 0:
+            return SpendDecision(outcome=ALLOW, message="")
+        if pending_micro_usd > 0 or await self._turn_has_debited(connection, turn_id):
+            return SpendDecision(outcome=REJECT, message=BALANCE_REFUSAL_MESSAGE)
+        return SpendDecision(outcome=ALLOW, message="")
+
+    async def _turn_has_debited(self, connection: AsyncConnection, turn_id: UUID | None) -> bool:
+        """Whether this turn has already taken anything off the balance.
+
+        A turn whose model rounds run on the workspace's own key still generates images and video
+        and still makes in-sandbox calls on the platform key, and those charge. Asking only whether
+        the next round costs anything would let such a turn run on past zero with nothing to stop
+        it; asking only whether the balance is under would park a turn that debits nothing, which it
+        can never resume from. So the question is whether the spend in front of this turn actually
+        charges the balance.
+
+        It reads what the rows took rather than what they cost: an own-key row is priced and takes
+        nothing, so pricing would park a turn that can never resume its way out."""
+        if turn_id is None:
+            return False
+        return (
+            await connection.execute(
+                sa.select(tables.ledger.c.id)
+                .where(
+                    tables.ledger.c.turn_id == turn_id,
+                    tables.ledger.c.debited_micro_usd > 0,
+                )
+                .limit(1)
+            )
+        ).one_or_none() is not None

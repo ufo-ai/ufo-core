@@ -2609,9 +2609,10 @@ async def test_a_reply_from_an_unseated_speaker_faces_the_decision(
 async def test_a_reply_onto_a_parked_turn_faces_the_decision(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """A parked turn is held rather than running: the balance that parked it refuses the fold too,
-    so each un-addressed reply would found a parked turn of its own and the dispatcher would
-    release the whole backlog of member-to-member chatter once the balance is credited."""
+    """A workspace under its reserve is refused at admission rather than parked, so the reply is
+    turned away with a line the member reads instead of joining a backlog the dispatcher would
+    release in one burst once the balance is credited. Parking is reserved for a turn that already
+    holds work the ledger booked, which an un-addressed reply never does."""
     workspace_id, _ = await _seed()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -2632,7 +2633,7 @@ async def test_a_reply_onto_a_parked_turn_faces_the_decision(
                 sa.select(tables.turn.c.status).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    assert status == "parked"
+    assert status == "cancelled"
 
 
 async def test_a_reply_onto_a_turn_whose_cap_broke_faces_the_decision(

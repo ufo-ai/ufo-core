@@ -228,7 +228,11 @@ def run() -> None:
     skills = skill_registry(manifests, (model_catalog_skill(registry),))
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
-    admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
+    admission = Admission(
+        dbos=dbos_client,
+        durable_surfaces=durable_surfaces(manifests),
+        key_slot_for=registry.key_slot_for,
+    )
 
     def invoker_for(workspace_id: UUID) -> AdmissionInvoker:
         return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
@@ -329,6 +333,7 @@ def run() -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
+        key_slot_for=registry.key_slot_for,
         ambient_reply=AmbientReplyClassifier(
             model=ModelAccess(
                 replace(registry, auto_model=config.models.ambient_reply_model),
@@ -453,7 +458,7 @@ def _launch_jobs(
         runtime.manifests,
         core_jobs(
             sync_driver,
-            TurnDispatcher(client=runtime.dbos),
+            TurnDispatcher(client=runtime.dbos, key_slot_for=runtime.registry.key_slot_for),
             page_change_runner,
             DeliverySweep(invoker_for=invoker_for, registry=runtime.subagents),
         ),
@@ -896,6 +901,7 @@ def _mount_shared_surfaces(
     sandbox_sizes: tuple[str, ...] = (),
     memory: MemorySearch | None = None,
     objects: "Mapping[str, BoundKind] | None" = None,
+    key_slot_for: Callable[[str], str | None] | None = None,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
     surface's routes, resolving the workspace per request instead of pinning one at boot:
@@ -910,7 +916,11 @@ def _mount_shared_surfaces(
     then every claim, build, credential read, post, and attachment runs under that workspace's
     binding."""
     app.add_middleware(WorkspaceScopeBoundary)
-    admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
+    admission = Admission(
+        dbos=dbos_client,
+        durable_surfaces=durable_surfaces(manifests),
+        key_slot_for=key_slot_for,
+    )
     tailer = HubTailer(hub=hub)
     stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
     registered: dict[str, SurfaceSpec] = {}
@@ -971,6 +981,7 @@ def _mount_shared_surfaces(
             _stopper=stopper,
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
+            _key_slot_for=key_slot_for,
             _public_base_url=public_base_url,
             _home_surface=home_surface(manifests),
             _ingress_public_url=ingress_public_url,

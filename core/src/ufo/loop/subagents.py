@@ -13,7 +13,7 @@ whatever the caller asked, and the spawning conversation is where its messages a
 child runs under the spawning turn's agent, as it always has."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -24,8 +24,11 @@ from dbos import DBOSClient, EnqueueOptions
 from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ufo.accounting import REJECT, BalanceGate
 from ufo.audience import Audience, audience_member
+from ufo.balance import BalanceExhausted
 from ufo.cancellation import cancel_one_turn
 from ufo.contracts import Contract, input_contract, output_contract
 from ufo.db import workspace_tx
@@ -48,6 +51,7 @@ from ufo.schema.records import (
     DELIVERY_DELIVERED,
     DELIVERY_PENDING,
     INTERNAL_ADMISSION,
+    PARKED,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     TURN_QUEUE_NAME,
@@ -105,6 +109,12 @@ SUBAGENT_OUTPUT_DISCIPLINE = (
 CORE_SKILL_INDEX = tuple((skill.name, skill.description) for skill in CORE_SKILLS)
 
 
+class SubagentParked(RuntimeError):
+    """An awaited child stopped on a spend limit. The parent stops waiting, the child is cancelled
+    rather than left for the dispatcher to re-run into nobody, and the tool that spawned reports
+    this to the model."""
+
+
 @dataclass(frozen=True)
 class SubagentRegistry:
     """The frozen set of profiles a spawn dispatches against — extensions contribute profiles the
@@ -141,6 +151,17 @@ class AgentTarget:
     owner_member_id: UUID | None
     input_schema: dict[str, object] | None
     output_schema: dict[str, object] | None
+
+
+def _target_model(resolved: SubagentProfile | AgentTarget) -> str | None:
+    """The model a spawn target pins, or None to weigh the child under the agent that will run it.
+    A profile may pin one — possibly another provider's — while a workspace agent carries its model
+    on its own row, which the gate reads from the agent id the child is admitted under."""
+    match resolved:
+        case SubagentProfile():
+            return resolved.model
+        case _:
+            return None
 
 
 def subagent_system_prompt(
@@ -186,6 +207,7 @@ class Subagents:
     registry: SubagentRegistry
     parent: Turn
     audience: Audience
+    key_slot_for: Callable[[str], str | None] | None = None
     requester_member_id: UUID | None = None
 
     def authorize(self, requester_member_id: UUID | None) -> "Subagents":
@@ -256,6 +278,7 @@ class Subagents:
             inbound=typed_input.model_dump_json(),
             delivers_result=delivers_result,
             name=name,
+            model=_target_model(resolved),
         ):
             await self._enqueue(turn_id, conversation_id)
         if background:
@@ -429,6 +452,9 @@ class Subagents:
             if followup is not None and followup.conversation_id != child.conversation_id:
                 raise ValueError("dedup key belongs to another follow-up")
             if followup is None:
+                await self._require_balance(
+                    connection, self._profile_model(child.subagent_profile), child.agent_id
+                )
                 followup_seq = (
                     await connection.execute(
                         sa.select(sa.func.max(tables.turn.c.seq)).where(
@@ -632,6 +658,34 @@ class Subagents:
             raise ValueError(f"{turn_id} is not a spawn of this conversation")
         return row.subagent_profile
 
+    def _profile_model(self, profile: str | None) -> str | None:
+        """The model the named profile pins, or None to weigh the child under its agent's. A profile
+        the registry no longer declares answers None rather than raising: this is the billing model
+        for a child that already exists, and a follow-up to a live child is not the place to
+        discover a manifest changed under it."""
+        named = next((one for one in self.registry.profiles if one.name == profile), None)
+        return named.model if named is not None else None
+
+    async def _require_balance(
+        self, connection: AsyncConnection, model: str | None, agent_id: UUID | None = None
+    ) -> None:
+        """Refuse to start work the prepaid balance cannot cover. A turn passes this line once, at
+        its own admission; a turn that fans out asks again per child, so an exhausted workspace
+        stops at the first one instead of buying a free round per helper. Only genuinely new work
+        is asked: a recovery re-run that reconnects to a child already past `queued` never reaches
+        here, so a refusal can never strand a child that has already run.
+
+        The child is weighed under the model that will answer it — its profile's where the profile
+        pins one, otherwise the model of the agent the child runs as, which is the child's own agent
+        and not this parent's. A profile may pin a different provider, and a spawned agent may carry
+        a different model; weighing either under the parent's would exempt a call the platform pays
+        for in full."""
+        admits = await BalanceGate(self.parent.workspace_id).admits(
+            connection, agent_id or self.parent.agent_id, self.key_slot_for, model=model
+        )
+        if admits.outcome == REJECT:
+            raise BalanceExhausted(admits.message)
+
     async def _admit(
         self,
         conversation_id: UUID,
@@ -643,6 +697,7 @@ class Subagents:
         inbound: str,
         delivers_result: bool = False,
         name: str = "",
+        model: str | None = None,
     ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
         traceparent so the child's span joins the parent's trace. A profile child runs in the
@@ -714,6 +769,7 @@ class Subagents:
                 raise ValueError("spawn dedup key belongs to another member request")
             if claimed.status != "queued":
                 return False
+            await self._require_balance(connection, model, agent_id)
             await connection.execute(
                 sa.update(tables.turn)
                 .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
@@ -753,15 +809,34 @@ class Subagents:
             )
 
     async def _await_terminal(self, turn_id: UUID) -> TerminalFrame:
+        """Wait for the child's terminal, and end the wait if the child parks.
+
+        A park writes no terminal and clears on nothing this parent can do, so waiting through one
+        holds the member's turn open for as long as the process lives — the request never answers
+        and the conversation admits nothing else.
+
+        The child is cancelled rather than left parked. A parked child the parent has stopped
+        waiting on would otherwise be resumed by the dispatcher, re-run at full cost, and finish
+        into a caller that is long gone. Cancelling is also what makes the raise honest: a park has
+        no stored reason, so the parent reports that the child stopped without finishing rather
+        than guessing which line stopped it."""
         while True:
             async with workspace_tx() as connection:
                 row = (
                     await connection.execute(
-                        sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn_id)
+                        sa.select(tables.turn.c.terminal, tables.turn.c.status).where(
+                            tables.turn.c.id == turn_id
+                        )
                     )
                 ).one()
             if row.terminal is not None:
                 return TerminalFrame.model_validate(row.terminal)
+            if row.status == PARKED:
+                await cancel_one_turn(self.client, turn_id)
+                raise SubagentParked(
+                    "subagent stopped before it finished and was cancelled; "
+                    "it held on a spend limit"
+                )
             await asyncio.sleep(SUBAGENT_POLL_SECONDS)
 
 
