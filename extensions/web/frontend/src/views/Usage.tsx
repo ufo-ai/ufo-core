@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Facts } from "@/components/ui/facts";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { money } from "@/lib/money";
@@ -303,6 +304,65 @@ function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
   );
 }
 
+const BILLING_PATH = "/ext/metronome/billing";
+
+type BillingReport =
+  | { limited: false }
+  | {
+      limited: true;
+      balance_micro_usd: number;
+      refused_below_micro_usd: number;
+      card_on_file: boolean;
+    };
+
+type BillingState = { phase: "unanswered" } | { phase: "ready"; report: BillingReport };
+
+/** A balance is an exact figure, signed when the workspace is into its grace allowance, so it
+ *  never takes `money`'s sub-cent shorthand. */
+function dollars(micro: number): string {
+  return (micro < 0 ? "-" : "") + "$" + (Math.abs(micro) / 1e6).toFixed(2);
+}
+
+/** The workspace's prepaid balance, read from the metronome extension's own endpoint rather than
+ *  the panel API. The route authenticates the session itself and answers admins only, so the
+ *  section is drawn exactly when it answers and any refusal draws nothing. */
+function Billing() {
+  const [state, setState] = useState<BillingState>({ phase: "unanswered" });
+  useEffect(() => {
+    let live = true;
+    fetch(BILLING_PATH, { credentials: "same-origin" })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const report = (await res.json()) as BillingReport;
+        if (live) setState({ phase: "ready", report });
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+  if (state.phase !== "ready") return null;
+  const report = state.report;
+  return (
+    <Section title="Billing">
+      {report.limited ? (
+        <Facts
+          rows={[
+            {
+              label: "Turns are refused below",
+              value: dollars(report.refused_below_micro_usd),
+            },
+            { label: "Balance", value: dollars(report.balance_micro_usd) },
+            { label: "Card on file", value: report.card_on_file ? "Yes" : "No" },
+          ]}
+        />
+      ) : (
+        <PanelBlank body="This workspace has no spending limit." />
+      )}
+    </Section>
+  );
+}
+
 export function WorkspaceUsage() {
   const [range, setRange] = useState<Range>(rangeFromHash);
   const state = usePanelRead<WorkspaceUsageReport>("/workspace/usage?range=" + range);
@@ -349,6 +409,7 @@ export function WorkspaceUsage() {
                 <Section title="Other usage"><Dimensions lines={otherDimensions(payload.by_dimension)} empty="Nothing else you ran in this range carried a price." /></Section>
               </>
             )}
+            <Billing />
             <Section title="Caps"><Caps caps={payload.caps} empty="No spend cap is set on you." /></Section>
           </>
         );

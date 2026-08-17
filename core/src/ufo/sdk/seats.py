@@ -14,5 +14,11 @@ from ufo.seats import (
     SeatSnapshot as SeatSnapshot,
 )
 from ufo.seats import (
+    member_by_email as member_by_email,
+)
+from ufo.seats import (
+    member_is_admin as member_is_admin,
+)
+from ufo.seats import (
     member_workspaces as member_workspaces,
 )

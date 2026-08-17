@@ -28,6 +28,8 @@ from ufo.seats import (
     UnknownMember,
     create_member,
     gate_member,
+    member_by_email,
+    member_is_admin,
 )
 from ufo.surfaces.hub_tail import PARK_NOTICE, turn_status_frame
 from ufo.workspace import ws
@@ -413,3 +415,36 @@ async def test_create_member_lowercases_the_address_it_writes(db: None) -> None:
             .all()
         )
     assert emails == [ADMIN_EMAIL]
+
+
+async def test_member_by_email_answers_the_row_in_the_workspace_asked_for(db: None) -> None:
+    """One person, seated in two workspaces, holding one address. A session proves the address; it
+    cannot prove which workspace's member it is. So the lookup is scoped in the query, and callers
+    that read an admin flag off the answer depend on it: unscoped, the same address would carry the
+    other workspace's flag here, and a guest would read what an admin reads."""
+    here, elsewhere = await _workspace(), await _workspace()
+    mine = await _member(here, TEAMMATE_EMAIL)
+    theirs = await _member(elsewhere, TEAMMATE_EMAIL, offset_seconds=60)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).where(tables.member.c.id == theirs).values(is_admin=True)
+        )
+        with ws(here):
+            found = await member_by_email(connection, here, TEAMMATE_EMAIL)
+            assert found == mine
+            assert await member_is_admin(connection, here, found) is False
+        with ws(elsewhere):
+            assert await member_by_email(connection, elsewhere, TEAMMATE_EMAIL) == theirs
+
+
+async def test_member_by_email_never_creates_a_member(db: None) -> None:
+    """The billing page resolves whoever the session names. An address that was never seated must
+    answer nothing, not become a member of the workspace it asked about."""
+    workspace_id = await _workspace()
+    async with workspace_tx() as connection:
+        with ws(workspace_id):
+            assert await member_by_email(connection, workspace_id, "nobody@example.com") is None
+            seated = (
+                await connection.execute(sa.select(sa.func.count()).select_from(tables.member))
+            ).scalar_one()
+    assert seated == 0

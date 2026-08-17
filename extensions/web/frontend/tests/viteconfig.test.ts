@@ -26,7 +26,7 @@ const proxyRule = async (): Promise<[string, ProxyOptions]> => {
 
 test("one rule covers the whole surface, so no route reaches the fleet unrouted", async () => {
   const [pattern] = await proxyRule();
-  expect(pattern).toBe("^/surface/web");
+  expect(pattern).toBe("^/(surface/web|ext/)");
 });
 
 test("the sign-in redirect comes back on the dev origin", async () => {
@@ -50,4 +50,5 @@ test("the rule routes each request through the predicate", async () => {
   expect(routed("GET", "/surface/web/static")).toBe("/surface/web/static");
   expect(routed("POST", "/surface/web")).toBeUndefined();
   expect(routed("GET", "/surface/web/api/agents")).toBeUndefined();
+  expect(routed("GET", "/ext/metronome/billing")).toBeUndefined();
 });

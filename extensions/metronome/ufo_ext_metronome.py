@@ -66,13 +66,22 @@ from ufo.sdk.balance import (
     mark_topup_verified,
     read_auto_topup,
     read_balance,
+    read_headroom,
     set_auto_topup,
 )
+from ufo.sdk.bearer import SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.context import ExtensionContext
+from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.jobs import JobSpec
-from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
+from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection, RouteSpec
 from ufo.sdk.o11y import log, warn
-from ufo.sdk.seats import Seats, SeatSnapshot, member_workspaces
+from ufo.sdk.seats import (
+    Seats,
+    SeatSnapshot,
+    member_by_email,
+    member_is_admin,
+    member_workspaces,
+)
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "metronome"
@@ -880,6 +889,62 @@ def _rfc3339(moment: datetime) -> str:
     return aware.isoformat()
 
 
+BILLING_ROUTE_PATH = "billing"
+
+
+def _billing_request_workspace(request: Request) -> UUID | None:
+    """The workspace a billing request belongs to, read from the member's session cookie.
+
+    Core binds whatever this returns and refuses the request outright when it returns None, so this
+    is the only thing standing between the page and the open internet."""
+    return workspace_claim(request.cookies.get(SESSION_COOKIE, ""))
+
+
+async def _billing_projection(ext: ExtensionContext, request: Request) -> Response:
+    """What the workspace has left, what stops it, and whether a card is on file.
+
+    This reads; it never charges and never changes a rule. It exists because the acts that fix
+    billing are chat acts, and a workspace out of credit refuses the very turns that would carry
+    them — so the one screen that explains why the agent stopped has to sit off the turn path
+    entirely. Nothing here is reachable from a stopped workspace by any other route.
+
+    The session is verified against the workspace core bound from the same cookie, and the address
+    it proves is resolved to a member of that workspace and no other. An address is not a member
+    anywhere in particular, so resolving it first and checking the workspace after would read
+    another workspace's member on the way."""
+    email = verify_token(request.cookies.get(SESSION_COOKIE, ""), ext.store.workspace_id)
+    if email is None:
+        return JSONResponse({"error": "sign in to read billing"}, status_code=401)
+    async with ext.transaction() as connection:
+        member_id = await member_by_email(connection, ext.store.workspace_id, email)
+        if member_id is None or not await member_is_admin(
+            connection, ext.store.workspace_id, member_id
+        ):
+            return JSONResponse({"error": "only a workspace admin can read billing"}, 403)
+        headroom = await read_headroom(connection, ext.store.workspace_id)
+        balance = await read_balance(connection, ext.store.workspace_id)
+    if headroom is None or balance is None:
+        return JSONResponse({"limited": False})
+    config = BillingConfig.from_env()
+    record = await _billing_record(ext)
+    card = record is not None and (
+        await _default_payment_method(config, record.stripe_customer_id, BILLING_TRANSPORT)
+        is not None
+    )
+    return JSONResponse(
+        {
+            "limited": True,
+            "balance_micro_usd": headroom.balance_micro_usd,
+            "reserve_micro_usd": headroom.reserve_micro_usd,
+            "grace_micro_usd": headroom.grace_micro_usd,
+            "refused_below_micro_usd": headroom.reserve_micro_usd - headroom.grace_micro_usd,
+            "granted_micro_usd": balance.granted_micro_usd,
+            "charged_micro_usd": balance.charged_micro_usd,
+            "card_on_file": card,
+        }
+    )
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -903,6 +968,14 @@ def manifest() -> Manifest:
                 schedule=SEAT_JOB_SCHEDULE,
                 handler=_ship_seats,
                 candidates=member_workspaces(),
+            ),
+        ),
+        routes=(
+            RouteSpec(
+                method="GET",
+                path=BILLING_ROUTE_PATH,
+                handler=_billing_projection,
+                identify=_billing_request_workspace,
             ),
         ),
         prompt_sections=(PromptSection(name=BILLING_SECTION_NAME, body=BILLING_SECTION_BODY),),

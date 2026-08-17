@@ -29,7 +29,16 @@ from ufo.accounting import (
     record_turn_usage,
     record_workspace_usage,
 )
-from ufo.balance import TOPUP_GRACE_MICRO_USD, credit, debit, read_balance, read_headroom
+from ufo.balance import (
+    TOPUP_GRACE_MICRO_USD,
+    credit,
+    debit,
+    mark_topup_verified,
+    read_balance,
+    read_headroom,
+    set_reserve,
+)
+from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialRequests, CredentialStore
@@ -42,6 +51,7 @@ from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, Sandb
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
 from ufo.sdk.audience import Audience, conversation_audience
+from ufo.sdk.http import Request
 from ufo.surfaces.admission import Admission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
@@ -257,7 +267,9 @@ def test_manifest_declares_two_cron_jobs_one_tool_one_section() -> None:
     (slot,) = declared.credentials
     assert slot.name == "anthropic_api_key"
     assert slot.injection is None
-    assert not declared.routes
+    (billing_route,) = declared.routes
+    assert (billing_route.method, billing_route.path) == ("GET", metronome.BILLING_ROUTE_PATH)
+    assert billing_route.handler is metronome._billing_projection
 
 
 async def test_ships_settled_rows_with_exact_events(
@@ -892,7 +904,11 @@ PORTAL_CONFIGURATION = "bpc_test_config"
 SAVED_CARD = "pm_card_visa"
 
 
+TOKEN_SECRET = "billing-page-secret"
+
+
 def _billing_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, TOKEN_SECRET)
     monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
     monkeypatch.setenv(metronome.STRIPE_SECRET_KEY_ENV, STRIPE_KEY)
     monkeypatch.setenv(metronome.STRIPE_PORTAL_CONFIGURATION_ENV, PORTAL_CONFIGURATION)
@@ -1941,3 +1957,102 @@ async def test_a_charge_still_in_flight_does_not_stand_the_refill_down(
     providers.in_flight = False
     await _run_topup(workspace_id, providers)
     assert await _balance_of(workspace_id) == 25 * DOLLAR
+
+
+def _billing_request(workspace_id: UUID, email: str | None) -> Request:
+    headers = []
+    if email is not None:
+        token = mint_token(TOKEN_SECRET, str(workspace_id), email, timedelta(hours=1))
+        headers.append((b"cookie", f"{metronome.SESSION_COOKIE}={token}".encode()))
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/ext/metronome/billing",
+            "headers": headers,
+            "query_string": b"",
+        }
+    )
+
+
+async def _read_billing(workspace_id: UUID, email: str | None) -> tuple[int, dict[str, object]]:
+    ctx = context_for(metronome.NAME, frozenset())
+    request = _billing_request(workspace_id, email)
+    with ws(workspace_id):
+        answer = await metronome._billing_projection(ctx, request)
+    return answer.status_code, json.loads(bytes(answer.body))
+
+
+async def test_the_billing_page_refuses_a_request_with_no_session(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Core mounts an extension route with no auth in front of it, so the handler is the only thing
+    between this page and the open internet."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    status, _ = await _read_billing(workspace_id, None)
+    assert status == 401
+
+
+async def test_the_billing_page_refuses_a_member_who_is_not_an_admin(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workspace holds people from outside the company. The page names what the company has spent
+    and whether its card is on file, so a seat is not enough to read it."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    status, body = await _read_billing(workspace_id, "mate@example.com")
+    assert status == 403
+    assert "admin" in str(body["error"])
+
+
+async def test_an_admin_elsewhere_is_not_an_admin_here(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session proves an address, and an address is a member somewhere, not everywhere. The same
+    person is an admin of one workspace and an ordinary seat in another, so the address must be
+    resolved to a member of *this* workspace before the admin flag on that row means anything. An
+    unscoped lookup would find the other row and read this workspace's billing to a guest."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, mate_id, _conv = await _billing_seed()
+    elsewhere_id, _o2, elsewhere_mate, _c2 = await _billing_seed()
+    with ws(elsewhere_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.member)
+                .where(tables.member.c.id == elsewhere_mate)
+                .values(is_admin=True)
+            )
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            here = (
+                await connection.execute(
+                    sa.select(tables.member.c.is_admin).where(tables.member.c.id == mate_id)
+                )
+            ).scalar_one()
+    assert here is False
+    status, _ = await _read_billing(workspace_id, "mate@example.com")
+    assert status == 403
+
+
+async def test_the_billing_page_answers_an_admin_what_stops_the_workspace(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The number an admin needs is the line turns are refused at, not the balance: a workspace
+    whose card has paid keeps working below zero, and one that never paid stops at its reserve."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 40 * DOLLAR, 0, "opening")
+            await set_reserve(connection, workspace_id, 5 * DOLLAR)
+    status, body = await _read_billing(workspace_id, "owner@example.com")
+    assert status == 200
+    assert body["balance_micro_usd"] == 40 * DOLLAR
+    assert body["refused_below_micro_usd"] == 5 * DOLLAR
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await mark_topup_verified(connection, workspace_id)
+    _status, paid = await _read_billing(workspace_id, "owner@example.com")
+    assert paid["grace_micro_usd"] == TOPUP_GRACE_MICRO_USD
+    assert paid["refused_below_micro_usd"] == 5 * DOLLAR - TOPUP_GRACE_MICRO_USD

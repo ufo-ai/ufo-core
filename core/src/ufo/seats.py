@@ -248,6 +248,25 @@ async def workspace_domain(connection: AsyncConnection, workspace_id: UUID) -> s
     return email_domain(email) or None
 
 
+async def member_by_email(
+    connection: AsyncConnection, workspace_id: UUID, email: str
+) -> UUID | None:
+    """The member of this workspace holding this address, or None.
+
+    Lookup only, and scoped to the workspace in the query rather than by the caller: a session
+    proves an address, and an address is not a member anywhere in particular. A route that resolved
+    the address first and checked the workspace after would read a member of another workspace on
+    the way. Nothing here creates a member — an address that has never been seated is not one."""
+    return (
+        await connection.execute(
+            sa.select(tables.member.c.id).where(
+                tables.member.c.workspace_id == workspace_id,
+                sa.func.lower(tables.member.c.email) == email.strip().lower(),
+            )
+        )
+    ).scalar_one_or_none()
+
+
 async def member_is_admin(connection: AsyncConnection, workspace_id: UUID, member_id: UUID) -> bool:
     return bool(
         (
