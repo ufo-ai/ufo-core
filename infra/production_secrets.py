@@ -22,6 +22,7 @@ API_KEY_INPUTS = {
     "openrouter-api-key": "OPENROUTER_API_KEY",
     "turbopuffer-api-key": "TURBOPUFFER_API_KEY",
 }
+TESTING_VALUE_PREFIXES = ("sk_test_", "pk_test_", "rk_test_")
 API_KEYS_PROPERTIES = frozenset(
     {
         "anthropic-api-key",
@@ -36,7 +37,6 @@ API_KEYS_PROPERTIES = frozenset(
         "github-app-id",
         "github-app-private-key",
         "metronome-bearer-token",
-        "metronome-package-alias",
         "openai-api-key",
         "openrouter-api-key",
         "pipedream-client-id",
@@ -90,15 +90,46 @@ def _required(environment: Mapping[str, str], name: str) -> str:
 
 
 def _payload(raw: bytes, properties: frozenset[str], secret_id: str) -> dict[str, str]:
+    """The live secret, checked to carry every property this deploy declares, returned as the
+    payload to write back.
+
+    A declared property the secret lacks fails loud: that is the direction that loses a key a
+    running deploy needs. A property the deploy no longer declares is carried through untouched.
+    Dropping it here would be a step too early: the write runs before the terraform apply that
+    replaces the ExternalSecret still projecting it, so the forced re-sync between them would ask
+    External Secrets for a property the secret no longer holds, never publish a ready version, and
+    time the deploy out before the apply that would have removed the projection — every retry
+    failing the same way. Nothing reads a property no manifest projects, so carrying it costs a
+    stale key and buys a removal that lands in one deploy."""
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"{secret_id} must contain valid JSON") from error
-    if not isinstance(value, dict) or set(value) != properties:
-        raise RuntimeError(f"{secret_id} must contain the exact secret properties")
-    if any(not isinstance(item, str) for item in value.values()):
+    if not isinstance(value, dict) or not properties <= set(value):
+        raise RuntimeError(f"{secret_id} must contain every declared secret property")
+    if any(not isinstance(value[name], str) for name in properties):
         raise RuntimeError(f"{secret_id} properties must be strings")
     return value
+
+
+def _refuse_testing_values(values: Mapping[str, str], secret_id: str) -> None:
+    """Fail the deploy on a value that is visibly a test-mode credential, rather than publishing it.
+
+    Production's secret documents are seeded by hand from copies of the testing values, and every
+    layer below here accepts what that produces: the check above reads only that values are strings,
+    and the runtime verifies a testing credential happily against the testing provider. A test-mode
+    Stripe key charges nobody and issues no invoice, so the deploy is the last place the mistake is
+    visible at all.
+
+    Only a credential whose own format names its mode can be caught this way. A Metronome sandbox
+    token and a testing Slack app's secret are shaped exactly like their production counterparts, so
+    nothing here can tell them apart — those stay the runbook's job, and this catches the one family
+    that announces itself."""
+    testing = sorted(
+        name for name, value in values.items() if value.startswith(TESTING_VALUE_PREFIXES)
+    )
+    if testing:
+        raise RuntimeError(f"{secret_id} holds test-mode credentials: {', '.join(testing)}")
 
 
 def _json(value: dict[str, str]) -> bytes:
@@ -115,6 +146,9 @@ def production_secret_writes(
     api_keys.update(
         {name: _required(environment, input_name) for name, input_name in API_KEY_INPUTS.items()}
     )
+    gateway = _payload(gateway_payload, GATEWAY_PROPERTIES, gateway_secret_id)
+    _refuse_testing_values(api_keys, api_keys_secret_id)
+    _refuse_testing_values(gateway, gateway_secret_id)
     return (
         SecretWrite(
             api_keys_secret_id,
@@ -123,7 +157,7 @@ def production_secret_writes(
         ),
         SecretWrite(
             gateway_secret_id,
-            _json(_payload(gateway_payload, GATEWAY_PROPERTIES, gateway_secret_id)),
+            _json(gateway),
             deployment_id,
         ),
     )

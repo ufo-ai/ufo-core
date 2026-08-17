@@ -29,7 +29,7 @@ Read the one file that matches the question. Do not read all of them.
 | --- | --- |
 | Signup, invite codes, first sign-in, joining an existing workspace | `references/getting-started.md` |
 | Installing UFO into Slack, install states, the shared channel | `references/slack-install.md` |
-| Cost, payment method, when the plan goes live, members, adding teammates | `references/billing-and-seats.md` |
+| Cost, payment method, the workspace balance, members, adding teammates | `references/billing-and-seats.md` |
 | What the agent can do, the web portal, connectors, credentials, members and admins, scheduled tasks, memory | `references/capabilities.md` |
 | Something is broken or a step failed | `references/troubleshooting.md` |
 | Whether a thing exists yet | `references/not-yet.md` |

@@ -75,13 +75,13 @@ def test_assistant_billing_pack_is_the_local_bundle_plus_metronome() -> None:
 
 
 def test_activating_the_assistant_billing_pack_brings_up_the_billing_surface() -> None:
-    """Naming it makes the billing tool, job, and prompt section active — the proof that a local
+    """Naming it makes the billing tool, jobs, and prompt section active — the proof that a local
     deploy can service the `Set up billing` choice hosted onboarding offers the owner."""
     manifests = load_manifests(assistant_billing.NAME)
     assert [m.name for m in manifests] == [*assistant_billing.EXTENSIONS, assistant_billing.NAME]
     metronome = next(m for m in manifests if m.name == "metronome")
     assert "manage_billing" in {tool.name for tool in metronome.tools}
-    assert "billing_activation" in {job.name for job in metronome.jobs}
+    assert {"usage_shipper", "seat_shipper"} <= {job.name for job in metronome.jobs}
     assert "billing" in {section.name for section in metronome.prompt_sections}
 
 

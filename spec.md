@@ -805,12 +805,11 @@ by the workspace, so the rate card bills only pass-through usage.
 
 Buying the plan is a chat act like every other member action: a speaking admin asks, and an
 extension tool returns a short-lived provider portal link for the payment method,
-and one of the extension's jobs activates the plan once the payment provider reports a card —
-provider ids and the pending package intent live in the extension's own store, so core gains no
-billing table, callback, webhook, or route (`metronome`'s `manage_billing` + `billing_activation`
-over Stripe and Metronome). The pending record pins the initiating conversation and agent so the
-completion returns there rather than whichever admin spoke most recently. Hosted onboarding only
-offers an admin the choice; the chat transport carries it.
+and the tool hands back a Stripe portal link for saving one — the customer id lives in the
+extension's own store, so core gains no billing table, callback, webhook, or route (`metronome`'s
+`manage_billing` over Stripe). Metronome rates what it is sent and gates nothing: what a turn spends
+against is the prepaid balance core holds, and `status` reports that balance beside the card. Hosted
+onboarding only offers an admin the choice; the chat transport carries it.
 
 ## Model abstraction
 

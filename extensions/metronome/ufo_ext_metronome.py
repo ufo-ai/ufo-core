@@ -23,26 +23,27 @@ freezes the label into each export intent at mint, resolved through the deploy's
 this module only relays `export.byok` — so a backlog drained after an outage carries the key
 state that served it, and a re-send is byte-identical whatever changed since.
 
-Billing setup is a chat act too. An admin asks, the agent calls `manage_billing`, and the tool
-hands back a short-lived Stripe Customer Portal link for saving a payment method — no callback, no
-webhook, no billing table. What the tool persists is the workspace's provider ids and the package
-it intends to buy; the `billing_activation` job turns that intent into a live plan once Stripe
-reports a default payment method, and tells the initiating conversation once. Every provider write
-carries a durable
-identity — a deterministic key for the Stripe Customer, the workspace UUID as the Metronome
-customer's ingest alias (the same id every usage event is stamped with), a stable `uniqueness_key`
-for the Contract — so a conflict is reconciled by fetching the object that already exists and a key
-is never rotated to get past one. Those identities are also how an object is recognized later: the
-workspace's plan is the contract carrying its `uniqueness_key`, never whichever contract the
-customer happens to list first, because a customer can hold contracts this workspace never bought.
-The plan is a Metronome Contract, so no Stripe Subscription is ever created.
+Billing is a chat act too. An admin asks, the agent calls `manage_billing`, and the tool hands back
+either what the workspace has left or a short-lived Stripe Customer Portal link for saving a payment
+method — no callback, no webhook, no billing table. What the tool persists is the workspace's Stripe
+Customer id, under a deterministic key so a conflict is reconciled by fetching the customer that
+already exists rather than by minting a second one.
 
-Two provider details are pinned here rather than discovered per call. `STRIPE_API_VERSION` fixes the
+Metronome rates what it is sent and never gates anything. A workspace runs on the prepaid balance
+core holds; this module reports that balance beside the card, and ships the usage record the ledger
+reconciles against. There is no contract, no package, and no plan to activate.
+
+Metronome must never collect. A workspace pays by putting money on its balance through Stripe, and
+the same usage priced a second time by a Metronome contract configured to invoice would charge that
+workspace twice for one turn — once when the balance was funded, once when the statement went out.
+So a contract here carries no billing-provider configuration: it exists to rate and record usage
+into a statement a human reads, never to move money. Nothing in this module creates a contract, so
+this holds by what an operator sets up; it is the first thing to check when wiring a new account.
+
+One provider detail is pinned here rather than discovered per call: `STRIPE_API_VERSION` fixes the
 Stripe API version, so a provider-side default bump can never reshape a response underneath us — the
-version Stripe's own SDKs pin is the one taken. `CONTRACTS_LIST_PATH` is on v2 because Metronome
-disabled the v1 contract list ("Please use the v2 endpoint to list contracts") while contract
-creation stays on the documented v1 path; both responses carry the identical `id` and
-`uniqueness_key` this reads. The opt-in provider smoke is what validates a change to either.
+version Stripe's own SDKs pin is the one taken. The opt-in provider smoke is what validates a change
+to it.
 
 Which Metronome environment receives the events — sandbox or production — is decided entirely by
 whose bearer token `METRONOME_BEARER_TOKEN` carries."""
@@ -59,10 +60,11 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.accounting import UsageExport, metered_workspaces
+from ufo.sdk.balance import read_balance
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
-from ufo.sdk.o11y import log
+from ufo.sdk.o11y import log, warn
 from ufo.sdk.seats import Seats, SeatSnapshot, member_workspaces
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
@@ -75,8 +77,6 @@ SEAT_JOB_SCHEDULE = "0 0 * * * *"
 METRONOME_API = "https://api.metronome.com"
 INGEST_URL = f"{METRONOME_API}/v1/ingest"
 METRONOME_BEARER_TOKEN_ENV = "METRONOME_BEARER_TOKEN"
-METRONOME_PACKAGE_ALIAS_ENV = "METRONOME_PACKAGE_ALIAS"
-CONTRACTS_LIST_PATH = "/v2/contracts/list"
 STRIPE_API = "https://api.stripe.com/v1"
 STRIPE_API_VERSION = "2026-02-25.clover"
 STRIPE_SECRET_KEY_ENV = "STRIPE_SECRET_KEY"
@@ -90,38 +90,34 @@ INGEST_TIMEOUT_SECONDS = 30
 BACKFILL_WINDOW_DAYS = 7
 FLOOR_KEY = "ship_floor"
 
-BILLING_JOB_NAME = "billing_activation"
-BILLING_JOB_SCHEDULE = "45 * * * * *"
 BILLING_KEY = "billing"
 BILLING_TIMEOUT_SECONDS = 30
-STRIPE_BILLING_PROVIDER = "stripe"
-STRIPE_COLLECTION_METHOD = "charge_automatically"
-STRIPE_DELIVERY_METHOD = "direct_to_billing_provider"
 PAYMENT_METHOD_UPDATE_FLOW = "payment_method_update"
-BILLING_ACTIVE_PROMPT = (
-    "[billing activated] The workspace's payment method is saved and the {package} plan is live. "
-    "Tell a workspace admin in one short line, and mention they can ask you for billing status "
-    "or the billing portal whenever they want."
-)
-
 MANAGE_BILLING_TOOL = "manage_billing"
 
 MANAGE_BILLING_DESCRIPTION = (
-    "Set up or inspect the workspace's billing plan. Admin-only. 'setup' returns a short-lived "
-    "Stripe link for saving a payment method and records the plan to activate once it is saved; "
-    "'status' reports the card and plan as the providers hold them; 'portal' returns a fresh link "
-    "for invoices, payment methods, and billing details."
+    "Read the workspace's billing. Admin-only. 'status' reports whether a card is on file and how "
+    "much balance is left; 'portal' returns a short-lived Stripe link for saving a payment method "
+    "and for invoices and billing details."
 )
 
 BILLING_SECTION_NAME = "billing"
 BILLING_SECTION_BODY = (
-    "When a workspace admin asks to set up billing, add a card, or start a plan — including "
-    "the 'Set up billing' choice that ends hosted onboarding — call manage_billing with action "
-    "'setup' and give them the returned portal_url as a link to open. Say that the plan goes live "
-    "shortly after they save a card and that you will tell them here when it does; never claim it "
-    "is active before the tool reports it. 'status' reports whether a card is on file and whether "
-    "the plan is live; 'portal' returns a fresh link for invoices, payment methods, and billing "
-    "details."
+    "The workspace runs on a prepaid balance: turns spend it, and a turn is refused once the "
+    "balance reaches the headroom a turn needs to begin, which is at or above zero. A workspace "
+    "serving its turns with its own model provider key is the exception — its turns run while the "
+    "balance is above zero — and a workspace with no balance at all is not limited by one, which "
+    "is what a null balance and reserve mean. When a "
+    "workspace admin asks about billing, what they have left, or how to add a card, "
+    "call manage_billing with action 'status' and report the balance, the reserve beneath it, "
+    "and whether a card is on file — a balance at or below the reserve is refused, so the balance "
+    "alone tells an admin they have money they cannot spend. Report what status returns rather "
+    "than inferring why a turn stopped. For adding or changing a card, or "
+    "for invoices, call action 'portal' and give them the "
+    "returned portal_url as a link to open. There is no plan to sell and none to activate, so "
+    "never offer one or say one is pending. If an admin says they are already on a plan, do not "
+    "contradict them — nothing here can see a billing arrangement made before this, so say you "
+    "will check with the team. If they ask to add credit, say you will pass that to the team."
 )
 
 INGEST_TRANSPORT: httpx.AsyncBaseTransport | None = None
@@ -134,12 +130,6 @@ class MetronomeError(RuntimeError):
     (ingest `transaction_id`, ingest alias, `uniqueness_key`) absorbs the re-send."""
 
 
-class MetronomeConflict(MetronomeError):
-    """Metronome answered 409: the ingest alias or `uniqueness_key` this call tried to claim is
-    already held. The caller reconciles by fetching the object that holds it — never by rotating
-    the key."""
-
-
 class StripeError(RuntimeError):
     """Stripe answered a non-2xx status — surfaced with status and body. Nothing is recorded for a
     failed call, so the admin's next attempt or the next job tick starts from the same state."""
@@ -149,8 +139,15 @@ class StripeError(RuntimeError):
 class UsageShipper:
     """Drain one workspace's pending usage exports to Metronome's ingest API. Each pass reads a
     batch of frozen delta intents, POSTs them, then acknowledges — strictly in that order, so a
-    crash between POST and ack re-sends byte-identical events and Metronome deduplicates. The
-    `transport` field is the httpx testability seam; production leaves it None."""
+    crash between POST and ack re-sends byte-identical events and Metronome deduplicates.
+
+    The alias is reconciled once a pass, and only once a pass has something to send. This job ticks
+    every minute for every workspace, so reconciling ahead of the batch read would spend one
+    customer API call per workspace per minute on a fleet that is mostly idle — and the throttling
+    that earns raises here, which holds the usage of the workspaces that do have some. The alias is
+    still confirmed before anything is ingested under it.
+
+    The `transport` field is the httpx testability seam; production leaves it None."""
 
     ctx: ExtensionContext
     transport: httpx.AsyncBaseTransport | None = None
@@ -158,10 +155,15 @@ class UsageShipper:
     async def run(self) -> None:
         token = _require_env(METRONOME_BEARER_TOKEN_ENV)
         floor = await self._floor()
+        reconciled = False
         while True:
             exports = await self.ctx.pending_usage_exports(floor, BATCH_EVENTS)
             if not exports:
                 return
+            self._note_usage_aging_out(exports)
+            if not reconciled:
+                await _ensure_metronome_customer(self.ctx, token, self.transport)
+                reconciled = True
             await _ingest(token, self._events(exports), self.transport)
             log(
                 "metronome.shipped",
@@ -183,6 +185,29 @@ class UsageShipper:
             await self.ctx.store.put(FLOOR_KEY, floor.isoformat())
             return floor
         return datetime.fromisoformat(str(stored))
+
+    def _note_usage_aging_out(self, exports: tuple[UsageExport, ...]) -> None:
+        """Say so when held usage has aged past the provider's backdating window.
+
+        Holding a batch rather than acking it unconfirmed delays the usage, which is right — but the
+        delay is not free forever. The provider backdates only `BACKFILL_WINDOW_DAYS`, so a backlog
+        held longer than that becomes unbillable, and the hold quietly turns into the loss it was
+        meant to prevent. Nothing here can recover that usage; what it can do is stop it being
+        silent, so an operator sees the window closing while there is time to fix the cause."""
+        oldest = min(
+            export.occurred_at.replace(tzinfo=UTC)
+            if export.occurred_at.tzinfo is None
+            else export.occurred_at
+            for export in exports
+        )
+        if oldest >= datetime.now(UTC) - timedelta(days=BACKFILL_WINDOW_DAYS):
+            return
+        warn(
+            "metronome.usage_past_backdating_window",
+            workspace_id=str(self.ctx.store.workspace_id),
+            oldest=_rfc3339(oldest),
+            held=len(exports),
+        )
 
     def _events(self, exports: tuple[UsageExport, ...]) -> list[dict[str, object]]:
         customer_id = str(self.ctx.store.workspace_id)
@@ -229,6 +254,7 @@ class SeatShipper:
         workspace_id = self.ctx.store.workspace_id
         async with self.ctx.transaction() as connection:
             snapshot = await Seats(workspace_id).snapshot(connection)
+        await _ensure_metronome_customer(self.ctx, token, self.transport)
         await _ingest(token, [self._event(snapshot, today)], self.transport)
         log(
             "metronome.seats_shipped",
@@ -253,7 +279,7 @@ async def _ship_seats(ctx: ExtensionContext) -> None:
 
 
 class BillingConfig(BaseModel):
-    """The four settings the billing workflow cannot run without, read and validated once at the
+    """The three settings the billing workflow cannot run without, read and validated once at the
     entry to a tool call or a tick — before any provider object exists, so a half-configured deploy
     can never leave a Stripe Customer behind and then fail on the portal configuration. Every
     missing name is reported at once rather than one per attempt. The usage and seat shippers read
@@ -265,7 +291,6 @@ class BillingConfig(BaseModel):
     stripe_secret_key: str
     stripe_portal_configuration_id: str
     metronome_bearer_token: str
-    metronome_package_alias: str
 
     @classmethod
     def from_env(cls) -> "BillingConfig":
@@ -273,7 +298,6 @@ class BillingConfig(BaseModel):
             "stripe_secret_key": os.environ.get(STRIPE_SECRET_KEY_ENV),
             "stripe_portal_configuration_id": os.environ.get(STRIPE_PORTAL_CONFIGURATION_ENV),
             "metronome_bearer_token": os.environ.get(METRONOME_BEARER_TOKEN_ENV),
-            "metronome_package_alias": os.environ.get(METRONOME_PACKAGE_ALIAS_ENV),
         }
         missing = [
             name
@@ -281,7 +305,6 @@ class BillingConfig(BaseModel):
                 (STRIPE_SECRET_KEY_ENV, "stripe_secret_key"),
                 (STRIPE_PORTAL_CONFIGURATION_ENV, "stripe_portal_configuration_id"),
                 (METRONOME_BEARER_TOKEN_ENV, "metronome_bearer_token"),
-                (METRONOME_PACKAGE_ALIAS_ENV, "metronome_package_alias"),
             )
             if not found[field]
         ]
@@ -291,90 +314,13 @@ class BillingConfig(BaseModel):
 
 
 class BillingRecord(BaseModel):
-    """One workspace's billing provisioning state, as the extension store holds it. Written by the
-    `setup` tool the moment a Stripe Customer exists — before the admin is handed the portal link —
-    and completed by the activation job. The provider ids are the durable identities every later
-    call resolves against; `package_alias` and `contract_starting_at` are the intent captured at
-    setup, and the notification target is the conversation and agent that initiated it. Neither a
-    package the deploy renames nor the passage of time changes what a pending workspace was
-    promised — and every contract-create retry, however far apart, sends byte-identical
-    parameters. A record with no `activated_at` is the job's pending work."""
+    """One workspace's billing provisioning state, as the extension store holds it. Written when a
+    Stripe Customer first exists, and the durable identity every later call resolves against.
+
+    Pydantic ignores keys it does not declare, so a stored record carrying more than this still
+    validates and still yields its customer."""
 
     stripe_customer_id: str
-    package_alias: str
-    contract_starting_at: datetime
-    notification_conversation_id: UUID
-    notification_agent_id: UUID
-    metronome_customer_id: str | None = None
-    metronome_contract_id: str | None = None
-    activated_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class BillingActivation:
-    """Turn a workspace's saved payment method into a live Metronome plan.
-
-    Each step commits before the next runs, so a tick that dies part-way resumes exactly where it
-    stopped rather than redoing provider writes: no default payment method leaves the record
-    untouched and pending, a created Metronome customer is recorded (and recovered by ingest alias
-    if the record was lost), and the contract's stable uniqueness key makes a duplicate create a
-    409 the next tick reconciles by reading the contract that already exists. The initiating
-    conversation is told once, and the activation mark lands only after that turn is admitted."""
-
-    ctx: ExtensionContext
-    transport: httpx.AsyncBaseTransport | None = None
-
-    async def run(self) -> None:
-        record = await _billing_record(self.ctx)
-        if record is None or record.activated_at is not None:
-            return
-        config = BillingConfig.from_env()
-        if not await _has_default_payment_method(config, record.stripe_customer_id, self.transport):
-            return
-        workspace_id = str(self.ctx.store.workspace_id)
-        customer_id = record.metronome_customer_id
-        if customer_id is None:
-            customer_id = await _metronome_customer(
-                config, workspace_id, record.stripe_customer_id, self.transport
-            )
-            record = await self._store(
-                record.model_copy(update={"metronome_customer_id": customer_id})
-            )
-        if record.metronome_contract_id is None:
-            contract_id = await _metronome_contract(
-                config,
-                customer_id,
-                record,
-                _contract_key(self.ctx.store.workspace_id),
-                self.transport,
-            )
-            record = await self._store(
-                record.model_copy(update={"metronome_contract_id": contract_id})
-            )
-        await self._notify(record)
-
-    async def _store(self, record: BillingRecord) -> BillingRecord:
-        await self.ctx.store.put(BILLING_KEY, record.model_dump(mode="json"))
-        return record
-
-    async def _notify(self, record: BillingRecord) -> None:
-        workspace_id = self.ctx.store.workspace_id
-        await self.ctx.invoke(
-            record.notification_conversation_id,
-            record.notification_agent_id,
-            BILLING_ACTIVE_PROMPT.format(package=record.package_alias),
-            idempotency_key=f"billing-active:{workspace_id}",
-        )
-        await self._store(record.model_copy(update={"activated_at": datetime.now(UTC)}))
-        log(
-            "metronome.billing_activated",
-            workspace_id=str(workspace_id),
-            contract_id=record.metronome_contract_id,
-        )
-
-
-async def _activate_billing(ctx: ExtensionContext) -> None:
-    await BillingActivation(ctx=ctx, transport=BILLING_TRANSPORT).run()
 
 
 async def _billing_record(ctx: ExtensionContext) -> BillingRecord | None:
@@ -382,19 +328,11 @@ async def _billing_record(ctx: ExtensionContext) -> BillingRecord | None:
     return None if stored is None else BillingRecord.model_validate(stored)
 
 
-def _contract_key(workspace_id: UUID) -> str:
-    """The workspace's permanent contract identity: the `uniqueness_key` Metronome stores on the
-    Contract we create, and the only field a later read identifies it by. Never rotated — a conflict
-    on it means our contract already exists, not that we need a different key."""
-    return f"ufo-contract:{workspace_id}"
-
-
 class ManageBillingInput(BaseModel):
-    action: Literal["setup", "status", "portal"] = Field(
+    action: Literal["status", "portal"] = Field(
         description=(
-            "setup: start payment setup and return a link for saving a card. status: report the "
-            "card and plan the providers currently hold. portal: return a link for invoices, "
-            "payment methods, and billing details."
+            "status: report the card on file and the workspace's remaining balance. portal: return "
+            "a link for saving a payment method, and for invoices and billing details."
         )
     )
     user_description: str = Field(
@@ -407,8 +345,6 @@ async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResu
     ext = await _admin_billing(ctx)
     config = BillingConfig.from_env()
     match args.action:
-        case "setup":
-            return await _billing_setup(ctx, ext, config)
         case "status":
             return await _billing_status(ext, config)
         case "portal":
@@ -424,89 +360,49 @@ async def _admin_billing(ctx: ToolContext) -> ExtensionContext:
     return ctx.ext
 
 
-async def _billing_setup(
-    ctx: ToolContext,
-    ext: ExtensionContext,
-    config: BillingConfig,
-) -> ToolResult:
-    """Resolve the workspace's one Stripe Customer, then hand back a portal link that does exactly
-    one thing: save a payment method.
-
-    The record is written once — only when it does not exist yet — and that write lands before the
-    link is returned, so the activation job owns the follow-through by the time the admin opens it.
-    A later setup has nothing to add and must not write: putting a re-read record back would let a
-    setup overlapping the job revert the provider ids that job had just recorded. What the first
-    setup captures is what every later provisioning attempt replays: the package, and a contract
-    start truncated to the hour, because a package contract must begin on an hour boundary and
-    Metronome rejects microsecond precision outright."""
-    workspace_id = ext.store.workspace_id
-    record = await _billing_record(ext)
-    if record is None:
-        record = BillingRecord(
-            stripe_customer_id=await _stripe_customer(config, workspace_id, BILLING_TRANSPORT),
-            package_alias=config.metronome_package_alias,
-            contract_starting_at=datetime.now(UTC).replace(minute=0, second=0, microsecond=0),
-            notification_conversation_id=ctx.turn.conversation_id,
-            notification_agent_id=ctx.turn.agent_id,
-        )
-        await ext.store.put(BILLING_KEY, record.model_dump(mode="json"))
-    url = await _portal_session(
-        config, record.stripe_customer_id, PAYMENT_METHOD_UPDATE_FLOW, BILLING_TRANSPORT
-    )
-    log(
-        "metronome.billing_setup",
-        workspace_id=str(workspace_id),
-        customer_id=record.stripe_customer_id,
-    )
-    return _text_result(
-        {
-            "portal_url": url,
-            "stripe_customer_id": record.stripe_customer_id,
-            "package": record.package_alias,
-        }
-    )
-
-
 async def _billing_status(ext: ExtensionContext, config: BillingConfig) -> ToolResult:
-    """Current provider truth, not our record: Stripe says whether a card is on file and Metronome
-    says whether this workspace's own contract exists. The record supplies only the ids to ask
-    about — a contract on the customer that is not ours never counts as this workspace's plan."""
+    """What the workspace can spend, and whether a card is on file to add to it. The card is read
+    from Stripe rather than from our record, so it answers what the provider holds now; the balance
+    is core's, and a workspace that has never been credited has none.
+
+    The reserve is reported beside the balance because a turn is refused once the balance reaches
+    it, so the balance alone names money the gate will not spend. Neither is a spendable figure:
+    what entry actually asks for scales with the turns already running, so a single number here
+    would name a line no gate holds."""
+    async with ext.transaction() as connection:
+        balance = await read_balance(connection, ext.store.workspace_id)
     record = await _billing_record(ext)
-    if record is None:
-        return _text_result({"configured": False})
-    paid = await _has_default_payment_method(config, record.stripe_customer_id, BILLING_TRANSPORT)
-    contract_id = (
-        None
-        if record.metronome_customer_id is None
-        else await _contract_for(
-            config,
-            record.metronome_customer_id,
-            _contract_key(ext.store.workspace_id),
-            BILLING_TRANSPORT,
-        )
+    paid = record is not None and await _has_default_payment_method(
+        config, record.stripe_customer_id, BILLING_TRANSPORT
     )
     return _text_result(
         {
-            "configured": True,
-            "stripe_customer_id": record.stripe_customer_id,
             "payment_method_on_file": paid,
-            "package": record.package_alias,
-            "metronome_customer_id": record.metronome_customer_id,
-            "metronome_contract_id": contract_id,
-            "plan_active": contract_id is not None,
+            "balance_micro_usd": None if balance is None else balance.balance_micro_usd,
+            "reserve_micro_usd": None if balance is None else balance.reserve_micro_usd,
+            "granted_micro_usd": None if balance is None else balance.granted_micro_usd,
+            "charged_micro_usd": None if balance is None else balance.charged_micro_usd,
         }
     )
 
 
 async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolResult:
-    """A fresh management portal session — billing details, payment methods, invoices. Subscription
-    mutation is off in the configured portal: the plan is a Metronome Contract, not a Stripe
-    Subscription."""
+    """A fresh Stripe portal session — payment methods, invoices, billing details.
+
+    The link is what saves a card, so this resolves the workspace's Stripe Customer rather than
+    demanding a prior setup: `_stripe_customer` is idempotent on a deterministic key, so the first
+    admin to ask for the portal creates it and every later ask reuses it. The record is written only
+    when it does not exist, which keeps the customer id stable for the reads beside it."""
+    workspace_id = ext.store.workspace_id
     record = await _billing_record(ext)
     if record is None:
-        raise ValueError("billing is not set up for this workspace yet; run setup first")
+        record = BillingRecord(
+            stripe_customer_id=await _stripe_customer(config, workspace_id, BILLING_TRANSPORT)
+        )
+        await ext.store.put(BILLING_KEY, record.model_dump(mode="json"))
     url = await _portal_session(config, record.stripe_customer_id, None, BILLING_TRANSPORT)
-    return _text_result({"portal_url": url})
+    log("metronome.billing_portal", workspace_id=str(workspace_id))
+    return _text_result({"portal_url": url, "stripe_customer_id": record.stripe_customer_id})
 
 
 def _text_result(payload: dict[str, object]) -> ToolResult:
@@ -602,131 +498,6 @@ async def _stripe(
     return response.json()
 
 
-async def _metronome_customer(
-    config: BillingConfig,
-    alias: str,
-    stripe_customer_id: str,
-    transport: httpx.AsyncBaseTransport | None,
-) -> str:
-    """The workspace's Metronome customer, carrying the workspace UUID as an ingest alias — the same
-    id every usage event is stamped with, so events match the customer they bill. Looked up by that
-    alias first and reconciled to it on conflict, so the alias (not a 24-hour idempotency key) is
-    the durable identity. Created with the Stripe automatic-collection configuration, so Metronome
-    invoices charge the card the admin just saved."""
-    existing = await _customer_by_alias(config, alias, transport)
-    if existing is not None:
-        return existing
-    body: dict[str, object] = {
-        "name": f"ufo workspace {alias}",
-        "ingest_aliases": [alias],
-        "customer_billing_provider_configurations": [
-            {
-                "billing_provider": STRIPE_BILLING_PROVIDER,
-                "delivery_method": STRIPE_DELIVERY_METHOD,
-                "configuration": {
-                    "stripe_customer_id": stripe_customer_id,
-                    "stripe_collection_method": STRIPE_COLLECTION_METHOD,
-                },
-            }
-        ],
-    }
-    try:
-        created = await _metronome(
-            config,
-            "POST",
-            "/v1/customers",
-            transport,
-            body=body,
-            idempotency_key=f"ufo-metronome-customer:{alias}",
-        )
-    except MetronomeConflict:
-        reconciled = await _customer_by_alias(config, alias, transport)
-        if reconciled is None:
-            raise
-        return reconciled
-    match created.get("data"):
-        case {"id": str() as customer_id}:
-            return customer_id
-    raise MetronomeError(f"metronome customer create returned no id: {created}")
-
-
-async def _customer_by_alias(
-    config: BillingConfig, alias: str, transport: httpx.AsyncBaseTransport | None
-) -> str | None:
-    found = await _metronome(
-        config, "GET", "/v1/customers", transport, params={"ingest_alias": alias}
-    )
-    match found.get("data"):
-        case [{"id": str() as customer_id}, *_]:
-            return customer_id
-    return None
-
-
-async def _metronome_contract(
-    config: BillingConfig,
-    customer_id: str,
-    record: BillingRecord,
-    uniqueness_key: str,
-    transport: httpx.AsyncBaseTransport | None,
-) -> str:
-    """The workspace's plan: one Contract provisioned from the configured Package, identified for
-    all time by `uniqueness_key`. Reading that key back is both the resume path and the
-    reconciliation for the 409 a reused key raises. The start comes from the record rather than the
-    clock, so every attempt — however far apart — sends identical parameters and can never trip the
-    key on a mismatch."""
-    existing = await _contract_for(config, customer_id, uniqueness_key, transport)
-    if existing is not None:
-        return existing
-    try:
-        created = await _metronome(
-            config,
-            "POST",
-            "/v1/contracts/create",
-            transport,
-            body={
-                "customer_id": customer_id,
-                "starting_at": _rfc3339(record.contract_starting_at),
-                "package_alias": record.package_alias,
-                "uniqueness_key": uniqueness_key,
-            },
-        )
-    except MetronomeConflict:
-        reconciled = await _contract_for(config, customer_id, uniqueness_key, transport)
-        if reconciled is None:
-            raise
-        return reconciled
-    match created.get("data"):
-        case {"id": str() as contract_id}:
-            return contract_id
-    raise MetronomeError(f"metronome contract create returned no id: {created}")
-
-
-async def _contract_for(
-    config: BillingConfig,
-    customer_id: str,
-    uniqueness_key: str,
-    transport: httpx.AsyncBaseTransport | None,
-) -> str | None:
-    """This workspace's own live contract on the customer, matched by the `uniqueness_key` we minted
-    for it — never by list position. A Metronome customer can carry contracts this workspace never
-    asked for (an operator-provisioned trial, a hand-built plan), and adopting one of those would
-    report a plan the workspace does not have while suppressing the create that would give it one.
-    Archived contracts are absent from this read, so a match is a live plan; no match means ours
-    does not exist yet, whatever else the customer holds."""
-    listed = await _metronome(
-        config, "POST", CONTRACTS_LIST_PATH, transport, body={"customer_id": customer_id}
-    )
-    match listed.get("data"):
-        case [*contracts]:
-            for contract in contracts:
-                match contract:
-                    case {"id": str() as contract_id, "uniqueness_key": key} if (
-                        key == uniqueness_key
-                    ):
-                        return contract_id
-    return None
-
-
 async def _metronome(
     config: BillingConfig,
     method: str,
@@ -743,8 +514,6 @@ async def _metronome(
         response = await http.request(
             method, f"{METRONOME_API}{path}", json=body, params=params, headers=headers
         )
-    if response.status_code == HTTPStatus.CONFLICT:
-        raise MetronomeConflict(f"metronome {path} conflicted: {response.text}")
     if not response.is_success:
         raise MetronomeError(f"metronome {path} failed ({response.status_code}): {response.text}")
     return response.json()
@@ -755,6 +524,87 @@ def _as_str(value: object, field: str) -> str:
         case str() if value:
             return value
     raise ValueError(f"provider response carried no {field}")
+
+
+async def _ensure_metronome_customer(
+    ctx: ExtensionContext, token: str, transport: httpx.AsyncBaseTransport | None
+) -> None:
+    """Make sure a live Metronome customer carries this workspace's UUID as an ingest alias.
+
+    Every usage and seat event is stamped `customer_id = <workspace uuid>`, and Metronome resolves
+    that through the alias — with no customer holding it, each event is accepted and attributed to
+    nobody, so metering stops with nothing to see. The alias is read every tick rather than
+    remembered: a customer archived, or a bearer token moved to another account, leaves a stored id
+    pointing at nothing while `_ingest` keeps answering 2xx and the exports keep being acked, which
+    is the same silent loss with a cache in front of it.
+
+    Every way of not confirming the alias raises, and the caller ships nothing: ingest answers 2xx
+    whether or not the alias resolves, so shipping past an unconfirmed alias and acking the exports
+    destroys that usage rather than delaying it. A token that cannot read customers cannot confirm
+    anything, so it holds the backlog instead of draining it into nowhere.
+
+    A conflict means something already holds the alias, which the read that just answered None
+    could not see. Re-reading separates the two causes: a live customer means the other shipper
+    created it in the gap, and this tick lost a harmless race; still nothing means the holder is
+    archived or otherwise invisible to this token, and every event stamped with it is dropped.
+
+    The alias is the durable identity, so the create carries no idempotency key: a key caches its
+    response for a day, which would freeze a transient failure long after the cause was gone."""
+    alias = str(ctx.store.workspace_id)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=BILLING_TIMEOUT_SECONDS, transport=transport) as http:
+        if await _customer_by_alias(http, headers, alias) is not None:
+            return
+        created = await http.post(
+            f"{METRONOME_API}/v1/customers",
+            json={"name": f"ufo workspace {alias}", "ingest_aliases": [alias]},
+            headers=headers,
+        )
+        if created.status_code == HTTPStatus.CONFLICT:
+            if await _customer_by_alias(http, headers, alias) is not None:
+                log("metronome.customer_alias_held", workspace_id=alias)
+                return
+            raise MetronomeError(
+                f"metronome ingest alias {alias} is held by a customer this token cannot read; "
+                "usage shipped under it would be attributed to nobody"
+            )
+        if created.status_code in _CUSTOMER_SCOPE_DENIED:
+            raise _CustomerScopeDenied(
+                f"metronome customer create denied ({created.status_code}): this token cannot "
+                "confirm the ingest alias, so usage under it cannot be shipped"
+            )
+        if not created.is_success:
+            raise MetronomeError(
+                f"metronome customer create failed ({created.status_code}): {created.text}"
+            )
+    log("metronome.customer_created", workspace_id=alias)
+
+
+class _CustomerScopeDenied(MetronomeError):
+    """The token may ingest but not read or write customers."""
+
+
+_CUSTOMER_SCOPE_DENIED = frozenset({HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN})
+
+
+async def _customer_by_alias(
+    http: httpx.AsyncClient, headers: dict[str, str], alias: str
+) -> str | None:
+    """The live customer holding this ingest alias, or None. Archived customers keep the alias but
+    are absent from this read, which is why a create can still conflict after it answers None."""
+    found = await http.get(
+        f"{METRONOME_API}/v1/customers", params={"ingest_alias": alias}, headers=headers
+    )
+    if found.status_code in _CUSTOMER_SCOPE_DENIED:
+        raise _CustomerScopeDenied(f"metronome customer scope denied ({found.status_code})")
+    if not found.is_success:
+        raise MetronomeError(
+            f"metronome customer lookup failed ({found.status_code}): {found.text}"
+        )
+    match found.json().get("data"):
+        case [{"id": str() as existing}, *_]:
+            return existing
+    return None
 
 
 async def _ingest(
@@ -789,12 +639,6 @@ def manifest() -> Manifest:
                 name=SEAT_JOB_NAME,
                 schedule=SEAT_JOB_SCHEDULE,
                 handler=_ship_seats,
-                candidates=member_workspaces(),
-            ),
-            JobSpec(
-                name=BILLING_JOB_NAME,
-                schedule=BILLING_JOB_SCHEDULE,
-                handler=_activate_billing,
                 candidates=member_workspaces(),
             ),
         ),

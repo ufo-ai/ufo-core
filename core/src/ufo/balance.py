@@ -60,7 +60,7 @@ class Balance:
     last_purchase_at: datetime | None
 
 
-BALANCE_REFUSAL_MESSAGE = "This workspace is out of credit. An admin can add more."
+BALANCE_REFUSAL_MESSAGE = "This workspace is out of credit. Contact the team to add more."
 
 
 @dataclass(frozen=True, slots=True)

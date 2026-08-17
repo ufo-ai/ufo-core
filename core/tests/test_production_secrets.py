@@ -230,21 +230,8 @@ def test_production_secret_writes_reject_missing_inputs(name: str, error: str) -
 @pytest.mark.parametrize(
     ("api_keys", "gateway", "error"),
     (
-        (b"{}", _payload(GATEWAY_PROPERTIES), "generated/api-keys must contain the exact"),
-        (_payload(API_KEYS_PROPERTIES), b"{}", "generated/gateway must contain the exact"),
-        (
-            json.dumps(
-                {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES)}
-                | {"unknown": "value"}
-            ).encode(),
-            _payload(GATEWAY_PROPERTIES),
-            "generated/api-keys must contain the exact",
-        ),
-        (
-            _payload(API_KEYS_PROPERTIES),
-            b'{"bot-token":"value","unknown":"value"}',
-            "generated/gateway must contain the exact",
-        ),
+        (b"{}", _payload(GATEWAY_PROPERTIES), "generated/api-keys must contain every declared"),
+        (_payload(API_KEYS_PROPERTIES), b"{}", "generated/gateway must contain every declared"),
         (b"not-json", _payload(GATEWAY_PROPERTIES), "generated/api-keys must contain valid JSON"),
         (
             json.dumps({name: None for name in sorted(API_KEYS_PROPERTIES)}).encode(),
@@ -410,3 +397,48 @@ def test_production_secret_versions_are_retry_stable_and_deployment_unique() -> 
     ]
     assert tokens[0] == tokens[1]
     assert len({tokens[0], tokens[2], tokens[3]}) == 3
+
+
+def test_a_retired_property_is_carried_rather_than_wedging_the_deploy() -> None:
+    """Retiring a setting must not need two deploys or a hand-edited secret. Rejecting the extra
+    would fail every deploy; dropping it would be a step too early, because the write runs before
+    the terraform apply that replaces the ExternalSecret still projecting it — the forced re-sync
+    between them would ask for a property the secret no longer holds, never go ready, and time out
+    before that apply. Carrying it through costs a stale key nothing reads."""
+    retired = json.dumps(
+        {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES)} | {"retired": "value"}
+    ).encode()
+    (api_keys, _gateway) = production_secret_writes(
+        _environment(), retired, _payload(GATEWAY_PROPERTIES)
+    )
+    written = json.loads(api_keys.payload)
+    assert written["retired"] == "value"
+    assert set(API_KEYS_PROPERTIES) <= set(written)
+
+
+def test_a_test_mode_credential_never_reaches_production() -> None:
+    """Production's secret document is seeded by hand from copies of the testing values, and every
+    layer below the deploy accepts what that produces — the payload check reads only that values are
+    strings, and the runtime verifies a testing key happily against the testing provider. A
+    test-mode Stripe key charges nobody and issues no invoice, so this is the last place it
+    shows."""
+    seeded = json.dumps(
+        {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES)}
+        | {"stripe-secret-key": "sk_test_51abcdef"}
+    ).encode()
+    with pytest.raises(RuntimeError, match="holds test-mode credentials: stripe-secret-key"):
+        production_secret_writes(_environment(), seeded, _payload(GATEWAY_PROPERTIES))
+
+
+def test_a_live_credential_passes_the_mode_check() -> None:
+    """The guard reads the credential's own format, so a live key of the same family is untouched —
+    a Metronome sandbox token and a testing Slack secret look exactly like production's and stay the
+    runbook's job."""
+    live = json.dumps(
+        {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES)}
+        | {"stripe-secret-key": "sk_live_51abcdef"}
+    ).encode()
+    (api_keys, _gateway) = production_secret_writes(
+        _environment(), live, _payload(GATEWAY_PROPERTIES)
+    )
+    assert json.loads(api_keys.payload)["stripe-secret-key"] == "sk_live_51abcdef"

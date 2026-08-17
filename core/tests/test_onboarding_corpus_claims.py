@@ -28,6 +28,7 @@ INVITES = "control/src/ufo_control/gateway_invite.py"
 SLACK_CONNECT = "control/src/ufo_control/gateway_slack_connect.py"
 AUDIENCE = "core/src/ufo/audience.py"
 MEMBERS = "core/src/ufo/members.py"
+BALANCE = "core/src/ufo/balance.py"
 SEATS = "core/src/ufo/seats.py"
 TABLES = "core/src/ufo/schema/tables.py"
 WORKSPACE_KIND = "core/src/ufo/workspace_kind.py"
@@ -205,11 +206,11 @@ CLAIMS = (
         pattern=r'"properties": \{"seat_count": str\(len\(snapshot\.members\)\)\}',
     ),
     Claim(
-        claim="plan activation runs on a schedule rather than instantly",
+        claim="a spent balance refuses the turn rather than queueing it",
         corpus="references/billing-and-seats.md",
-        phrase="activation runs on a schedule",
-        source=METRONOME,
-        pattern=r"BILLING_JOB_SCHEDULE = ",
+        phrase="a turn is refused once the balance reaches",
+        source=BALANCE,
+        pattern=r"BALANCE_REFUSAL_MESSAGE = ",
     ),
     Claim(
         claim="only an admin can reach billing",

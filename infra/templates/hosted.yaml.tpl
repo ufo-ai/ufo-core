@@ -658,7 +658,7 @@ spec:
             - {name: http, containerPort: 8710}
           # Model/provider keys the fleet shares across workspaces (ANTHROPIC/OPENAI/OPENROUTER, EXA,
           # TURBOPUFFER, E2B, BROWSERBASE, COMPOSIO, PIPEDREAM, UFO_TOKEN_SECRET), the billing settings the
-          # metronome extension reads host-side (METRONOME_BEARER_TOKEN/METRONOME_PACKAGE_ALIAS,
+          # metronome extension reads host-side (METRONOME_BEARER_TOKEN,
           # STRIPE_SECRET_KEY/STRIPE_BILLING_PORTAL_CONFIGURATION_ID), this deploy's one Slack app's
           # secrets (SLACK_CLIENT_ID/SLACK_CLIENT_SECRET/SLACK_SIGNING_SECRET, read in-process for the
           # OAuth install and event verification) plus the shared egress proxy's CA

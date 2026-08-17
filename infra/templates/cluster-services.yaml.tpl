@@ -73,12 +73,10 @@ spec:
     - {secretKey: TURBOPUFFER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: turbopuffer-api-key}}
     - {secretKey: EXA_API_KEY, remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}
     - {secretKey: METRONOME_BEARER_TOKEN, remoteRef: {key: ${secret_api_keys}, property: metronome-bearer-token}}
-    # Billing setup: the Stripe key mints the customer and the portal sessions, the portal
-    # configuration is what keeps subscription mutation out of the member's hands, and the package
-    # alias names the Metronome package a workspace's contract is provisioned from.
+    # Billing: the Stripe key mints the customer and the portal sessions, and the portal
+    # configuration is what keeps subscription mutation out of the member's hands.
     - {secretKey: STRIPE_SECRET_KEY, remoteRef: {key: ${secret_api_keys}, property: stripe-secret-key}}
     - {secretKey: STRIPE_BILLING_PORTAL_CONFIGURATION_ID, remoteRef: {key: ${secret_api_keys}, property: stripe-billing-portal-configuration-id}}
-    - {secretKey: METRONOME_PACKAGE_ALIAS, remoteRef: {key: ${secret_api_keys}, property: metronome-package-alias}}
     # This deploy's one Slack app: client id/secret run the OAuth install exchange, the signing
     # secret verifies every inbound event — all read in-process by serve, never injected at the proxy.
     - {secretKey: SLACK_CLIENT_ID, remoteRef: {key: ${secret_api_keys}, property: slack-client-id}}

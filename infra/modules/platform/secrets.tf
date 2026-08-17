@@ -204,7 +204,6 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
     "turbopuffer-api-key"                    = ""
     "datadog-api-key"                        = ""
     "metronome-bearer-token"                 = ""
-    "metronome-package-alias"                = ""
     "stripe-secret-key"                      = ""
     "stripe-billing-portal-configuration-id" = ""
     "slack-client-id"                        = ""

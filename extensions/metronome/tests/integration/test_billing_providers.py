@@ -2,17 +2,16 @@
 
 The unit suite proves the gates, the wire, and idempotence over a MockTransport; this proves the
 provider contracts themselves — that the parameters we send are the ones Stripe and Metronome
-accept, that a package alias really provisions a contract, and that the workspace UUID we stamp on
-every usage event really is the id Metronome matches to the customer. Nothing here is mocked.
+accept, and that the workspace UUID we stamp on every usage event really is the id Metronome
+matches to the customer. Nothing here is mocked.
 
 The one act a headless test cannot perform is a human completing the hosted portal, so it does what
-the portal does — mint a test card, attach it, make it the invoice default — and then lets the real
-activation job observe that Stripe reports a default payment method. The portal session itself is
-still created and its URL asserted.
+the portal does — mint a test card, attach it, make it the invoice default — and then asserts the
+module reads that card back. The portal session itself is still created and its URL asserted.
 
-Opt-in: skips unless all four provider settings are present. Point it at a Stripe **test-mode** key
-and a Metronome **sandbox** token — it creates real customers and a real contract in whichever
-account the credentials name."""
+Opt-in: skips unless every provider setting is present. Point it at a Stripe **test-mode** key and a
+Metronome **sandbox** token — it creates a real customer in whichever account the credentials
+name."""
 
 import os
 from datetime import UTC, datetime
@@ -32,7 +31,6 @@ REQUIRED = (
     metronome.STRIPE_SECRET_KEY_ENV,
     metronome.STRIPE_PORTAL_CONFIGURATION_ENV,
     metronome.METRONOME_BEARER_TOKEN_ENV,
-    metronome.METRONOME_PACKAGE_ALIAS_ENV,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -71,7 +69,7 @@ async def _save_a_card(customer_id: str) -> None:
 
 
 @pytest.mark.serial
-async def test_live_setup_payment_and_contract_provisioning(db: None) -> None:
+async def test_live_portal_and_payment_method(db: None) -> None:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -83,38 +81,35 @@ async def test_live_setup_payment_and_contract_provisioning(db: None) -> None:
     config = metronome.BillingConfig.from_env()
 
     with ws(workspace_id):
-        setup = await metronome._billing_setup(ctx, config)
+        portal = await metronome._billing_portal(ctx, config)
         record = await metronome._billing_record(ctx)
     assert record is not None
-    assert record.package_alias == config.metronome_package_alias
     assert record.stripe_customer_id.startswith("cus_")
-    assert PORTAL_HOST in str(setup.content[0].text)
+    assert PORTAL_HOST in str(portal.content[0].text)
 
     with ws(workspace_id):
         assert not await metronome._has_default_payment_method(
             config, record.stripe_customer_id, None
         )
-        await metronome.BillingActivation(ctx=ctx).run()
-        assert (await metronome._billing_record(ctx)) == record
 
     await _save_a_card(record.stripe_customer_id)
 
     with ws(workspace_id):
         assert await metronome._has_default_payment_method(config, record.stripe_customer_id, None)
-        await metronome.BillingActivation(ctx=ctx).run()
-        activated = await metronome._billing_record(ctx)
-    assert activated is not None
-    assert activated.metronome_customer_id is not None
-    assert activated.metronome_contract_id is not None
+        assert (await metronome._billing_record(ctx)) == record
 
-    by_alias = await metronome._customer_by_alias(config, str(workspace_id), None)
-    assert by_alias == activated.metronome_customer_id
-    assert await metronome._contract_for(
-        config, activated.metronome_customer_id, metronome._contract_key(workspace_id), None
-    ) == (activated.metronome_contract_id)
+    token = os.environ[metronome.METRONOME_BEARER_TOKEN_ENV]
+    with ws(workspace_id):
+        await metronome._ensure_metronome_customer(ctx, token, None)
+    async with httpx.AsyncClient(timeout=metronome.BILLING_TIMEOUT_SECONDS) as http:
+        assert (
+            await metronome._customer_by_alias(
+                http, {"Authorization": f"Bearer {token}"}, str(workspace_id)
+            )
+        ) is not None
 
     await metronome._ingest(
-        os.environ[metronome.METRONOME_BEARER_TOKEN_ENV],
+        token,
         [
             {
                 "transaction_id": f"smoke:{workspace_id}",
@@ -128,7 +123,7 @@ async def test_live_setup_payment_and_contract_provisioning(db: None) -> None:
     )
 
     with ws(workspace_id):
-        portal = await metronome._billing_portal(ctx, config)
-    fresh = str(portal.content[0].text)
+        again = await metronome._billing_portal(ctx, config)
+    fresh = str(again.content[0].text)
     assert PORTAL_HOST in fresh
-    assert fresh != str(setup.content[0].text)
+    assert fresh != str(portal.content[0].text)

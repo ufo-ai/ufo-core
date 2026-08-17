@@ -8,10 +8,9 @@ and nothing in a local deploy could service it. This pack is the missing middle:
 assistant bundle, plus billing.
 
 Selecting it (`[pack] name = "assistant_billing"`, which `docker compose` renders from
-`UFO_DEV_PACK`) turns on `manage_billing`, the `billing_activation` job, and the usage and seat
-shippers — all of which then need real Metronome credentials, which is why this is opt-in and not
-the default dev pack. Point it at a Metronome **sandbox** token and a Stripe **test-mode** key:
-`docs/onboarding.md` has the recipe."""
+`UFO_DEV_PACK`) turns on `manage_billing` and the usage and seat shippers — all of which then need
+real Metronome credentials, which is why this is opt-in and not the default dev pack. Point it at a
+Metronome **sandbox** token and a Stripe **test-mode** key: `docs/onboarding.md` has the recipe."""
 
 import ufo_pack_assistant
 

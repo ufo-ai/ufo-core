@@ -1,0 +1,15 @@
+"""Public re-export: a billing extension reads a workspace's prepaid balance to report it, and
+credits it when a payment settles — the rules stay core's, the extension decides when to apply them.
+
+`ufo.sdk` is a package of thin re-export modules with an empty `__init__.py`, so the public
+surface lives in named modules like this one."""
+
+from ufo.balance import (
+    Balance as Balance,
+)
+from ufo.balance import (
+    credit as credit,
+)
+from ufo.balance import (
+    read_balance as read_balance,
+)
