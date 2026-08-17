@@ -374,11 +374,13 @@ impl GitStrategy {
             })
     }
 
-    /// Serve one LFS object from the per-principal content tier, fetching and verifying it from
-    /// the origin on a miss. The client reached this route through a rewritten batch answer, but
-    /// nothing here trusts what it names beyond the oid and size: the fetch re-batches against the
-    /// allowlisted origin with the principal's own credential, and the bytes must hash to the oid
-    /// before they are committed or served.
+    /// Serve one LFS object from the per-principal content tier, restoring it from the durable
+    /// tier or fetching it from the origin on a miss. The client reached this route through a
+    /// rewritten batch answer, but nothing here trusts what it names beyond the oid and size: the
+    /// fetch re-batches against the allowlisted origin with the principal's own credential, and
+    /// bytes must hash to the oid before they are committed or served — restored bytes held to
+    /// the same proof as fetched ones. What the origin supplies is snapshotted to the durable
+    /// tier off the response path, so a rolled pod restores instead of re-downloading.
     async fn serve_lfs_content(
         &self,
         host: &str,
@@ -405,6 +407,14 @@ impl GitStrategy {
         };
         if let Some(resp) = serve_pack_file(&meta, &body_path, "HIT").await {
             return resp;
+        }
+        if self
+            .restore_lfs(&dir, &body_path, oid, size, resolved)
+            .await
+        {
+            if let Some(resp) = serve_pack_file(&meta, &body_path, "HIT").await {
+                return resp;
+            }
         }
         let upstream = match self.fetch_lfs_object(host, repo, oid, size, resolved).await {
             Ok(r) => r,
@@ -439,6 +449,12 @@ impl GitStrategy {
             return (StatusCode::BAD_GATEWAY, "lfs content mismatch").into_response();
         }
         let serve_path = if tokio::fs::rename(&tmp, &body_path).await.is_ok() {
+            let durable = self.durable.clone();
+            let key = lfs_key(&resolved.principal, oid);
+            let snapshot = body_path.clone();
+            tokio::spawn(async move {
+                durable.put_file(&key, &snapshot).await;
+            });
             body_path
         } else {
             tmp.clone()
@@ -448,6 +464,43 @@ impl GitStrategy {
             let _ = tokio::fs::remove_file(&tmp).await;
         }
         resp.unwrap_or_else(|| (StatusCode::BAD_GATEWAY, "lfs serve failed").into_response())
+    }
+
+    /// Rebuild a missing object from the durable tier instead of the origin. The restored bytes
+    /// must hash to the oid and total the declared size before they are trusted: a corrupt durable
+    /// object is discarded and the caller fetches the origin as if it were never there — and the
+    /// snapshot that fetch spawns overwrites the bad copy.
+    async fn restore_lfs(
+        &self,
+        dir: &Path,
+        body_path: &Path,
+        oid: &str,
+        size: u64,
+        resolved: &Resolved,
+    ) -> bool {
+        if matches!(*self.durable, Durable::Off) {
+            return false;
+        }
+        // Reclaim space before a write may add to the tree: restore-only traffic on a rolled pod
+        // must bound the tier exactly as origin fetches do.
+        self.maybe_sweep_lfs().await;
+        if tokio::fs::create_dir_all(dir).await.is_err() {
+            return false;
+        }
+        let tmp = writing_temp(body_path);
+        if !self
+            .durable
+            .get_file(&lfs_key(&resolved.principal, oid), &tmp)
+            .await
+        {
+            return false;
+        }
+        if !lfs_file_matches(&tmp, oid, size).await {
+            tracing::warn!(oid, "durable lfs object failed verification");
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return false;
+        }
+        tokio::fs::rename(&tmp, body_path).await.is_ok()
     }
 
     /// One streaming response for an LFS object, negotiated fresh with the origin: this daemon's
@@ -1084,6 +1137,32 @@ fn is_oid(value: &str) -> bool {
 
 /// The `size=<n>` a rewritten href carries: the batch's declared object size, which decides
 /// cacheability up front and pins the byte count the capture must verify.
+/// Durable key for one principal's object, isolated in the store as it is on disk.
+fn lfs_key(principal: &str, oid: &str) -> String {
+    format!("lfs/{}/{oid}", sanitize(principal))
+}
+
+/// True when the file on disk hashes to the oid and totals `size` bytes.
+async fn lfs_file_matches(path: &Path, oid: &str, size: u64) -> bool {
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut chunk = vec![0u8; READ_CHUNK];
+    loop {
+        match file.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n as u64;
+                hasher.update(&chunk[..n]);
+            }
+            Err(_) => return false,
+        }
+    }
+    total == size && hex::encode(hasher.finalize()) == oid
+}
+
 fn lfs_size(query: Option<&str>) -> Option<u64> {
     query?
         .split('&')

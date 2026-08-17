@@ -71,7 +71,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "cache" {
 }
 
 # The daemon's LRU evicts local disk only, never S3, so the durable tier is bounded here instead.
-# An object unread for the window is re-fetchable from origin (git re-clones, packages re-download);
+# An object unread for the window is re-fetchable from origin (git re-clones, packages and LFS
+# objects re-download);
 # a hot git bundle is re-snapshotted on its interval, which resets its age, so only genuinely cold
 # objects expire. Without this the shared pkg/ prefix — every artifact ever fetched fleet-wide —
 # grows without limit.

@@ -146,7 +146,9 @@ Objects are immutable and content-addressed, so a hit needs no freshness rule: a
 against the allowlisted origin with the daemon's own credential (never a client-named URL), fetches
 an href only if its host is allowlisted or resolves to globally routable addresses — the daemon
 inherits the fetch the sandbox's egress rules used to guard — and commits bytes only when they
-hash to the oid. Uploads, locks, and verify relay untouched, and an object past the per-entry cap
+hash to the oid. Committed objects snapshot to the durable tier (`lfs/<principal>/<oid>`) off the
+response path, and a cold pod restores from it under the same hash proof before it re-downloads
+anything; the bucket's blanket expiration bounds the prefix like every other tier's. Uploads, locks, and verify relay untouched, and an object past the per-entry cap
 streams through uncached. The proxy stamps `x-forwarded-proto` on what it relays, which is how the
 daemon spells absolute hrefs the sandbox can reach.
 

@@ -1650,3 +1650,215 @@ async fn an_lfs_href_at_a_private_address_is_refused() {
         "an href inside a private range must be refused, never fetched"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cold_daemon_serves_lfs_content_from_the_durable_tier_without_origin() {
+    let tmp = tempfile::tempdir().unwrap();
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+
+    let (up_addr, content_hits) =
+        spawn_lfs_upstream(tmp.path().join("empty"), oid.clone(), LFS_CONTENT).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+    let durable_root = tmp.path().join("durable");
+    let url_tail = format!("/git/{up_addr}/acme/widget.git/info/lfs/objects/content/{oid}?size=11");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    let first = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 1 << 30,
+            ..config(
+                tmp.path().join("state-a"),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Fs {
+            root: durable_root.clone(),
+        },
+    ))
+    .await;
+    let resp = client
+        .get(format!("http://{first}{url_tail}"))
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.bytes().await.unwrap(), LFS_CONTENT);
+    assert_eq!(content_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    wait_for(&durable_root.join("lfs").join("public").join(&oid)).await;
+
+    // A rolled pod: fresh state, same durable tier. The object must restore, not re-download.
+    let second = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 1 << 30,
+            ..config(
+                tmp.path().join("state-b"),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Fs { root: durable_root },
+    ))
+    .await;
+    let resp = client
+        .get(format!("http://{second}{url_tail}"))
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("x-ufo-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("HIT"),
+        "a durable restore serves as a local entry"
+    );
+    assert_eq!(resp.bytes().await.unwrap(), LFS_CONTENT);
+    assert_eq!(
+        content_hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a cold daemon must restore from the durable tier, not the origin"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corrupt_durable_lfs_object_is_refetched_and_overwritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+
+    let (up_addr, content_hits) =
+        spawn_lfs_upstream(tmp.path().join("empty"), oid.clone(), LFS_CONTENT).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+
+    // Same length as the real object, so only the hash can tell it apart.
+    let durable_root = tmp.path().join("durable");
+    let durable_object = durable_root.join("lfs").join("public").join(&oid);
+    tokio::fs::create_dir_all(durable_object.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&durable_object, "WRONG BYTES")
+        .await
+        .unwrap();
+
+    let daemon = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 1 << 30,
+            ..config(
+                tmp.path().join("state"),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Fs {
+            root: durable_root.clone(),
+        },
+    ))
+    .await;
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/objects/content/{oid}?size=11"
+        ))
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.bytes().await.unwrap(),
+        LFS_CONTENT,
+        "a corrupt durable object must be discarded and the origin fetched"
+    );
+    assert_eq!(content_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    for _ in 0..100 {
+        if tokio::fs::read(&durable_object).await.ok().as_deref() == Some(LFS_CONTENT.as_bytes()) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the fetch's snapshot must overwrite the corrupt durable object");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_only_daemon_still_sweeps_the_lfs_tier() {
+    let tmp = tempfile::tempdir().unwrap();
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+
+    let (up_addr, content_hits) =
+        spawn_lfs_upstream(tmp.path().join("empty"), oid.clone(), LFS_CONTENT).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+
+    let durable_root = tmp.path().join("durable");
+    let durable_object = durable_root.join("lfs").join("public").join(&oid);
+    tokio::fs::create_dir_all(durable_object.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&durable_object, LFS_CONTENT)
+        .await
+        .unwrap();
+
+    // A stale entry already holds the tier past its ceiling. Restore-only traffic must evict it
+    // exactly as origin fetches would — a rolled pod serving from the durable tier is the one
+    // workload that never takes the fetch path's sweep.
+    let state = tmp.path().join("state");
+    let stale = state.join("lfs").join("public").join("stale.body");
+    tokio::fs::create_dir_all(stale.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&stale, vec![0u8; 4096]).await.unwrap();
+    filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+
+    let daemon = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 100,
+            ..config(
+                state.clone(),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Fs { root: durable_root },
+    ))
+    .await;
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/objects/content/{oid}?size=11"
+        ))
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.bytes().await.unwrap(), LFS_CONTENT);
+    assert_eq!(
+        content_hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "this request must be served by restore alone"
+    );
+
+    for _ in 0..100 {
+        if !stale.exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("a restore must sweep the tier back under its ceiling");
+}
