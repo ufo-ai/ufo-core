@@ -77,6 +77,7 @@ from ufo.hub import (
     TextDelta,
     ToolCall,
 )
+from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.queue import _load_turn
 from ufo.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
@@ -307,6 +308,7 @@ def _mock_transport(
             if email:
                 user |= {
                     "real_name": real_name,
+                    "team_id": TEAM_ID,
                     "tz": "America/New_York",
                     "is_email_confirmed": user_id not in unconfirmed,
                 }
@@ -1066,7 +1068,12 @@ def test_ambient_digest_filters_and_bounds() -> None:
 def test_turn_context_composes_the_sender_line_and_drops_an_unknown_timezone() -> None:
     link = "https://acme.slack.com/archives/C9/p1005?thread_ts=100.5&cid=C9"
     full = slack._turn_context(
-        slack.SlackUser(name="Bee Jones", email="bee@example.com", timezone="America/New_York"),
+        slack.SlackUser(
+            name="Bee Jones",
+            email="bee@example.com",
+            timezone="America/New_York",
+            team_id=TEAM_ID,
+        ),
         link,
     )
     assert (full.sender, full.timezone, full.source) == (
@@ -1075,11 +1082,14 @@ def test_turn_context_composes_the_sender_line_and_drops_an_unknown_timezone() -
         link,
     )
     degraded = slack._turn_context(
-        slack.SlackUser(name="Bee Jones", email=None, timezone="Mars/Olympus_Mons"), link
+        slack.SlackUser(
+            name="Bee Jones", email=None, timezone="Mars/Olympus_Mons", team_id=TEAM_ID
+        ),
+        link,
     )
     assert (degraded.sender, degraded.timezone, degraded.source) == ("Bee Jones", None, link)
     assert slack._turn_context(None, link) == slack._turn_context(
-        slack.SlackUser(name=None, email=None, timezone=None), link
+        slack.SlackUser(name=None, email=None, timezone=None, team_id=None), link
     )
     assert slack._turn_context(None, None).source is None
 
@@ -4341,6 +4351,180 @@ async def test_the_terminal_delivery_drops_every_record_the_turns_replies_made(
     assert left == []
 
 
+GUEST_TEAM_ID = "T0000009"
+ROSTER_NAMES = {
+    "U1": "Alex Graveley",
+    "U2": "Bee",
+    "U3": "Cy Vance",
+    "U4": "Dee Marsh",
+    BOT_USER_ID: "ufo",
+}
+
+
+def _roster_transport(
+    recorder: list[httpx.Request],
+    members: tuple[str, ...],
+    teams: dict[str, str] | None = None,
+) -> httpx.MockTransport:
+    """Slack for the send path: the channel's roster, and a users.info that answers each member's
+    own display name and the team they belong to — the two reads the outbound mention map is built
+    from. `teams` puts a member in another Slack org, as a Connect channel's guest is."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CONVERSATIONS_MEMBERS_URL:
+            return httpx.Response(200, json={"ok": True, "members": list(members)})
+        if url == slack.SLACK_USERS_INFO_URL:
+            user_id = str(request.url.params.get("user"))
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user": {
+                        "real_name": ROSTER_NAMES.get(user_id, ""),
+                        "team_id": (teams or {}).get(user_id, TEAM_ID),
+                        "is_email_confirmed": True,
+                        "profile": {"email": f"{user_id.lower()}@example.com"},
+                    },
+                },
+            )
+        if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
+            return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    return httpx.MockTransport(handler)
+
+
+async def test_a_reply_names_a_member_and_the_wire_carries_the_mention_slack_notifies_on(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The whole route in one post: the agent wrote names, and the surface mapped the ones this
+    conversation's own roster answers for. A name the roster does not carry, a name belonging to a
+    guest of another Slack org, and every broadcast word stay the plain text the agent wrote."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _roster_transport(recorder, ("U1", "U2", "U3", BOT_USER_ID), teams={"U3": GUEST_TEAM_ID}),
+    )
+    said = (
+        "@Alex Graveley shipped it. @Bee, please review.\n"
+        "@Cy Vance is a guest, @Dee Marsh is not here, and @channel notifies nobody."
+    )
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", said, blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    posts = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    reply = json.loads(posts[0].content)
+    assert reply["blocks"][0]["text"] == (
+        "<@U1> shipped it. <@U2>, please review.\n"
+        "@Cy Vance is a guest, @Dee Marsh is not here, and @channel notifies nobody."
+    )
+    assert reply["text"] == reply["blocks"][0]["text"]
+    roster = _fetches(recorder, slack.SLACK_CONVERSATIONS_MEMBERS_URL)
+    assert [request.url.params.get("channel") for request in roster] == ["C5"]
+    assert roster[0].url.params.get("limit") == str(slack.MENTION_ROSTER_MAX)
+    assert BOT_USER_ID not in {
+        request.url.params.get("user") for request in _fetches(recorder, slack.SLACK_USERS_INFO_URL)
+    }
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status).where(tables.writeback.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert status == WRITEBACK_DELIVERED
+
+
+async def test_a_reply_the_turn_spoke_mid_flight_carries_its_mentions_too(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A mid-turn reply is the model's own words to the member, like the terminal reply's, so a name
+    it writes notifies the same person."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _roster_transport(recorder, ("U2", BOT_USER_ID))
+    )
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "closing", blob, artifact=False)
+    await _seed_spoken_reply(workspace_id, turn_id, "Filed it, @Bee.")
+
+    await app.state.mid_turn_reply_poller.drain()
+
+    posts = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    assert json.loads(posts[0].content)["blocks"] == [
+        {"type": "markdown", "text": "Filed it, <@U2>."}
+    ]
+
+
+async def test_a_reply_that_names_nobody_reads_no_roster_and_a_failed_read_posts_the_text(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The map is best effort and costs nothing to skip: a reply with no `@` in it never asks Slack
+    who is in the channel, and a roster read that fails posts the words the agent wrote rather than
+    delaying the reply onto the poller's retry ladder."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _roster_transport(recorder, ())
+    )
+    await _seed_done_turn(workspace_id, "C5:200.0", "shipped it", blob, artifact=False)
+    await _seed_done_turn(workspace_id, "C6:200.0", "ask @Bee", blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    posted = {
+        json.loads(request.content)["channel"]: json.loads(request.content)["blocks"][0]["text"]
+        for request in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    }
+    assert posted == {"C5": "shipped it", "C6": "ask @Bee"}
+    asked = [
+        request.url.params.get("channel")
+        for request in _fetches(recorder, slack.SLACK_CONVERSATIONS_MEMBERS_URL)
+    ]
+    assert asked == ["C6"]
+
+
+async def test_the_dm_partner_is_in_the_name_cache_before_they_are_ever_mentioned(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The likeliest person for a reply to mention is the member the agent is talking to, so the
+    speaker's own id is resolved on admission even when their message mentions nobody — otherwise
+    the one name the map most needs is the one the cache never holds."""
+    workspace_id, _ = await _seed()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    body = _event_body(
+        type="message", channel_type="im", user="U1", channel="D7", ts="50.0", text="hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+    with ws(workspace_id):
+        row = await slack.ScopedStore(slack.SLACK_EXTENSION).get(f"{slack.NAME_STORE_PREFIX}U1")
+    assert isinstance(row, dict)
+    assert (row["name"], row["team"]) == ("Bee Jones", TEAM_ID)
+
+
+def test_the_manifest_teaches_the_agent_to_write_a_name_and_never_an_id() -> None:
+    """Both ends of the contribution seam: the Slack pack declares the prompt section, and the same
+    tuple the loop builds from `manifest.prompt_sections` renders into the shell's `{{sections}}`
+    slot — which is what gets agents writing `@Alex Graveley` for the send path to map."""
+    (section,) = slack_manifest().prompt_sections
+    assert section.name == "slack_mentions"
+    rendered = render_system_prompt(
+        "You are the assistant.", ((section.name, section.body),), knowledge_cutoff="2026-01"
+    )
+    assert "never a raw id" in rendered.content
+    assert "Never write `@here`, `@channel` or `@everyone`" in rendered.content
+    assert "{{" not in rendered.content
+
+
 def _long_reply_transport(
     recorder: list[httpx.Request], invalid_post: int | None = None
 ) -> httpx.MockTransport:
@@ -4508,6 +4692,7 @@ async def test_long_writeback_retry_resumes_after_its_last_accepted_part(
             "deliveries": [{"id": f"{turn_id}:0:markdown", "ts": "999.100"}],
             "pending": f"{turn_id}:1:markdown",
             "complete": False,
+            "mentions": {},
         }
         await connection.execute(
             sa.update(tables.writeback)
@@ -4552,6 +4737,103 @@ async def test_long_writeback_retry_resumes_after_its_last_accepted_part(
     assert row.status == WRITEBACK_DELIVERED
     assert row.reply_ref == f"{channel}:999.100"
     assert progress is None
+
+
+async def test_a_long_replys_retry_splits_at_the_boundaries_its_first_attempt_pinned(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The invariant the index-keyed delivery record needs: every part is checkpointed by its index,
+    so the text the parts come from cannot move between attempts. The map is read once and pinned in
+    that record, so a retry whose roster read fails maps the same names as the first attempt and
+    splits the reply in the same place — no span posted twice, and none dropped."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    delivered: dict[str, str] = {}
+    rosters = 0
+    rate_limited = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal rosters, rate_limited
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CONVERSATIONS_MEMBERS_URL:
+            rosters += 1
+            if rosters > 1:
+                return httpx.Response(500, json={"ok": False, "error": "internal_error"})
+            return httpx.Response(200, json={"ok": True, "members": ["U1", BOT_USER_ID]})
+        if url == slack.SLACK_USERS_INFO_URL:
+            user_id = str(request.url.params.get("user"))
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user": {
+                        "real_name": ROSTER_NAMES.get(user_id, ""),
+                        "team_id": TEAM_ID,
+                        "is_email_confirmed": True,
+                        "profile": {"email": f"{user_id.lower()}@example.com"},
+                    },
+                },
+            )
+        if url == slack.SLACK_CONVERSATIONS_REPLIES_URL:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [{"ts": "200.0", "text": "root"}],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+        if url != slack.SLACK_CHAT_POST_MESSAGE_URL:
+            return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+        body = json.loads(request.content)
+        delivery_id = body["metadata"]["event_payload"]["id"]
+        if delivered and delivery_id not in delivered and not rate_limited:
+            rate_limited = True
+            return httpx.Response(
+                429, headers={"Retry-After": "1"}, json={"ok": False, "error": "ratelimited"}
+            )
+        delivered[delivery_id] = body["text"]
+        return httpx.Response(
+            200, json={"ok": True, "channel": "C5", "ts": f"999.{len(delivered)}00"}
+        )
+
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    said = "@Alex Graveley shipped it. " * 8 + "A useful sentence with several words.\n\n" * 350
+    mapped = said.replace("@Alex Graveley", "<@U1>")
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", said, blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+    async with workspace_tx() as connection:
+        progress = await connection.scalar(
+            sa.select(tables.ext_store.c.value).where(
+                tables.ext_store.c.workspace_id == workspace_id,
+                tables.ext_store.c.extension == slack.SLACK_EXTENSION,
+                tables.ext_store.c.key == slack._slack_reply_progress_key(turn_id),
+            )
+        )
+        assert isinstance(progress, dict)
+        assert progress["mentions"] == {"alex graveley": "U1"}
+        await connection.execute(
+            sa.update(tables.writeback)
+            .where(tables.writeback.c.turn_id == turn_id)
+            .values(claim_expires_at=None)
+        )
+    await app.state.writeback_poller.drain()
+
+    assert list(delivered) == [f"{turn_id}:0:markdown", f"{turn_id}:1:markdown"]
+    assert list(delivered.values()) == slack.slack_reply_parts(mapped)
+    assert "".join(delivered.values()) == mapped
+    assert rosters == 1
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status).where(tables.writeback.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert status == WRITEBACK_DELIVERED
 
 
 async def test_long_invalid_blocks_fallback_stays_below_slacks_text_splitter(

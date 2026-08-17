@@ -151,6 +151,8 @@ from ufo.sdk.surfaces import (
 )
 from ufo_ext_slack.attribution import addressing_mention, message_bodies
 from ufo_ext_slack.mentions import (
+    mention_index,
+    mention_markup,
     mentioned_channels,
     mentioned_users,
     render_markup,
@@ -168,6 +170,7 @@ NAME_CACHE_TTL_SECONDS = 86400.0
 NAME_CHAR_LIMIT = 64
 NAME_FORBIDDEN = str.maketrans("", "", "<>")
 MENTION_RESOLVE_MAX = 32
+MENTION_ROSTER_MAX = 100
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
 SLACK_SIGNING_SECRET_SLOT = "slack_signing_secret"
@@ -502,11 +505,13 @@ class SlackUser:
     """The sender facts one users.info read yields: the display fields for the turn's <context>
     tag and the email the DM member resolution needs. The email anchors member identity, so it is
     carried only when Slack has confirmed it (`is_email_confirmed`) — an unconfirmed address is no
-    email at all."""
+    email at all. `team_id` is the Slack org the user belongs to, which is what tells a member of
+    the installed workspace from a guest another org shares a Connect channel with."""
 
     name: str | None
     email: str | None
     timezone: str | None
+    team_id: str | None
 
 
 class SlackConversation(BaseModel):
@@ -1475,7 +1480,7 @@ async def _admit_inbound(
         _slack_user(bot_token, inbound.slack_user_id),
         _ambient_context(ctx, bot_token, inbound, identity, marker),
         _slack_permalink(bot_token, inbound.queue_key.partition(":")[0], inbound.ts),
-        names.of([inbound.body]),
+        names.of([inbound.body], [inbound.slack_user_id]),
     )
     member_id = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
     audience = conversation_audience(member_id) if inbound.audience is None else inbound.audience
@@ -1709,22 +1714,59 @@ async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
         email = None
     name = user.get("real_name") or user.get("name")
     timezone = user.get("tz")
+    team_id = user.get("team_id")
     return SlackUser(
         name=name if isinstance(name, str) and name else None,
         email=email.strip() if isinstance(email, str) and email.strip() else None,
         timezone=timezone if isinstance(timezone, str) and timezone else None,
+        team_id=team_id if isinstance(team_id, str) and team_id else None,
     )
 
 
 @dataclass(frozen=True)
+class _NamedId:
+    """What one id is called, and the Slack team it belongs to — empty for a channel, and for a user
+    Slack placed in none. The team rides in the cache row because the outbound mention map needs it
+    on a cached read as much as on a fresh one: a name becomes a notification only for a member of
+    the team this install is bound to, and a row that cannot name a team is no evidence of one."""
+
+    name: str
+    team: str
+
+
+async def _conversation_members(bot_token: str, channel: str) -> tuple[str, ...]:
+    """Who is in this conversation, as the ids of its first `MENTION_ROSTER_MAX` members. One page:
+    the roster exists to notify the people talking here, and a channel with more members than that
+    is not a place to page the hundredth of them from a name that happens to match.
+
+    Best effort on the ambient fetch's short timeout, like every other Slack read behind a reply: an
+    unreadable roster maps nothing, and the reply posts the text the agent wrote."""
+    try:
+        async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
+            payload = await _slack_ok(
+                client.get(
+                    SLACK_CONVERSATIONS_MEMBERS_URL,
+                    params={"channel": channel, "limit": str(MENTION_ROSTER_MAX)},
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                )
+            )
+    except Exception as error:
+        _LOG.warning("slack conversations.members failed for %s: %s", channel, error)
+        return ()
+    members = payload.get("members")
+    return tuple(m for m in members if isinstance(m, str)) if isinstance(members, list) else ()
+
+
+@dataclass(frozen=True)
 class SlackNames:
-    """The names behind the ids a Slack message mentions.
+    """The names behind the ids a Slack message mentions, and the ids behind the names a reply does.
 
     Slack encodes a mention as an id, so a message arrives reading `<@U0BG8632NDS>` until something
-    asks Slack who that is. The answer changes rarely and is wanted on the inbound path, so it is
-    kept in this extension's own store and re-read after `NAME_CACHE_TTL_SECONDS` — a member who
-    renames themselves corrects the next day's messages, and a busy channel's regulars cost no
-    lookup at all.
+    asks Slack who that is. The answer changes rarely and is wanted on both paths — `of` renders an
+    inbound mention, `mention_ids` maps an outbound one — so it is kept in this extension's own
+    store and re-read after `NAME_CACHE_TTL_SECONDS`: a member who renames themselves corrects the
+    next day's messages, and a busy channel's regulars cost no lookup at all. One key space serves
+    both, so nothing has to keep two of them agreeing.
 
     Best effort throughout, on the ambient fetch's short timeout: ingest answers inside Slack's
     event ack, so an id this cannot resolve keeps its encoded form, and the message is admitted
@@ -1741,6 +1783,25 @@ class SlackNames:
         wanted |= {
             id_: SLACK_CONVERSATIONS_INFO_URL for text in texts for id_ in mentioned_channels(text)
         }
+        return {id_: named.name for id_, named in (await self._resolved(wanted)).items()}
+
+    async def mention_ids(self, channel: str, identity: SlackIdentity) -> dict[str, str]:
+        """The map an outbound `@name` here resolves through, keyed by `mention_key`.
+
+        The conversation's own roster is the whole allowlist. It is the bound the safety argument
+        needs — a reply quotes bystanders, source pages, connector results and web pages, and one
+        `@Name` among them must reach no further than the people already reading the thread — and it
+        is also what makes the map small enough to resolve on the send path. Two ids are refused
+        inside it: the app's own bot user, and any member of another Slack org, whom a Connect
+        channel puts on the roster and whom notifying is a disclosure decision this is not."""
+        roster = await _conversation_members(self.bot_token, channel)
+        wanted = {id_: SLACK_USERS_INFO_URL for id_ in roster if id_ != identity.bot_user_id}
+        named = await self._resolved(wanted)
+        return mention_index(
+            {id_: entry.name for id_, entry in named.items() if entry.team == identity.team_id}
+        )
+
+    async def _resolved(self, wanted: Mapping[str, str]) -> dict[str, _NamedId]:
         known = await self._remembered(list(wanted))
         missing = sorted(id_ for id_ in wanted if id_ not in known)[:MENTION_RESOLVE_MAX]
         if not missing:
@@ -1750,7 +1811,7 @@ class SlackNames:
         await self._remember(fetched)
         return known | fetched
 
-    async def _remembered(self, ids: Sequence[str]) -> dict[str, str]:
+    async def _remembered(self, ids: Sequence[str]) -> dict[str, _NamedId]:
         if not ids:
             return {}
         try:
@@ -1761,38 +1822,46 @@ class SlackNames:
             _LOG.warning("slack name cache read failed", exc_info=True)
             return {}
         stale = datetime.now(UTC).timestamp() - NAME_CACHE_TTL_SECONDS
-        remembered: dict[str, str] = {}
+        remembered: dict[str, _NamedId] = {}
         for id_ in ids:
             row = rows.get(f"{NAME_STORE_PREFIX}{id_}")
             if not isinstance(row, dict):
                 continue
-            name, at = row.get("name"), row.get("at")
-            if isinstance(name, str) and name and isinstance(at, int | float) and at > stale:
-                remembered[id_] = name
+            name, at, team = row.get("name"), row.get("at"), row.get("team")
+            if not isinstance(name, str) or not name or not isinstance(team, str):
+                continue
+            if isinstance(at, int | float) and at > stale:
+                remembered[id_] = _NamedId(name=name, team=team)
         return remembered
 
-    async def _name(self, id_: str, url: str) -> str | None:
-        """What Slack calls this id, as one bounded line carrying no wire delimiter. A member sets
-        their own display name and `users.info` returns it unescaped, so a name is admitted under
-        the same bound as the `[A-Z0-9]` id it stands in for: one line, no `<` or `>`, 64 chars."""
+    async def _name(self, id_: str, url: str) -> _NamedId | None:
+        """What Slack calls this id and which team it is in, the name as one bounded line with no
+        wire delimiter. A member sets their own display name and `users.info` returns it unescaped,
+        so a name is admitted under the same bound as the `[A-Z0-9]` id it stands in for: one line,
+        no `<` or `>`, 64 chars."""
         raw: object = None
+        team = ""
         if url == SLACK_USERS_INFO_URL:
             user = await _slack_user(self.bot_token, id_)
             raw = None if user is None else user.name
+            team = "" if user is None or user.team_id is None else user.team_id
         else:
             info = await _channel_info(self.bot_token, id_)
             raw = None if info is None else info.get("name")
         if not isinstance(raw, str):
             return None
         name = " ".join(raw.translate(NAME_FORBIDDEN).split())[:NAME_CHAR_LIMIT]
-        return name or None
+        return _NamedId(name=name, team=team) if name else None
 
-    async def _remember(self, names: Mapping[str, str]) -> None:
+    async def _remember(self, names: Mapping[str, _NamedId]) -> None:
         at = datetime.now(UTC).timestamp()
         store = ScopedStore(SLACK_EXTENSION)
-        for id_, name in names.items():
+        for id_, named in names.items():
             try:
-                await store.put(f"{NAME_STORE_PREFIX}{id_}", {"name": name, "at": at})
+                await store.put(
+                    f"{NAME_STORE_PREFIX}{id_}",
+                    {"name": named.name, "at": at, "team": named.team},
+                )
             except Exception:
                 _LOG.warning("slack name cache write failed for %s", id_, exc_info=True)
 
@@ -3306,6 +3375,20 @@ def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str:
     return f"- {name} ({artifact.size_bytes} bytes)"
 
 
+async def _reply_mention_ids(
+    ctx: SurfaceContext, bot_token: str, channel: str, text: str
+) -> dict[str, str]:
+    """The map this reply's `@name`s resolve through, read from Slack once. A reply with no `@` in
+    it reads no roster at all. An install with no identity record maps nothing, since the map's
+    bound is membership of the team that record names."""
+    if "@" not in text:
+        return {}
+    identity = await _identity(ctx)
+    if identity is None:
+        return {}
+    return await SlackNames(bot_token).mention_ids(channel, identity)
+
+
 async def _channel_info(bot_token: str, channel: str) -> Mapping[str, object] | None:
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
@@ -3383,9 +3466,17 @@ class _SlackReplyDelivery(BaseModel):
 
 
 class _SlackReplyProgress(BaseModel):
+    """What one reply has already posted, and the mention map it posts through.
+
+    `mentions` is pinned on the first attempt and read back by every later one: a delivery is
+    checkpointed by its part index, so the text `slack_reply_parts` splits has to stay a pure
+    function of the persisted reply text, which live Slack reads are not. `None` is a map not
+    resolved yet; the ids in it are wire ids, beside the reply's text and never inside it."""
+
     deliveries: tuple[_SlackReplyDelivery, ...] = ()
     pending: str | None = None
     complete: bool = False
+    mentions: dict[str, str] | None = None
 
 
 def _slack_reply_progress_key(turn_id: UUID, reply_id: UUID | None = None) -> str:
@@ -3528,6 +3619,39 @@ async def _deliver_slack_reply(
     return progress, expected, payload
 
 
+async def _reply_mentions_mapped(
+    ctx: SurfaceContext,
+    bot_token: str,
+    channel: str,
+    text: str,
+    store: ScopedStore,
+    key: str,
+    progress: _SlackReplyProgress,
+    expected: JsonValue,
+) -> tuple[_SlackReplyProgress, JsonValue, str]:
+    """The reply with every `@name` it writes for a member of this conversation replaced by the
+    mention Slack notifies on. The agent writes names, never ids, so this is the only place a
+    `<@U…>` enters agent-authored text — every store still holds the name a reader can read.
+
+    The roster is read once and the map it yields is pinned in the delivery record, so every later
+    attempt maps through the pinned map instead of reading Slack again. That is what keeps the
+    mapped text — and the boundaries `slack_reply_parts` splits it at, at every level down to the
+    `invalid_blocks` plain fallback — a pure function of the persisted reply text, which each part's
+    index-keyed checkpoint needs. A first attempt whose roster read failed pins an empty map, and
+    that reply posts the plain names for good.
+
+    Mapped before the split: a mention is longer than the name it replaces and `slack_reply_body`
+    refuses an over-cap part, so a long reply mapped after the split would start raising in the
+    writeback poller."""
+    if progress.mentions is not None:
+        return progress, expected, mention_markup(text, progress.mentions)
+    ids = await _reply_mention_ids(ctx, bot_token, channel, text)
+    progress, expected = await _checkpoint_slack_reply(
+        store, key, expected, progress.model_copy(update={"mentions": ids})
+    )
+    return progress, expected, mention_markup(text, ids)
+
+
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply parts and return the first message ref (`channel:ts`), the delivery record.
     Only the last part carries the standard footer (`_slack_footer`), with the turn's settled
@@ -3543,7 +3667,23 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     channel, separator, thread_ts = writeback.queue_key.partition(":")
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    text = _reply_with_oversize_links(ctx, writeback)
+    store = ScopedStore(SLACK_EXTENSION)
+    progress_key = _slack_reply_progress_key(writeback.turn_id)
+    progress, stored = await _slack_reply_progress(store, progress_key)
+    if progress.complete:
+        if not progress.deliveries:
+            raise SlackApiError("Completed Slack reply has no deliveries")
+        return f"{channel}:{progress.deliveries[0].ts}"
+    progress, stored, text = await _reply_mentions_mapped(
+        ctx,
+        bot_token,
+        channel,
+        _reply_with_oversize_links(ctx, writeback),
+        store,
+        progress_key,
+        progress,
+        stored,
+    )
     actions = slack_ask_blocks(writeback.terminal.question) or slack_connect_blocks(
         writeback.terminal.connect_request, writeback.turn_id
     )
@@ -3564,13 +3704,6 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     )
     parts = slack_reply_parts(text)
     first_ts: str | None = None
-    store = ScopedStore(SLACK_EXTENSION)
-    progress_key = _slack_reply_progress_key(writeback.turn_id)
-    progress, stored = await _slack_reply_progress(store, progress_key)
-    if progress.complete:
-        if not progress.deliveries:
-            raise SlackApiError("Completed Slack reply has no deliveries")
-        return f"{channel}:{progress.deliveries[0].ts}"
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         if progress.pending is not None:
             reconciled_ts = await _reconcile_slack_reply(
@@ -3691,11 +3824,11 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
     claim leaves open, a claim that expires while this post is in flight.
 
     Every record of a turn's replies is dropped in `attach`, once core has recorded the ref of the
-    terminal reply that ends the turn."""
+    terminal reply that ends the turn. It does carry mentions: these are the model's own words to
+    the member, like the terminal reply's, so a name it writes notifies the same person here."""
     channel, separator, thread_ts = reply.queue_key.partition(":")
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    parts = slack_reply_parts(reply.text)
     store = ScopedStore(SLACK_EXTENSION)
     progress_key = _slack_reply_progress_key(reply.turn_id, reply.id)
     progress, stored = await _slack_reply_progress(store, progress_key)
@@ -3703,6 +3836,10 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
         if not progress.deliveries:
             raise SlackApiError("Completed Slack reply has no deliveries")
         return f"{channel}:{progress.deliveries[0].ts}"
+    progress, stored, text = await _reply_mentions_mapped(
+        ctx, bot_token, channel, reply.text, store, progress_key, progress, stored
+    )
+    parts = slack_reply_parts(text)
     first_ts: str | None = None
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         if progress.pending is not None:

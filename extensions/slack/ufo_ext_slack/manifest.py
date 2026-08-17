@@ -12,11 +12,17 @@ proxy, so neither slot carries a wire-injection target.
 
 The surface's thread followers are side-channel tasks in the process that runs the turn, so the
 status follower and the progress reporter are armed on `user_prompt_submit` — the one event that
-fires once per execution of a turn, which is what puts them back on a run this fleet resumed."""
+fires once per execution of a turn, which is what puts them back on a run this fleet resumed.
+
+The prompt section is how an agent learns to write `@Alex Graveley` and never `<@U0BG8632NDS>`: the
+surface maps the name to the id it notifies on at send, so the rule has to reach the model that
+writes the reply. Prompt sections are workspace-global, not per-surface — the loop renders every
+active manifest's sections for every turn — so the section is short and never claims the mention
+works anywhere but Slack."""
 
 from pathlib import Path
 
-from ufo.sdk.manifest import CredentialSlot, HookSpec, Manifest, SkillSpec
+from ufo.sdk.manifest import CredentialSlot, HookSpec, Manifest, PromptSection, SkillSpec
 from ufo.sdk.surfaces import SurfaceRoute, SurfaceSpec
 from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
 from ufo_ext_slack.surface import (
@@ -40,6 +46,9 @@ from ufo_ext_slack.tools import TOOLS
 NAME = SLACK_EXTENSION
 VERSION = "0.1.0"
 SKILL_DIR = Path(__file__).parent / "skills" / "slack-app-setup"
+
+SECTION_NAME = "slack_mentions"
+SECTION_BODY = (Path(__file__).parent / "prompts" / "slack_section.md").read_text().strip()
 
 
 def manifest() -> Manifest:
@@ -74,6 +83,7 @@ def manifest() -> Manifest:
             ),
         ),
         tools=TOOLS,
+        prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         hooks=(
             HookSpec(
                 event="pre_tool_use",
