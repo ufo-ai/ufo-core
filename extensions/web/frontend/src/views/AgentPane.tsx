@@ -7,16 +7,9 @@ import { Conversations } from "@/views/Conversations";
 import { AgentSkills } from "@/views/AgentSkills";
 import { Homepage } from "@/views/Homepage";
 import { Settings } from "@/views/Settings";
+import { AGENT_TAB_LABELS } from "@/views/registry";
 import type { AgentTab, PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Agent } from "@/lib/types";
-
-const TAB_LABELS: Record<AgentTab, string> = {
-  home: "Home",
-  settings: "Settings",
-  conversations: "Conversations",
-  radar: "Radar",
-  skills: "Skills",
-};
 
 export type AgentPaneProps = {
   agent: Agent;
@@ -57,7 +50,7 @@ export function AgentPane({ agent, tab, tabs, selected, onTab, place, onPlace }:
           group="agent"
           tabs={tabs}
           current={tab}
-          label={(name) => TAB_LABELS[name]}
+          label={(name) => AGENT_TAB_LABELS[name]}
           onPick={onTab}
         />
       </header>

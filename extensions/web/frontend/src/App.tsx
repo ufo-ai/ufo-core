@@ -43,6 +43,7 @@ import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, heldScheme, holdScheme, type Scheme } from "@/lib/scheme";
+import { pageTitle } from "@/lib/title";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -135,6 +136,10 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  useEffect(() => {
+    document.title = pageTitle(route, agents, rail.rows, linked, mainAgent);
+  }, [route, agents, rail.rows, linked, mainAgent]);
 
   useEffect(() => {
     let live = true;

@@ -2,7 +2,7 @@ import { buttonVariants } from "@/components/ui/button";
 import type { SessionFault } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
-const FAULTS: Record<SessionFault, { title: string; cause: string; action: string }> = {
+export const FAULTS: Record<SessionFault, { title: string; cause: string; action: string }> = {
   expired: {
     title: "Session ended",
     cause: "Sign in again to open your workspace.",

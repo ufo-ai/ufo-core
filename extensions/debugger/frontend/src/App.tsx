@@ -11,6 +11,10 @@ export function App() {
   const [picker, setPicker] = useState(params.ws ?? "");
 
   useEffect(() => {
+    document.title = (params.c ?? "Conversations") + " · ufo debugger";
+  }, [params.c]);
+
+  useEffect(() => {
     setMeta(null);
     setError(null);
     get<WorkspaceMeta>("workspace")

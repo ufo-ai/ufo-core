@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { App } from "@/App";
-import { SignIn } from "@/views/SignIn";
+import { FAULTS, SignIn } from "@/views/SignIn";
 import { BASE, sessionFault, type SessionFault } from "@/lib/api";
+import { titled } from "@/lib/title";
 import type { AgentsPayload } from "@/lib/types";
 
 type Boot =
@@ -40,6 +41,10 @@ export function Portal() {
       live = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (boot.phase === "signed-out") document.title = titled(FAULTS[boot.fault].title);
+  }, [boot]);
 
   /** A re-read after an agent is created lands the new row everywhere the audience is read — the
    *  cards, the sidebar's picker, and the router that opens one. It replaces a ready answer only:

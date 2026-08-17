@@ -1358,7 +1358,7 @@ async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
 
 def _install_page(message: str, status: int) -> Response:
     return Response(
-        f"<!doctype html><meta charset=utf-8><title>ufo · Slack</title>"
+        f"<!doctype html><meta charset=utf-8><title>Slack · ufo</title>"
         f"<body style='font:16px system-ui;margin:4rem auto;max-width:32rem;text-align:center'>"
         f"<p>{html.escape(message)}</p></body>",
         status_code=status,

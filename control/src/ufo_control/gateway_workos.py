@@ -199,7 +199,7 @@ def console_signin_page(state: str) -> str:
     address as the code the console verifier reads straight back."""
     return (
         "<!doctype html>\n"
-        '<html lang="en"><head><meta charset="utf-8"><title>ufo — dev sign-in</title></head>\n'
+        '<html lang="en"><head><meta charset="utf-8"><title>Dev sign-in · ufo</title></head>\n'
         "<body>\n"
         "<h1>Dev sign-in</h1>\n"
         "<p>WorkOS is off (WORKOS_MODE=console). Enter a work email to sign in.</p>\n"

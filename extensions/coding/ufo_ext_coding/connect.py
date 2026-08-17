@@ -177,7 +177,8 @@ def _page(message: str, status: int) -> Response:
         status_code=status,
         media_type="text/html",
         content=(
-            "<!doctype html><html><body style='font-family:system-ui;padding:3rem;max-width:34rem'>"
+            "<!doctype html><html><head><title>GitHub · ufo</title></head>"
+            "<body style='font-family:system-ui;padding:3rem;max-width:34rem'>"
             f"<p>{message}</p></body></html>"
         ),
     )

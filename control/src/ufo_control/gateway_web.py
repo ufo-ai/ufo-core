@@ -70,7 +70,7 @@ LOGIN_PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ufo</title>
+<title>Sign in · ufo</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -223,6 +223,7 @@ function complete() {
     row.style.display = 'block';
   }
   document.getElementById('home').style.display = 'block';
+  document.title = 'Signed in · ufo';
 }
 
 function handle(directive) {

@@ -109,9 +109,10 @@ def test_login_page_member_copy_is_the_fixed_copy() -> None:
     rendered sweep in test_every_word_a_member_reads_carries_no_ufo_metaphor cannot judge its
     typography. Presence proves each listed string, never that no unlisted string exists."""
     for copy in (
-        "<title>ufo</title>",
+        "<title>Sign in · ufo</title>",
         "<header>ufo</header>",
         "<h1>Sign in</h1>",
+        "document.title = 'Signed in · ufo'",
         ">Continue</button>",
         ">Continue with Google</a>",
         "<h1>Signed in</h1>",
