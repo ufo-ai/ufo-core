@@ -29,9 +29,20 @@ const MIRROR_SWEEP_INTERVAL: Duration = Duration::from_secs(120);
 /// The pack cache tree is swept back under its ceiling at most this often.
 const PACK_SWEEP_INTERVAL: Duration = Duration::from_secs(120);
 const MAX_UPLOAD_PACK_BYTES: usize = 128 * 1024 * 1024;
+/// Bound on a relayed git-lfs API body: batch and lock JSON, never object content — content moves
+/// on the hrefs the batch response names, straight between the client and the origin's storage.
+const MAX_LFS_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// A single cached upload-pack response never exceeds this, whatever the ceiling: one outsized pack
 /// must not be able to evict every other entry to fit.
 const MAX_CACHED_PACK_BYTES: u64 = 512 * 1024 * 1024;
+/// A single cached LFS object never exceeds this, whatever the ceiling; content past it streams
+/// through uncached.
+const MAX_CACHED_LFS_BYTES: u64 = 512 * 1024 * 1024;
+/// The daemon-owned segment a rewritten batch href lands on. The LFS API defines nothing under it,
+/// so shadowing it costs no origin surface.
+const LFS_CONTENT_ROUTE: &str = "objects/content/";
+/// How many redirects a content fetch follows, each hop re-vetted against the href host guard.
+const LFS_CONTENT_HOPS: usize = 4;
 /// A `.writing` temp older than this had no writer for an hour — far past any pack generation — so the
 /// sweep reclaims it as a crashed capture's orphan. Mirrors the package cache's grace.
 const PACK_WRITING_ORPHAN_GRACE_SECS: u64 = 3600;
@@ -72,15 +83,23 @@ struct MirrorState {
 pub struct GitStrategy {
     state_root: PathBuf,
     pack_root: PathBuf,
+    lfs_root: PathBuf,
     creds: Arc<CredentialClient>,
     scheme: String,
+    /// Relays git-lfs API calls and fetches LFS content from the origin. Redirects are never
+    /// followed silently: an API 3xx passes through to the client, and a content 3xx is re-checked
+    /// against the same host guard as the href it came from.
+    http: reqwest::Client,
+    allowed_hosts: Vec<String>,
     durable: Arc<Durable>,
     mirror_limit: u64,
     pack_limit: u64,
+    lfs_limit: u64,
     fresh_ttl: Duration,
     mirrors: Mutex<HashMap<PathBuf, Arc<Mutex<MirrorState>>>>,
     last_sweep: Mutex<Option<Instant>>,
     last_pack_sweep: Mutex<Option<Instant>>,
+    last_lfs_sweep: Mutex<Option<Instant>>,
     in_use: InUse,
 }
 
@@ -93,15 +112,23 @@ impl GitStrategy {
         Self {
             state_root: config.state_root.join("git"),
             pack_root: config.state_root.join("pack"),
+            lfs_root: config.state_root.join("lfs"),
             creds,
             scheme: config.upstream_scheme.clone(),
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("build lfs relay client"),
+            allowed_hosts: config.allowed_git_hosts.clone(),
             durable,
             mirror_limit: config.disk_limit_bytes,
             pack_limit: config.pack_cache_bytes,
+            lfs_limit: config.lfs_cache_bytes,
             fresh_ttl: Duration::from_secs(config.git_fresh_ttl_secs),
             mirrors: Mutex::new(HashMap::new()),
             last_sweep: Mutex::new(None),
             last_pack_sweep: Mutex::new(None),
+            last_lfs_sweep: Mutex::new(None),
             in_use: InUse::default(),
         }
     }
@@ -119,6 +146,38 @@ impl GitStrategy {
         workspace: &str,
         user: &str,
     ) -> Response {
+        // The git-lfs API rides the same remote URL as the wire protocol, so its calls arrive
+        // here: `<repo>.git/info/lfs/...`, JSON both ways. The daemon relays them with the
+        // principal's credential — and when the LFS tier is on, it rewrites each batch answer's
+        // download href onto its own content route, so the objects it fetches once (verified
+        // against their oid) serve every later pull from disk. Everything else — uploads, locks,
+        // verify — relays untouched, and object content is never read from a client-named URL:
+        // a miss re-batches against the allowlisted origin itself.
+        if let Some((repo, lfs_path)) = split_lfs(tail) {
+            let resolved = match self.creds.resolve(workspace, user, host, &repo).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, host, repo, "credential resolve failed");
+                    return (StatusCode::BAD_GATEWAY, "credential resolve failed").into_response();
+                }
+            };
+            if let Some(oid) = lfs_path.strip_prefix(LFS_CONTENT_ROUTE) {
+                return self
+                    .serve_lfs_content(host, &repo, oid, query, &resolved)
+                    .await;
+            }
+            if lfs_path == "objects/batch" && self.lfs_limit > 0 {
+                return self
+                    .serve_lfs_batch(method, host, &repo, headers, body, &resolved)
+                    .await;
+            }
+            return self
+                .forward_lfs(
+                    method, host, &repo, lfs_path, query, headers, body, &resolved,
+                )
+                .await;
+        }
+
         let Some((endpoint, repo)) = classify(tail, &body) else {
             return (StatusCode::NOT_FOUND, "unsupported git path").into_response();
         };
@@ -191,6 +250,361 @@ impl GitStrategy {
                 (StatusCode::BAD_GATEWAY, "git backend failed").into_response()
             }
         }
+    }
+
+    /// Relay one git-lfs API call to the origin — the principal's credential injected on the way
+    /// out, the origin's status, headers, and body streamed back untouched. The host was
+    /// allowlisted and the repo made safe before this is reached, so the URL built here can only
+    /// name an approved origin.
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_lfs(
+        &self,
+        method: &Method,
+        host: &str,
+        repo: &str,
+        lfs_path: &str,
+        query: Option<&str>,
+        headers: &HeaderMap,
+        body: Bytes,
+        resolved: &Resolved,
+    ) -> Response {
+        if body.len() > MAX_LFS_BODY_BYTES {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "lfs body too large").into_response();
+        }
+        let mut url = format!("{}://{host}/{repo}.git/info/lfs/{lfs_path}", self.scheme);
+        if let Some(q) = query {
+            url.push('?');
+            url.push_str(q);
+        }
+        let mut request = self.http.request(method.clone(), &url).body(body);
+        for name in ["content-type", "accept"] {
+            if let Some(value) = header(headers, name) {
+                request = request.header(name, value);
+            }
+        }
+        let upstream = match with_lfs_auth(request, resolved).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, host, repo, "lfs relay failed");
+                return (StatusCode::BAD_GATEWAY, "lfs upstream unavailable").into_response();
+            }
+        };
+        let mut builder = Response::builder().status(upstream.status());
+        for (name, value) in upstream.headers() {
+            if !matches!(
+                name.as_str(),
+                "connection" | "keep-alive" | "transfer-encoding" | "content-length"
+            ) {
+                builder = builder.header(name, value);
+            }
+        }
+        builder
+            .body(Body::from_stream(upstream.bytes_stream()))
+            .unwrap_or_else(|_| {
+                (StatusCode::BAD_GATEWAY, "lfs relay response failed").into_response()
+            })
+    }
+
+    /// Relay a batch call like `forward_lfs`, but rewrite each download href in the answer onto
+    /// this daemon's content route, so the client pulls objects through the cache. An answer that
+    /// cannot be rewritten — an error status, a non-basic transfer, no Host to build a base from —
+    /// relays untouched: correctness never rides on the rewrite, only the caching does.
+    async fn serve_lfs_batch(
+        &self,
+        method: &Method,
+        host: &str,
+        repo: &str,
+        headers: &HeaderMap,
+        body: Bytes,
+        resolved: &Resolved,
+    ) -> Response {
+        if body.len() > MAX_LFS_BODY_BYTES {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "lfs body too large").into_response();
+        }
+        let url = format!("{}://{host}/{repo}.git/info/lfs/objects/batch", self.scheme);
+        let mut request = self.http.request(method.clone(), &url).body(body);
+        for name in ["content-type", "accept"] {
+            if let Some(value) = header(headers, name) {
+                request = request.header(name, value);
+            }
+        }
+        let upstream = match with_lfs_auth(request, resolved).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, host, repo, "lfs relay failed");
+                return (StatusCode::BAD_GATEWAY, "lfs upstream unavailable").into_response();
+            }
+        };
+        let status = upstream.status();
+        let kept: Vec<(String, String)> = upstream
+            .headers()
+            .iter()
+            .filter(|(name, _)| {
+                !matches!(
+                    name.as_str(),
+                    "connection" | "keep-alive" | "transfer-encoding" | "content-length"
+                )
+            })
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.as_str().to_string(), v.to_string()))
+            })
+            .collect();
+        let answer = match read_capped(upstream, MAX_LFS_BODY_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(error = %e, host, repo, "lfs batch read failed");
+                return (StatusCode::BAD_GATEWAY, "lfs batch response too large").into_response();
+            }
+        };
+        let rewritten = (status == StatusCode::OK)
+            .then(|| public_base(headers))
+            .flatten()
+            .and_then(|base| rewrite_batch(&answer, &base, host, repo));
+        let mut builder = Response::builder().status(status);
+        for (name, value) in kept {
+            builder = builder.header(name, value);
+        }
+        builder
+            .body(Body::from(rewritten.map(Bytes::from).unwrap_or(answer)))
+            .unwrap_or_else(|_| {
+                (StatusCode::BAD_GATEWAY, "lfs relay response failed").into_response()
+            })
+    }
+
+    /// Serve one LFS object from the per-principal content tier, fetching and verifying it from
+    /// the origin on a miss. The client reached this route through a rewritten batch answer, but
+    /// nothing here trusts what it names beyond the oid and size: the fetch re-batches against the
+    /// allowlisted origin with the principal's own credential, and the bytes must hash to the oid
+    /// before they are committed or served.
+    async fn serve_lfs_content(
+        &self,
+        host: &str,
+        repo: &str,
+        oid: &str,
+        query: Option<&str>,
+        resolved: &Resolved,
+    ) -> Response {
+        if !is_oid(oid) {
+            return (StatusCode::NOT_FOUND, "not an lfs oid").into_response();
+        }
+        let Some(size) = lfs_size(query) else {
+            return (StatusCode::BAD_REQUEST, "missing size").into_response();
+        };
+        let dir = self.lfs_root.join(sanitize(&resolved.principal));
+        let body_path = dir.join(format!("{oid}.body"));
+        let _in_use = self.in_use.guard(&body_path);
+        let meta = PackMeta {
+            status: StatusCode::OK.as_u16(),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/octet-stream".to_string(),
+            )],
+        };
+        if let Some(resp) = serve_pack_file(&meta, &body_path, "HIT").await {
+            return resp;
+        }
+        let upstream = match self.fetch_lfs_object(host, repo, oid, size, resolved).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, host, repo, oid, "lfs content fetch failed");
+                return (StatusCode::BAD_GATEWAY, "lfs content unavailable").into_response();
+            }
+        };
+        // Content the tier could never keep streams through uncached: correct for the client, no
+        // disk for the daemon. The client verifies the oid itself, as it does against any server.
+        if size > MAX_CACHED_LFS_BYTES.min(self.lfs_limit) {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/octet-stream")
+                .header("content-length", size)
+                .header("x-ufo-cache", "MISS")
+                .body(Body::from_stream(upstream.bytes_stream()))
+                .unwrap_or_else(|_| {
+                    (StatusCode::BAD_GATEWAY, "lfs relay response failed").into_response()
+                });
+        }
+        // Reclaim space before a write may add to the tree.
+        self.maybe_sweep_lfs().await;
+        if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+            tracing::warn!(error = %e, "create lfs cache dir failed");
+            return (StatusCode::BAD_GATEWAY, "lfs cache unavailable").into_response();
+        }
+        let tmp = writing_temp(&body_path);
+        if let Err(e) = capture_lfs(upstream, &tmp, oid, size).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            tracing::warn!(error = %e, host, repo, oid, "lfs content capture failed");
+            return (StatusCode::BAD_GATEWAY, "lfs content mismatch").into_response();
+        }
+        let serve_path = if tokio::fs::rename(&tmp, &body_path).await.is_ok() {
+            body_path
+        } else {
+            tmp.clone()
+        };
+        let resp = serve_pack_file(&meta, &serve_path, "MISS").await;
+        if serve_path == tmp {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        resp.unwrap_or_else(|| (StatusCode::BAD_GATEWAY, "lfs serve failed").into_response())
+    }
+
+    /// One streaming response for an LFS object, negotiated fresh with the origin: this daemon's
+    /// own batch call, then the download href it names. Without the cache the client fetches the
+    /// href through egress rules that stop at private addresses; the daemon takes that fetch over,
+    /// so it applies the same bar — every hop's host allowlisted or globally routable — and an
+    /// origin's batch answer can never steer the daemon's network position at the cluster.
+    async fn fetch_lfs_object(
+        &self,
+        host: &str,
+        repo: &str,
+        oid: &str,
+        size: u64,
+        resolved: &Resolved,
+    ) -> Result<reqwest::Response, String> {
+        let url = format!("{}://{host}/{repo}.git/info/lfs/objects/batch", self.scheme);
+        let batch = serde_json::json!({
+            "operation": "download",
+            "transfers": ["basic"],
+            "objects": [{"oid": oid, "size": size}],
+        });
+        let request = self
+            .http
+            .post(&url)
+            .header("content-type", "application/vnd.git-lfs+json")
+            .header("accept", "application/vnd.git-lfs+json")
+            .body(batch.to_string());
+        let response = with_lfs_auth(request, resolved)
+            .send()
+            .await
+            .map_err(|e| format!("lfs batch: {e}"))?;
+        if response.status() != StatusCode::OK {
+            return Err(format!("lfs batch answered {}", response.status()));
+        }
+        let answer = read_capped(response, MAX_LFS_BODY_BYTES).await?;
+        let doc: serde_json::Value =
+            serde_json::from_slice(&answer).map_err(|e| format!("lfs batch json: {e}"))?;
+        let object = doc
+            .get("objects")
+            .and_then(|o| o.as_array())
+            .and_then(|objects| {
+                objects
+                    .iter()
+                    .find(|o| o.get("oid").and_then(|v| v.as_str()) == Some(oid))
+            })
+            .ok_or("lfs batch names no such object")?;
+        if let Some(error) = object.get("error") {
+            return Err(format!("lfs batch refused the object: {error}"));
+        }
+        let action = object
+            .get("actions")
+            .and_then(|a| a.get("download"))
+            .ok_or("lfs batch offers no download")?;
+        let mut target = action
+            .get("href")
+            .and_then(|h| h.as_str())
+            .ok_or("lfs download has no href")?
+            .to_string();
+        let mut extra: Vec<(String, String)> = action
+            .get("header")
+            .and_then(|h| h.as_object())
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(name, value)| {
+                        value.as_str().map(|v| (name.clone(), v.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for _ in 0..LFS_CONTENT_HOPS {
+            let (client, url) = self.lfs_content_client(&target).await?;
+            let mut request = client.get(url.clone());
+            for (name, value) in &extra {
+                request = request.header(name, value);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|e| format!("lfs content: {e}"))?;
+            if response.status().is_redirection() {
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or("lfs redirect without location")?;
+                let next = url
+                    .join(location)
+                    .map_err(|e| format!("lfs redirect target: {e}"))?;
+                // The batch's headers are the first hop's grant; they must not leak to a host the
+                // redirect chose.
+                if next.host_str() != url.host_str() {
+                    extra.clear();
+                }
+                target = next.to_string();
+                continue;
+            }
+            if response.status() != StatusCode::OK {
+                return Err(format!("lfs content answered {}", response.status()));
+            }
+            return Ok(response);
+        }
+        Err("lfs content redirected too many times".into())
+    }
+
+    /// A client pinned to the href host's own vetted address. The host passes when it is an
+    /// allowlisted git host, or when every address it resolves to is globally routable — so a
+    /// batch answer cannot point the daemon at loopback, a private range, or the cluster, and the
+    /// pinned resolution is the one that was checked.
+    async fn lfs_content_client(
+        &self,
+        target: &str,
+    ) -> Result<(reqwest::Client, reqwest::Url), String> {
+        let url = reqwest::Url::parse(target).map_err(|e| format!("lfs href: {e}"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(format!("lfs href scheme {}", url.scheme()));
+        }
+        let host = url.host_str().ok_or("lfs href has no host")?.to_string();
+        let port = url.port_or_known_default().ok_or("lfs href has no port")?;
+        let named = match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.clone(),
+        };
+        let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("resolve {host}: {e}"))?
+            .collect();
+        let allowlisted = self.allowed_hosts.iter().any(|h| *h == named || *h == host);
+        let addr = if allowlisted {
+            *addrs
+                .first()
+                .ok_or_else(|| format!("{host} resolves to nothing"))?
+        } else {
+            if addrs.is_empty() || !addrs.iter().all(|a| globally_routable(&a.ip())) {
+                return Err(format!("{host} does not resolve to public addresses"));
+            }
+            addrs[0]
+        };
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(&host, addr)
+            .build()
+            .map_err(|e| format!("build lfs content client: {e}"))?;
+        Ok((client, url))
+    }
+
+    async fn maybe_sweep_lfs(&self) {
+        {
+            let mut last = self.last_lfs_sweep.lock().await;
+            if last.is_some_and(|t| t.elapsed() < PACK_SWEEP_INTERVAL) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let root = self.lfs_root.clone();
+        let limit = self.lfs_limit;
+        let in_use = self.in_use.clone();
+        tokio::task::spawn_blocking(move || sweep_packs(&root, limit, &in_use));
     }
 
     async fn ensure_fresh(
@@ -584,6 +998,167 @@ impl GitStrategy {
         }
         Ok(child)
     }
+}
+
+/// `acme/widget.git/info/lfs/objects/batch` → (safe repo, `objects/batch`). git-lfs derives its
+/// endpoint as `<remote>.git/info/lfs` whether or not the remote URL spells the `.git`, so the
+/// suffix is always present and nothing else on this path carries it.
+fn split_lfs(tail: &str) -> Option<(String, &str)> {
+    let (repo, rest) = tail.split_once(".git/info/lfs/")?;
+    Some((safe_repo(repo)?, rest))
+}
+
+/// The principal's credential on an outbound LFS call, Basic exactly as the git fetch sends it.
+fn with_lfs_auth(request: reqwest::RequestBuilder, resolved: &Resolved) -> reqwest::RequestBuilder {
+    match &resolved.token {
+        Some(token) => {
+            let user = resolved.username.as_deref().unwrap_or("x-access-token");
+            request.basic_auth(user, Some(token))
+        }
+        None => request,
+    }
+}
+
+/// Read a response body whole, refusing past `cap`: the callers parse the bytes, so an unbounded
+/// upstream answer must not become unbounded memory.
+async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Bytes, String> {
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read lfs response: {e}"))?;
+        if buf.len() + chunk.len() > cap {
+            return Err("lfs response too large".into());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(buf))
+}
+
+/// Rewrite a batch answer so each download lands on this daemon's content route, carrying the oid
+/// and declared size the content serve needs. Uploads and verifies keep their origin actions. None
+/// when the answer is not one this daemon can re-route — not JSON, or a negotiated transfer other
+/// than basic — and the caller then relays the origin's bytes untouched.
+fn rewrite_batch(answer: &[u8], base: &str, host: &str, repo: &str) -> Option<Vec<u8>> {
+    let mut doc: serde_json::Value = serde_json::from_slice(answer).ok()?;
+    if doc
+        .get("transfer")
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| t != "basic")
+    {
+        return None;
+    }
+    for object in doc.get_mut("objects")?.as_array_mut()? {
+        let oid = object
+            .get("oid")
+            .and_then(|o| o.as_str())
+            .map(str::to_string);
+        let size = object.get("size").and_then(|s| s.as_u64());
+        let (Some(oid), Some(size)) = (oid, size) else {
+            continue;
+        };
+        if !is_oid(&oid) {
+            continue;
+        }
+        let Some(download) = object
+            .get_mut("actions")
+            .and_then(|actions| actions.get_mut("download"))
+        else {
+            continue;
+        };
+        // The origin's href and its pre-signed headers stay with the daemon's own re-batch on a
+        // miss; the client gets a grant-free URL it reaches with its identity alone.
+        *download = serde_json::json!({
+            "href": format!("{base}/git/{host}/{repo}.git/info/lfs/{LFS_CONTENT_ROUTE}{oid}?size={size}")
+        });
+    }
+    serde_json::to_vec(&doc).ok()
+}
+
+fn is_oid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The `size=<n>` a rewritten href carries: the batch's declared object size, which decides
+/// cacheability up front and pins the byte count the capture must verify.
+fn lfs_size(query: Option<&str>) -> Option<u64> {
+    query?
+        .split('&')
+        .find_map(|p| p.strip_prefix("size="))?
+        .parse()
+        .ok()
+}
+
+/// The absolute base the client reaches this daemon at, rebuilt from its request: the Host it
+/// addressed and the scheme the fronting proxy stamped (`x-forwarded-proto`; plain http when the
+/// daemon is dialed directly). None without a Host — then no href can be rewritten.
+fn public_base(headers: &HeaderMap) -> Option<String> {
+    let host = header(headers, "host")?;
+    let scheme = header(headers, "x-forwarded-proto").unwrap_or("http");
+    Some(format!("{scheme}://{host}"))
+}
+
+/// The bar the sandbox's own egress applies to a public CONNECT: IPv4 that is not loopback,
+/// private, link-local, carrier-grade NAT, multicast, broadcast, unspecified, documentation,
+/// benchmarking, or reserved. IPv6 is refused outright, as the egress proxy refuses it.
+fn globally_routable(ip: &std::net::IpAddr) -> bool {
+    let std::net::IpAddr::V4(v4) = ip else {
+        return false;
+    };
+    let octets = v4.octets();
+    !(v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_multicast()
+        || v4.is_broadcast()
+        || v4.is_unspecified()
+        || v4.is_documentation()
+        || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 64)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 198 && (octets[1] & 0b1111_1110) == 18)
+        || octets[0] >= 240)
+}
+
+/// Drain an LFS content response to `path`, verifying as it writes: the bytes must hash to the
+/// oid and total the declared size, or nothing is committed — a truncated or substituted object
+/// never enters the tier and never reaches the client.
+async fn capture_lfs(
+    response: reqwest::Response,
+    path: &Path,
+    oid: &str,
+    size: u64,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| format!("create {path:?}: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut written = 0u64;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read lfs content: {e}"))?;
+        written += chunk.len() as u64;
+        if written > size {
+            return Err("lfs content past its declared size".into());
+        }
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("write lfs content: {e}"))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("flush lfs content: {e}"))?;
+    if written != size {
+        return Err(format!("lfs content is {written} bytes, not {size}"));
+    }
+    if hex::encode(hasher.finalize()) != oid {
+        return Err("lfs content does not hash to its oid".into());
+    }
+    Ok(())
 }
 
 fn classify(tail: &str, body: &[u8]) -> Option<(Endpoint, String)> {
@@ -1000,7 +1575,7 @@ async fn serve_pack_file(
     let len = file.metadata().await.ok()?.len();
     // The sweep ranks entries by mtime, so a replay is a use that must postpone eviction.
     let _ = set_file_mtime(body_path, FileTime::now());
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, READ_CHUNK);
     let mut builder =
         Response::builder().status(StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK));
     for (name, value) in &meta.headers {
@@ -1013,7 +1588,9 @@ async fn serve_pack_file(
         .ok()
 }
 
-/// Evict least-recently-used cached packs until the pack tree is under `limit`. Mirrors the mirror
+/// Evict least-recently-used cached packs until the pack tree is under `limit`. The LFS content
+/// tier keeps the same entry shape (`<key>.body`), so its sweep is this same function over its own
+/// root and ceiling. Mirrors the mirror
 /// sweep and the package sweep: reserve each victim with an atomic rename-aside taken only while
 /// `in_use` shows no holder, then delete the body and its meta outside the lock, so an entry a live
 /// request is replaying is never removed mid-serve. A cached pack is re-generable from the mirror, so
@@ -1201,7 +1778,10 @@ mod tests {
 
     use axum::http::HeaderMap;
 
-    use super::{is_ls_refs, negotiation_wants, pack_key, safe_repo, sweep_mirrors, sweep_packs};
+    use super::{
+        globally_routable, is_ls_refs, is_oid, lfs_size, negotiation_wants, pack_key,
+        rewrite_batch, safe_repo, split_lfs, sweep_mirrors, sweep_packs,
+    };
     use crate::inuse::InUse;
 
     fn pkt(line: &str) -> String {
@@ -1237,6 +1817,113 @@ mod tests {
         assert!(!is_ls_refs(v0.as_bytes()));
         assert!(!is_ls_refs(b""));
         assert!(!is_ls_refs(b"not a pkt-line at all"));
+    }
+
+    #[test]
+    fn split_lfs_takes_only_the_lfs_api_and_keeps_the_repo_safe() {
+        assert_eq!(
+            split_lfs("acme/widget.git/info/lfs/objects/batch"),
+            Some(("acme/widget".to_string(), "objects/batch"))
+        );
+        assert_eq!(
+            split_lfs("acme/widget.git/info/lfs/locks/verify"),
+            Some(("acme/widget".to_string(), "locks/verify"))
+        );
+        // A repo whose own path ends in the marker still splits at the api boundary.
+        assert_eq!(
+            split_lfs("acme/info/lfs.git/info/lfs/objects/batch"),
+            Some(("acme/info/lfs".to_string(), "objects/batch"))
+        );
+        assert_eq!(split_lfs("acme/widget/info/refs"), None);
+        assert_eq!(split_lfs("acme/widget.git/git-upload-pack"), None);
+        assert_eq!(split_lfs("info/lfs/git-upload-pack"), None);
+        assert_eq!(split_lfs("../evil.git/info/lfs/objects/batch"), None);
+    }
+
+    #[test]
+    fn rewrite_batch_points_downloads_at_the_daemon_and_leaves_the_rest() {
+        let oid = "a".repeat(64);
+        let answer = serde_json::json!({
+            "transfer": "basic",
+            "objects": [
+                {
+                    "oid": oid,
+                    "size": 11,
+                    "actions": {
+                        "download": {
+                            "href": "https://storage.example/x",
+                            "header": {"Authorization": "presigned"}
+                        },
+                        "upload": {"href": "https://storage.example/up"}
+                    }
+                },
+                {"oid": oid, "size": 11, "error": {"code": 404, "message": "gone"}}
+            ]
+        });
+        let rewritten: serde_json::Value = serde_json::from_slice(
+            &rewrite_batch(
+                &serde_json::to_vec(&answer).unwrap(),
+                "https://cache.ufo.internal",
+                "github.com",
+                "acme/widget",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let download = &rewritten["objects"][0]["actions"]["download"];
+        assert_eq!(
+            download["href"],
+            format!(
+                "https://cache.ufo.internal/git/github.com/acme/widget.git/info/lfs/objects/content/{oid}?size=11"
+            )
+        );
+        assert!(
+            download.get("header").is_none(),
+            "the origin's pre-signed grant must not reach the client"
+        );
+        assert_eq!(
+            rewritten["objects"][0]["actions"]["upload"]["href"], "https://storage.example/up",
+            "uploads keep the origin's own action"
+        );
+        assert_eq!(rewritten["objects"][1]["error"]["code"], 404);
+
+        // A transfer the daemon does not understand relays untouched, and so does a non-answer.
+        let multipart = br#"{"transfer":"multipart","objects":[]}"#;
+        assert_eq!(rewrite_batch(multipart, "b", "h", "r"), None);
+        assert_eq!(rewrite_batch(b"not json", "b", "h", "r"), None);
+
+        assert!(is_oid(&oid));
+        assert!(!is_oid("ABCDEF"));
+        assert_eq!(lfs_size(Some("size=11")), Some(11));
+        assert_eq!(lfs_size(Some("other=1")), None);
+        assert_eq!(lfs_size(None), None);
+    }
+
+    #[test]
+    fn only_public_addresses_pass_the_content_guard() {
+        let public = ["140.82.112.3", "185.199.108.133", "1.1.1.1"];
+        for ip in public {
+            assert!(globally_routable(&ip.parse().unwrap()), "{ip}");
+        }
+        let refused = [
+            "127.0.0.1",
+            "10.255.255.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "192.0.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "0.0.0.0",
+            "240.0.0.1",
+            "::1",
+            "2606:4700::1111",
+        ];
+        for ip in refused {
+            assert!(!globally_routable(&ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]

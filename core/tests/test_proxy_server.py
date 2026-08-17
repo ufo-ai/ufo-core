@@ -3150,7 +3150,8 @@ async def test_the_cache_service_relays_to_the_daemon_with_proxy_stamped_identit
             b"GET /git/github.com/o/r/info/refs?service=git-upload-pack HTTP/1.1\r\n"
             b"host: " + CACHE_HOST.encode() + b"\r\n"
             b"x-ufo-workspace: spoofed\r\n"
-            b"x-ufo-user: spoofed\r\n\r\n"
+            b"x-ufo-user: spoofed\r\n"
+            b"x-forwarded-proto: spoofed\r\n\r\n"
         )
         await writer.drain()
         response = await reader.read()
@@ -3163,6 +3164,7 @@ async def test_the_cache_service_relays_to_the_daemon_with_proxy_stamped_identit
     relayed = record.requests[0]
     assert f"x-ufo-workspace: {workspace_id}".encode() in relayed
     assert b"spoofed" not in relayed
+    assert b"x-forwarded-proto: https" in relayed
     assert b"connection: close" in relayed.lower()
     assert b"/git/github.com/o/r/info/refs" in relayed
 

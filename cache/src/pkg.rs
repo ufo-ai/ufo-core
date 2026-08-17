@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
+use crate::cgi::READ_CHUNK;
 use crate::durable::Durable;
 use crate::git::sanitize;
 use crate::inuse::InUse;
@@ -397,7 +398,7 @@ async fn serve_file(meta: &Meta, body_path: &Path, cache_status: &str) -> Option
     let file = tokio::fs::File::open(body_path).await.ok()?;
     let len = file.metadata().await.ok()?.len();
     let _ = set_file_mtime(body_path, FileTime::now());
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, READ_CHUNK);
     Some(build_response(
         StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK),
         &meta.replay_headers(),

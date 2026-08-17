@@ -1,22 +1,30 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use base64::Engine;
+use sha2::Digest;
 use ufo_cache::durable::Durable;
 use ufo_cache::Config;
 
 async fn git(args: &[&str], cwd: &Path) {
-    let out = tokio::process::Command::new("git")
-        .args(args)
+    git_with_env(args, cwd, &[]).await
+}
+
+async fn git_with_env(args: &[&str], cwd: &Path, envs: &[(&str, &str)]) {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .await
-        .unwrap();
+        .env("GIT_COMMITTER_EMAIL", "t@t");
+    for (name, value) in envs {
+        cmd.env(name, value);
+    }
+    let out = cmd.output().await.unwrap();
     assert!(
         out.status.success(),
         "git {:?} failed: {}",
@@ -90,6 +98,7 @@ fn config(state: PathBuf, control_url: String, allowed: &str) -> Config {
         pkg_disk_limit_bytes: 1 << 30,
         git_fresh_ttl_secs: 0,
         pack_cache_bytes: 0,
+        lfs_cache_bytes: 0,
     }
 }
 
@@ -1049,5 +1058,595 @@ async fn a_repeat_clone_of_one_head_replays_and_checks_out_identical_bytes() {
             .await
             .unwrap(),
         "world"
+    );
+}
+
+struct RecordedLfs {
+    authorization: String,
+    content_type: String,
+    accept: String,
+    body: bytes::Bytes,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_lfs_api_call_is_relayed_with_the_principals_credential() {
+    let recorded: Arc<Mutex<Option<RecordedLfs>>> = Arc::new(Mutex::new(None));
+    let rec = recorded.clone();
+    let up_router = axum::Router::new()
+        .route(
+            "/acme/widget.git/info/lfs/objects/batch",
+            axum::routing::post(move |req: axum::extract::Request| {
+                let rec = rec.clone();
+                async move {
+                    let (parts, body) = req.into_parts();
+                    let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+                    let h = |name: &str| {
+                        parts
+                            .headers
+                            .get(name)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    *rec.lock().unwrap() = Some(RecordedLfs {
+                        authorization: h("authorization"),
+                        content_type: h("content-type"),
+                        accept: h("accept"),
+                        body: bytes,
+                    });
+                    (
+                        [("content-type", "application/vnd.git-lfs+json")],
+                        r#"{"transfer":"basic","objects":[]}"#,
+                    )
+                }
+            }),
+        )
+        .route(
+            "/acme/widget.git/info/lfs/locks/verify",
+            axum::routing::post(|| async { (reqwest::StatusCode::FORBIDDEN, "lfs forbidden") }),
+        );
+    let up_addr = common::spawn(up_router).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({
+        "principal": "w1-u-alice",
+        "username": "x-access-token",
+        "token": "tok123"
+    }));
+    let cp_addr = common::spawn(cp_router).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let daemon = common::spawn(ufo_cache::app(
+        &config(
+            tmp.path().join("state"),
+            format!("http://{cp_addr}"),
+            &up_addr.to_string(),
+        ),
+        Durable::Off,
+    ))
+    .await;
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let batch_body = r#"{"operation":"download","objects":[{"oid":"abc","size":3}]}"#;
+    let resp = client
+        .post(format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/objects/batch"
+        ))
+        .header("content-type", "application/vnd.git-lfs+json")
+        .header("accept", "application/vnd.git-lfs+json")
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .body(batch_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/vnd.git-lfs+json"),
+        "the origin's response headers must come back with its body"
+    );
+    assert_eq!(
+        resp.bytes().await.unwrap(),
+        r#"{"transfer":"basic","objects":[]}"#,
+        "the origin's batch response must be relayed byte for byte"
+    );
+
+    let seen = recorded.lock().unwrap().take().unwrap();
+    let basic = base64::engine::general_purpose::STANDARD.encode("x-access-token:tok123");
+    assert_eq!(
+        seen.authorization,
+        format!("Basic {basic}"),
+        "the relay must authenticate upstream with the principal's resolved credential"
+    );
+    assert_eq!(seen.content_type, "application/vnd.git-lfs+json");
+    assert_eq!(seen.accept, "application/vnd.git-lfs+json");
+    assert_eq!(
+        seen.body, batch_body,
+        "the negotiation body must reach the origin unchanged"
+    );
+
+    // A non-200 relays as itself: git-lfs reads the status to decide its next step, so a refusal
+    // must never be flattened into a daemon error.
+    let resp = client
+        .post(format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/locks/verify"
+        ))
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.bytes().await.unwrap(), "lfs forbidden");
+}
+
+/// Push a commit that tracks `*.bin` with the lfs filter and adds `data.bin` as an LFS pointer to
+/// `oid`. The filter is neutralized on these commands so the pointer bytes land in git verbatim,
+/// whatever git-lfs config the running machine carries.
+async fn push_lfs_pointer(uproot: &Path, workdir: &Path, oid: &str, size: usize) {
+    let bare = uproot.join("acme").join("widget");
+    git(
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            workdir.to_str().unwrap(),
+        ],
+        uproot,
+    )
+    .await;
+    tokio::fs::write(
+        workdir.join(".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        workdir.join("data.bin"),
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n"),
+    )
+    .await
+    .unwrap();
+    let neutral = [
+        "-c",
+        "filter.lfs.clean=cat",
+        "-c",
+        "filter.lfs.smudge=cat",
+        "-c",
+        "filter.lfs.process=",
+        "-c",
+        "filter.lfs.required=false",
+    ];
+    git(&[&neutral[..], &["add", "."][..]].concat(), workdir).await;
+    git(
+        &[&neutral[..], &["commit", "-q", "-m", "lfs"][..]].concat(),
+        workdir,
+    )
+    .await;
+    git(
+        &[&neutral[..], &["push", "-q", "origin", "main"][..]].concat(),
+        workdir,
+    )
+    .await;
+}
+
+/// A git upstream that also answers the git-lfs batch API: real `git http-backend` for the wire
+/// protocol, a canned batch answer whose href names the server's own content route, and a counter
+/// of content downloads so a test can prove the cache fetched only once. Binds before building the
+/// router so the handler can spell its own address in that href.
+async fn spawn_lfs_upstream(
+    project_root: PathBuf,
+    oid: String,
+    content: &'static str,
+) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let content_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = content_hits.clone();
+    let (git_router, _) = common::git_upstream(project_root);
+    let router = axum::Router::new()
+        .route(
+            "/acme/widget.git/info/lfs/objects/batch",
+            axum::routing::post(move || {
+                let oid = oid.clone();
+                async move {
+                    (
+                        [("content-type", "application/vnd.git-lfs+json")],
+                        serde_json::json!({
+                            "transfer": "basic",
+                            "objects": [{
+                                "oid": oid,
+                                "size": content.len(),
+                                "actions": {
+                                    "download": {"href": format!("http://{addr}/lfs-content/{oid}")}
+                                }
+                            }]
+                        })
+                        .to_string(),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/lfs-content/{oid}",
+            axum::routing::get(move || {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    content
+                }
+            }),
+        )
+        .merge(git_router);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    (addr, content_hits)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn git_lfs_pull_through_the_daemon_materializes_the_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uproot = seed_upstream(tmp.path()).await;
+
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+    push_lfs_pointer(&uproot, &tmp.path().join("wt"), &oid, LFS_CONTENT.len()).await;
+
+    let (up_addr, _) = spawn_lfs_upstream(uproot, oid, LFS_CONTENT).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+    let daemon = common::spawn(ufo_cache::app(
+        &config(
+            tmp.path().join("state"),
+            format!("http://{cp_addr}"),
+            &up_addr.to_string(),
+        ),
+        Durable::Off,
+    ))
+    .await;
+    let repo_url = format!("http://{daemon}/git/{up_addr}/acme/widget");
+
+    // The clone skips the smudge so it needs no LFS round trip; the pull that follows is the LFS
+    // client's own flow: batch through the daemon, then the href straight to the origin's storage.
+    let dest = tmp.path().join("dest");
+    clone_for_lfs(&repo_url, tmp.path(), &dest).await;
+    assert!(
+        tokio::fs::read_to_string(dest.join("data.bin"))
+            .await
+            .unwrap()
+            .starts_with("version https://git-lfs.github.com/spec/v1"),
+        "before the pull the worktree holds the pointer, not the content"
+    );
+
+    lfs_pull(&dest).await;
+
+    assert_eq!(
+        tokio::fs::read_to_string(dest.join("data.bin"))
+            .await
+            .unwrap(),
+        LFS_CONTENT,
+        "git lfs pull through the daemon must materialize the object's content"
+    );
+}
+
+/// Clone through the daemon with the smudge skipped, and write the identity headers into the
+/// clone's config so its own LFS calls carry them.
+async fn clone_for_lfs(repo_url: &str, base: &Path, dest: &Path) {
+    git_with_env(
+        &[
+            "-c",
+            "http.extraHeader=x-ufo-workspace: w1",
+            "-c",
+            "http.extraHeader=x-ufo-user: alice",
+            "clone",
+            "-q",
+            repo_url,
+            dest.to_str().unwrap(),
+        ],
+        base,
+        &[("GIT_LFS_SKIP_SMUDGE", "1")],
+    )
+    .await;
+    git(
+        &["config", "--add", "http.extraHeader", "x-ufo-workspace: w1"],
+        dest,
+    )
+    .await;
+    git(
+        &["config", "--add", "http.extraHeader", "x-ufo-user: alice"],
+        dest,
+    )
+    .await;
+}
+
+async fn lfs_pull(dest: &Path) {
+    git(&["lfs", "install", "--local"], dest).await;
+    git(&["lfs", "pull"], dest).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_lfs_pull_is_served_from_the_content_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uproot = seed_upstream(tmp.path()).await;
+
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+    push_lfs_pointer(&uproot, &tmp.path().join("wt"), &oid, LFS_CONTENT.len()).await;
+
+    let (up_addr, content_hits) = spawn_lfs_upstream(uproot, oid.clone(), LFS_CONTENT).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+    let state = tmp.path().join("state");
+    let daemon = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 1 << 30,
+            ..config(
+                state.clone(),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Off,
+    ))
+    .await;
+    let repo_url = format!("http://{daemon}/git/{up_addr}/acme/widget");
+
+    let dest1 = tmp.path().join("dest1");
+    clone_for_lfs(&repo_url, tmp.path(), &dest1).await;
+    lfs_pull(&dest1).await;
+    assert_eq!(
+        tokio::fs::read_to_string(dest1.join("data.bin"))
+            .await
+            .unwrap(),
+        LFS_CONTENT
+    );
+    assert_eq!(
+        content_hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the first pull fetches the object from the origin once"
+    );
+    assert!(
+        state
+            .join("lfs")
+            .join("public")
+            .join(format!("{oid}.body"))
+            .exists(),
+        "the fetched object must land in the principal's content tier"
+    );
+
+    // A rebuilt sandbox pulling the same repo is a fresh clone and the same objects: the content
+    // must come from the tier, not another trip to the origin's storage.
+    let dest2 = tmp.path().join("dest2");
+    clone_for_lfs(&repo_url, tmp.path(), &dest2).await;
+    lfs_pull(&dest2).await;
+    assert_eq!(
+        tokio::fs::read_to_string(dest2.join("data.bin"))
+            .await
+            .unwrap(),
+        LFS_CONTENT
+    );
+    assert_eq!(
+        content_hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the second pull must be served from the content tier"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_batch_answer_names_the_daemon_for_downloads() {
+    let tmp = tempfile::tempdir().unwrap();
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+
+    let (up_addr, _) = spawn_lfs_upstream(tmp.path().join("empty"), oid.clone(), LFS_CONTENT).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+    let daemon = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 1 << 30,
+            ..config(
+                tmp.path().join("state"),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Off,
+    ))
+    .await;
+
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/objects/batch"
+        ))
+        .header("content-type", "application/vnd.git-lfs+json")
+        .header("accept", "application/vnd.git-lfs+json")
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .body(format!(
+            r#"{{"operation":"download","objects":[{{"oid":"{oid}","size":11}}]}}"#
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    let download = &answer["objects"][0]["actions"]["download"];
+    assert_eq!(
+        download["href"],
+        format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/objects/content/{oid}?size=11"
+        ),
+        "the batch answer must point the download at the daemon's content route"
+    );
+    assert!(
+        download.get("header").is_none(),
+        "the origin's pre-signed headers stay with the daemon, never the client"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lfs_content_past_the_ceiling_streams_and_leaves_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+
+    let (up_addr, _) = spawn_lfs_upstream(tmp.path().join("empty"), oid.clone(), LFS_CONTENT).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+    let state = tmp.path().join("state");
+    // A one-byte ceiling puts every object past the cap: the fetch must stream through whole and
+    // write nothing.
+    let daemon = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 1,
+            ..config(
+                state.clone(),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Off,
+    ))
+    .await;
+
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/objects/content/{oid}?size=11"
+        ))
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.bytes().await.unwrap(), LFS_CONTENT);
+    let leftovers = match tokio::fs::read_dir(state.join("lfs").join("public")).await {
+        Ok(mut dir) => dir.next_entry().await.unwrap().is_some(),
+        Err(_) => false,
+    };
+    assert!(
+        !leftovers,
+        "content past the ceiling must leave nothing on the volume"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lfs_content_that_fails_its_digest_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+
+    // The origin serves different bytes than the oid names — a truncated or substituted object
+    // must never be cached or handed to the client as the real one.
+    let (up_addr, _) =
+        spawn_lfs_upstream(tmp.path().join("empty"), oid.clone(), "WRONG BYTES").await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+    let state = tmp.path().join("state");
+    let daemon = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 1 << 30,
+            ..config(
+                state.clone(),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Off,
+    ))
+    .await;
+
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/objects/content/{oid}?size=11"
+        ))
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502);
+    let lfs_dir = state.join("lfs").join("public");
+    let empty = match tokio::fs::read_dir(&lfs_dir).await {
+        Ok(mut dir) => dir.next_entry().await.unwrap().is_none(),
+        Err(_) => true,
+    };
+    assert!(empty, "a failed digest must leave nothing in the tier");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_lfs_href_at_a_private_address_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    const LFS_CONTENT: &str = "LFS CONTENT";
+    let oid = hex::encode(sha2::Sha256::digest(LFS_CONTENT.as_bytes()));
+
+    // The origin's batch answer points inside a private range. The daemon fetches hrefs with its
+    // own network position, so it must refuse what the sandbox's egress would have refused.
+    let batch_oid = oid.clone();
+    let up_router = axum::Router::new().route(
+        "/acme/widget.git/info/lfs/objects/batch",
+        axum::routing::post(move || {
+            let oid = batch_oid.clone();
+            async move {
+                (
+                    [("content-type", "application/vnd.git-lfs+json")],
+                    serde_json::json!({
+                        "transfer": "basic",
+                        "objects": [{
+                            "oid": oid,
+                            "size": 11,
+                            "actions": {
+                                "download": {"href": format!("http://10.255.255.1:9/lfs-content/{oid}")}
+                            }
+                        }]
+                    })
+                    .to_string(),
+                )
+            }
+        }),
+    );
+    let up_addr = common::spawn(up_router).await;
+    let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
+    let cp_addr = common::spawn(cp_router).await;
+    let daemon = common::spawn(ufo_cache::app(
+        &Config {
+            lfs_cache_bytes: 1 << 30,
+            ..config(
+                tmp.path().join("state"),
+                format!("http://{cp_addr}"),
+                &up_addr.to_string(),
+            )
+        },
+        Durable::Off,
+    ))
+    .await;
+
+    let resp = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://{daemon}/git/{up_addr}/acme/widget.git/info/lfs/objects/content/{oid}?size=11"
+        ))
+        .header("x-ufo-workspace", "w1")
+        .header("x-ufo-user", "alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        502,
+        "an href inside a private range must be refused, never fetched"
     );
 }

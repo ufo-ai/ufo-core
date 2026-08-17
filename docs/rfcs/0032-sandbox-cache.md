@@ -137,6 +137,19 @@ the object refresh only, so an upstream revocation is honoured up to the TTL lat
 a clone whose ref discovery was still authorized. A rate-limited sweep evicts the least-recently-used
 mirrors to keep the tree under its ceiling.
 
+git-lfs derives its API endpoint from the same remote URL the rewrite points at the cache, so its
+calls (`<repo>.git/info/lfs/*` — batch, verify, locks, uploads and downloads alike) arrive at the
+daemon too. The daemon **relays them to the origin** with the principal's credential injected —
+and rewrites each batch answer's download href onto its own content route, so LFS objects are
+**cached per principal by oid** (`UFO_CACHE_LFS_CACHE_MB`, default 4096; `0` relays untouched).
+Objects are immutable and content-addressed, so a hit needs no freshness rule: a miss re-batches
+against the allowlisted origin with the daemon's own credential (never a client-named URL), fetches
+an href only if its host is allowlisted or resolves to globally routable addresses — the daemon
+inherits the fetch the sandbox's egress rules used to guard — and commits bytes only when they
+hash to the oid. Uploads, locks, and verify relay untouched, and an object past the per-entry cap
+streams through uncached. The proxy stamps `x-forwarded-proto` on what it relays, which is how the
+daemon spells absolute hrefs the sandbox can reach.
+
 The mirror does not make pack generation cheaper, so `git-upload-pack` responses are **cached on
 disk** beside the mirrors (`UFO_CACHE_PACK_CACHE_MB`, default 4096; `0` disables it) and replayed
 byte-identically for an identical request. The key is a sha256 of the principal, host, repo,

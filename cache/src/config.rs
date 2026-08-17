@@ -37,6 +37,9 @@ pub struct Config {
     /// Soft ceiling for the cached `git-upload-pack` responses (`state_root/pack`); its eviction runs
     /// above it. `0` disables the pack cache, so every request runs the backend as before.
     pub pack_cache_bytes: u64,
+    /// Soft ceiling for the cached LFS objects (`state_root/lfs`); its eviction runs above it. `0`
+    /// disables the tier: batch answers relay untouched and content moves client to origin.
+    pub lfs_cache_bytes: u64,
 }
 
 // Per-tier ceiling (the package cache and git mirrors are bounded separately), so the cache volume
@@ -47,9 +50,11 @@ const DEFAULT_PKG_DISK_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 // that a subagent fan-out cloning one repo pays one negotiation; short enough that a negotiation
 // arriving on its own is not far behind origin.
 const DEFAULT_GIT_FRESH_TTL_SECS: u64 = 15;
-// The hosted cache volume is 24Gi against 4 GiB of mirrors and 8 GiB of packages, so this tier takes
-// the bound to 16 GiB and leaves headroom: exceeding an `emptyDir` `sizeLimit` evicts the proxy pod.
+// The hosted cache volume is 24Gi against 4 GiB of mirrors and 8 GiB of packages, so the pack and
+// LFS tiers take the bound to 20 GiB and leave headroom: exceeding an `emptyDir` `sizeLimit`
+// evicts the proxy pod.
 const DEFAULT_PACK_CACHE_MB: u64 = 4096;
+const DEFAULT_LFS_CACHE_MB: u64 = 4096;
 
 // Public registries and their download CDNs for Node, Python, Rust, and Go — the build/test time
 // sinks. More ecosystems (apt, apk, RubyGems, Maven) drop in through UFO_CACHE_PKG_HOSTS.
@@ -105,6 +110,13 @@ impl Config {
                     .map_err(|e| format!("UFO_CACHE_PACK_CACHE_MB: {e}"))?
                     .saturating_mul(1024 * 1024),
                 Err(_) => DEFAULT_PACK_CACHE_MB.saturating_mul(1024 * 1024),
+            },
+            lfs_cache_bytes: match std::env::var("UFO_CACHE_LFS_CACHE_MB") {
+                Ok(v) => v
+                    .parse::<u64>()
+                    .map_err(|e| format!("UFO_CACHE_LFS_CACHE_MB: {e}"))?
+                    .saturating_mul(1024 * 1024),
+                Err(_) => DEFAULT_LFS_CACHE_MB.saturating_mul(1024 * 1024),
             },
         })
     }

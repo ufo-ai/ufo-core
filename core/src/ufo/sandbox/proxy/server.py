@@ -1461,6 +1461,7 @@ _SERVICE_STRIPPED = frozenset(
     {
         b"x-ufo-workspace",
         b"x-ufo-user",
+        b"x-forwarded-proto",
         b"connection",
         b"keep-alive",
         b"proxy-connection",
@@ -1471,9 +1472,10 @@ _SERVICE_STRIPPED = frozenset(
 
 def _service_headers(headers: list[bytes], principal: EgressPrincipal) -> bytes:
     """The request header block relayed to the cache daemon: the sandbox's own headers minus any it
-    must not set — the identity headers (asserted here, never trusted from the container) and the
-    connection controls — plus the proxy-stamped `(workspace, user)` and a `close` that delimits the
-    exchange to one re-identified request."""
+    must not set — the identity headers and the forwarded scheme (asserted here, never trusted from
+    the container) and the connection controls — plus the proxy-stamped `(workspace, user)`, the
+    `https` the sandbox actually spoke (the daemon rebuilds absolute URLs from it), and a `close`
+    that delimits the exchange to one re-identified request."""
     kept = b"".join(
         line for line in headers if line.partition(b":")[0].strip().lower() not in _SERVICE_STRIPPED
     )
@@ -1481,6 +1483,7 @@ def _service_headers(headers: list[bytes], principal: EgressPrincipal) -> bytes:
     stamped = (
         f"x-ufo-workspace: {principal.workspace_id}\r\n"
         f"x-ufo-user: {'' if member is None else member}\r\n"
+        "x-forwarded-proto: https\r\n"
         "connection: close\r\n"
     ).encode()
     return kept + stamped

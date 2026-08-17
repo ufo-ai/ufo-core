@@ -405,9 +405,10 @@ spec:
               - {key: ufo.toml, path: ufo.toml}
 %{ if cache_enabled }
         # The cache's hot tier: node-local scratch, wiped on pod roll. Durability is the S3 tier the
-        # daemon restores from on a cold start, not this volume. Sized above the daemon's two
-        # ceilings — UFO_CACHE_DISK_LIMIT_BYTES (default 4 GiB of git mirrors) plus
-        # UFO_CACHE_PKG_DISK_LIMIT_BYTES (default 8 GiB of package artifacts) — to leave headroom for
+        # daemon restores from on a cold start, not this volume. Sized above the daemon's ceilings —
+        # UFO_CACHE_DISK_LIMIT_BYTES (default 4 GiB of git mirrors), UFO_CACHE_PKG_DISK_LIMIT_BYTES
+        # (default 8 GiB of package artifacts), UFO_CACHE_PACK_CACHE_MB (default 4 GiB of upload-pack
+        # replays), and UFO_CACHE_LFS_CACHE_MB (default 4 GiB of LFS objects) — to leave headroom for
         # in-progress clones and downloads the sweep counts but cannot evict.
         - name: cache
           emptyDir: {sizeLimit: 24Gi}
