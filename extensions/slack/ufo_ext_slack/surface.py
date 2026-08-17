@@ -1461,7 +1461,14 @@ async def _admit_inbound(
 ) -> None:
     """Everything an admitted message costs beyond the event ack: the sender, permalink and ambient
     context reads, the member and conversation resolution, the thread mirror the turn's own
-    execution follows from, and the admission itself."""
+    execution follows from, and the admission itself.
+
+    A channel thread is named for its channel as it opens, ahead of the admission that would name it
+    the words the message arrived with. Those words are one message of a channel's traffic, spelled
+    in Slack's wire markup wherever no name answers for an id, and the member reading the portal is
+    told which channel the thread runs in instead. Only the message that opens the conversation
+    names it, so a better name written later stands; a DM is nobody's channel and keeps the member's
+    own words."""
     marker = mint_marker()
     names = SlackNames(bot_token)
     sender, context, source, mentioned = await asyncio.gather(
@@ -1475,6 +1482,8 @@ async def _admit_inbound(
     conversation_id = await ctx.conversation_for(
         inbound.queue_key, audience, label=inbound.surface_label
     )
+    if inbound.conversation_id is None and not inbound.is_dm and inbound.surface_label is not None:
+        await ctx.retitle_conversation(conversation_id, inbound.surface_label)
     thread = MirroredThread(queue_key=inbound.queue_key, message_ts=inbound.ts)
     await _mirror_thread(conversation_id, thread)
     attachments = (

@@ -2962,6 +2962,19 @@ async def _loaded_labels(workspace_id: UUID) -> dict[str, str | None]:
     return {row.queue_key: row.surface_label for row in rows}
 
 
+async def _loaded_titles(workspace_id: UUID) -> dict[str, str | None]:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.queue_key, tables.conversation.c.title).where(
+                        tables.conversation.c.workspace_id == workspace_id
+                    )
+                )
+            ).all()
+    return {row.queue_key: row.title for row in rows}
+
+
 async def test_origin_labels_come_from_metadata_the_audience_decision_already_read(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -3110,6 +3123,76 @@ async def test_a_renamed_channel_relabels_and_a_nameless_message_leaves_the_labe
     assert await _loaded_labels(workspace_id) == {
         "CPUBLIC:1.0": "#general-eng",
         "CPRIVATE:3.0": "#plans",
+    }
+
+
+async def test_a_channel_thread_is_named_for_its_channel_and_a_dm_for_the_member_words(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A channel thread is called the channel it runs in, not the one message that opened it: the
+    member reading the portal never meets a Slack user id there. A DM is nobody's channel, so it
+    keeps the member's own words. A channel whose name Slack does not answer for keeps them too,
+    and a rename after the thread opens leaves the name the thread already carries."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    channels: dict[str, dict[str, object] | None] = {"CPUBLIC": {"name": "ext-designers"}}
+    transport = _mock_transport(recorder, {}, channels=channels)
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    opened = _event_body(
+        type="message",
+        channel_type="channel",
+        user="U1",
+        channel="CPUBLIC",
+        ts="1.0",
+        text=f"<@{BOT_USER_ID}> use the report",
+    )
+    after_rename = _event_body(
+        type="message",
+        channel_type="channel",
+        user="U1",
+        channel="CPUBLIC",
+        ts="2.0",
+        thread_ts="1.0",
+        text=f"<@{BOT_USER_ID}> again",
+    )
+    nameless = _event_body(
+        type="message",
+        channel_type="group",
+        user="U1",
+        channel="CPRIVATE",
+        ts="3.0",
+        text=f"<@{BOT_USER_ID}> plan the sprint",
+    )
+    direct = _event_body(
+        type="message",
+        channel_type="im",
+        user="U1",
+        channel="D1",
+        ts="4.0",
+        text="read the report",
+    )
+
+    async with client:
+        for body in (opened, nameless, direct):
+            response = await client.post(
+                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.json() == {"ok": True}
+        channels["CPUBLIC"] = {"name": "ext-designers-archive"}
+        response = await client.post(
+            EVENTS_PATH, content=after_rename, headers=_sign(after_rename, int(time.time()))
+        )
+        assert response.json() == {"ok": True}
+
+    assert await _loaded_titles(workspace_id) == {
+        "CPUBLIC:1.0": "#ext-designers",
+        "CPRIVATE:3.0": f"<@{BOT_USER_ID}> plan the sprint",
+        "D1": "read the report",
+    }
+    assert await _loaded_labels(workspace_id) == {
+        "CPUBLIC:1.0": "#ext-designers-archive",
+        "CPRIVATE:3.0": None,
+        "D1": slack.DIRECT_MESSAGE_LABEL,
     }
 
 
