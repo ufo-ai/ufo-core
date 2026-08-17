@@ -442,7 +442,7 @@ async def stream_directives(
                                 "Connection request unavailable; ask me to connect again."
                             )
                         else:
-                            connect_message = f"Complete the connection: {url}"
+                            connect_message = f"[Complete the connection]({url})"
                 shared: tuple[SharedFile, ...] = ()
                 if isinstance(frame, Terminal) and files is not None:
                     shared = await files()

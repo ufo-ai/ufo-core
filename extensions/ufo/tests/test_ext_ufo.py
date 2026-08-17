@@ -302,7 +302,7 @@ def test_a_shared_file_precedes_the_secret_and_connect_lines() -> None:
         done,
         streamed=True,
         collect=request.prompts[:1],
-        connect_message="Complete the connection: https://oauth.test/a",
+        connect_message="[Complete the connection](https://oauth.test/a)",
         files=(SharedFile(filename="k.csv", size_bytes=4, url="https://ufo.test/artifacts/k"),),
     )
     assert [line.split(b"\t")[0] for line in lines] == [b"file", b"secret", b"say", b"ask"]
@@ -355,7 +355,7 @@ async def test_stream_privately_renders_a_connect_handoff() -> None:
     ]
     assert lines == [
         b"say\tUse the connection control.\n",
-        b"say\tComplete the connection: https://oauth.example.test/authorize\n",
+        b"say\t[Complete the connection](https://oauth.example.test/authorize)\n",
         b"ask\t>\n",
     ]
 
@@ -1622,7 +1622,7 @@ async def test_empty_body_privately_opens_the_latest_connect_handoff(
         install_connect_flow(None)
     assert lines[0] == ["say", "Use the connection control."]
     assert lines[1][0] == "say"
-    assert lines[1][1].startswith("Complete the connection: https://oauth.example.test/authorize")
+    assert lines[1][1].startswith("[Complete the connection](https://oauth.example.test/authorize")
     assert lines[2] == ["ask", ">"]
     async with workspace_tx() as connection:
         memoized_url = (
