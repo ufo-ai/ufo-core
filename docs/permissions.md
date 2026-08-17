@@ -36,7 +36,7 @@ flowchart TD
 | Admin | `member.is_admin`, read live per call | management verbs — content beyond their own audience only through a recorded disclosure, except the artifacts listing (see [Read paths](#read-paths-and-how-they-differ)) |
 | Main agent | `agent.is_main` | member/agent kind writes, cross-agent object verbs, workspace roster, the source-owner exception |
 | Child agent | its `agent` row | its own grants and conversations; in chat it may edit no agent, not even itself (an admin's intent lane may edit it) |
-| Scheduled fire / subagent | no speaker; `on_behalf_of_member_id` (task creator / spawn requester / monitor armer) | that member's *use* capabilities — never granting acts, never admin |
+| Scheduled fire / subagent | no speaker; `on_behalf_of_member_id` (task creator / spawn requester / monitor armer / the member a first-party job names — an agent's owner, else the workspace's earliest-seated admin) | that member's *use* capabilities — never granting acts, never admin |
 | Extension | `ExtensionContext`, scoped at construction | its declared slots, its own store, the ambient workspace — never a blob handle, never another workspace; its raw DB transaction is bound by RLS |
 | Operator | local process access for `ufoctl`; `OPERATOR_EMAIL_DOMAIN` bearer for the debug/memory surfaces | fleet-wide, outside the member model |
 
@@ -153,15 +153,21 @@ more, and is carried unchanged into every turn (`core/src/ufo/audience.py`):
 
 | Atom | Assigned to | Content readable by |
 |---|---|---|
-| `shared` | Slack public channels; extension-opened conversations (triggers, errands) | every member |
-| `member:<uuid>` | Slack DMs, terminal sessions, web chats, intent lanes | that member |
-| `room:<surface>:<room>` | Slack private channels and MPIMs | **nobody** — the workspace holds no fact about who is in the room |
+| `shared` | Slack public channels; extension-opened conversations (triggers, errands) that name no member | every member |
+| `member:<uuid>` | Slack DMs, terminal sessions, web chats, intent lanes; an extension-opened room that names a member — the shape an on-behalf job's turn runs in | that member |
+| `room:<surface>:<room>` | Slack private channels and MPIMs | **nobody** — no read path answers from room membership |
 | `foreign:<surface>:<room>` | Slack Connect / externally shared channels | **nobody**, and sealed: it can recall nothing internal |
 
 A new Slack conversation whose kind cannot be decided is refused (503), never guessed. The
 audience only narrows (`narrow_audience`): `shared` may become anything, a room may seal to
 `foreign` on the same key (never back), a widening request is ignored, and any other change
 raises. Subagent conversations inherit the spawning turn's audience verbatim.
+
+Room membership is read at send and never served. To map an `@name` onto the id Slack notifies,
+the Slack surface reads that channel's own roster (`conversations.members`, first 100, members of
+the installed team alone — a Connect guest is never mapped) and pins the resulting name-to-id map
+in the reply's delivery record, so every retry splits the same text. No member-facing read answers
+from that map.
 
 `readable_audiences(member)` is the one definition every member-facing content read answers from:
 `(shared, member:<me>)` — no admin arm. The admin path exists but is separate, audited, and
@@ -203,6 +209,7 @@ The audience atom is one rule; what each projection does with an admin differs b
 | Artifacts, portal listing | files of readable conversations | **every conversation's files, rooms and foreign included, no disclosure record** — the one read where private content reaches an admin unaudited; the `shared` scope toggle re-applies reader audiences even for admins |
 | Artifacts, `artifact` object kind | `audience_subjects` of own audience | same — the `admin` flag is accepted and ignored |
 | Radar / scheduled-runs feed | `readable_audiences`, unconditional | same — the projection takes no admin parameter |
+| Agent homepage, portal Home tab | the bound site's own `visibility` | **narrower than the listing** — a private homepage answers its creator alone, so the read hands an admin no link the frame would refuse |
 | Memory (portal + `memory` kind) | `{shared, member:<me>}` | same — admin ignored |
 | Usage | own window, no other member or agent named | + workspace rollup |
 | Roster, portal team view | full roster to every signed-in member | same |
@@ -222,7 +229,10 @@ Sites are the outlier by design: a hosted site carries its own `visibility` colu
 `private` (creator alone), `workspace` (any signed-in member), `public` (anyone with the link) —
 taken from the deploying member's request, defaulted from the conversation audience when unnamed
 (member or foreign audience → `private`, else `workspace`), and managed thereafter by its
-creator; an admin may only narrow to private.
+creator; an admin may only narrow to private. An agent's homepage is a pointer to one such site:
+`set_homepage` binds it, needs no live speaker, and gates on neither the site's creator nor its
+visibility, because the pointer discloses nothing — every homepage read re-applies the site's own
+visibility, and widening one stays the creator's act.
 
 ## Grants — what an agent may use
 
@@ -406,6 +416,7 @@ Manifest points are the capability declarations; a few are privileged in kind:
 | `surfaces` | asserts member identity and admits turns |
 | `routes` | its `identify` return is bound as the ambient workspace — the extension authenticates its own callers (the SDK's `workspace_claim` is the verified helper) |
 | `agents` | ships an agent row whose allowlist may name `profile_only` tools; arrives with no grants — a member grants each in chat |
+| `member_context_read` | reads outside any one conversation — the seated roster, the agent roster with owners, the earliest-seated admin, the scheduled member's own cross-agent context, and one on-behalf turn for a seated member; first-party only, since the loader refuses any distribution but `ufo` that declares it |
 | backend seams (`indexes`, `embeds`, `hubs`, `carriers`, …) | each becomes the deploy's single implementation, receiving scoped credential access; `models` instead merges every manifest's specs into one registry, one spec per model id |
 
 ## Operator
