@@ -86,7 +86,7 @@ and OAuth-install write, installation binding, tail) and the streaming `BlobStor
 streams from `url_private` into the workspace before the turn runs, bounded by the workspace write
 it feeds; a shared file streams from the blob store straight to Slack's external-upload URL without
 ever buffering whole. Uploads fan out with `asyncio.gather` on the one event loop — never a thread
-pool."""
+pool — and one share step then posts every file a turn shared as a single message."""
 
 import asyncio
 import hashlib
@@ -767,6 +767,9 @@ MAX_SLACK_MESSAGE_BYTES = 40_000
 MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
 # Slack's own documented ceiling for a single file; an over-cap artifact goes out as a TTL link.
 SLACK_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
+# Undocumented Slack ceiling: `files.completeUploadExternal` answers `internal_error` when one call
+# names more files than this, so a larger share goes out as the fewest messages Slack will take.
+SLACK_ATTACH_MAX_FILES = 10
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
 CREDENTIALS_FRAGMENT = "#/workspace/credentials"
@@ -4025,11 +4028,13 @@ def _posted_message_ts(payload: Mapping[str, object]) -> str:
 
 
 async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None:
-    """Stream each shared file that fits the upload cap into the conversation, all at once on the
-    event loop; an over-cap file is delivered as a link in `post`, not here. The upload lands in the
-    same thread the reply did — the member's own message, never the bot reply's ts, which Slack
-    forbids as a parent. Best effort: a rejected file is logged and the rest still deliver, so an
-    upload never re-posts the reply or blocks its siblings.
+    """Stream every shared file that fits the upload cap into the conversation, all at once on the
+    event loop, then share them as one message holding every file in share order — a turn that
+    shared four files posts one message with four attachments, never four messages. An over-cap
+    file is delivered as a link in `post`, not here. The message lands in the same thread the reply
+    did — the member's own message, never the bot reply's ts, which Slack forbids as a parent. Best
+    effort: a file Slack refuses is logged and left out of the share, so the rest still arrive
+    together, and an upload never re-posts the reply or blocks its siblings.
 
     Every record the turn made is dropped first — the terminal reply's delivery record, one per span
     it spoke mid-flight, and the DM anchors those replies threaded under — because core has now
@@ -4048,62 +4053,90 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
         return
     channel = writeback.queue_key.partition(":")[0]
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    results = await asyncio.gather(
-        *(_upload_artifact(ctx, bot_token, channel, thread, artifact) for artifact in inline),
-        return_exceptions=True,
-    )
-    for artifact, result in zip(inline, results, strict=True):
-        if isinstance(result, BaseException):
-            _LOG.warning("slack attachment upload failed for %s: %s", artifact.filename, result)
-
-
-async def _upload_artifact(
-    ctx: SurfaceContext,
-    bot_token: str,
-    channel: str,
-    thread_ts: str | None,
-    artifact: SharedArtifact,
-) -> None:
-    """The three-step external upload, streamed: reserve an upload URL for the exact byte length,
-    POST the blob's bytes to it (streamed from the blob store, never buffered), then complete the
-    upload into the channel or parent thread with the caption or the plain filename as its title."""
     timeout = httpx.Timeout(
         SLACK_UPLOAD_READ_TIMEOUT_SECONDS, write=SLACK_UPLOAD_WRITE_TIMEOUT_SECONDS
     )
     async with httpx.AsyncClient(timeout=timeout) as client:
-        reservation = await _slack_ok(
-            client.post(
-                SLACK_FILES_GET_UPLOAD_URL,
-                headers={"Authorization": f"Bearer {bot_token}"},
-                data={"filename": artifact.filename, "length": str(artifact.size_bytes)},
-            )
+        results = await asyncio.gather(
+            *(_upload_artifact(ctx, client, bot_token, artifact) for artifact in inline),
+            return_exceptions=True,
         )
-        upload_url = reservation.get("upload_url")
-        file_id = reservation.get("file_id")
-        if not isinstance(upload_url, str) or not isinstance(file_id, str):
-            raise SlackApiError("Slack upload reservation missing upload_url or file_id")
-        posted = await client.post(
-            upload_url,
-            content=ctx.blob.get_stream(artifact.blob_key),
-            headers={"Content-Type": "application/octet-stream"},
+        files: list[dict[str, str]] = []
+        for artifact, result in zip(inline, results, strict=True):
+            if isinstance(result, BaseException):
+                _LOG.warning("slack attachment upload failed for %s: %s", artifact.filename, result)
+            else:
+                files.append({"id": result, "title": artifact.subject or artifact.filename})
+        for batch in _attachment_batches(files):
+            try:
+                await _share_uploaded_files(client, bot_token, channel, thread, batch)
+            except Exception as error:
+                titles = ", ".join(file["title"] for file in batch)
+                _LOG.warning("slack attachment share failed for %s: %s", titles, error)
+
+
+def _attachment_batches(files: Sequence[dict[str, str]]) -> Iterator[Sequence[dict[str, str]]]:
+    """One share's uploaded files, cut into the messages Slack will take. A share inside the cap is
+    one batch, so it is one message."""
+    for start in range(0, len(files), SLACK_ATTACH_MAX_FILES):
+        yield files[start : start + SLACK_ATTACH_MAX_FILES]
+
+
+async def _upload_artifact(
+    ctx: SurfaceContext,
+    client: httpx.AsyncClient,
+    bot_token: str,
+    artifact: SharedArtifact,
+) -> str:
+    """The first two steps of the external upload, streamed: reserve an upload URL for the exact
+    byte length, then POST the blob's bytes to it (streamed from the blob store, never buffered).
+    Answers the file id the share step names; nothing reaches the conversation until that step
+    runs."""
+    reservation = await _slack_ok(
+        client.post(
+            SLACK_FILES_GET_UPLOAD_URL,
+            headers={"Authorization": f"Bearer {bot_token}"},
+            data={"filename": artifact.filename, "length": str(artifact.size_bytes)},
         )
-        posted.raise_for_status()
-        await _slack_ok(
-            client.post(
-                SLACK_FILES_COMPLETE_UPLOAD,
-                headers={
-                    "Authorization": f"Bearer {bot_token}",
-                    "Content-Type": "application/json; charset=utf-8",
-                },
-                content=json.dumps(
-                    {
-                        "files": [{"id": file_id, "title": artifact.subject or artifact.filename}],
-                        "channel_id": channel,
-                        **({"thread_ts": thread_ts} if thread_ts is not None else {}),
-                    }
-                ),
-            )
+    )
+    upload_url = reservation.get("upload_url")
+    file_id = reservation.get("file_id")
+    if not isinstance(upload_url, str) or not isinstance(file_id, str):
+        raise SlackApiError("Slack upload reservation missing upload_url or file_id")
+    posted = await client.post(
+        upload_url,
+        content=ctx.blob.get_stream(artifact.blob_key),
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    posted.raise_for_status()
+    return file_id
+
+
+async def _share_uploaded_files(
+    client: httpx.AsyncClient,
+    bot_token: str,
+    channel: str,
+    thread_ts: str | None,
+    files: Sequence[dict[str, str]],
+) -> None:
+    """The last step of the external upload: share the uploaded files into the channel or parent
+    thread as one message, each keeping the caption or the plain filename as its title."""
+    await _slack_ok(
+        client.post(
+            SLACK_FILES_COMPLETE_UPLOAD,
+            headers={
+                "Authorization": f"Bearer {bot_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            content=json.dumps(
+                {
+                    "files": list(files),
+                    "channel_id": channel,
+                    **({"thread_ts": thread_ts} if thread_ts is not None else {}),
+                }
+            ),
         )
+    )
 
 
 async def _slack_ok(request: Awaitable[httpx.Response]) -> dict[str, object]:

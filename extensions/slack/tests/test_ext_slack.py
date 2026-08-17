@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -122,7 +122,8 @@ SIGNING_SECRET = "signing-secret"
 CLIENT_ID = "112233.445566"
 CLIENT_SECRET = "client-secret"
 BOT_TOKEN = "xoxb-test"
-UPLOAD_URL = "https://files.slack.com/upload/session-1"
+UPLOAD_URL_PREFIX = "https://files.slack.com/upload/"
+UPLOAD_URL = f"{UPLOAD_URL_PREFIX}report.pdf"
 RESPONSE_URL = "https://hooks.slack.com/actions/T0000001/123/abc"
 ARTIFACT_SECRET = "artifact-token-secret"
 PUBLIC_BASE_URL = "https://ufo.example.test"
@@ -292,6 +293,12 @@ DEFAULT_TEAM = {
 }
 
 
+def _file_id(filename: str) -> str:
+    """The id Slack's reservation answers for a file, named after it so a share of several files
+    reads as itself whatever order the concurrent uploads resolved in."""
+    return f"F-{filename}"
+
+
 def _mock_transport(
     recorder: list[httpx.Request],
     users: dict[str, str],
@@ -299,6 +306,7 @@ def _mock_transport(
     channels: dict[str, dict[str, object] | None] | None = None,
     messages: tuple[dict[str, object], ...] = (),
     real_name: str = "Bee Jones",
+    refused_uploads: AbstractSet[str] = frozenset(),
 ) -> httpx.MockTransport:
     """The numbered users are the workspace's own team unless a caller says otherwise — `U1` its
     onboarded member and the rest same-domain colleagues who join on first contact. That is what a
@@ -372,11 +380,22 @@ def _mock_transport(
         if url == slack.SLACK_CHAT_UPDATE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
         if url == slack.SLACK_FILES_GET_UPLOAD_URL:
-            return httpx.Response(200, json={"ok": True, "upload_url": UPLOAD_URL, "file_id": "F1"})
-        if url == UPLOAD_URL:
+            reserved = parse_qs(request.content.decode())["filename"][0]
+            if reserved in refused_uploads:
+                return httpx.Response(200, json={"ok": False, "error": "file_upload_failed"})
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "upload_url": f"{UPLOAD_URL_PREFIX}{reserved}",
+                    "file_id": _file_id(reserved),
+                },
+            )
+        if url.startswith(UPLOAD_URL_PREFIX):
             return httpx.Response(200, text="OK")
         if url == slack.SLACK_FILES_COMPLETE_UPLOAD:
-            return httpx.Response(200, json={"ok": True, "files": [{"id": "F1"}]})
+            shared = json.loads(request.content)["files"]
+            return httpx.Response(200, json={"ok": True, "files": shared})
         if url.startswith("https://files.slack.com/files-pri/"):
             return httpx.Response(200, content=b"INBOUND-BYTES")
         return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
@@ -4266,7 +4285,7 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
     complete_body = json.loads(completes[0].content)
     assert complete_body["channel_id"] == "C5"
     assert complete_body["thread_ts"] == "200.0"
-    assert complete_body["files"] == [{"id": "F1", "title": "report.pdf"}]
+    assert complete_body["files"] == [{"id": _file_id("report.pdf"), "title": "report.pdf"}]
 
     async with workspace_tx() as connection:
         row = (
@@ -4278,6 +4297,237 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
         ).one()
     assert row.status == WRITEBACK_DELIVERED
     assert row.reply_ref == "C5:999.100"
+
+
+async def _seed_shared_files(
+    workspace_id: UUID,
+    turn_id: UUID,
+    blob,
+    files: Sequence[tuple[str, str | None]],
+) -> None:
+    """One turn's share of several files, seeded in share order with the bytes they stream. Each row
+    is shared a second after the one before it while the keys descend, so a delivery that reads the
+    files in share order cannot be a delivery that read them by key."""
+    shared_at = datetime.now(UTC)
+    for index, (filename, subject) in enumerate(files):
+        blob_key = f"artifacts/{turn_id}/{len(files) - index:03d}-{filename}"
+        content = f"{filename}-CONTENT".encode()
+        with ws(workspace_id):
+            await blob.put(blob_key, content)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=turn_id,
+                    blob_key=blob_key,
+                    workspace_id=workspace_id,
+                    filename=filename,
+                    subject=subject,
+                    media_type="text/plain",
+                    size_bytes=len(content),
+                    created_at=shared_at + timedelta(seconds=index),
+                    updated_at=shared_at + timedelta(seconds=index),
+                )
+            )
+
+
+def _shared_files(recorder: list[httpx.Request]) -> list[list[dict[str, str]]]:
+    """What each share step named, in the order the deliveries made them."""
+    return [
+        json.loads(request.content)["files"]
+        for request in recorder
+        if str(request.url) == slack.SLACK_FILES_COMPLETE_UPLOAD
+    ]
+
+
+async def test_one_share_of_several_files_arrives_as_one_message(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The files a turn shared are one delivery, so they arrive as one message carrying every file
+    in share order — not a run of messages the member reads as several answers. Each file keeps its
+    own caption as its title, and the message hangs under the same thread the reply did."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "three files", blob, artifact=False)
+    await _seed_shared_files(
+        workspace_id,
+        turn_id,
+        blob,
+        (("first.txt", None), ("second.txt", "The audit"), ("third.txt", None)),
+    )
+
+    await app.state.writeback_poller.drain()
+
+    assert len([r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]) == 1
+    assert {
+        str(r.url).removeprefix(UPLOAD_URL_PREFIX): r.content
+        for r in recorder
+        if str(r.url).startswith(UPLOAD_URL_PREFIX)
+    } == {
+        "first.txt": b"first.txt-CONTENT",
+        "second.txt": b"second.txt-CONTENT",
+        "third.txt": b"third.txt-CONTENT",
+    }
+    assert _shared_files(recorder) == [
+        [
+            {"id": _file_id("first.txt"), "title": "first.txt"},
+            {"id": _file_id("second.txt"), "title": "The audit"},
+            {"id": _file_id("third.txt"), "title": "third.txt"},
+        ]
+    ]
+    complete = json.loads(
+        next(r for r in recorder if str(r.url) == slack.SLACK_FILES_COMPLETE_UPLOAD).content
+    )
+    assert (complete["channel_id"], complete["thread_ts"]) == ("C5", "200.0")
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status).where(tables.writeback.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert status == WRITEBACK_DELIVERED
+
+
+async def test_a_file_slack_refuses_leaves_the_others_in_the_one_message(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """A file Slack will not take is logged and left out of the share; the files it did take still
+    arrive together in that one message, and the turn is still delivered."""
+    caplog.set_level(logging.WARNING, logger="ufo_ext_slack")
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _mock_transport(recorder, {}, refused_uploads={"refused.txt"}),
+    )
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "two of three", blob, artifact=False)
+    await _seed_shared_files(
+        workspace_id,
+        turn_id,
+        blob,
+        (("first.txt", None), ("refused.txt", None), ("third.txt", None)),
+    )
+
+    await app.state.writeback_poller.drain()
+
+    assert _shared_files(recorder) == [
+        [
+            {"id": _file_id("first.txt"), "title": "first.txt"},
+            {"id": _file_id("third.txt"), "title": "third.txt"},
+        ]
+    ]
+    assert [r.getMessage() for r in caplog.records if "refused.txt" in r.getMessage()] != []
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status).where(tables.writeback.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert status == WRITEBACK_DELIVERED
+
+
+async def test_a_share_slack_will_not_take_at_all_still_delivers_the_turn(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """The share step is best effort like the uploads it finishes: Slack refusing it is logged, and
+    the turn stays delivered rather than coming back for an attempt that would post the reply's
+    words a second time."""
+    caplog.set_level(logging.WARNING, logger="ufo_ext_slack")
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    base = _mock_transport(recorder, {})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == slack.SLACK_FILES_COMPLETE_UPLOAD:
+            recorder.append(request)
+            return httpx.Response(200, json={"ok": False, "error": "internal_error"})
+        return base.handler(request)
+
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "two files", blob, artifact=False)
+    await _seed_shared_files(
+        workspace_id, turn_id, blob, (("first.txt", None), ("second.txt", None))
+    )
+
+    await app.state.writeback_poller.drain()
+
+    assert len([r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]) == 1
+    assert len(_shared_files(recorder)) == 1
+    assert [r.getMessage() for r in caplog.records if "internal_error" in r.getMessage()] != []
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status).where(tables.writeback.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert status == WRITEBACK_DELIVERED
+
+
+async def test_an_oversize_file_is_linked_while_the_rest_ride_the_one_message(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """An over-cap file is still a link in the reply and reserves no upload; the files under the cap
+    are unaffected and arrive together as one message."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "here you go",
+        blob,
+        artifact=True,
+        artifact_name="huge.bin",
+        artifact_key=f"artifacts/{uuid4()}/huge.bin",
+        artifact_size=slack.SLACK_UPLOAD_MAX_BYTES + 1,
+        artifact_media_type="application/octet-stream",
+    )
+    await _seed_shared_files(
+        workspace_id, turn_id, blob, (("first.txt", None), ("second.txt", None))
+    )
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    reply = json.loads(posts[0].content)["text"]
+    assert slack.SLACK_OVERSIZE_HEADING in reply
+    assert "huge.bin" in reply
+    assert _shared_files(recorder) == [
+        [
+            {"id": _file_id("first.txt"), "title": "first.txt"},
+            {"id": _file_id("second.txt"), "title": "second.txt"},
+        ]
+    ]
+    reserved = [
+        parse_qs(r.content.decode())["filename"][0]
+        for r in recorder
+        if str(r.url) == slack.SLACK_FILES_GET_UPLOAD_URL
+    ]
+    assert reserved == ["first.txt", "second.txt"]
+
+
+async def test_a_share_past_the_per_message_cap_takes_the_fewest_messages(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Slack takes only so many files in one share, so a larger share is cut into the fewest
+    messages it will accept — full messages first, share order unbroken across them."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "the batch", blob, artifact=False)
+    names = tuple(f"file-{index:02d}.txt" for index in range(slack.SLACK_ATTACH_MAX_FILES + 1))
+    await _seed_shared_files(workspace_id, turn_id, blob, tuple((name, None) for name in names))
+
+    await app.state.writeback_poller.drain()
+
+    shared = _shared_files(recorder)
+    assert [len(batch) for batch in shared] == [slack.SLACK_ATTACH_MAX_FILES, 1]
+    assert [file["id"] for batch in shared for file in batch] == [_file_id(n) for n in names]
 
 
 async def _seed_spoken_reply(
@@ -5222,7 +5472,7 @@ async def test_writeback_streams_a_dm_attachment_into_the_threaded_reply(
     assert len(completes) == 1
     complete_body = json.loads(completes[0].content)
     assert (complete_body["channel_id"], complete_body["thread_ts"]) == ("D5", "100.5")
-    assert complete_body["files"] == [{"id": "F1", "title": "report.pdf"}]
+    assert complete_body["files"] == [{"id": _file_id("report.pdf"), "title": "report.pdf"}]
     assert await _dm_anchors(workspace_id) == []
 
 
