@@ -15,6 +15,7 @@ from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
+import lz4.frame
 import pytest
 import sqlalchemy as sa
 import ufo_ext_todos as todos
@@ -160,7 +161,7 @@ from ufo.surfaces import hub_tail
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.tools.context import ToolContext
-from ufo.transcript import Conversation
+from ufo.transcript import CompactionSummary, CompactionWindow, Conversation, compaction_key
 from ufo.workspace import ws
 from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges
 
@@ -869,6 +870,37 @@ async def _write_transcript(
         ).scalar_one()
     with ws(workspace_id):
         await Transcript(blob=blob, conversation_id=conversation_id).write(conversation)
+
+
+async def _write_compaction(
+    blob: WorkspaceBlobStore,
+    conversation_id: UUID,
+    index: int,
+    before: tuple[Message, ...],
+    after: tuple[Message, ...],
+) -> None:
+    async with workspace_tx() as connection:
+        workspace_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.workspace_id).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+    summary = CompactionSummary(intent="", current_work="", next_step="")
+    with ws(workspace_id):
+        await blob.put(
+            compaction_key(conversation_id, index, "before"),
+            lz4.frame.compress(CompactionWindow(messages=before).model_dump_json().encode()),
+        )
+        await blob.put(
+            compaction_key(conversation_id, index, "after"),
+            lz4.frame.compress(CompactionWindow(messages=after).model_dump_json().encode()),
+        )
+        await blob.put(
+            compaction_key(conversation_id, index, "summary"),
+            lz4.frame.compress(summary.model_dump_json().encode()),
+        )
 
 
 @pytest.fixture(scope="session")
@@ -9220,11 +9252,13 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
 
     for conversation_id in (theirs, room, uuid4()):
         for token in (token_m, token_admin):
-            denied = await client.get(
-                f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
-                headers={"cookie": f"{SESSION_COOKIE}={token}"},
-            )
-            assert denied.status_code == 404
+            for page in ("", "/1"):
+                denied = await client.get(
+                    f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
+                    + page,
+                    headers={"cookie": f"{SESSION_COOKIE}={token}"},
+                )
+                assert denied.status_code == 404
     crossed = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
@@ -9237,6 +9271,345 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
     assert malformed.status_code == 404
     anonymous = await client.get(f"/surface/web/agents/{agent_id}/conversations/{mine}/transcript")
     assert anonymous.status_code == 401
+
+
+async def test_a_compacted_conversation_pages_its_earlier_messages(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A compacted transcript states its tail and, in `earlier`, how many pages stand above it.
+    Each page answers the messages its compaction replaced, less the kept tail the next window
+    already shows, so pages and tail concatenate without a repeat or a gap; the summary message a
+    compaction wrote draws no bubble on either read. An index outside the records is not found."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="first reply"),
+    )
+    second = await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=2, inbound="second ask"
+    )
+    third = await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=3, inbound="third ask"
+    )
+    head = (
+        Message(role="user", content=f"<context>\nmessage_ref: {first}\n</context>\nfirst ask"),
+        Message(role="assistant", content="first reply"),
+    )
+    tail = (
+        Message(role="user", content=f"<context>\nmessage_ref: {second}\n</context>\nsecond ask"),
+        Message(role="assistant", content="second reply"),
+    )
+    summary = Message(role="user", content="Compacted context:\nthe head, summarized")
+    await _write_compaction(blob, conversation_id, 1, before=(*head, *tail), after=(summary, *tail))
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=3,
+            messages=(
+                summary,
+                *tail,
+                Message(
+                    role="user", content=f"<context>\nmessage_ref: {third}\n</context>\nthird ask"
+                ),
+                Message(role="assistant", content="third reply"),
+            ),
+        ),
+    )
+
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
+    read = await client.get(path, headers=headers)
+    assert read.status_code == 200
+    assert read.json() == {
+        "messages": [
+            {"role": "user", "text": "second ask"},
+            {"role": "assistant", "text": "second reply"},
+            {"role": "user", "text": "third ask"},
+            {"role": "assistant", "text": "third reply"},
+        ],
+        "earlier": 1,
+    }
+
+    page = await client.get(path + "/1", headers=headers)
+    assert page.status_code == 200
+    assert page.json() == {
+        "messages": [
+            {"role": "user", "text": "first ask"},
+            {"role": "assistant", "text": "first reply"},
+        ]
+    }
+
+    own = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=headers,
+    )
+    assert own.status_code == 200
+    assert own.json()["earlier"] == 1
+
+    for absent in ("0", "2", "one"):
+        missing = await client.get(path + "/" + absent, headers=headers)
+        assert missing.status_code == 404
+
+
+async def test_earlier_names_only_records_the_transcript_reflects(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A compaction record can exist without ever reaching the transcript: a turn that compacted
+    and then ended non-done keeps the pre-compaction transcript, and the next compaction
+    summarizes from that fuller window, shadowing the orphaned record. The tail then already
+    holds everything such a record replaced, so `earlier` names only the newest record the
+    transcript opens with — nothing while the transcript is unreflective, and never a shadowed
+    record from the page above it."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="first reply"),
+    )
+    second = await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=2, inbound="second ask"
+    )
+    history = (
+        Message(role="user", content=f"<context>\nmessage_ref: {first}\n</context>\nfirst ask"),
+        Message(role="assistant", content="first reply"),
+        Message(role="user", content=f"<context>\nmessage_ref: {second}\n</context>\nsecond ask"),
+        Message(role="assistant", content="second reply"),
+    )
+    orphaned = Message(role="user", content="Compacted context:\nnever landed")
+    await _write_compaction(
+        blob, conversation_id, 1, before=history[:2], after=(orphaned, *history[1:2])
+    )
+    await _write_transcript(blob, conversation_id, Conversation(seq=2, messages=history))
+
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
+    repaired = await client.get(path, headers=headers)
+    assert repaired.status_code == 200
+    assert "earlier" not in repaired.json()
+
+    third = await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=3, inbound="third ask"
+    )
+    late = (
+        Message(role="user", content=f"<context>\nmessage_ref: {third}\n</context>\nthird ask"),
+        Message(role="assistant", content="third reply"),
+    )
+    summary = Message(role="user", content="Compacted context:\nthe fuller window, summarized")
+    await _write_compaction(
+        blob, conversation_id, 2, before=(*history, *late), after=(summary, *late)
+    )
+    await _write_transcript(blob, conversation_id, Conversation(seq=3, messages=(summary, *late)))
+
+    compacted = await client.get(path, headers=headers)
+    assert compacted.status_code == 200
+    assert compacted.json() == {
+        "messages": [
+            {"role": "user", "text": "third ask"},
+            {"role": "assistant", "text": "third reply"},
+        ],
+        "earlier": 2,
+    }
+    page = await client.get(path + "/2", headers=headers)
+    assert page.status_code == 200
+    assert page.json() == {
+        "messages": [
+            {"role": "user", "text": "first ask"},
+            {"role": "assistant", "text": "first reply"},
+            {"role": "user", "text": "second ask"},
+            {"role": "assistant", "text": "second reply"},
+        ]
+    }
+
+
+async def test_pages_chain_upward_through_their_records(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """Each page names the page above it: the newest older record its own window opens with. The
+    pane follows that chain instead of counting records, so twice-compacted history reads back
+    whole — page one, page two, tail — with no message repeated or skipped."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="first reply"),
+    )
+    turns = [first] + [
+        await _seed_listed_turn(
+            workspace_id, conversation_id, agent_id, seq=seq, inbound=f"ask {seq}"
+        )
+        for seq in (2, 3, 4)
+    ]
+    rounds = [
+        (
+            Message(
+                role="user", content=f"<context>\nmessage_ref: {turn}\n</context>\nask {at + 1}"
+            ),
+            Message(role="assistant", content=f"reply {at + 1}"),
+        )
+        for at, turn in enumerate(turns)
+    ]
+    first_summary = Message(role="user", content="Compacted context:\nrounds one and two")
+    second_summary = Message(role="user", content="Compacted context:\nthrough round three")
+    await _write_compaction(
+        blob,
+        conversation_id,
+        1,
+        before=(*rounds[0], *rounds[1]),
+        after=(first_summary, *rounds[1]),
+    )
+    await _write_compaction(
+        blob,
+        conversation_id,
+        2,
+        before=(first_summary, *rounds[1], *rounds[2]),
+        after=(second_summary, *rounds[2]),
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(seq=4, messages=(second_summary, *rounds[2], *rounds[3])),
+    )
+
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
+    read = await client.get(path, headers=headers)
+    assert read.status_code == 200
+    assert read.json() == {
+        "messages": [
+            {"role": "user", "text": "ask 3"},
+            {"role": "assistant", "text": "reply 3"},
+            {"role": "user", "text": "ask 4"},
+            {"role": "assistant", "text": "reply 4"},
+        ],
+        "earlier": 2,
+    }
+    upper = await client.get(path + "/2", headers=headers)
+    assert upper.status_code == 200
+    assert upper.json() == {
+        "messages": [
+            {"role": "user", "text": "ask 2"},
+            {"role": "assistant", "text": "reply 2"},
+        ],
+        "earlier": 1,
+    }
+    top = await client.get(path + "/1", headers=headers)
+    assert top.status_code == 200
+    assert top.json() == {
+        "messages": [
+            {"role": "user", "text": "ask 1"},
+            {"role": "assistant", "text": "reply 1"},
+        ]
+    }
+
+
+async def test_history_pages_answer_at_the_chat_reach(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A member-private extension conversation grants its agent chat without a panel, and the
+    member-chat transcript serves it — so the pages that transcript advertises answer for the same
+    conversation, while another member stays refused."""
+    client, workspace_id, _agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "n@example.com")
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    sweep_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=sweep_agent,
+                workspace_id=workspace_id,
+                name="sweep",
+                prompt="brief daily",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        sweep_agent,
+        queue_key=f"daily-brief:{member_id}",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="extension:sweep",
+    )
+    older = await _seed_listed_turn(
+        workspace_id, conversation_id, sweep_agent, seq=1, inbound="older ask"
+    )
+    briefed = await _seed_listed_turn(
+        workspace_id, conversation_id, sweep_agent, seq=2, inbound="brief me"
+    )
+    tail = (
+        Message(role="user", content=f"<context>\nmessage_ref: {briefed}\n</context>\nbrief me"),
+        Message(role="assistant", content="today's brief"),
+    )
+    summary = Message(role="user", content="Compacted context:\nolder briefs")
+    await _write_compaction(
+        blob,
+        conversation_id,
+        1,
+        before=(
+            Message(role="user", content=f"<context>\nmessage_ref: {older}\n</context>\nolder ask"),
+            *tail,
+        ),
+        after=(summary, *tail),
+    )
+    await _write_transcript(blob, conversation_id, Conversation(seq=2, messages=(summary, *tail)))
+
+    own = await client.get(
+        f"/surface/web/agents/{sweep_agent}/transcript?conversation={conversation_id}",
+        headers=headers,
+    )
+    assert own.status_code == 200
+    assert own.json()["earlier"] == 1
+
+    path = f"/surface/web/agents/{sweep_agent}/conversations/{conversation_id}/transcript/1"
+    page = await client.get(path, headers=headers)
+    assert page.status_code == 200
+    assert page.json() == {"messages": [{"role": "user", "text": "older ask"}]}
+
+    refused = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={other_token}"})
+    assert refused.status_code == 404
+
+    shared = await _seed_agent_conversation(
+        workspace_id,
+        sweep_agent,
+        queue_key="sweep-room",
+        audience="shared",
+        member_id=None,
+    )
+    await _write_compaction(
+        blob,
+        shared,
+        1,
+        before=(Message(role="user", content="shared ask"),),
+        after=(Message(role="user", content="Compacted context:\nshared"),),
+    )
+    for tail_route in ("/transcript", "/transcript/1"):
+        parity = await client.get(
+            f"/surface/web/agents/{sweep_agent}/conversations/{shared}{tail_route}",
+            headers=headers,
+        )
+        assert parity.status_code == 404
 
 
 async def _acknowledge(

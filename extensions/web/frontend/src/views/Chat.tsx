@@ -39,6 +39,7 @@ import { COLUMN } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
+import { useEarlierMessages } from "@/lib/earlier";
 import { takePendingAsk } from "@/lib/pendingAsk";
 import {
   answerQuestions,
@@ -118,6 +119,12 @@ export function Chat({
     wasBusy.current = state.busy;
   }, [onSettled, state.busy]);
 
+  const earlier = useEarlierMessages(
+    conversationId === null
+      ? null
+      : "/agents/" + agent.id + "/conversations/" + conversationId + "/transcript",
+    state.earlier,
+  );
   const messages = state.messages;
   const showEmpty = messages !== null && !messages.length && !state.busy && !state.live;
   const stalled = messages === null ? state.fault : null;
@@ -129,6 +136,7 @@ export function Chat({
       <TranscriptPane className="flex-1">
         <MessageLog
           messages={messages ?? []}
+          earlier={earlier}
           live={state.live}
           className={cn(COLUMN, "p-2xl")}
           question={(question) => (

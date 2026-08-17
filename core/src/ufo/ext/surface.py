@@ -99,6 +99,7 @@ from ufo.image_previews import (
     raster_image_media_type,
 )
 from ufo.listings import page_of, page_query
+from ufo.models.interface import Message
 from ufo.o11y import log, warn
 from ufo.sandbox.containment import contained_leaf
 from ufo.sandbox.conversation import (
@@ -143,6 +144,7 @@ from ufo.transcript import (
     CompactionRecord,
     Conversation,
     decode,
+    read_compaction_after,
     read_compaction_record,
     transcript_key,
 )
@@ -3457,6 +3459,16 @@ class SurfaceContext:
         if not await self._owned_conversation(conversation_id):
             return None
         return await read_compaction_record(self.blob, conversation_id, index)
+
+    async def read_compaction_after(
+        self, conversation_id: UUID, index: int
+    ) -> tuple[Message, ...] | None:
+        """One compaction's `after` window alone — the summary plus the kept tail, the light half a
+        reader compares a later window's opening against — or None when the conversation is not
+        this workspace's or the index holds no record."""
+        if not await self._owned_conversation(conversation_id):
+            return None
+        return await read_compaction_after(self.blob, conversation_id, index)
 
     async def list_workspace_files(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
         """Member-visible files in the conversation's `/workspace` — the sandbox's live state with

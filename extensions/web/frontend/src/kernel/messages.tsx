@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
 import { IconChevronRight } from "@tabler/icons-react";
 
@@ -25,6 +33,7 @@ import { Reveal } from "@/components/ui/reveal";
 import { speakerName } from "@/lib/audience";
 import { brailleOf, randomCell } from "@/lib/braille";
 import { cn } from "@/lib/cn";
+import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
 import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
@@ -87,6 +96,100 @@ export function useTakeMeToTheFoot(): () => void {
   return scrollToEnd;
 }
 
+/** The element whose scrollbar moves this node: the nearest ancestor that scrolls its overflow —
+ *  the live chat's own pane, a linked conversation's column — or the page itself when nothing
+ *  nearer does. */
+function scrollerOf(node: Element): Element {
+  for (let held = node.parentElement; held !== null; held = held.parentElement) {
+    const overflow = getComputedStyle(held).overflowY;
+    if (overflow === "auto" || overflow === "scroll") return held;
+  }
+  return document.scrollingElement ?? document.documentElement;
+}
+
+/** Where a node stands in its scroller's content, independent of how far that content is
+ *  scrolled — the page scroller's own rect already carries its scroll, an inner pane's does
+ *  not. */
+function placeOf(node: Element, scroller: Element): number {
+  const top = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  return scroller === document.scrollingElement ? top : top + scroller.scrollTop;
+}
+
+/** A transcript read back opens at its end, the way the live chat's pane lands there: the newest
+ *  thing is the thing being said. The pane decides that for itself; a transcript standing in a
+ *  column or page that scrolls has no pane, so the opening scroll is stated here, once, on
+ *  mount. */
+export function OpenedAtTheFoot({ children }: { children: ReactNode }) {
+  const held = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = held.current;
+    if (node === null) return;
+    const scroller = scrollerOf(node);
+    scroller.scrollTop = scroller.scrollHeight;
+  }, []);
+  return <div ref={held}>{children}</div>;
+}
+
+/** The row above the oldest loaded message of a compacted conversation. Scrolled into view, it
+ *  loads the page above and holds the line being read exactly where it was — the next page's
+ *  height is added above the reading line, so the same height is put back on the scroller. The
+ *  measure anchors on the row's next sibling rather than the scroller's height: a reply streaming
+ *  in below would otherwise ride into the correction. A load that failed stops watching and waits
+ *  to be pressed, so a dead route is asked once rather than on every scroll. Once every page is
+ *  in, the row stays as an empty item rather than unmounting: the last page's correction runs in
+ *  the very commit that draws the page, and only a mounted row can run it. */
+function EarlierRow({ earlier }: { earlier: EarlierMessages }) {
+  const row = useRef<HTMLDivElement>(null);
+  const held = useRef<{ scroller: Element; anchor: Element; place: number } | null>(null);
+  const load = () => {
+    const node = row.current;
+    if (node === null) return;
+    const anchor = node.nextElementSibling;
+    if (anchor !== null) {
+      const scroller = scrollerOf(node);
+      held.current = { scroller, anchor, place: placeOf(anchor, scroller) };
+    }
+    earlier.load();
+  };
+  const latest = useRef(load);
+  latest.current = load;
+  const watching = earlier.more && !earlier.loading && !earlier.failed;
+  useEffect(() => {
+    const node = row.current;
+    if (!watching || node === null) return;
+    const watcher = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) latest.current();
+    });
+    watcher.observe(node);
+    return () => watcher.disconnect();
+  }, [watching, earlier.pages.length]);
+  useLayoutEffect(() => {
+    const kept = held.current;
+    if (kept === null) return;
+    held.current = null;
+    kept.scroller.scrollTop += placeOf(kept.anchor, kept.scroller) - kept.place;
+  }, [earlier.pages.length]);
+  if (earlier.failed) {
+    return (
+      <MessageScrollerItem ref={row}>
+        <Marker render={<button type="button" onClick={load} />}>
+          <MarkerContent>Couldn't load earlier messages — retry</MarkerContent>
+        </Marker>
+      </MessageScrollerItem>
+    );
+  }
+  if (earlier.loading || earlier.more) {
+    return (
+      <MessageScrollerItem ref={row}>
+        <Marker>
+          <MarkerContent>{earlier.loading ? "Loading earlier messages…" : null}</MarkerContent>
+        </Marker>
+      </MessageScrollerItem>
+    );
+  }
+  return <MessageScrollerItem ref={row} />;
+}
+
 /** One conversation's messages, as a column of rows. It draws no scroll region: a live chat hangs
  *  it in a `TranscriptPane`, a transcript read back hangs it straight in the page that scrolls it.
  *
@@ -126,6 +229,7 @@ export function useTakeMeToTheFoot(): () => void {
  *  handoff, an empty state — so nothing floats over the conversation in a pane of its own. */
 export function MessageLog({
   messages,
+  earlier,
   live = null,
   question,
   onOpenArtifacts,
@@ -133,6 +237,10 @@ export function MessageLog({
   children,
 }: {
   messages: Spoken[];
+  /** The compacted-away pages above `messages`, for a conversation that has them: the loaded ones
+   *  draw above the tail, and the row over the oldest brings in the next as the reader scrolls
+   *  up. A pane without one draws the tail as the whole conversation. */
+  earlier?: EarlierMessages;
   live?: LiveTurn | null;
   question?: (asked: ChatQuestion) => ReactNode;
   onOpenArtifacts?: () => void;
@@ -152,13 +260,13 @@ export function MessageLog({
     ...(live ? [{ at: settled.length, live }] : []),
     ...queued.map((said, index) => ({ at: settled.length + (live ? 1 : 0) + index, said })),
   ];
-  const bubble = (message: Spoken, index: number) =>
+  const bubble = (message: Spoken, key: string) =>
     message.role === "error" ? (
-      <MessageScrollerItem key={index} messageId={"m" + String(index)}>
+      <MessageScrollerItem key={key} messageId={key}>
         <Meta>{message.text}</Meta>
       </MessageScrollerItem>
     ) : (
-      <MessageScrollerItem key={index} messageId={"m" + String(index)}>
+      <MessageScrollerItem key={key} messageId={key}>
         <Speech mine={message.role === "user"}>
           {message.role === "user" && message.speaker ? (
             <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
@@ -191,9 +299,16 @@ export function MessageLog({
     );
   return (
     <MessageScrollerContent className={className} aria-busy={live !== null}>
+      {earlier &&
+      (earlier.pages.length > 0 || earlier.more || earlier.loading || earlier.failed) ? (
+        <EarlierRow earlier={earlier} />
+      ) : null}
+      {earlier?.pages.flatMap((page) =>
+        page.messages.map((said, at) => bubble(said, "h" + page.index + ":" + at)),
+      )}
       {rows.map((row) =>
         row.live ? (
-          <MessageScrollerItem key={row.at} messageId={"m" + String(row.at)}>
+          <MessageScrollerItem key={"m" + String(row.at)} messageId={"m" + String(row.at)}>
             <Speech mine={false}>
               <Activity
                 events={row.live.events}
@@ -217,7 +332,7 @@ export function MessageLog({
             </Speech>
           </MessageScrollerItem>
         ) : (
-          bubble(row.said, row.at)
+          bubble(row.said, "m" + String(row.at))
         ),
       )}
       {children}

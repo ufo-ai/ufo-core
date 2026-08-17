@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { MessageLog, TranscriptScroll } from "@/kernel/messages";
+import type { EarlierMessages } from "@/lib/earlier";
 import { ConversationTranscript } from "@/views/Conversations";
 
 import {
@@ -2100,6 +2102,168 @@ test("a streamed chunk never steals focus from where the member put it", async (
   StreamFake.last().emit("message", { text: "chunk" });
   await screen.findByText(saying("chunk"));
   expect(document.activeElement).toBe(elsewhere);
+});
+
+/** The transcript of a compacted conversation is only the tail; `earlier` names the page of
+ *  compacted-away messages standing above it, and each page's response names the one above it —
+ *  the chain is the server's to state. The row over the oldest loaded message brings the next
+ *  page in when it is seen — the test's IntersectionObserver sees everything at once, so the
+ *  pages land unprompted — and each reads above the tail in order, the loading row gone and no
+ *  further page asked for once a response names none. */
+test("a compacted conversation pages its earlier messages in above the tail", async () => {
+  const { calls } = wire({
+    "/transcript/2": () =>
+      json({
+        messages: [
+          { role: "user", text: "second ask" },
+          { role: "assistant", text: "second reply" },
+        ],
+        earlier: 1,
+      }),
+    "/transcript/1": () =>
+      json({
+        messages: [
+          { role: "user", text: "first ask" },
+          { role: "assistant", text: "first reply" },
+        ],
+      }),
+    ...transcript({
+      messages: [
+        { role: "user", text: "third ask" },
+        { role: "assistant", text: "third reply" },
+      ],
+      earlier: 2,
+    }),
+  });
+  open();
+
+  expect(await screen.findByText("first reply")).toBeTruthy();
+  const log = screen.getByTestId("log").textContent ?? "";
+  expect(log.indexOf("first ask")).toBeGreaterThanOrEqual(0);
+  expect(log.indexOf("first ask")).toBeLessThan(log.indexOf("second ask"));
+  expect(log.indexOf("second ask")).toBeLessThan(log.indexOf("third ask"));
+  expect(screen.queryByText("Loading earlier messages…")).toBeNull();
+  expect(calls.filter((url) => url.includes("/transcript/"))).toEqual([
+    "/surface/web/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/transcript/2",
+    "/surface/web/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/transcript/1",
+  ]);
+});
+
+/** The reply being written and the reply that landed are one row in one list: the pane follows
+ *  the element, so a row rebuilt at the end of every turn would take the transcript back to the
+ *  top with it. The streamed row and the settled one must share a key. */
+test("the reply that landed keeps the streaming row's element", async () => {
+  wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
+  open();
+  await screen.findByText("Review PR 1268.");
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "landed words" });
+  const streamed = await screen.findByText(saying("landed words"));
+  const row = streamed.closest("[data-slot=message-scroller-item]");
+  expect(row).toBeTruthy();
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+  await waitFor(() => expect(screen.getByRole("log").getAttribute("aria-busy")).toBe("false"));
+  const settled = screen
+    .getByText(saying("landed words"))
+    .closest("[data-slot=message-scroller-item]");
+  expect(settled).toBe(row);
+});
+
+test("a conversation that never compacted asks for no pages", async () => {
+  const { calls } = wire(transcript({ messages: [{ role: "assistant", text: "Done." }] }));
+  open();
+  await screen.findByText("Done.");
+  expect(calls.filter((url) => url.includes("/transcript/"))).toEqual([]);
+});
+
+/** jsdom lays nothing out, so the geometry of a page landing is stated by hand: a pane showing
+ *  three hundred pixels, every row a hundred tall at its index. Loading a page adds its height
+ *  above the line being read, and the row puts exactly that height back on the scroller — here
+ *  two rows, two hundred pixels — including for the last page, whose correction runs in the very
+ *  commit that empties the row. */
+test("loading a page above holds the line being read where it was", async () => {
+  const load = vi.fn();
+  const earlier: EarlierMessages = { pages: [], more: true, loading: false, failed: true, load };
+  const log = (state: EarlierMessages) => (
+    <div data-testid="pane" style={{ overflowY: "auto" }}>
+      <TranscriptScroll>
+        <MessageLog
+          messages={[
+            { role: "user", text: "third ask" },
+            { role: "assistant", text: "third reply" },
+          ]}
+          earlier={state}
+        />
+      </TranscriptScroll>
+    </div>
+  );
+  const view = render(log(earlier));
+  const pane = screen.getByTestId("pane");
+  const box = (top: number, height: number) =>
+    ({ top, bottom: top + height, height, left: 0, right: 0, width: 0, x: 0, y: top }) as DOMRect;
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: Element,
+  ) {
+    if (this === pane) return box(0, 300);
+    if ((this as HTMLElement).dataset?.slot !== "message-scroller-item") return box(0, 0);
+    let above = 0;
+    for (let held = this.previousElementSibling; held; held = held.previousElementSibling) {
+      above += 1;
+    }
+    return box(above * 100 - pane.scrollTop, 100);
+  });
+  pane.scrollTop = 0;
+
+  await userEvent.click(screen.getByText("Couldn't load earlier messages — retry"));
+  expect(load).toHaveBeenCalledTimes(1);
+  view.rerender(
+    log({
+      pages: [
+        {
+          index: 1,
+          messages: [
+            { role: "user", text: "first ask" },
+            { role: "assistant", text: "first reply" },
+          ],
+        },
+      ],
+      more: false,
+      loading: false,
+      failed: false,
+      load,
+    }),
+  );
+  expect(pane.scrollTop).toBe(200);
+});
+
+/** The read-back transcript pages the same way, and a page that would not come stops asking: the
+ *  row states what happened and waits to be pressed rather than retrying against the same answer
+ *  on every scroll. */
+test("a transcript read back retries a failed page only when pressed", async () => {
+  const load = vi.fn();
+  render(
+    <ConversationTranscript
+      title="Review PR 1268"
+      messages={[{ role: "assistant", text: "tail reply" }]}
+      earlier={{
+        pages: [{ index: 1, messages: [{ role: "user", text: "first ask" }] }],
+        more: true,
+        loading: false,
+        failed: true,
+        load,
+      }}
+    />,
+  );
+  const texts = screen.getByRole("log").textContent ?? "";
+  expect(texts.indexOf("first ask")).toBeLessThan(texts.indexOf("tail reply"));
+  expect(load).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByText("Couldn't load earlier messages — retry"));
+  expect(load).toHaveBeenCalledTimes(1);
 });
 
 /** The live chat gives the conversation a height of its own and scrolls it there. A transcript read

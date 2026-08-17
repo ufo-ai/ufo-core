@@ -149,6 +149,22 @@ def decode_compaction(index: int, before: bytes, after: bytes, summary: bytes) -
         raise TranscriptDecodeError(str(error)) from error
 
 
+async def read_compaction_after(
+    blob: BlobStore, conversation_id: UUID, index: int
+) -> tuple[Message, ...] | None:
+    """One compaction's `after` window alone — the summary message plus the kept tail. It is the
+    small half of the record, so a reader checking whether a later window opens with it pays one
+    light fetch instead of decoding the full pre-compaction history."""
+    try:
+        body = await blob.get(compaction_key(conversation_id, index, "after"))
+    except BlobNotFound:
+        return None
+    try:
+        return CompactionWindow.model_validate_json(lz4.frame.decompress(body)).messages
+    except (ValueError, RuntimeError) as error:
+        raise TranscriptDecodeError(str(error)) from error
+
+
 async def read_compaction_record(
     blob: BlobStore, conversation_id: UUID, index: int
 ) -> CompactionRecord | None:

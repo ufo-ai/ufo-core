@@ -1298,9 +1298,84 @@ def _rendered_messages(
     return rendered
 
 
+@dataclass(frozen=True)
+class _TranscriptAids:
+    """Everything the transcript renderer needs beside the messages themselves — subagent runs,
+    speaker and question attribution, shared files, and whether the conversation ran a profile —
+    gathered once so the live window and an earlier page render one message identically."""
+
+    subagents: SubagentRuns
+    turn_ids: frozenset[str]
+    agent_origin: frozenset[str]
+    speakers: dict[str, str]
+    asked: dict[str, str]
+    files: dict[str, list[dict[str, object]]]
+    run_conversation: bool
+
+    def render(
+        self,
+        messages: tuple[Message, ...],
+        asking: Mapping[str, dict[str, object]] | None = None,
+    ) -> list[dict[str, object]]:
+        rendered = _rendered_messages(
+            messages,
+            self.subagents,
+            self.turn_ids,
+            self.agent_origin,
+            self.speakers,
+            asking,
+            self.asked,
+            self.files,
+        )
+        if self.run_conversation:
+            for reply in rendered:
+                if reply["role"] == "assistant":
+                    reply["text"] = _run_answer(str(reply["text"]))
+        return rendered
+
+
+async def _transcript_aids(
+    ctx: SurfaceContext,
+    conversation_id: UUID,
+    viewer: UUID,
+    agent_origin: frozenset[str],
+    speakers: dict[str, str],
+    asked: dict[str, str],
+) -> _TranscriptAids:
+    turns, spawned, shared = await asyncio.gather(
+        ctx.list_turns(conversation_id),
+        ctx.conversation_subagent_turns(conversation_id),
+        ctx.list_conversation_artifacts(conversation_id, limit=CONVERSATION_ARTIFACTS_MAX),
+    )
+    files: dict[str, list[dict[str, object]]] = {}
+    for entry in reversed(shared):
+        files.setdefault(str(entry.turn_id), []).append(_file_payload(ctx, entry.artifact))
+    return _TranscriptAids(
+        subagents=await _subagent_nodes(ctx, spawned),
+        turn_ids=frozenset(str(turn.id) for turn in turns),
+        agent_origin=agent_origin,
+        speakers=speakers
+        | {
+            str(turn.id): turn.context.sender
+            for turn in turns
+            if turn.context is not None
+            and turn.context.sender is not None
+            and turn.speaker_member_id != viewer
+        },
+        asked=asked
+        | {
+            str(turn.id): turn.context.question
+            for turn in turns
+            if turn.context is not None and turn.context.question is not None
+        },
+        files=files,
+        run_conversation=any(turn.subagent_profile is not None for turn in turns),
+    )
+
+
 async def _conversation_messages(
     ctx: SurfaceContext, conversation_id: UUID, viewer: UUID
-) -> tuple[list[dict[str, object]], Turn | None]:
+) -> tuple[list[dict[str, object]], Turn | None, int]:
     """One conversation as every portal surface renders it — the live chat, the read-only
     transcript an agent's conversations open, and a subagent run's own page: the engine's
     `<context>` framing stripped, tool results elided, and each reply carrying the work it did,
@@ -1342,11 +1417,17 @@ async def _conversation_messages(
 
     A question stands on the reply that asked it, because that is the reply it answers. Only the
     newest committed turn's: a later turn supersedes what an earlier one asked, so an older
-    question is a choice the member no longer has."""
-    recorded, agent_origin, spoken = await asyncio.gather(
+    question is a choice the member no longer has.
+
+    A compacted conversation's live transcript starts at its newest summary, so this projection
+    states the conversation's tail and, in `earlier`, the compaction record standing directly
+    above it — the newest one whose kept window the transcript opens with, served by
+    `_history_messages` as the reader scrolls up, each page naming the one above it in turn."""
+    recorded, agent_origin, spoken, compactions = await asyncio.gather(
         ctx.read_transcript(conversation_id),
         ctx.agent_origin_refs(conversation_id),
         ctx.arrival_speakers(conversation_id),
+        ctx.list_compactions(conversation_id),
     )
     speakers = {
         str(arrival.id): arrival.sender
@@ -1368,43 +1449,13 @@ async def _conversation_messages(
             }
     if recorded is None:
         rendered: list[dict[str, object]] = []
+        earlier = 0
     else:
-        turns, spawned, shared = await asyncio.gather(
-            ctx.list_turns(conversation_id),
-            ctx.conversation_subagent_turns(conversation_id),
-            ctx.list_conversation_artifacts(conversation_id, limit=CONVERSATION_ARTIFACTS_MAX),
-        )
-        files: dict[str, list[dict[str, object]]] = {}
-        for entry in reversed(shared):
-            files.setdefault(str(entry.turn_id), []).append(_file_payload(ctx, entry.artifact))
-        rendered = _rendered_messages(
-            recorded.messages,
-            await _subagent_nodes(ctx, spawned),
-            frozenset(str(turn.id) for turn in turns),
-            agent_origin,
-            speakers
-            | {
-                str(turn.id): turn.context.sender
-                for turn in turns
-                if turn.context is not None
-                and turn.context.sender is not None
-                and turn.speaker_member_id != viewer
-            },
-            asking,
-            asked
-            | {
-                str(turn.id): turn.context.question
-                for turn in turns
-                if turn.context is not None and turn.context.question is not None
-            },
-            files,
-        )
-        if any(turn.subagent_profile is not None for turn in turns):
-            for reply in rendered:
-                if reply["role"] == "assistant":
-                    reply["text"] = _run_answer(str(reply["text"]))
+        aids = await _transcript_aids(ctx, conversation_id, viewer, agent_origin, speakers, asked)
+        rendered = aids.render(recorded.messages, asking)
+        earlier = await _verified_earlier(ctx, conversation_id, compactions, recorded.messages)
     if detail is None:
-        return rendered, None
+        return rendered, None, earlier
     if detail.turn.terminal is None and str(detail.turn.id) not in agent_origin:
         prompt: dict[str, object] = {
             "role": "user",
@@ -1441,7 +1492,62 @@ async def _conversation_messages(
         ):
             bubble["arrival_id"] = str(arrival.id)
         rendered.append(bubble)
-    return rendered, detail.turn
+    return rendered, detail.turn, earlier
+
+
+async def _verified_earlier(
+    ctx: SurfaceContext,
+    conversation_id: UUID,
+    indices: tuple[int, ...],
+    messages: tuple[Message, ...],
+) -> int:
+    """The newest compaction record `messages` actually opens with — its `after` window is their
+    prefix — or 0 when none is. A record can exist without ever reaching the transcript: a turn
+    that compacted and then ended non-done keeps the pre-compaction transcript
+    (`TranscriptRepair.persist_inbound`), and the next compaction then summarizes from that fuller
+    window, shadowing the orphaned record. Counting records would page those in as messages the
+    window below already shows, so a page is advertised only when the chain to it holds."""
+    for index in sorted(indices, reverse=True):
+        after = await ctx.read_compaction_after(conversation_id, index)
+        if after and messages[: len(after)] == after:
+            return index
+    return 0
+
+
+async def _history_messages(
+    ctx: SurfaceContext, conversation_id: UUID, viewer: UUID, index: int
+) -> tuple[list[dict[str, object]], int] | None:
+    """One earlier page of a compacted conversation and the index of the page above it (0 when
+    none), or None when this index holds no record.
+
+    A compaction record's `before` is the whole window the compaction replaced, and its `after` is
+    the summary plus the tail it kept verbatim — messages the window after it (the next record's
+    `before`, or the live transcript) opens with. The page is therefore `before` less that kept
+    tail: pages and the live projection concatenate without a message repeating or going missing,
+    whichever page the reader has scrolled to. The page above is the newest older record this
+    page's `before` opens with — the same verified chain `earlier` states for the tail — so the
+    reader is never handed a page the one below already restates. Rendered with the same aids as
+    the live window, so a message reads the same on whichever page it stands."""
+    record = await ctx.read_compaction(conversation_id, index)
+    if record is None:
+        return None
+    kept = max(len(record.after) - 1, 0)
+    window = record.before[: len(record.before) - kept] if kept else record.before
+    agent_origin, spoken = await asyncio.gather(
+        ctx.agent_origin_refs(conversation_id),
+        ctx.arrival_speakers(conversation_id),
+    )
+    speakers = {
+        str(arrival.id): arrival.sender
+        for arrival in spoken
+        if arrival.sender is not None and arrival.speaker_member_id != viewer
+    }
+    asked = {
+        str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
+    }
+    aids = await _transcript_aids(ctx, conversation_id, viewer, agent_origin, speakers, asked)
+    above = await _verified_earlier(ctx, conversation_id, tuple(range(1, index)), record.before)
+    return aids.render(window), above
 
 
 async def transcript(ctx: SurfaceContext, request: Request) -> Response:
@@ -1469,12 +1575,16 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         is None
     ):
         return Response("no such conversation", status_code=404)
-    rendered, turn = await _conversation_messages(ctx, conversation_id, member_id)
-    if turn is None:
-        return JSONResponse({"messages": rendered})
-    if turn.terminal is None:
-        return JSONResponse({"messages": rendered, "turn": str(turn.id)})
-    return JSONResponse({"messages": rendered, **await _open_handoffs(ctx, turn.id, turn.terminal)})
+    rendered, turn, earlier = await _conversation_messages(ctx, conversation_id, member_id)
+    payload: dict[str, object] = {"messages": rendered}
+    if earlier:
+        payload["earlier"] = earlier
+    if turn is not None:
+        if turn.terminal is None:
+            payload["turn"] = str(turn.id)
+        else:
+            payload.update(await _open_handoffs(ctx, turn.id, turn.terminal))
+    return JSONResponse(payload)
 
 
 async def _open_handoffs(
@@ -2003,8 +2113,62 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     if isinstance(authorized, Response):
         return authorized
     _agent_id, conversation_id, viewer = authorized
-    rendered, _turn = await _conversation_messages(ctx, conversation_id, viewer.member_id)
-    return JSONResponse({"messages": rendered})
+    rendered, _turn, earlier = await _conversation_messages(ctx, conversation_id, viewer.member_id)
+    payload: dict[str, object] = {"messages": rendered}
+    if earlier:
+        payload["earlier"] = earlier
+    return JSONResponse(payload)
+
+
+async def _member_chat_page(
+    ctx: SurfaceContext, request: Request
+) -> tuple[UUID, UUID, "SlotViewer"] | Response:
+    """The member-chat transcript's own admission, answered for the page read it advertises: the
+    agent at the chat reach and the conversation `_member_chat` serves — a member-private
+    extension conversation grants chat with an agent no panel gate holds."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, email, audience = resolved
+    agent_id = _agent_param(request)
+    if agent_id is None or not audience.allows_chat(agent_id):
+        return Response("no such conversation", status_code=404)
+    try:
+        conversation_id = UUID(request.path_params["conversation_id"])
+    except ValueError:
+        return Response("no such conversation", status_code=404)
+    chat = await _member_chat(
+        ctx, web_extension().store, agent_id, member_id, email, conversation_id
+    )
+    if chat is None:
+        return Response("no such conversation", status_code=404)
+    return agent_id, conversation_id, SlotViewer(member_id, audience.admin)
+
+
+async def conversation_history(ctx: SurfaceContext, request: Request) -> Response:
+    """One earlier page of a conversation whose transcript has compacted. `index` names the
+    compaction record, from 1 upward; the transcript's `earlier` names the page above its tail and
+    each page's `earlier` the one above it, so the pane follows the chain upward as the reader
+    scrolls. Gated as exactly the union of the two reads that advertise a page — the conversation
+    content read, or the member's own chat transcript — so a page answers precisely where a
+    transcript that names it answers, and nowhere else."""
+    authorized = await _readable_conversation(ctx, request)
+    if isinstance(authorized, Response):
+        authorized = await _member_chat_page(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    _agent_id, conversation_id, viewer = authorized
+    index = request.path_params["index"]
+    if not index.isdigit() or int(index) < 1:
+        return Response("no such page", status_code=404)
+    page = await _history_messages(ctx, conversation_id, viewer.member_id, int(index))
+    if page is None:
+        return Response("no such page", status_code=404)
+    rendered, above = page
+    payload: dict[str, object] = {"messages": rendered}
+    if above:
+        payload["earlier"] = above
+    return JSONResponse(payload)
 
 
 @dataclass(frozen=True)
@@ -3136,6 +3300,11 @@ ROUTES = (
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/transcript",
         handler=conversation_transcript,
+    ),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/transcript/{index}",
+        handler=conversation_history,
     ),
     SurfaceRoute(
         method="GET",

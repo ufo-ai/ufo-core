@@ -49,6 +49,8 @@ export type StreamingTurn = { id: string; answering: boolean };
 
 export type ChatState = {
   messages: Bubble[] | null;
+  /** How many compacted-away pages stand above `messages`, as the transcript read stated it. */
+  earlier: number;
   busy: boolean;
   live: LiveTurn | null;
   turn: StreamingTurn | null;
@@ -65,6 +67,7 @@ export type ChatState = {
 
 const EMPTY: ChatState = {
   messages: null,
+  earlier: 0,
   busy: false,
   live: null,
   turn: null,

@@ -2723,11 +2723,14 @@ async def test_compaction_records_list_and_read_back(db: None, tmp_path) -> None
         assert record.summary == summary
         assert record.before == window
         assert await context.read_compaction(conversation_id, 3) is None
+        assert await context.read_compaction_after(conversation_id, 1) == window
+        assert await context.read_compaction_after(conversation_id, 3) is None
     foreign_workspace, _, _ = await _seed()
     foreign_context = _context(foreign_workspace, StubDbos(), blob)
     with ws(foreign_workspace):
         assert await foreign_context.list_compactions(conversation_id) == ()
         assert await foreign_context.read_compaction(conversation_id, 1) is None
+        assert await foreign_context.read_compaction_after(conversation_id, 1) is None
 
 
 async def test_workspace_files_list_and_stream_scoped_to_the_conversation(

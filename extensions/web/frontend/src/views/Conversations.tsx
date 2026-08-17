@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
 import { Moment } from "@/lib/moments";
-import { MessageLog, TranscriptScroll } from "@/kernel/messages";
+import { MessageLog, OpenedAtTheFoot, TranscriptScroll } from "@/kernel/messages";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -26,8 +26,9 @@ import {
   speakerName,
   useViewer,
 } from "@/lib/audience";
+import { useEarlierMessages, type EarlierMessages } from "@/lib/earlier";
 import type { WorkspacePlace } from "@/lib/route";
-import type { Agent, Conversation, Message } from "@/lib/types";
+import type { Agent, Conversation, Message, Transcript } from "@/lib/types";
 
 /** The one way back out of a conversation, and the only thing above the section that names it. */
 export function Back({ onBack }: { onBack: () => void }) {
@@ -378,17 +379,21 @@ export function unreadable(message: string): ReactNode {
 export function ConversationTranscript({
   title,
   messages,
+  earlier,
   onOpenArtifacts,
 }: {
   title: ReactNode;
   messages: Message[];
+  earlier?: EarlierMessages;
   onOpenArtifacts?: () => void;
 }) {
   return (
     <Section title={title}>
       {messages.length ? (
         <TranscriptScroll>
-          <MessageLog messages={messages} onOpenArtifacts={onOpenArtifacts} />
+          <OpenedAtTheFoot>
+            <MessageLog messages={messages} earlier={earlier} onOpenArtifacts={onOpenArtifacts} />
+          </OpenedAtTheFoot>
         </TranscriptScroll>
       ) : (
         <PanelBlank body="No messages in this conversation yet." />
@@ -416,7 +421,11 @@ export function ConversationDetail({
   onOpenArtifacts?: () => void;
 }) {
   const path = "/agents/" + agent.id + "/conversations/" + conversation.id;
-  const state = usePanelRead<{ messages: Message[] }>(path + "/transcript");
+  const state = usePanelRead<Transcript>(path + "/transcript");
+  const earlier = useEarlierMessages(
+    path + "/transcript",
+    state.phase === "ready" ? (state.payload.earlier ?? 0) : 0,
+  );
   const viewer = useViewer();
 
   return (
@@ -427,6 +436,7 @@ export function ConversationDetail({
           <ConversationTranscript
             title={title ?? conversationTitle(conversation, viewer)}
             messages={payload.messages}
+            earlier={earlier}
             onOpenArtifacts={onOpenArtifacts}
           />
         )}

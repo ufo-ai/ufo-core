@@ -169,6 +169,10 @@ export type Message = {
 
 export type Transcript = {
   messages: Message[];
+  /** The compacted-away page standing directly above `messages`, read at
+   *  `…/transcript/<earlier>`; each page's response names the one above it in turn. Absent when
+   *  the transcript reflects no compaction. */
+  earlier?: number;
   turn?: string;
   credentials?: CredentialRequest | null;
 };

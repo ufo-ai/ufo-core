@@ -22,6 +22,7 @@ from ufo.transcript import (
     compaction_key,
     decode,
     encode,
+    read_compaction_after,
     read_compaction_records,
     transcript_key,
 )
@@ -196,3 +197,13 @@ async def test_read_compaction_records_walks_every_index(tmp_path: Path) -> None
 async def test_read_compaction_records_is_empty_without_compactions(tmp_path: Path) -> None:
     blob = FilesystemBlobStore(root=tmp_path)
     assert await read_compaction_records(blob, uuid4()) == ()
+
+
+async def test_read_compaction_after_fetches_the_light_half_alone(tmp_path: Path) -> None:
+    blob = FilesystemBlobStore(root=tmp_path)
+    conversation_id = uuid4()
+    await _write_compaction(blob, conversation_id, 1)
+    assert await read_compaction_after(blob, conversation_id, 1) == (
+        Message(role="user", content="after 1"),
+    )
+    assert await read_compaction_after(blob, conversation_id, 2) is None
