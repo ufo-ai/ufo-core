@@ -60,7 +60,14 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.accounting import UsageExport, metered_workspaces
-from ufo.sdk.balance import AutoTopup, credit, read_auto_topup, read_balance, set_auto_topup
+from ufo.sdk.balance import (
+    AutoTopup,
+    credit,
+    mark_topup_verified,
+    read_auto_topup,
+    read_balance,
+    set_auto_topup,
+)
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
@@ -86,7 +93,7 @@ TOPUP_ATTEMPT_KEY = "topup_attempt"
 # strand the workspace with no way back.
 TOPUP_RETRY_AFTER = timedelta(days=1)
 TOPUP_JOB_NAME = "balance_topup"
-TOPUP_JOB_SCHEDULE = "0 */5 * * * *"
+TOPUP_JOB_SCHEDULE = "0 * * * * *"
 METRONOME_API = "https://api.metronome.com"
 INGEST_URL = f"{METRONOME_API}/v1/ingest"
 METRONOME_BEARER_TOKEN_ENV = "METRONOME_BEARER_TOKEN"
@@ -125,8 +132,9 @@ BILLING_SECTION_BODY = (
     "is what a null balance and reserve mean. When a "
     "workspace admin asks about billing, what they have left, or how to add a card, "
     "call manage_billing with action 'status' and report the balance, the reserve beneath it, "
-    "and whether a card is on file — a balance at or below the reserve is refused, so the balance "
-    "alone tells an admin they have money they cannot spend. Report what status returns rather "
+    "and whether a card is on file. A workspace whose card has already paid a refill keeps working "
+    "for a fixed amount past that line, so a low balance there is not the same as being stopped. "
+    "Report what status returns rather "
     "than inferring why a turn stopped. For adding or changing a card, or "
     "for invoices, call action 'portal' and give them the "
     "returned portal_url as a link to open. There is no plan to sell and none to activate, so "
@@ -155,6 +163,16 @@ class StripeError(RuntimeError):
     def __init__(self, message: str, status: int = 0) -> None:
         super().__init__(message)
         self.status = status
+
+
+class _ChargeInFlight(StripeError):
+    """An earlier charge under this key is still being decided.
+
+    The tick is shorter than a card authorization can take, so a refill still in flight when the
+    next tick fires asks Stripe for the same key again and is told so. That is neither a decline
+    nor a fault: the first request is still the one deciding, and the money it moves is credited
+    when it answers. Nothing is recorded for it — counting it as a refusal would stand the refill
+    down for a day over a card that is in the middle of paying."""
 
 
 @dataclass(frozen=True)
@@ -709,11 +727,15 @@ class BalanceTopup:
     async def run(self) -> None:
         """Refill once the balance is short, and slow down against a card that has said no.
 
-        The tick is every few minutes, so an issuer's refusal repeated on that schedule is an
-        unbounded retry against something that already answered — it earns nothing and costs
-        standing with the card network. A refusal holds the next attempt for a day, and arranging
-        autopay again releases it sooner. The wait always lapses: the balance gate refuses the very
-        turn that would re-arrange autopay, so a card that recovers on its own has to be enough."""
+        The tick is every minute because a single turn can outspend a longer one: the interval is
+        the window a workspace has to survive on its own between crossing its refill line and the
+        money landing, and core's grace is sized against it.
+
+        A refusal holds the next attempt for a day, and arranging autopay again releases it sooner —
+        an issuer's refusal repeated on the tick is an unbounded retry against something that
+        already answered, which earns nothing and costs standing with the card network. The wait
+        always lapses: the balance gate refuses the very turn that would re-arrange autopay, so a
+        card that recovers on its own has to be enough."""
         workspace_id = self.ctx.store.workspace_id
         async with self.ctx.transaction() as connection:
             wanted = await read_auto_topup(connection, workspace_id)
@@ -744,14 +766,18 @@ class BalanceTopup:
                 refused_at=refused,
             )
             return
-        intent = await self._charge(
-            config,
-            record.stripe_customer_id,
-            method,
-            wanted,
-            workspace_id,
-            f"{charged_so_far}:{attempt}",
-        )
+        try:
+            intent = await self._charge(
+                config,
+                record.stripe_customer_id,
+                method,
+                wanted,
+                workspace_id,
+                f"{charged_so_far}:{attempt}",
+            )
+        except _ChargeInFlight:
+            warn("metronome.topup_in_flight", workspace_id=str(workspace_id))
+            return
         if intent is None:
             await self.ctx.store.put(TOPUP_REFUSED_AT_KEY, datetime.now(UTC).isoformat())
             await self.ctx.store.put(TOPUP_ATTEMPT_KEY, str(attempt + 1))
@@ -765,6 +791,7 @@ class BalanceTopup:
                 wanted.amount_micro_usd,
                 f"stripe/{intent}",
             )
+            await mark_topup_verified(connection, workspace_id)
         if added:
             log(
                 "metronome.topped_up",
@@ -816,6 +843,8 @@ class BalanceTopup:
                 idempotency_key=f"ufo-topup:{workspace_id}:{attempt}",
             )
         except StripeError as refused:
+            if refused.status == HTTPStatus.CONFLICT:
+                raise _ChargeInFlight(str(refused), refused.status) from refused
             if refused.status != HTTPStatus.PAYMENT_REQUIRED:
                 raise
             warn("metronome.topup_declined", workspace_id=str(workspace_id), status="402")

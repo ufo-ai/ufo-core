@@ -1422,6 +1422,12 @@ class BalanceGate:
     at zero. Overshoot is then bounded by one round below zero rather than running unbounded beneath
     the reserve, and a credit smaller than the reserve cannot resume anything.
 
+    A workspace whose card has already paid carries both lines down by its grace, which is what
+    keeps a solvent workspace working across the gap between falling under its refill threshold and
+    the charge landing. The lines move together and by the same figure, so entry stays the stricter
+    of the two: were the grace applied only to entry, a turn would be admitted below the line that
+    stops it and be parked on its first round.
+
     A workspace with no balance row allows both, which is the self-host path."""
 
     workspace_id: UUID
@@ -1456,7 +1462,7 @@ class BalanceGate:
         if headroom is None:
             return SpendDecision(outcome=ALLOW, message="")
         _forget_absent_balance(self.workspace_id)
-        if headroom.balance_micro_usd > headroom.reserve_micro_usd:
+        if headroom.balance_micro_usd > headroom.reserve_micro_usd - headroom.grace_micro_usd:
             return SpendDecision(outcome=ALLOW, message="")
         if turn_id is not None and await self._turn_has_debited(connection, turn_id):
             return SpendDecision(outcome=REJECT, message=BALANCE_REFUSAL_MESSAGE)
@@ -1507,7 +1513,7 @@ class BalanceGate:
         if headroom is None:
             return SpendDecision(outcome=ALLOW, message="")
         _forget_absent_balance(self.workspace_id)
-        if headroom.balance_micro_usd - pending_micro_usd > 0:
+        if headroom.balance_micro_usd - pending_micro_usd > -headroom.grace_micro_usd:
             return SpendDecision(outcome=ALLOW, message="")
         if pending_micro_usd > 0 or await self._turn_has_debited(connection, turn_id):
             return SpendDecision(outcome=REJECT, message=BALANCE_REFUSAL_MESSAGE)

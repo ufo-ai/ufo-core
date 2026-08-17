@@ -402,6 +402,7 @@ workspace_balance = sa.Table(
     sa.Column("reserve_micro_usd", sa.BigInteger, nullable=False, server_default=sa.text("0")),
     sa.Column("auto_topup_micro_usd", sa.BigInteger, nullable=True),
     sa.Column("auto_topup_threshold_micro_usd", sa.BigInteger, nullable=True),
+    sa.Column("topup_verified_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )

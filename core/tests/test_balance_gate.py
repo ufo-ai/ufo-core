@@ -11,7 +11,15 @@ from test_spend_caps import (
 )
 
 from ufo.accounting import ALLOW, BalanceGate, record_image_usage, record_turn_usage
-from ufo.balance import BALANCE_REFUSAL_MESSAGE, credit, debit, set_reserve
+from ufo.balance import (
+    BALANCE_REFUSAL_MESSAGE,
+    TOPUP_GRACE_MICRO_USD,
+    credit,
+    debit,
+    mark_topup_verified,
+    set_auto_topup,
+    set_reserve,
+)
 from ufo.db import workspace_tx
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
@@ -328,3 +336,60 @@ async def test_the_fold_read_does_not_promise_what_admission_refuses(db: None) -
     assert turn_id is not None
     assert spent.outcome != ALLOW
     assert funded.outcome == ALLOW
+
+
+async def test_a_card_that_has_paid_keeps_the_workspace_working_past_its_line(db: None) -> None:
+    """The routine block this exists to stop. A refill cannot land the instant the balance crosses
+    its threshold — the job ticks, then the card answers — and one turn can outspend that gap. A
+    workspace whose card has already settled a charge is solvent and about to be topped up, so it
+    keeps working across the gap instead of being refused for being briefly short."""
+    async with workspace_tx() as connection:
+        workspace_id, _, _, _ = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=1, reserve_dollars=10)
+        await debit(connection, workspace_id, 20 * DOLLAR)
+        await mark_topup_verified(connection, workspace_id)
+        entering = await BalanceGate(workspace_id).admits(connection)
+    assert entering.outcome == ALLOW
+
+
+async def test_the_grace_is_earned_by_paying_not_granted_on_arrival(db: None) -> None:
+    """Identical balance, no settled charge behind it. Granting the overdraft to a workspace that
+    has never paid would hand every fresh signup a free spend limit, so a card on file is worth
+    nothing here and only a charge that cleared counts."""
+    async with workspace_tx() as connection:
+        workspace_id, _, _, _ = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=1, reserve_dollars=10)
+        await debit(connection, workspace_id, 20 * DOLLAR)
+        entering = await BalanceGate(workspace_id).admits(connection)
+    assert entering.outcome != ALLOW
+    assert entering.message == BALANCE_REFUSAL_MESSAGE
+
+
+async def test_the_grace_is_a_flat_figure_a_workspace_cannot_widen(db: None) -> None:
+    """The overdraft is bounded by a constant, so what a workspace can take while unpaid does not
+    move with any figure it chooses. Past the constant it is refused however much it arranged to
+    refill."""
+    async with workspace_tx() as connection:
+        workspace_id, _, _, _ = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=1)
+        await set_auto_topup(connection, workspace_id, 100_000 * DOLLAR, 50_000 * DOLLAR)
+        await mark_topup_verified(connection, workspace_id)
+        await debit(connection, workspace_id, DOLLAR + TOPUP_GRACE_MICRO_USD)
+        entering = await BalanceGate(workspace_id).admits(connection)
+    assert entering.outcome != ALLOW
+
+
+async def test_entry_stays_the_stricter_line_once_the_grace_applies(db: None) -> None:
+    """The ordering the two thresholds depend on. Moving only entry down by the grace would admit a
+    turn beneath the line that stops it, so it would be parked on its first round — worse than the
+    refusal it replaced. Both lines move together, and entry stays the stricter of the two."""
+    async with workspace_tx() as connection:
+        workspace_id, _, _, _ = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=1, reserve_dollars=10)
+        await mark_topup_verified(connection, workspace_id)
+        await debit(connection, workspace_id, DOLLAR + TOPUP_GRACE_MICRO_USD - 5 * DOLLAR)
+        gate = BalanceGate(workspace_id)
+        entering = await gate.admits(connection)
+        continuing = await gate.sustains(connection, pending_micro_usd=DOLLAR)
+    assert entering.outcome != ALLOW
+    assert continuing.outcome == ALLOW

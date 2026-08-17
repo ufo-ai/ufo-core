@@ -14,6 +14,9 @@ from ufo.balance import (
     credit as credit,
 )
 from ufo.balance import (
+    mark_topup_verified as mark_topup_verified,
+)
+from ufo.balance import (
     read_auto_topup as read_auto_topup,
 )
 from ufo.balance import (

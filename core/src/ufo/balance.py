@@ -22,6 +22,16 @@ from ufo.schema import tables
 BALANCE_PRESENCE_TTL_SECONDS = 5.0
 BALANCE_PRESENCE_CACHE_MAX = 4096
 _no_balance: dict[UUID, float] = {}
+# How far a workspace whose card has already paid may run past the line before a gate stops it.
+# The refill job cannot be instant: it ticks, then Stripe answers, and one turn can outspend that
+# gap, so a balance tested against the bare line refuses turns for a workspace that is solvent and
+# about to be topped up. This absorbs the gap.
+#
+# It is a flat figure, not a share of the refill the member chose, because a member-scaled overdraft
+# is a credit line whose limit the borrower sets: arranging a huge refill would earn a huge one. And
+# it is earned rather than granted, so the exposure on a workspace that never pays is nothing at
+# all — a card that has settled a charge has proved itself in the only way that counts.
+TOPUP_GRACE_MICRO_USD = 100_000_000
 
 
 def balance_absent(workspace_id: UUID) -> bool:
@@ -120,12 +130,30 @@ async def set_auto_topup(
     return updated.rowcount == 1
 
 
+async def mark_topup_verified(connection: AsyncConnection, workspace_id: UUID) -> None:
+    """Record that a card has settled a charge for this workspace, which is what earns the grace.
+
+    Stamped once and never moved, so the grace a workspace has earned does not depend on how
+    recently it last paid: a card that worked is the evidence, and a later decline is already
+    answered by the refill standing down rather than by withdrawing the overdraft under a turn that
+    is mid-flight."""
+    await connection.execute(
+        sa.update(tables.workspace_balance)
+        .where(
+            tables.workspace_balance.c.workspace_id == workspace_id,
+            tables.workspace_balance.c.topup_verified_at.is_(None),
+        )
+        .values(topup_verified_at=sa.func.now(), updated_at=sa.func.now())
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Headroom:
-    """The two figures a gate decides on."""
+    """The figures a gate decides on."""
 
     balance_micro_usd: int
     reserve_micro_usd: int
+    grace_micro_usd: int
 
 
 async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Headroom | None:
@@ -136,6 +164,7 @@ async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Head
             sa.select(
                 tables.workspace_balance.c.balance_micro_usd,
                 tables.workspace_balance.c.reserve_micro_usd,
+                tables.workspace_balance.c.topup_verified_at,
             ).where(tables.workspace_balance.c.workspace_id == workspace_id)
         )
     ).one_or_none()
@@ -143,7 +172,9 @@ async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Head
         _note_absent_balance(workspace_id)
         return None
     return Headroom(
-        balance_micro_usd=row.balance_micro_usd, reserve_micro_usd=row.reserve_micro_usd
+        balance_micro_usd=row.balance_micro_usd,
+        reserve_micro_usd=row.reserve_micro_usd,
+        grace_micro_usd=0 if row.topup_verified_at is None else TOPUP_GRACE_MICRO_USD,
     )
 
 

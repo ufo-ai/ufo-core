@@ -29,7 +29,7 @@ from ufo.accounting import (
     record_turn_usage,
     record_workspace_usage,
 )
-from ufo.balance import credit, debit, read_balance
+from ufo.balance import TOPUP_GRACE_MICRO_USD, credit, debit, read_balance, read_headroom
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialRequests, CredentialStore
@@ -246,7 +246,7 @@ def test_manifest_declares_two_cron_jobs_one_tool_one_section() -> None:
     assert usage.schedule == "0 * * * * *"
     assert usage.handler is metronome._ship
     assert topup.name == "balance_topup"
-    assert topup.schedule == "0 */5 * * * *"
+    assert topup.schedule == "0 * * * * *"
     assert topup.handler is metronome._top_up
     assert seats.name == "seat_shipper"
     assert seats.schedule == "0 0 * * * *"
@@ -914,6 +914,7 @@ class _Providers:
         self.charges: dict[str, str] = {}
         self.replayed: dict[str, tuple[int, dict[str, object]]] = {}
         self.decline = False
+        self.in_flight = False
         self.failing: set[str] = set()
         self.sessions = 0
 
@@ -945,6 +946,15 @@ class _Providers:
                 },
             )
         if path == "/v1/payment_intents" and request.method == "POST":
+            # A key whose earlier request has not answered yet is a conflict, not a decline:
+            # the first request is still the one that will move the money.
+            if self.in_flight:
+                return httpx.Response(
+                    409,
+                    json={
+                        "error": {"code": "idempotency_in_progress", "type": "idempotency_error"}
+                    },
+                )
             form = _form(request)
             self.intents.append(form)
             # A confirm reads `payment_method` from the request; it never falls back to the
@@ -1853,3 +1863,81 @@ def test_the_billing_tool_names_every_action_it_accepts() -> None:
     for action in ("status", "portal", "autopay"):
         assert action in tool.description, action
         assert action in metronome.BILLING_SECTION_BODY, action
+
+
+async def _grace(workspace_id: UUID) -> int:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            headroom = await read_headroom(connection, workspace_id)
+    assert headroom is not None
+    return headroom.grace_micro_usd
+
+
+async def test_a_settled_charge_earns_the_workspace_its_grace(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overdraft core allows is earned by paying, and this is the act that proves it. A card on
+    file proves nothing — an issuer decides at the charge — so the flag is set from the one place
+    that has watched money move."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+    assert await _grace(workspace_id) == 0
+
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 25 * DOLLAR
+    assert await _grace(workspace_id) == TOPUP_GRACE_MICRO_USD
+
+
+async def test_a_charge_still_in_flight_does_not_stand_the_refill_down(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tick is shorter than an authorization can take, so a refill still being decided is asked
+    again under the same key and told so. Counting that as a refusal would park the refill for a
+    day over a card in the middle of paying, and the balance it was about to fund would run out."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+
+    providers.in_flight = True
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 5 * DOLLAR
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        assert await ctx.store.get(metronome.TOPUP_REFUSED_AT_KEY) is None
+
+    providers.in_flight = False
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 25 * DOLLAR

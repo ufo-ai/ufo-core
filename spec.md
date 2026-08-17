@@ -66,7 +66,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |
 | `balance_purchase` | One row per credit to a workspace's prepaid balance: what it granted, what it charged, and the `reference` it is idempotent on. Both amounts are signed, so a refund or a corrected credit is a row like any other. A grant charges nothing; a volume tier grants more than it charges, and that difference is the only record of a discount. |
-| `workspace_balance` | The prepaid balance in micro-USD, and `reserve_micro_usd`, the headroom a turn needs before it may begin. A mutable row rather than a sum over `balance_purchase`, because a lifetime balance has no window to bound its sum. |
+| `workspace_balance` | The prepaid balance in micro-USD, and `reserve_micro_usd`, the headroom a turn needs before it may begin. `topup_verified_at` stamps the first refill a card actually settled, which is what earns the workspace its grace. A mutable row rather than a sum over `balance_purchase`, because a lifetime balance has no window to bound its sum. |
 | `job` | Recurring/one-time background work (source sync, page-change fan-out, turn dispatch, subagent result delivery, extension jobs). |
 | `scheduled_task` (scheduled_tasks extension) | Agent-namespaced, member-private recurring invocation with names unique per agent and optional UTC expiry, enforced before invocation. The extension owns the table — core migrations created it and it was adopted in place; fires ride the internal `invoke` capability as scheduled turns. Creation binds the executor and its reporting conversation; updates never move either and never rewrite the marks a fire left, so run history outlives an edit. The main agent may target an existing child-agent task from any conversation: its creator may inspect, edit, or cancel it; an admin may list management metadata, change cadence or expiry, or cancel, but cannot read or change its prompt or responses; another member cannot see it. Each recurring turn carries the exact claimed UTC occurrence; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. |
 | `sweep_edition` (sweep extension) | One private daily brief per seated member and local date. A pending edition commits its cursor and finding ledger only after a valid terminal reply. A failed edition remains eligible for the next hourly job, up to three attempts. |
@@ -761,16 +761,29 @@ would be permanent, including against the documented way to keep working without
 exemption stops at zero all the same. Such a turn still generates media and still makes in-sandbox
 calls on the platform's key, and those debit — so an exemption that ignored the balance entirely
 would let an overdrawn workspace spend the platform's money one turn at a time without bound. A
-workspace that has spent past zero owes for that work and is refused like any other until it is
+workspace that has spent past its floor owes for that work and is refused like any other until it is
 credited; what it owes is real money, not the model rounds its own key paid for.
 
 A workspace whose balance is spent is refused at admission with a line the member reads, and a
-running turn parks rather than spending past zero. The two lines are deliberately different:
+running turn parks rather than spending past its floor. The two lines are deliberately different:
 `reserve_micro_usd` is the headroom a turn needs to **begin**, tested at admission, at a fold, and
 when the dispatcher resumes a parked turn; a running turn stops at **zero**. Were they one line, a
 balance just above the reserve would admit a turn the first round's spend pushed straight back
 under, so a small credit would buy a park-resume-park cycle rather than progress. Overshoot is
-bounded by one round below zero per turn. Turns running at once are not bounded against each other:
+bounded by one round below the floor per turn.
+
+Both lines drop by a **grace** for a workspace whose card has already settled a refill: entry at
+`reserve − grace`, a running turn at `−grace`. A refill cannot land the instant a balance crosses
+its threshold — the job ticks, then the card answers — and one turn can outspend that gap, so a
+solvent workspace with money already on the way would otherwise be refused for being briefly short.
+The lines move together and by the same figure, so entry stays the stricter of the two; moved apart,
+a turn would be admitted beneath the line that stops it and park on its first round. The grace is a
+flat figure, never a share of the refill the member chose, because an overdraft scaled by a
+member-set number is a credit line whose limit the borrower sets. It is earned rather than granted:
+a card on file proves nothing, since an issuer decides at the charge, so a workspace that has never
+paid carries no grace at all and the exposure on one that has is bounded by the constant.
+
+Turns running at once are not bounded against each other:
 each measures its own spend against a balance the others have not been charged against yet, because
 spend reaches the ledger at park or terminal, so a request fanning out into helpers can overshoot by
 a round per helper. The reserve is the headroom that absorbs it, and it is sized by the deploy.
