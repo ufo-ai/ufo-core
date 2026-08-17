@@ -548,7 +548,8 @@ fn steps_lines(steps: &[Step], fold: Fold, theme: &Theme, width: u16) -> Vec<Lin
 /// The same rows with the toggle each carries, so a click and the rendering read one traversal.
 /// A live turn's rows read as the narration they were; the rows a member opened again are past
 /// work, so they stand indented under the count and state each call's work without the
-/// `running <tool>:` lead — the words the web's settled disclosure shows.
+/// `running <tool>:` lead — the words the web's settled disclosure shows. A settled block ends
+/// in a blank line, standing the reply apart from it.
 fn steps_rows(
     steps: &[Step],
     fold: Fold,
@@ -559,7 +560,12 @@ fn steps_rows(
         |mark: &str| Line::styled(format!("{} {mark}", rollup_line(steps.len())), theme.muted);
     let mut rows = match fold {
         Fold::Live => Vec::new(),
-        Fold::Rolled => return vec![(summary(FOLD_ROLLED), Some(Toggle::Fold))],
+        Fold::Rolled => {
+            return vec![
+                (summary(FOLD_ROLLED), Some(Toggle::Fold)),
+                (Line::raw(""), None),
+            ]
+        }
         Fold::Opened => vec![(summary(FOLD_OPENED), Some(Toggle::Fold))],
     };
     let disclosed = fold == Fold::Opened;
@@ -607,6 +613,9 @@ fn steps_rows(
                 }
             }
         }
+    }
+    if disclosed {
+        rows.push((Line::raw(""), None));
     }
     rows
 }
@@ -1039,7 +1048,7 @@ mod tests {
         retained.roll_up_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 2 steps ▸", "the answer"]
+            ["Completed 2 steps ▸", "", "the answer"]
         );
         retained.toggle_steps();
         assert_eq!(
@@ -1048,13 +1057,14 @@ mod tests {
                 "Completed 2 steps ▾",
                 "  first the calendar",
                 "  the calendar",
+                "",
                 "the answer",
             ]
         );
         retained.toggle_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 2 steps ▸", "the answer"]
+            ["Completed 2 steps ▸", "", "the answer"]
         );
     }
 
@@ -1076,6 +1086,7 @@ mod tests {
                 "› and again",
                 "",
                 "Completed 2 steps ▸",
+                "",
             ]
         );
     }
@@ -1092,11 +1103,14 @@ mod tests {
         });
         retained.push_under("reviewer", "running bash: cargo test".into());
         retained.roll_up_steps();
-        assert_eq!(texts(&retained.document(&theme)), ["Completed 2 steps ▸"]);
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["Completed 2 steps ▸", ""]
+        );
         retained.toggle_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 2 steps ▾", "  reviewer", "  reviewer ▸"]
+            ["Completed 2 steps ▾", "  reviewer", "  reviewer ▸", ""]
         );
         assert!(retained.toggle(2, 0, &theme));
         assert_eq!(
@@ -1107,12 +1121,13 @@ mod tests {
                 "  reviewer ▾",
                 "    the diff",
                 "    cargo test",
+                "",
             ]
         );
         assert!(retained.toggle(2, 0, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 2 steps ▾", "  reviewer", "  reviewer ▸"]
+            ["Completed 2 steps ▾", "  reviewer", "  reviewer ▸", ""]
         );
     }
 
@@ -1159,18 +1174,18 @@ mod tests {
         assert!(retained.toggle(0, 0, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▾", "  ls", "the answer"]
+            ["Completed 1 step ▾", "  ls", "", "the answer"]
         );
         assert!(retained.toggle(0, 5, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▸", "the answer"]
+            ["Completed 1 step ▸", "", "the answer"]
         );
         assert!(!retained.toggle(0, 30, &theme));
         assert!(!retained.toggle(1, 0, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▸", "the answer"]
+            ["Completed 1 step ▸", "", "the answer"]
         );
     }
 
@@ -1187,7 +1202,7 @@ mod tests {
         retained.push_under("reviewer", "running bash: late".into());
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▸", "reviewer · running bash: late ▸"]
+            ["Completed 1 step ▸", "", "reviewer · running bash: late ▸"]
         );
     }
 
@@ -1201,7 +1216,7 @@ mod tests {
         retained.toggle_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▾", "  notes", "running bash: ls"]
+            ["Completed 1 step ▾", "  notes", "", "running bash: ls"]
         );
     }
 
