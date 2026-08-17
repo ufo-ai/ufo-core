@@ -360,17 +360,6 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
                   </NavRow>
                 </li>
               ))}
-              <li>
-                <NavRow
-                  icon={<WorkspaceGlyph />}
-                  current={route.kind === "workspace"}
-                  collapsed={collapsed}
-                  label="Workspace"
-                  onClick={() => placeWorkspace("team", {}, "push")}
-                >
-                  Workspace
-                </NavRow>
-              </li>
             </ul>
             <div className={cn("flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0", collapsed && "hidden max-narrow:flex")}>
               <RailList
@@ -383,7 +372,20 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
                 onRetry={() => setReloads((count) => count + 1)}
               />
             </div>
-            <footer className={cn("flex items-center gap-sm px-2xl max-narrow:ml-auto max-narrow:px-lg max-narrow:py-md", collapsed && "mt-auto justify-center px-sm max-narrow:mt-0 max-narrow:px-lg")}>
+            <ul className="m-0 mt-auto flex list-none flex-col gap-px px-sm py-0 max-narrow:mt-0 max-narrow:ml-auto max-narrow:flex-row max-narrow:items-center max-narrow:p-0">
+              <li>
+                <NavRow
+                  icon={<WorkspaceGlyph />}
+                  current={route.kind === "workspace"}
+                  collapsed={collapsed}
+                  label="Workspace"
+                  onClick={() => placeWorkspace("team", {}, "push")}
+                >
+                  Workspace
+                </NavRow>
+              </li>
+            </ul>
+            <footer className={cn("flex items-center gap-sm px-2xl max-narrow:px-lg max-narrow:py-md", collapsed && "justify-center px-sm max-narrow:px-lg")}>
               <SidebarTooltip collapsed={collapsed} label={member.email}>
                 <span
                   aria-hidden="true"

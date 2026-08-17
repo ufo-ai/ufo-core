@@ -155,6 +155,20 @@ test("an admin is offered administration, which reads the admin projection", asy
   expect(document.querySelectorAll("h1").length).toBe(1);
 });
 
+test("the workspace entry stands at the foot of the sidebar, under the rail and over the member", () => {
+  wire({});
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const workspace = screen.getByRole("button", { name: "Workspace" });
+  const nav = screen.getByRole("navigation", { name: "Workspace" });
+  const footer = nav.querySelector("footer")!;
+  expect(footer.contains(workspace)).toBe(false);
+  expect(workspace.closest("ul")!.nextElementSibling).toBe(footer);
+  expect(within(nav).getByRole("button", { name: "Agents" }).closest("ul")!.contains(workspace)).toBe(
+    false,
+  );
+});
+
 test("a collapsed sidebar keeps the admin entry for the narrow strip", async () => {
   wire({});
   render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
