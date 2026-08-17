@@ -3031,6 +3031,7 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         key=f"pause-fired:{uuid4()}",
         text="resumed",
         fired=fired + timedelta(minutes=1),
+        artifact=("resumed.md", "text/markdown"),
     )
     room_conversation = await _seed_agent_conversation(
         workspace_id,
@@ -3046,6 +3047,7 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         room_conversation,
         text="in a room",
         fired=fired + timedelta(minutes=2),
+        artifact=("room.md", "text/markdown"),
     )
     await _seed_web_turn(
         workspace_id,
@@ -3127,6 +3129,7 @@ async def test_radar_pages_by_keyset(
             key=f"{uuid4()}:2026-08-14T09:0{index}:00+00:00",
             text="t" * 2_000,
             fired=fired + timedelta(minutes=index),
+            artifact=("page.md", "text/markdown"),
         )
         for index in range(3)
     ]
@@ -3146,6 +3149,52 @@ async def test_radar_pages_by_keyset(
         await client.get(f"{RADAR_PATH}?after={quote(second['newer'])}", headers=headers)
     ).json()
     assert [run["turn_id"] for run in back["runs"]] == [run["turn_id"] for run in first["runs"]]
+
+
+async def test_radar_pages_carry_only_stories_and_never_read_empty(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page's size counts the runs the feed draws, never the fires behind them: a run that ended
+    well and shared no file reported nothing and is no row here. So the newest page fills with
+    reports however many quiet fires sit between them, and following `older` always answers rows —
+    the cursor is minted from what the member can read, not from what the day happened to hold."""
+    client, workspace_id, agent_id = web
+    _member, token = await _seed_member(workspace_id, "m@example.com")
+    conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="slack/radar-stories",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    fired = datetime.now(UTC) - timedelta(hours=1)
+    reported: list[UUID] = []
+    for index in range(12):
+        reports = index % 4 == 3
+        run = await _seed_scheduled_run(
+            workspace_id,
+            agent_id,
+            conversation,
+            seq=index + 1,
+            text="the digest",
+            fired=fired + timedelta(minutes=index),
+            artifact=("report.md", "text/markdown") if reports else None,
+        )
+        if reports:
+            reported.append(run)
+    monkeypatch.setattr(web_surface, "RADAR_MIN_RUNS", 2)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    payload = (await client.get(RADAR_PATH, headers=headers)).json()
+    walked: list[str] = []
+    while True:
+        assert payload["runs"] != []
+        walked.extend(run["turn_id"] for run in payload["runs"])
+        if payload["older"] is None:
+            break
+        after = quote(payload["older"])
+        payload = (await client.get(f"{RADAR_PATH}?after={after}", headers=headers)).json()
+    assert walked == [str(run) for run in reversed(reported)]
 
 
 async def test_radar_newest_page_holds_today_whole(
@@ -3173,6 +3222,7 @@ async def test_radar_newest_page_holds_today_whole(
             seq=index + 1,
             text="the older digest",
             fired=stale + timedelta(minutes=index),
+            artifact=("older.md", "text/markdown"),
         )
     monkeypatch.setattr(web_surface, "RADAR_MIN_RUNS", 3)
     monkeypatch.setattr(web_surface, "RADAR_MAX_RUNS", 4)
@@ -3188,6 +3238,7 @@ async def test_radar_newest_page_holds_today_whole(
             seq=index + 5,
             text="today's digest",
             fired=fired + timedelta(milliseconds=index),
+            artifact=("today.md", "text/markdown"),
         )
         for index in range(5)
     ]

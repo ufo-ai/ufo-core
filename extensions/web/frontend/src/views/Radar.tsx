@@ -143,22 +143,14 @@ function Feed({
   return (
     <Panel state={state} shape="cards">
       {(payload) => {
-        const stories = payload.runs.filter(newsworthy);
-        if (!stories.length)
+        if (!payload.runs.length)
           return (
-            <>
-              <PanelBlank body="Each scheduled run reports here: the reply it closed with and the files it shared." />
-              {payload.older || payload.newer ? (
-                <div className="mt-4xl">
-                  <Pager payload={payload} onPlace={onPlace} />
-                </div>
-              ) : null}
-            </>
+            <PanelBlank body="Each scheduled run reports here: the reply it closed with and the files it shared." />
           );
         return (
           <>
             <div className="flex flex-col gap-4xl">
-              {editions(stories).map((edition) => (
+              {editions(payload.runs).map((edition) => (
                 <section key={edition.date} className="flex flex-col">
                   <div className="flex items-center gap-lg">
                     <h2 className="m-0 font-mono text-mono font-normal uppercase text-ink-soft">
@@ -182,13 +174,6 @@ function Feed({
       }}
     </Panel>
   );
-}
-
-/** Whether a run is a story at all: what it made, or how it went wrong. A run publishes by
- *  sharing files — the fire asks for exactly that act — so a successful run that shared nothing
- *  chose not to report and is absent; its conversation holds it. A failure is always news. */
-function newsworthy(run: RadarRun): boolean {
-  return run.status !== "done" || run.artifacts.length > 0;
 }
 
 /** The page's runs under the calendar day each fired on, in the order the page already holds. */

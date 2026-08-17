@@ -2419,7 +2419,13 @@ class SurfaceContext:
         recorded disclosure, or a room at all — a feed aggregates, and an aggregate of what each
         row would refuse is still refused. A turn still going is not yet a run — it has no reply
         to report — so only terminal turns list, and each carries its terminal reply and the files
-        it shared, so a feed renders output and previews without a second walk."""
+        it shared, so a feed renders output and previews without a second walk.
+
+        A run reports by sharing a file — the fire asks for exactly that act — so a run that ended
+        well and shared none published nothing and is no row here; its conversation holds it. A
+        failure is always a row, because how a fire went wrong is itself the report. `limit`
+        therefore counts rows a feed draws, and the page's `older` cursor promises a row behind
+        it."""
         query = self._scheduled_runs(member_id, agent_id)
         async with workspace_tx() as connection:
             rows = (
@@ -2504,6 +2510,14 @@ class SurfaceContext:
             return int((await connection.execute(query)).scalar_one())
 
     def _scheduled_runs(self, member_id: UUID, agent_id: UUID | None) -> sa.Select[Any]:
+        reported = (
+            sa.select(tables.shared_artifact.c.turn_id)
+            .where(
+                tables.shared_artifact.c.workspace_id == self.workspace_id,
+                tables.shared_artifact.c.turn_id == tables.turn.c.id,
+            )
+            .exists()
+        )
         query = (
             sa.select(
                 tables.turn.c.id,
@@ -2525,6 +2539,7 @@ class SurfaceContext:
                 tables.turn.c.workspace_id == self.workspace_id,
                 tables.turn.c.admission_source == SCHEDULED_ADMISSION,
                 tables.turn.c.terminal.is_not(None),
+                sa.or_(tables.turn.c.status != "done", reported),
                 tables.conversation.c.audience.in_(readable_audiences(member_id)),
             )
         )

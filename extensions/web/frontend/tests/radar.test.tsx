@@ -105,8 +105,7 @@ function mountRadarSection() {
 
 test("a story is what a run made or how it went wrong, never what it said", async () => {
   wire({
-    "/workspace/radar": () =>
-      json({ runs: [RUN, QUIET_RUN, FAILED_RUN, STOPPED_RUN], older: null }),
+    "/workspace/radar": () => json({ runs: [RUN, FAILED_RUN, STOPPED_RUN], older: null }),
     "/dl/notes.md": () => new Response("### Standup\n\nTwo blockers cleared."),
   });
   mountRadarSection();
@@ -136,7 +135,14 @@ test("a story is what a run made or how it went wrong, never what it said", asyn
   expect(screen.getByText("Failed")).toBeTruthy();
   expect(screen.getByText("The roll-up source timed out.")).toBeTruthy();
   expect(screen.getByText("Stopped")).toBeTruthy();
-  expect(screen.queryByText("quiet-check")).toBeNull();
+});
+
+test("the feed draws every run the page holds", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [QUIET_RUN], older: "older|x" }) });
+  mountRadarSection();
+
+  expect(await screen.findByRole("heading", { level: 3, name: "quiet-check" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Older" })).toBeTruthy();
 });
 
 test("a story's task opens the task record where the prompt is read", async () => {

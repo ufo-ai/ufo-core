@@ -2539,7 +2539,9 @@ async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
     portal dates a stamp by — and never fewer than `RADAR_MIN_RUNS`, so a quiet day still reads as
     a feed and a busy one is not cut mid-day. `RADAR_MAX_RUNS` bounds the one response; a day past
     that ceiling, and every older run, reads behind the `older` cursor, which pages
-    `RADAR_MIN_RUNS` at a time."""
+    `RADAR_MIN_RUNS` at a time. Both counts are counts of runs that reported — the rows the feed
+    draws — so a day of fires that published nothing costs the page nothing and no page reads
+    empty while a run remains behind it."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved

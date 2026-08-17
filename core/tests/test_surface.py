@@ -1772,6 +1772,16 @@ async def test_artifact_listing_narrows_to_created_and_shared_scopes(db: None, t
         await context.list_artifacts(member_id, admin=False, limit=10, scope="everyone")
 
 
+def _shared_page(name: str) -> SharedArtifact:
+    return SharedArtifact(
+        blob_key=f"artifacts/{name}/report.md",
+        filename="report.md",
+        subject=None,
+        media_type="text/markdown",
+        size_bytes=6,
+    )
+
+
 async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
     db: None, tmp_path
 ) -> None:
@@ -1810,18 +1820,27 @@ async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
         idempotency_key="11111111-1111-4111-8111-111111111111:2026-08-14T09:00:00+00:00",
     )
     private_run = await _seed_turn(
-        workspace_id, "R2", "done", "private", member_id=other_id, admission_source="scheduled"
+        workspace_id,
+        "R2",
+        "done",
+        "private",
+        (_shared_page("R2"),),
+        member_id=other_id,
+        admission_source="scheduled",
     )
     await _seed_turn(
         workspace_id,
         "R4",
         "done",
         "in a room",
+        (_shared_page("R4"),),
         audience=str(room_audience("slack", "C123")),
         admission_source="scheduled",
     )
-    await _seed_turn(workspace_id, "R5", "running", "", admission_source="scheduled")
-    await _seed_turn(workspace_id, "R3", "done", "typed")
+    await _seed_turn(
+        workspace_id, "R5", "running", "", (_shared_page("R5"),), admission_source="scheduled"
+    )
+    await _seed_turn(workspace_id, "R3", "done", "typed", (_shared_page("R3"),))
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     page = await context.list_scheduled_runs(member_id, limit=10)
     assert [run.turn_id for run in page.rows] == [shared_run]
@@ -1852,6 +1871,7 @@ async def test_scheduled_runs_page_by_keyset_without_repeats(db: None, tmp_path)
             f"P{index}",
             "done",
             str(index),
+            (_shared_page(f"P{index}"),),
             admission_source="scheduled",
             created_at=fired + timedelta(minutes=index),
         )
@@ -1865,6 +1885,49 @@ async def test_scheduled_runs_page_by_keyset_without_repeats(db: None, tmp_path)
     assert len(walked) == 3 and set(walked) == seeded
     back = await context.list_scheduled_runs(member_id, limit=2, cursor=rest.newer)
     assert [run.turn_id for run in back.rows] == [run.turn_id for run in first.rows]
+
+
+async def test_scheduled_runs_page_only_the_runs_that_reported(db: None, tmp_path) -> None:
+    """A run that ended well and shared no file reported nothing, so it is no row of this feed: it
+    neither fills a page nor counts toward one. Quiet runs between two reports therefore cannot
+    spend a page, and every page of the walk carries rows while rows remain behind it."""
+    workspace_id, _, _ = await _seed()
+    member_id = await _seed_member_row(workspace_id, "m@example.com")
+    midnight = datetime(2026, 8, 15, tzinfo=UTC)
+    reported: list[UUID] = []
+    for index, (status, files) in enumerate(
+        (
+            ("done", (_shared_page("Q0"),)),
+            ("done", ()),
+            ("done", ()),
+            ("failed", ()),
+            ("done", ()),
+            ("done", ()),
+            ("done", (_shared_page("Q6"),)),
+        )
+    ):
+        turn_id = await _seed_turn(
+            workspace_id,
+            f"Q{index}",
+            status,
+            "the digest",
+            files,
+            admission_source="scheduled",
+            created_at=midnight + timedelta(minutes=index),
+        )
+        if status != "done" or files:
+            reported.append(turn_id)
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.count_scheduled_runs_since(member_id, midnight) == len(reported)
+    walked: list[UUID] = []
+    page = await context.list_scheduled_runs(member_id, limit=1)
+    while True:
+        assert page.rows != ()
+        walked.extend(run.turn_id for run in page.rows)
+        if page.older is None:
+            break
+        page = await context.list_scheduled_runs(member_id, limit=1, cursor=page.older)
+    assert walked == list(reversed(reported))
 
 
 async def test_scheduled_run_count_holds_the_page_fence_and_the_span(db: None, tmp_path) -> None:
@@ -1889,6 +1952,7 @@ async def test_scheduled_run_count_holds_the_page_fence_and_the_span(db: None, t
             key,
             status,
             key,
+            (_shared_page(key),),
             member_id=member,
             admission_source=source,
             created_at=fired,
