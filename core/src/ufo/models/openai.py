@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 import openai
+from openai.types.completion_usage import PromptTokensDetails
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseErrorEvent,
@@ -44,6 +45,7 @@ from openai.types.responses.response_input_param import FunctionCallOutput, Resp
 from openai.types.responses.response_input_text_content_param import ResponseInputTextContentParam
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
 from openai.types.responses.response_reasoning_item_param import Summary as ReasoningSummaryParam
+from openai.types.responses.response_usage import InputTokensDetails
 from openai.types.shared.reasoning_effort import ReasoningEffort as OpenAIEffort
 
 from ufo.models.interface import (
@@ -84,6 +86,17 @@ STREAM_TRANSPORT_ERRORS = (
 STREAM_STATUS_ERRORS = (openai.APIStatusError,)
 REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
 REASONING_OFF_EFFORT: OpenAIEffort = "none"
+
+
+def _cache_write_tokens(details: PromptTokensDetails | InputTokensDetails | None) -> int:
+    if details is None or details.model_extra is None:
+        return 0
+    value = details.model_extra.get("cache_write_tokens")
+    if value is None:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise RuntimeError("OpenAI cache_write_tokens is not an integer")
+    return value
 
 
 def openai_sdk_client(api_key: str, base_url: str | None = None) -> openai.AsyncOpenAI:
@@ -409,12 +422,23 @@ class OpenAIClient:
                     if chunk.usage is not None:
                         details = chunk.usage.prompt_tokens_details
                         cached_tokens = (details.cached_tokens or 0) if details is not None else 0
+                        reported_cache_write_tokens = _cache_write_tokens(details)
+                        cache_write_tokens = (
+                            reported_cache_write_tokens if self.spec.price.cache_write_30m else 0
+                        )
                         if cached_tokens > chunk.usage.prompt_tokens:
                             raise RuntimeError("cached prompt tokens exceed total prompt tokens")
+                        if cached_tokens + reported_cache_write_tokens > chunk.usage.prompt_tokens:
+                            raise RuntimeError(
+                                "cached and cache-write prompt tokens exceed total prompt tokens"
+                            )
                         usage = Usage(
-                            input_tokens=chunk.usage.prompt_tokens - cached_tokens,
+                            input_tokens=(
+                                chunk.usage.prompt_tokens - cached_tokens - cache_write_tokens
+                            ),
                             output_tokens=chunk.usage.completion_tokens,
                             cache_read_tokens=cached_tokens,
+                            cache_write_30m_tokens=cache_write_tokens,
                         )
                     if not chunk.choices:
                         continue
@@ -611,15 +635,28 @@ class OpenAIClient:
                             raw = response.usage
                             if raw is None:
                                 raise RuntimeError("model stream produced no usage")
-                            cached_tokens = raw.input_tokens_details.cached_tokens
+                            details = raw.input_tokens_details
+                            cached_tokens = details.cached_tokens
+                            reported_cache_write_tokens = _cache_write_tokens(details)
+                            cache_write_tokens = (
+                                reported_cache_write_tokens
+                                if self.spec.price.cache_write_30m
+                                else 0
+                            )
                             if cached_tokens > raw.input_tokens:
                                 raise RuntimeError(
                                     "cached prompt tokens exceed total prompt tokens"
                                 )
+                            if cached_tokens + reported_cache_write_tokens > raw.input_tokens:
+                                raise RuntimeError(
+                                    "cached and cache-write prompt tokens exceed total "
+                                    "prompt tokens"
+                                )
                             usage = Usage(
-                                input_tokens=raw.input_tokens - cached_tokens,
+                                input_tokens=raw.input_tokens - cached_tokens - cache_write_tokens,
                                 output_tokens=raw.output_tokens,
                                 cache_read_tokens=cached_tokens,
+                                cache_write_30m_tokens=cache_write_tokens,
                             )
                         case ResponseIncompleteEvent(response=response):
                             reason = response.incomplete_details

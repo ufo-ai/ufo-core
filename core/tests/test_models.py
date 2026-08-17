@@ -254,9 +254,16 @@ def openai_finish(reason: str) -> chat_completion_chunk.ChatCompletionChunk:
 
 
 def openai_usage(
-    prompt: int = 0, completion: int = 0, cached: int | None = None
+    prompt: int = 0,
+    completion: int = 0,
+    cached: int | None = None,
+    cache_write: int | None = None,
 ) -> chat_completion_chunk.ChatCompletionChunk:
-    details = PromptTokensDetails(cached_tokens=cached) if cached is not None else None
+    details = (
+        PromptTokensDetails(cached_tokens=cached, cache_write_tokens=cache_write)
+        if cached is not None or cache_write is not None
+        else None
+    )
     return chat_completion_chunk.ChatCompletionChunk(
         id="chunk_test",
         object="chat.completion.chunk",
@@ -579,17 +586,34 @@ async def test_openai_maps_deltas_then_single_usage() -> None:
                 openai_text(None),
                 openai_text("a"),
                 openai_text("b"),
-                openai_usage(prompt=10, completion=5, cached=4),
+                openai_usage(prompt=10, completion=5, cached=4, cache_write=3),
             ],
             None,
         )
     )
-    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
+    spec = replace(
+        OPENAI_SPEC,
+        price=ModelPrice(0, 0, 0, 0, 0, cache_write_30m=1),
+    )
+    events = await collect(OpenAIClient(client=openai_sdk(create), spec=spec))
     assert events == [
         TextDelta(text="a"),
         TextDelta(text="b"),
-        Usage(input_tokens=6, output_tokens=5, cache_read_tokens=4),
+        Usage(
+            input_tokens=3,
+            output_tokens=5,
+            cache_read_tokens=4,
+            cache_write_30m_tokens=3,
+        ),
     ]
+
+
+async def test_openai_keeps_unpriced_cache_writes_in_fresh_input() -> None:
+    create = ScriptedCreate(
+        ([openai_text("a"), openai_usage(prompt=10, completion=5, cached=4, cache_write=3)], None)
+    )
+    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
+    assert events[-1] == Usage(input_tokens=6, output_tokens=5, cache_read_tokens=4)
 
 
 async def test_openai_usage_without_cached_tokens_reads_zero() -> None:

@@ -49,6 +49,12 @@ FULL_USAGE = Usage(
     cache_read_tokens=3000,
     cache_write_1h_tokens=4000,
 )
+OPENAI_FULL_USAGE = Usage(
+    input_tokens=1000,
+    output_tokens=2000,
+    cache_read_tokens=3000,
+    cache_write_30m_tokens=4000,
+)
 
 
 def test_priced_micro_usd_matches_hand_math() -> None:
@@ -94,13 +100,25 @@ def test_the_gpt_5_6_rows_price_at_the_published_rates() -> None:
     """Terra bills $2/$12 per Mtok and Luna $0.20/$1.20, each with cache reads at 0.1x input and
     cache writes at 1.25x — the rate OpenAI bills a GPT-5.6 cache write at, which is why these two
     rows carry a write rate above their input rate."""
-    assert CORE_PRICING.micro_usd("gpt-5.6-terra", FULL_USAGE) == 36_600
-    assert CORE_PRICING.micro_usd("gpt-5.6-luna", FULL_USAGE) == 3_660
+    usage = Usage(
+        input_tokens=1000,
+        output_tokens=2000,
+        cache_read_tokens=3000,
+        cache_write_30m_tokens=4000,
+    )
+    assert CORE_PRICING.micro_usd("gpt-5.6-terra", usage) == 36_600
+    assert CORE_PRICING.micro_usd("gpt-5.6-luna", usage) == 3_660
     for model in ("gpt-5.6-terra", "gpt-5.6-luna"):
         price = CORE_PRICES[model]
-        assert price.cache_write_5m == price.input * 5 // 4
-        assert price.cache_write_1h == price.cache_write_5m
+        assert price.cache_write_5m == 0
+        assert price.cache_write_30m == price.input * 5 // 4
+        assert price.cache_write_1h == 0
         assert price.cache_read == price.input // 10
+
+
+def test_sonnet_5_row_prices_at_the_published_rates() -> None:
+    price = CORE_PRICES["claude-sonnet-5"]
+    assert price == ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000)
 
 
 def test_price_digest_is_stable_sha256() -> None:
@@ -798,7 +816,9 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
         child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
-        await record_turn_usage(connection, workspace_id, child_turn, "gpt-5.6-terra", FULL_USAGE)
+        await record_turn_usage(
+            connection, workspace_id, child_turn, "gpt-5.6-terra", OPENAI_FULL_USAGE
+        )
         await connection.execute(
             sa.insert(tables.ledger).values(
                 id=uuid4(),

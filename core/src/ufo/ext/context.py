@@ -815,6 +815,7 @@ class ModelAccess:
                     output_tokens=sum(u.output_tokens for u in usages),
                     cache_read_tokens=sum(u.cache_read_tokens for u in usages),
                     cache_write_5m_tokens=sum(u.cache_write_5m_tokens for u in usages),
+                    cache_write_30m_tokens=sum(u.cache_write_30m_tokens for u in usages),
                     cache_write_1h_tokens=sum(u.cache_write_1h_tokens for u in usages),
                 )
                 bill.usage(model, usage, self._resolver.pricing, byok)
@@ -832,7 +833,12 @@ class ModelAccess:
             ("input", usage.input_tokens),
             ("output", usage.output_tokens),
             ("cache_read", usage.cache_read_tokens),
-            ("cache_write", usage.cache_write_5m_tokens + usage.cache_write_1h_tokens),
+            (
+                "cache_write",
+                usage.cache_write_5m_tokens
+                + usage.cache_write_30m_tokens
+                + usage.cache_write_1h_tokens,
+            ),
         ):
             if amount:
                 emit_metric("model_round_tokens_total", amount, **dimensions, kind=kind)

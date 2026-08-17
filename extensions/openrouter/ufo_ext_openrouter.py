@@ -268,15 +268,27 @@ def _chunk_provider(chunk: ChatCompletionChunk) -> str | None:
     return str(provider) if provider else None
 
 
-def _usage_of(usage: CompletionUsage) -> Usage:
+def _usage_of(usage: CompletionUsage, cache_write_30m_rate: int) -> Usage:
     details = usage.prompt_tokens_details
     cached_tokens = (details.cached_tokens or 0) if details is not None else 0
+    extra = details.model_extra if details is not None else None
+    cache_write = extra.get("cache_write_tokens") if extra is not None else None
+    if cache_write is None:
+        reported_cache_write_tokens = 0
+    elif isinstance(cache_write, int) and not isinstance(cache_write, bool):
+        reported_cache_write_tokens = cache_write
+    else:
+        raise ValueError("cache_write_tokens is not an integer")
+    cache_write_tokens = reported_cache_write_tokens if cache_write_30m_rate else 0
     if cached_tokens > usage.prompt_tokens:
         raise ValueError("cached prompt tokens exceed total prompt tokens")
+    if cached_tokens + reported_cache_write_tokens > usage.prompt_tokens:
+        raise ValueError("cached and cache-write prompt tokens exceed total prompt tokens")
     return Usage(
-        input_tokens=usage.prompt_tokens - cached_tokens,
+        input_tokens=usage.prompt_tokens - cached_tokens - cache_write_tokens,
         output_tokens=usage.completion_tokens,
         cache_read_tokens=cached_tokens,
+        cache_write_30m_tokens=cache_write_tokens,
     )
 
 
@@ -318,7 +330,7 @@ class OpenRouterModelClient:
                         yield ModelStreamStart()
                     provider = _chunk_provider(chunk) or provider
                     if chunk.usage is not None:
-                        usage = _usage_of(chunk.usage)
+                        usage = _usage_of(chunk.usage, self.spec.price.cache_write_30m)
                     if not chunk.choices:
                         continue
                     choice = chunk.choices[0]

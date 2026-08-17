@@ -859,7 +859,7 @@ class EgressProxy:
         if not tokens_metered:
             await _relay(client_reader, client_writer, upstream_reader, upstream_writer)
             return
-        accumulator = HttpTokenUsage(host)
+        accumulator = HttpTokenUsage(host, self.pricing)
         await _relay(
             client_reader, client_writer, upstream_reader, upstream_writer, accumulator.feed
         )
@@ -1182,6 +1182,9 @@ class EgressProxy:
                         cache_read_tokens=previous.cache_read_tokens + usage.cache_read_tokens,
                         cache_write_5m_tokens=(
                             previous.cache_write_5m_tokens + usage.cache_write_5m_tokens
+                        ),
+                        cache_write_30m_tokens=(
+                            previous.cache_write_30m_tokens + usage.cache_write_30m_tokens
                         ),
                         cache_write_1h_tokens=(
                             previous.cache_write_1h_tokens + usage.cache_write_1h_tokens
@@ -1642,9 +1645,11 @@ def _int_field(usage: dict[str, object], name: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-def _cached_field(usage: dict[str, object], details_name: str) -> int:
+def _cache_fields(usage: dict[str, object], details_name: str) -> tuple[int, int]:
     details = usage.get(details_name)
-    return _int_field(details, "cached_tokens") if isinstance(details, dict) else 0
+    if not isinstance(details, dict):
+        return 0, 0
+    return _int_field(details, "cached_tokens"), _int_field(details, "cache_write_tokens")
 
 
 @dataclass
@@ -1652,6 +1657,7 @@ class HttpTokenUsage:
     """Decode one HTTP response and recover model-reported usage from its SSE or JSON body."""
 
     host: str
+    pricing: Pricing = CORE_PRICING
     _head: bytearray = field(default_factory=bytearray, init=False)
     _body: bytearray = field(default_factory=bytearray, init=False)
     _chunk_buffer: bytearray = field(default_factory=bytearray, init=False)
@@ -1669,6 +1675,7 @@ class HttpTokenUsage:
     _output: int = field(default=0, init=False)
     _cache_read: int = field(default=0, init=False)
     _cache_write_5m: int = field(default=0, init=False)
+    _cache_write_30m: int = field(default=0, init=False)
     _cache_write_1h: int = field(default=0, init=False)
 
     def feed(self, chunk: bytes) -> None:
@@ -1721,6 +1728,7 @@ class HttpTokenUsage:
             output_tokens=self._output,
             cache_read_tokens=self._cache_read,
             cache_write_5m_tokens=self._cache_write_5m,
+            cache_write_30m_tokens=self._cache_write_30m,
             cache_write_1h_tokens=self._cache_write_1h,
         )
 
@@ -1890,22 +1898,32 @@ class HttpTokenUsage:
         usage = event.get("usage")
         if not isinstance(usage, dict):
             return
+        price = self.pricing.prices.get(self._model)
+        cache_write_30m_priced = price is not None and bool(price.cache_write_30m)
         if "prompt_tokens" in usage:
+            cached, cache_write = _cache_fields(usage, "prompt_tokens_details")
             self._absorb_openai(
                 _int_field(usage, "prompt_tokens"),
                 _int_field(usage, "completion_tokens"),
-                _cached_field(usage, "prompt_tokens_details"),
+                cached,
+                cache_write,
+                cache_write_30m_priced,
             )
         elif "input_tokens" in usage:
+            cached, cache_write = _cache_fields(usage, "input_tokens_details")
             self._absorb_openai(
                 _int_field(usage, "input_tokens"),
                 _int_field(usage, "output_tokens"),
-                _cached_field(usage, "input_tokens_details"),
+                cached,
+                cache_write,
+                cache_write_30m_priced,
             )
         else:
             log("egress.tokens_usage_unparsed", host=self.host)
 
-    def _absorb_openai(self, prompt: int, output: int, cached: int) -> None:
+    def _absorb_openai(
+        self, prompt: int, output: int, cached: int, cache_write: int, cache_write_30m_priced: bool
+    ) -> None:
         """An OpenAI prompt count is INCLUSIVE of the cached prefix, so the cached share is
         subtracted out and carried as the cache-read dimension — the same normalization the
         host-side adapters in `ufo.models.openai` apply, so a call the sandbox makes is priced
@@ -1917,9 +1935,21 @@ class HttpTokenUsage:
         if cached > prompt:
             log("egress.tokens_cached_over_prompt", host=self.host, prompt=prompt, cached=cached)
             cached = prompt
-        self._input = prompt - cached
+            cache_write = 0
+        elif cached + cache_write > prompt:
+            log(
+                "egress.tokens_cache_classes_over_prompt",
+                host=self.host,
+                prompt=prompt,
+                cached=cached,
+                cache_write=cache_write,
+            )
+            cache_write = prompt - cached
+        priced_cache_write = cache_write if cache_write_30m_priced else 0
+        self._input = prompt - cached - priced_cache_write
         self._output = output
         self._cache_read = cached
+        self._cache_write_30m = priced_cache_write
         self._seen = True
 
     def _fail(self) -> None:

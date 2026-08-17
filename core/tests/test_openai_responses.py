@@ -63,7 +63,7 @@ RESPONSES_SPEC = ModelSpec(
     id="gpt-5.6-terra",
     provider="openai",
     client=lambda spec, key: OpenAIClient(client=cast(openai.AsyncOpenAI, None), spec=spec),
-    price=ModelPrice(0, 0, 0, 0, 0),
+    price=ModelPrice(0, 0, 0, 0, 0, cache_write_30m=1),
     knowledge_cutoff="2026-02",
     context_window=272_000,
     reasoning=ReasoningSupport(supported=True, tools_with_reasoning=True),
@@ -242,7 +242,9 @@ async def test_responses_path_translates_images_tools_and_usage() -> None:
                             input_tokens=12,
                             output_tokens=4,
                             total_tokens=16,
-                            input_tokens_details=InputTokensDetails(cached_tokens=5),
+                            input_tokens_details=InputTokensDetails(
+                                cached_tokens=5, cache_write_tokens=3
+                            ),
                             output_tokens_details=OutputTokensDetails(reasoning_tokens=2),
                         )
                     ),
@@ -283,7 +285,12 @@ async def test_responses_path_translates_images_tools_and_usage() -> None:
         ToolCallStart(id="call-1", name="read"),
         ToolCallDelta(id="call-1", partial_json='{"path":"a.png"}'),
         TextDelta(text="done"),
-        Usage(input_tokens=7, output_tokens=4, cache_read_tokens=5),
+        Usage(
+            input_tokens=4,
+            output_tokens=4,
+            cache_read_tokens=5,
+            cache_write_30m_tokens=3,
+        ),
     ]
 
 

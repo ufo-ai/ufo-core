@@ -29,6 +29,7 @@ def test_manifest_registers_mantle_specs() -> None:
     assert by_id["openai.gpt-5.6-luna"].api_surface == "responses"
     assert by_id["openai.gpt-5.6-luna"].price.input == 200_000
     assert by_id["openai.gpt-5.6-luna"].price.output == 1_200_000
+    assert by_id["openai.gpt-5.6-luna"].price.cache_write_30m == 250_000
     assert by_id["openai.gpt-5.6-luna"].context_window == 272_000
     assert by_id["openai.gpt-5.6-luna"].knowledge_cutoff == "2026-02"
     assert by_id["openai.gpt-5.6-luna"].retention_none is False
@@ -37,6 +38,8 @@ def test_manifest_registers_mantle_specs() -> None:
     assert by_id["anthropic.claude-opus-4-8"].knowledge_cutoff == "2026-01"
     assert by_id["anthropic.claude-opus-5"].context_window == 1_000_000
     assert by_id["anthropic.claude-opus-5"].knowledge_cutoff == "2026-05"
+    assert by_id["anthropic.claude-sonnet-5"].price.input == 2_000_000
+    assert by_id["anthropic.claude-sonnet-5"].price.output == 10_000_000
     for spec in manifest.models:
         assert spec.provider == "bedrock"
         assert spec.key_slot == "bedrock_api_key"

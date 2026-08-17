@@ -137,7 +137,7 @@ BEDROCK_MODEL_SPECS = (
     ),
     _anthropic(
         "anthropic.claude-sonnet-5",
-        ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000),
+        ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
         "2026-01",
     ),
     _openai(
@@ -170,7 +170,7 @@ BEDROCK_MODEL_SPECS = (
     ),
     _openai(
         "openai.gpt-5.6-luna",
-        ModelPrice(200_000, 1_200_000, 20_000, 200_000, 200_000),
+        ModelPrice(200_000, 1_200_000, 20_000, 0, 0, 250_000),
         "2026-02",
         OPENAI_CONTEXT_WINDOW,
         "responses",

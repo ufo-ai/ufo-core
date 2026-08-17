@@ -79,6 +79,7 @@ def _total_tokens(usage: Usage) -> int:
         + usage.output_tokens
         + usage.cache_read_tokens
         + usage.cache_write_5m_tokens
+        + usage.cache_write_30m_tokens
         + usage.cache_write_1h_tokens
     )
 
@@ -90,6 +91,7 @@ def _prompt_tokens(usage: Usage) -> int:
         usage.input_tokens
         + usage.cache_read_tokens
         + usage.cache_write_5m_tokens
+        + usage.cache_write_30m_tokens
         + usage.cache_write_1h_tokens
     )
 

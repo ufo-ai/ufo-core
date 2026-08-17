@@ -682,6 +682,7 @@ def _total_usage(usage_events: list[Usage]) -> Usage:
         output_tokens=sum(u.output_tokens for u in usage_events),
         cache_read_tokens=sum(u.cache_read_tokens for u in usage_events),
         cache_write_5m_tokens=sum(u.cache_write_5m_tokens for u in usage_events),
+        cache_write_30m_tokens=sum(u.cache_write_30m_tokens for u in usage_events),
         cache_write_1h_tokens=sum(u.cache_write_1h_tokens for u in usage_events),
     )
 
@@ -2107,6 +2108,7 @@ class TurnEngine:
             ("input", round_usage.input_tokens),
             ("cache_read", round_usage.cache_read_tokens),
             ("cache_write_5m", round_usage.cache_write_5m_tokens),
+            ("cache_write_30m", round_usage.cache_write_30m_tokens),
             ("cache_write_1h", round_usage.cache_write_1h_tokens),
         ):
             if amount:
@@ -2117,7 +2119,9 @@ class TurnEngine:
             ("cache_read", round_usage.cache_read_tokens),
             (
                 "cache_write",
-                round_usage.cache_write_5m_tokens + round_usage.cache_write_1h_tokens,
+                round_usage.cache_write_5m_tokens
+                + round_usage.cache_write_30m_tokens
+                + round_usage.cache_write_1h_tokens,
             ),
         ):
             if amount:
@@ -2167,6 +2171,7 @@ class TurnEngine:
             + usage.output_tokens
             + usage.cache_read_tokens
             + usage.cache_write_5m_tokens
+            + usage.cache_write_30m_tokens
             + usage.cache_write_1h_tokens
         )
         await self._publish(

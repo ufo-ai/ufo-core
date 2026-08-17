@@ -43,6 +43,7 @@ from ufo.models.interface import (
     TextDelta,
     ToolSchema,
 )
+from ufo.models.pricing import ModelPrice
 from ufo.models.registry import model_registry
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
@@ -91,12 +92,14 @@ def _chunk(
     return ChatCompletionChunk(**fields)
 
 
-def _usage(prompt: int, completion: int, cached: int = 0) -> CompletionUsage:
+def _usage(prompt: int, completion: int, cached: int = 0, cache_write: int = 0) -> CompletionUsage:
     return CompletionUsage(
         prompt_tokens=prompt,
         completion_tokens=completion,
         total_tokens=prompt + completion,
-        prompt_tokens_details=PromptTokensDetails(cached_tokens=cached),
+        prompt_tokens_details=PromptTokensDetails(
+            cached_tokens=cached, cache_write_tokens=cache_write
+        ),
     )
 
 
@@ -145,12 +148,42 @@ async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget
     assert kwargs["stream_options"] == {"include_usage": True}
 
 
-async def test_cached_prompt_tokens_are_a_disjoint_usage_class() -> None:
+async def test_unpriced_cache_writes_remain_fresh_input() -> None:
     create = ScriptedCreate(
-        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(10, 2, cached=4))]
+        [
+            _chunk(content="ok"),
+            _chunk(finish="stop"),
+            _chunk(usage=_usage(10, 2, cached=4, cache_write=3)),
+        ]
     )
     events = [event async for event in _client(create).complete(REQUEST)]
-    assert events[-1] == Usage(input_tokens=6, output_tokens=2, cache_read_tokens=4)
+    assert events[-1] == Usage(
+        input_tokens=6,
+        output_tokens=2,
+        cache_read_tokens=4,
+    )
+
+
+async def test_priced_cache_writes_are_a_disjoint_usage_class() -> None:
+    create = ScriptedCreate(
+        [
+            _chunk(content="ok"),
+            _chunk(finish="stop"),
+            _chunk(usage=_usage(10, 2, cached=4, cache_write=3)),
+        ]
+    )
+    client = _client(create)
+    priced = replace(
+        client.spec,
+        price=ModelPrice(0, 0, 0, 0, 0, cache_write_30m=1),
+    )
+    events = [event async for event in replace(client, spec=priced).complete(REQUEST)]
+    assert events[-1] == Usage(
+        input_tokens=3,
+        output_tokens=2,
+        cache_read_tokens=4,
+        cache_write_30m_tokens=3,
+    )
 
 
 async def test_reasoning_effort_rides_from_the_request() -> None:

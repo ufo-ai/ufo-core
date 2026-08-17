@@ -160,9 +160,16 @@ OPENAI_CACHED_JSON_BODY = (
 OPENAI_RESPONSES_JSON_BODY = (
     JSON_RESPONSE_HEAD + b'{"id":"resp","object":"response","model":"gpt-5.6-terra",'
     b'"output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}],'
-    b'"usage":{"input_tokens":100000,"input_tokens_details":{"cached_tokens":90000},'
+    b'"usage":{"input_tokens":100000,"input_tokens_details":{"cached_tokens":80000,'
+    b'"cache_write_tokens":10000},'
     b'"output_tokens":500,"output_tokens_details":{"reasoning_tokens":100},'
     b'"total_tokens":100500}}'
+)
+OPENAI_UNPRICED_WRITE_JSON_BODY = (
+    JSON_RESPONSE_HEAD + b'{"id":"c","object":"chat.completion","model":"gpt-5.5",'
+    b'"choices":[{"message":{"role":"assistant","content":"hi"}}],'
+    b'"usage":{"prompt_tokens":100000,"completion_tokens":500,"total_tokens":100500,'
+    b'"prompt_tokens_details":{"cached_tokens":80000,"cache_write_tokens":10000}}}'
 )
 OPENAI_UNREADABLE_USAGE_JSON_BODY = (
     JSON_RESPONSE_HEAD + b'{"id":"c","object":"chat.completion","model":"gpt-5.5",'
@@ -2108,6 +2115,15 @@ def test_json_body_usage_parses_an_openai_response() -> None:
     )
 
 
+def test_unpriced_openai_cache_writes_remain_fresh_input() -> None:
+    accumulator = HttpTokenUsage(OPENAI_HOST)
+    accumulator.feed(OPENAI_UNPRICED_WRITE_JSON_BODY)
+    assert accumulator.usage() == (
+        "gpt-5.5",
+        Usage(input_tokens=20_000, output_tokens=500, cache_read_tokens=80_000),
+    )
+
+
 def test_a_usage_object_the_parser_cannot_read_is_reported(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -2471,7 +2487,7 @@ async def test_a_responses_shaped_body_is_metered_rather_than_billed_nothing(db:
         int(row.cache_read_tokens),
         int(row.priced_micro_usd),
         row.model,
-    ) == ("sandbox_tokens", 100_500, 100_000, 90_000, 44_000, "gpt-5.6-terra")
+    ) == ("sandbox_tokens", 100_500, 100_000, 80_000, 67_000, "gpt-5.6-terra")
 
 
 async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> None:

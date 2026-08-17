@@ -105,6 +105,7 @@ class Usage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_5m_tokens: int = 0
+    cache_write_30m_tokens: int = 0
     cache_write_1h_tokens: int = 0
 
 

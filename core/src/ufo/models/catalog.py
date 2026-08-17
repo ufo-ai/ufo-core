@@ -72,8 +72,8 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     """Core's direct backends, built with the key-env names the deploy configured. The GPT-5.6
     models are called on the Responses surface (`api_surface="responses"`) — each rejects `tools` +
     `reasoning_effort` together on `/v1/chat/completions` (#568), so they declare the surface that
-    renders the legal request rather than tripping a mid-turn 400 — with cache writes at 1.25x base
-    input, the rate OpenAI bills a GPT-5.6 cache write at, and cache reads at 0.1x. `claude-opus-5`
+    renders the legal request rather than tripping a mid-turn 400 — with 30-minute cache writes at
+    1.25x base input and cache reads at 0.1x. `claude-opus-5`
     carries the 1M-token context window it ships with, at Opus-tier pricing unchanged from Opus 4.8.
     Anthropic cache writes are 1.25x base input at 5m and 2x at 1h; cache reads are 0.1x.
 
@@ -116,7 +116,7 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
         ),
         _anthropic(
             "claude-sonnet-5",
-            ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000),
+            ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000),
             "2026-01",
             anthropic_key_env,
         ),
@@ -134,14 +134,14 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
         ),
         _openai(
             "gpt-5.6-terra",
-            ModelPrice(2_000_000, 12_000_000, 200_000, 2_500_000, 2_500_000),
+            ModelPrice(2_000_000, 12_000_000, 200_000, 0, 0, 2_500_000),
             "2026-02",
             openai_key_env,
             api_surface="responses",
         ),
         _openai(
             "gpt-5.6-luna",
-            ModelPrice(200_000, 1_200_000, 20_000, 250_000, 250_000),
+            ModelPrice(200_000, 1_200_000, 20_000, 0, 0, 250_000),
             "2026-02",
             openai_key_env,
             api_surface="responses",
