@@ -305,7 +305,7 @@ def test_the_connect_tool_and_its_return_leg_ship_together() -> None:
 
 
 def test_the_install_url_names_the_published_app() -> None:
-    assert connect.INSTALL_URL == ("https://github.com/apps/flyingobject-ai-ufo/installations/new")
+    assert connect.INSTALL_URL == "https://github.com/apps/ufo-ai/installations/new"
 
 
 def test_the_review_agent_spawns_the_profile_this_pack_registers() -> None:

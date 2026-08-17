@@ -25,7 +25,7 @@ from ufo.sdk.credentials import authorized_slot_workspace
 from ufo.sdk.http import Request, Response
 from ufo.sdk.tools import TextContent, ToolContext, ToolResult
 
-APP_SLUG = "flyingobject-ai-ufo"
+APP_SLUG = "ufo-ai"
 GIT_INSTALLATION_SLOT = "github_app_installation"
 INSTALL_PAYLOAD = "github-app-install"
 ROUTE_PATH = "installed"
