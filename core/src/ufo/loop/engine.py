@@ -875,6 +875,7 @@ class RunLineage:
 class TurnEngine:
     turn: Turn
     agent: Agent
+    byok: bool
     system_prompt: RenderedPrompt
     model: ModelClient
     provider: str
@@ -2675,6 +2676,7 @@ class TurnEngine:
                 usage,
                 self.attempt,
                 pricing=self.pricing,
+                byok=self.byok,
             )
             cost = await read_turn_cost(connection, self.turn.id, TOKENS_DIMENSION)
             spend = cost if cost is not None else _NOTHING_SPENT
@@ -2755,6 +2757,7 @@ class TurnEngine:
                     _total_usage(usage_events),
                     self.attempt,
                     pricing=self.pricing,
+                    byok=self.byok,
                 )
                 await connection.execute(
                     sa.update(tables.inbound_message)
@@ -2843,6 +2846,7 @@ class TurnEngine:
                     usage,
                     self.attempt,
                     pricing=self.pricing,
+                    byok=self.byok,
                 )
         except Exception as error:
             log(

@@ -994,6 +994,7 @@ def _engine(
     provider: str = "anthropic",
     model_id: str = "claude-opus-4-8",
     handle: SandboxHandle | None = None,
+    byok: bool = False,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -1002,6 +1003,7 @@ def _engine(
     return TurnEngine(
         turn=turn,
         agent=Agent(prompt="p", model=model_id),
+        byok=byok,
         system_prompt=rendered_prompt("p"),
         model=model,
         provider=provider,

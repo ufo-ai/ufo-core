@@ -12,6 +12,7 @@ from ufo import accounting
 from ufo.accounting import (
     IMAGES_DIMENSION,
     MEMBER_SCOPE,
+    SANDBOX_TOKENS_DIMENSION,
     TOKENS_DIMENSION,
     VIDEOS_DIMENSION,
     SpendRollup,
@@ -25,8 +26,10 @@ from ufo.accounting import (
     record_video_usage,
     record_workspace_usage,
 )
+from ufo.balance import credit
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
+from ufo.loop import queue as loop_queue
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICES, CORE_PRICING, PRICE_DIGEST
 from ufo.models.interface import PROVIDER_ANTHROPIC
 from ufo.models.pricing import (
@@ -283,7 +286,12 @@ async def test_a_parked_then_resumed_turn_reads_back_as_one_spend(db: None) -> N
             ("resumed-run", Usage(input_tokens=200, output_tokens=100, cache_read_tokens=800)),
         ):
             await record_turn_usage(
-                connection, workspace_id, turn_id, "claude-opus-4-8", usage, attempt
+                connection,
+                workspace_id,
+                turn_id,
+                "claude-opus-4-8",
+                usage,
+                attempt,
             )
     async with workspace_tx() as connection:
         billed = sa.select(
@@ -755,7 +763,12 @@ async def test_spend_by_origin_counts_a_turn_once_per_ledger_row(db: None) -> No
         )
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
         await record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE, attempt="resumed"
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            FULL_USAGE,
+            attempt="resumed",
         )
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
@@ -953,7 +966,11 @@ async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> 
         await record_egress_request(connection, workspace_id, mine)
         await record_turn_usage(connection, workspace_id, theirs, "claude-opus-4-8", FULL_USAGE)
         await record_turn_usage(
-            connection, workspace_id, subagent_turn, "claude-opus-4-8", FULL_USAGE
+            connection,
+            workspace_id,
+            subagent_turn,
+            "claude-opus-4-8",
+            FULL_USAGE,
         )
         await record_workspace_usage(connection, workspace_id, "claude-opus-4-8", FULL_USAGE)
         for subject_id, limit in ((member_id, 5_000_000), (stranger_id, 9_000_000)):
@@ -1054,7 +1071,11 @@ async def test_usage_export_settlement_rules(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", Usage(input_tokens=1000)
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=1000),
         )
         await record_workspace_usage(
             connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=250)
@@ -1198,3 +1219,370 @@ async def test_metered_workspaces_names_only_workspaces_with_ledger_rows(db: Non
         await _seed_turn(connection)
         await record_workspace_usage(connection, metered, "claude-opus-4-8", Usage(input_tokens=10))
     assert await accounting.metered_workspaces()() == (metered,)
+
+
+async def _balance_of(connection: AsyncConnection, workspace_id: UUID) -> int:
+    return (
+        await connection.execute(
+            sa.select(tables.workspace_balance.c.balance_micro_usd).where(
+                tables.workspace_balance.c.workspace_id == workspace_id
+            )
+        )
+    ).scalar_one()
+
+
+async def _priced_of(connection: AsyncConnection, turn_id: UUID, dimension: str) -> int:
+    return (
+        await connection.execute(
+            sa.select(sa.func.sum(tables.ledger.c.priced_micro_usd)).where(
+                tables.ledger.c.turn_id == turn_id, tables.ledger.c.dimension == dimension
+            )
+        )
+    ).scalar_one()
+
+
+async def test_a_replayed_attempt_debits_once(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        for _ in range(3):
+            await record_turn_usage(
+                connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            )
+        left = await _balance_of(connection, workspace_id)
+    assert left == 100_000_000 - CORE_PRICING.micro_usd("claude-opus-4-8", FULL_USAGE)
+
+
+async def test_several_sandbox_calls_debit_each_increment(db: None) -> None:
+    """One accumulating row, and the debits sum to it."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        for _ in range(3):
+            await record_sandbox_tokens(
+                connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+            )
+        billed = await _priced_of(connection, turn_id, SANDBOX_TOKENS_DIMENSION)
+        left = await _balance_of(connection, workspace_id)
+    assert left == 100_000_000 - billed
+
+
+async def test_a_job_bill_debits_the_balance(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _ = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        await record_workspace_usage(connection, workspace_id, "claude-opus-4-8", FULL_USAGE)
+        billed = (
+            await connection.execute(
+                sa.select(sa.func.sum(tables.ledger.c.priced_micro_usd)).where(
+                    tables.ledger.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        left = await _balance_of(connection, workspace_id)
+    assert billed > 0
+    assert left == 100_000_000 - billed
+
+
+async def test_generated_media_debits_and_egress_does_not(db: None) -> None:
+    """An image or video is real money on the platform key, so an empty balance must not keep
+    generating. Egress counts requests and prices at zero, so it never moves the balance."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        await record_egress_request(connection, workspace_id, turn_id)
+        after_egress = await _balance_of(connection, workspace_id)
+        await record_image_usage(connection, workspace_id, turn_id, "gpt-image-2", 2, 40_000)
+        await record_video_usage(connection, workspace_id, turn_id, "hailuo-3", 1, 7_000_000)
+        left = await _balance_of(connection, workspace_id)
+    assert after_egress == 100_000_000
+    assert left == 100_000_000 - 40_000 - 7_000_000
+
+
+async def test_a_workspace_with_no_balance_row_records_usage_unchanged(db: None) -> None:
+    """The self-host path: the ledger still carries what it would have charged, and there is nothing
+    to take it off."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        billed = await _priced_of(connection, turn_id, TOKENS_DIMENSION)
+        rows = (
+            await connection.execute(
+                sa.select(sa.func.count()).select_from(tables.workspace_balance)
+            )
+        ).scalar_one()
+    assert billed > 0
+    assert rows == 0
+
+
+async def test_the_balance_is_granted_less_every_debit(db: None) -> None:
+    """The balance is not a sum over the ledger: a BYOK burn is priced and never debited, so the
+    ledger total is only an upper bound. What holds exactly is granted less what was taken."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await credit(connection, workspace_id, 60_000_000, 60_000_000, "first")
+        await credit(connection, workspace_id, 40_000_000, 40_000_000, "second")
+        await credit(connection, workspace_id, -10_000_000, -10_000_000, "refund/second")
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            FULL_USAGE,
+            byok=True,
+        )
+        await record_image_usage(connection, workspace_id, turn_id, "gpt-image-2", 1, 25_000)
+        granted = (
+            await connection.execute(
+                sa.select(sa.func.sum(tables.balance_purchase.c.granted_micro_usd)).where(
+                    tables.balance_purchase.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        priced = (
+            await connection.execute(
+                sa.select(sa.func.sum(tables.ledger.c.priced_micro_usd)).where(
+                    tables.ledger.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        left = await _balance_of(connection, workspace_id)
+    assert left == int(granted) - 25_000
+    assert int(granted) - int(priced) < left
+
+
+async def test_a_burn_the_workspaces_own_key_paid_for_never_debits(db: None) -> None:
+    """BYOK meters without billing: the burn is still recorded at what it cost, and the balance is
+    untouched, because the workspace already paid the provider directly."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            FULL_USAGE,
+            byok=True,
+        )
+        priced = await _priced_of(connection, turn_id, TOKENS_DIMENSION)
+        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+        left = await _balance_of(connection, workspace_id)
+    assert cost is not None
+    assert cost.tokens > 0
+    assert priced > 0
+    assert left == 100_000_000
+
+
+async def test_a_burn_on_the_platform_key_still_debits(db: None) -> None:
+    """The exemption is the key that served the turn, decided when the turn was set up."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            FULL_USAGE,
+        )
+        left = await _balance_of(connection, workspace_id)
+    assert left < 100_000_000
+
+
+async def test_a_job_burn_the_workspaces_own_key_paid_for_never_debits(db: None) -> None:
+    """A background job's spend follows the same rule a turn's does: the workspace that paid the
+    provider directly is not charged for it a second time."""
+    async with workspace_tx() as connection:
+        workspace_id, _ = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await record_workspace_usage(
+            connection,
+            workspace_id,
+            "claude-opus-4-8",
+            FULL_USAGE,
+            CORE_PRICING,
+            True,
+        )
+        left = await _balance_of(connection, workspace_id)
+    assert left == 100_000_000
+
+
+async def test_a_job_burn_on_the_platform_key_debits(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _ = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        await record_workspace_usage(
+            connection,
+            workspace_id,
+            "claude-opus-4-8",
+            FULL_USAGE,
+            CORE_PRICING,
+            False,
+        )
+        left = await _balance_of(connection, workspace_id)
+    assert left < 100_000_000
+
+
+async def test_a_key_arriving_mid_turn_does_not_make_that_turn_free(db: None) -> None:
+    """The exemption is decided against the key that served the turn, not against the credential
+    rows as they stand when the bill is written. Re-read at terminal, a key stored mid-run would
+    make that turn free and one removed mid-run would charge what the workspace already paid."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE, byok=False
+        )
+        left = await _balance_of(connection, workspace_id)
+    assert left < 100_000_000
+
+
+async def test_the_balance_equals_granted_less_what_the_ledger_debited(db: None) -> None:
+    """The identity the audit rests on. Priced is what a burn cost; debited is what it took, and a
+    BYOK row is priced while taking nothing, so only the debited column rebuilds the balance."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await credit(connection, workspace_id, 60_000_000, 60_000_000, "first")
+        await credit(connection, workspace_id, -10_000_000, -10_000_000, "refund/first")
+        await record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE, byok=True
+        )
+        await record_image_usage(connection, workspace_id, turn_id, "gpt-image-2", 1, 25_000)
+        await record_sandbox_tokens(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+        granted = (
+            await connection.execute(
+                sa.select(sa.func.sum(tables.balance_purchase.c.granted_micro_usd)).where(
+                    tables.balance_purchase.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        totals = (
+            await connection.execute(
+                sa.select(
+                    sa.func.sum(tables.ledger.c.priced_micro_usd),
+                    sa.func.sum(tables.ledger.c.debited_micro_usd),
+                ).where(tables.ledger.c.workspace_id == workspace_id)
+            )
+        ).one()
+        left = await _balance_of(connection, workspace_id)
+    assert int(granted) - int(totals[1]) == left
+    assert int(totals[0]) > int(totals[1])
+
+
+async def test_a_workspace_with_no_balance_records_no_deduction(db: None) -> None:
+    """Every workspace before its first top-up and every self-hosted install has no balance row, so
+    nothing is taken. Recording the deduction that was attempted would claim money left a balance
+    that does not exist, and the reconciliation would be wrong in both directions."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_image_usage(connection, workspace_id, turn_id, "gpt-image-2", 1, 25_000)
+        await record_sandbox_tokens(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
+        )
+        totals = (
+            await connection.execute(
+                sa.select(
+                    sa.func.sum(tables.ledger.c.priced_micro_usd),
+                    sa.func.sum(tables.ledger.c.debited_micro_usd),
+                ).where(tables.ledger.c.workspace_id == workspace_id)
+            )
+        ).one()
+    assert int(totals[0]) > 0
+    assert int(totals[1]) == 0
+
+
+async def test_a_recovery_of_one_attempt_bills_the_key_that_served_it(db: None) -> None:
+    """A crash recovery re-executes the same attempt and must bill the tokens already burned under
+    the verdict they were burned under. Re-deciding there would make the whole attempt free because
+    a key arrived after the crash, or charge for what the workspace's own key paid because one
+    left."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+    first = await loop_queue._frozen_byok(workspace_id, turn_id, "anthropic_api_key", "attempt-1")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    recovered = await loop_queue._frozen_byok(
+        workspace_id, turn_id, "anthropic_api_key", "attempt-1"
+    )
+    assert first is False
+    assert recovered is False
+
+
+async def test_a_resumed_attempt_decides_against_the_key_that_will_serve_it(db: None) -> None:
+    """The money keys on the attempt: a parked turn's resume re-runs every round for real under a
+    fresh workflow id and bills each burn under that attempt. A verdict frozen against the turn
+    would bill the whole re-run under the situation that held when the turn first started — adding
+    a key during the pause charges for calls the workspace's own key paid, removing one makes the
+    entire re-run free, and either is repeatable with ordinary workspace permissions."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+    parked = await loop_queue._frozen_byok(workspace_id, turn_id, "anthropic_api_key", "attempt-1")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    resumed = await loop_queue._frozen_byok(workspace_id, turn_id, "anthropic_api_key", "attempt-2")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.credential).where(tables.credential.c.workspace_id == workspace_id)
+        )
+    resumed_again = await loop_queue._frozen_byok(
+        workspace_id, turn_id, "anthropic_api_key", "attempt-3"
+    )
+    assert parked is False
+    assert resumed is True
+    assert resumed_again is False

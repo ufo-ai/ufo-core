@@ -10,6 +10,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
+from ufo.accounting import workspace_owns_the_key
 from ufo.agent_scope import agent
 from ufo.agent_setup import setup_skill
 from ufo.audience import Audience, parse_audience
@@ -484,6 +485,12 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
             output_model = profile.output_model
         model = await runtime.registry.client_for(resolved.model)
+        byok = await _frozen_byok(
+            turn.workspace_id,
+            turn.id,
+            runtime.registry.spec(resolved.model).key_slot or None,
+            attempt,
+        )
         grants = GrantStore() if runtime.credentials is not None else None
         clis = connector_clis(runtime.manifests)
         with span("sandbox.open"):
@@ -514,6 +521,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         engine = TurnEngine(
             turn=turn,
             agent=resolved,
+            byok=byok,
             system_prompt=system_prompt,
             model=model,
             provider=runtime.registry.spec(resolved.model).provider,
@@ -791,6 +799,58 @@ async def _previous_turn_ended_at(turn: Turn) -> datetime | None:
             )
         ).scalar_one()
     return ended_at if ended_at.tzinfo is not None else ended_at.replace(tzinfo=UTC)
+
+
+async def _frozen_byok(
+    workspace_id: UUID, turn_id: UUID, key_slot: str | None, attempt: str
+) -> bool:
+    """Whether the workspace's own key serves this run attempt, decided once per attempt and kept
+    on the turn row.
+
+    The money keys on the attempt: a turn parked and resumed re-runs every round for real under a
+    fresh workflow id, and each burn is billed under its own attempt. So the verdict has to key on
+    the attempt too. Frozen against the turn instead, a resume bills its whole re-run under the
+    situation that held when the turn first started — a key added during the pause charges the
+    workspace for calls its own key paid, one removed makes the entire re-run free, and either is
+    repeatable with ordinary workspace permissions.
+
+    Within one attempt it stays frozen, which is what a crash recovery needs: the re-execution
+    rebuilds the engine from scratch and must bill the tokens already burned under the verdict they
+    were burned under. The write claims the attempt only if it is unclaimed, and the answer is
+    always the row's rather than the one this execution computed, so two recoveries of one attempt
+    cannot bill it two ways."""
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.byok, tables.turn.c.byok_attempt).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one_or_none()
+        if stored is not None and stored.byok is not None and stored.byok_attempt == attempt:
+            return bool(stored.byok)
+        decided = await workspace_owns_the_key(connection, workspace_id, key_slot)
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(
+                tables.turn.c.id == turn_id,
+                sa.or_(
+                    tables.turn.c.byok_attempt.is_(None),
+                    tables.turn.c.byok_attempt != attempt,
+                ),
+            )
+            .values(byok=decided, byok_attempt=attempt, updated_at=sa.func.now())
+        )
+        settled = (
+            await connection.execute(
+                sa.select(tables.turn.c.byok, tables.turn.c.byok_attempt).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one_or_none()
+    if settled is not None and settled.byok is not None and settled.byok_attempt == attempt:
+        return bool(settled.byok)
+    return decided
 
 
 async def _open_sandbox(

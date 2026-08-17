@@ -18,6 +18,7 @@ from opentelemetry.sdk.metrics.export import (
 from ufo import o11y
 from ufo.agent_scope import agent
 from ufo.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.balance import credit
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialSlotUnset, CredentialStore
@@ -159,8 +160,10 @@ class StubResolver:
     async def client_for(self, model: str) -> ModelClient:
         return self.client
 
+    key_slot: str | None = None
+
     def key_slot_for(self, model: str) -> str | None:
-        return None
+        return self.key_slot
 
     def provider_for(self, model: str) -> str:
         return PROVIDER_ANTHROPIC
@@ -1548,3 +1551,62 @@ async def test_open_conversation_refuses_an_agent_of_another_workspace(db: None)
         ).scalar_one()
     with ws(workspace_id), pytest.raises(ValueError, match="not an agent of this workspace"):
         await context_for("coding", frozenset()).open_conversation(stranger, "code-review:abc")
+
+
+@dataclass(frozen=True)
+class _CostlyModel:
+    """One round whose burn actually prices above zero, so a debit of nothing is a decision rather
+    than a rounding result."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="done")
+        yield Usage(input_tokens=2_000_000, output_tokens=2_000_000)
+
+
+async def test_a_background_job_on_the_workspaces_own_key_debits_nothing(
+    db: None,
+) -> None:
+    """A background job is metered on the same terms a turn is: the workspace already paid its own
+    provider for what its own key served, so the balance must not be taken twice. The flag has to be
+    produced beside the call — decided at billing time it would have no producer at all, and every
+    job would debit at full price."""
+    workspace_id = await _workspace()
+    async with workspace_tx() as connection:
+        await credit(connection, workspace_id, 50 * 1_000_000, 0, "opening")
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = context_for(
+        "core",
+        frozenset(),
+        model_resolver=StubResolver(_CostlyModel(), key_slot="anthropic_api_key"),
+        model_job="billing_probe",
+    )
+    assert context.model is not None
+    with ws(workspace_id):
+        await context.model.turn(
+            ModelRequest(
+                model="auto",
+                system="be terse",
+                messages=(Message(role="user", content="hi"),),
+                max_tokens=64,
+                conversation_cache_ttl="5m",
+            )
+        )
+    async with workspace_tx() as connection:
+        priced, debited = (
+            await connection.execute(
+                sa.select(
+                    sa.func.sum(tables.ledger.c.priced_micro_usd),
+                    sa.func.sum(tables.ledger.c.debited_micro_usd),
+                ).where(tables.ledger.c.workspace_id == workspace_id)
+            )
+        ).one()
+    assert int(priced) > 0
+    assert int(debited) == 0

@@ -567,6 +567,7 @@ def _engine(
     return TurnEngine(
         turn=turn,
         agent=agent,
+        byok=False,
         system_prompt=rendered_prompt("p"),
         model=model,
         provider="anthropic",

@@ -44,11 +44,19 @@ class BillableEvent:
     """Spend accrued inside one `billable_event()` block. Add model usage as the calls happen;
     nothing is written until the block exits cleanly, so a call that raises is never billed."""
 
-    _usages: list[tuple[str, Usage, Pricing]] = field(default_factory=list)
+    _usages: list[tuple[str, Usage, Pricing, bool]] = field(default_factory=list)
 
-    def usage(self, model: str, usage: Usage, pricing: Pricing = CORE_PRICING) -> None:
-        """Accrue one metered model call to book when the block succeeds."""
-        self._usages.append((model, usage, pricing))
+    def usage(
+        self,
+        model: str,
+        usage: Usage,
+        pricing: Pricing = CORE_PRICING,
+        byok: bool = False,
+    ) -> None:
+        """Accrue one metered model call to book when the block succeeds. `byok` is decided by the
+        caller, against the key that served this call, so a call the workspace's own key paid for is
+        billed nothing and the answer cannot drift before the bill is written."""
+        self._usages.append((model, usage, pricing, byok))
 
 
 @dataclass(frozen=True)
@@ -108,8 +116,10 @@ class WorkspaceScope:
         if not event._usages:
             return
         async with workspace_tx() as connection:
-            for model, usage, pricing in event._usages:
-                await record_workspace_usage(connection, self.workspace_id, model, usage, pricing)
+            for model, usage, pricing, byok in event._usages:
+                await record_workspace_usage(
+                    connection, self.workspace_id, model, usage, pricing, byok
+                )
 
 
 @contextmanager

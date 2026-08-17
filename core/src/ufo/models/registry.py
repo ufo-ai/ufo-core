@@ -77,8 +77,12 @@ class ModelRegistry:
     def key_slot_for(self, model: str) -> str | None:
         """The BYOK slot whose stored value would key this model's calls — total instead of loud: an
         unclaimed model (a historical ledger row from a removed spec) or a keyless spec answers
-        None, so a billing export labels it platform-served rather than wedging on it."""
-        spec = self.specs.get(model)
+        None, so a billing export labels it platform-served rather than wedging on it.
+
+        `auto` resolves first, because an agent stores what it was authored with and a workspace
+        created the normal way stores `auto`. Asked about that sentinel a bare lookup answers None,
+        which reads as platform-served for an agent whose calls the workspace's own key pays."""
+        spec = self.specs.get(self.resolve(model))
         if spec is None or not spec.key_slot:
             return None
         return spec.key_slot

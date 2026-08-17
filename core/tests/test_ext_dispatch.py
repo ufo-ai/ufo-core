@@ -245,6 +245,7 @@ def _engine(
     return TurnEngine(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
+        byok=False,
         system_prompt=rendered_prompt("p"),
         model=model,
         provider="anthropic",

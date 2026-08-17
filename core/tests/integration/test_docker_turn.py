@@ -171,6 +171,7 @@ async def test_turn_execs_bash_in_a_live_container(
     engine = TurnEngine(
         turn=turn,
         agent=Agent(prompt="run the marker", model="claude-opus-4-8"),
+        byok=False,
         system_prompt=rendered_prompt("run the marker"),
         model=model,
         provider="anthropic",

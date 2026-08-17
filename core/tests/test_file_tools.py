@@ -924,6 +924,7 @@ def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
     return TurnEngine(
         turn=ctx.turn,
         agent=ctx.agent,
+        byok=False,
         system_prompt=rendered_prompt("p"),
         model=_QuietModel(),
         provider="anthropic",

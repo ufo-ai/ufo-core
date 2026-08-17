@@ -374,6 +374,9 @@ class ModelResolver:
     def provider_for(self, model: str) -> str:
         return PROVIDER_ANTHROPIC
 
+    def key_slot_for(self, model: str) -> str | None:
+        return None
+
 
 async def test_replay_uses_metered_model_access_and_feeds_archived_results(db: None) -> None:
     workspace_id = await _workspace()

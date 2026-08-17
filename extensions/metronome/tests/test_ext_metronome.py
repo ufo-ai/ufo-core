@@ -237,7 +237,11 @@ async def test_ships_settled_rows_with_exact_events(
     await _settle(turn_id, age_seconds=0)
     async with workspace_tx() as connection:
         await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
+            connection,
+            workspace_id,
+            turn_id,
+            MODEL,
+            Usage(input_tokens=1000, output_tokens=500),
         )
         await record_workspace_usage(connection, workspace_id, MODEL, Usage(input_tokens=250))
     recorder = _Recorder()
@@ -626,7 +630,11 @@ async def test_byok_label_flips_with_the_stored_key_and_stays_per_workspace(
         await _settle(turn_id, age_seconds=0)
         async with workspace_tx() as connection:
             await record_turn_usage(
-                connection, ws_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
+                connection,
+                ws_id,
+                turn_id,
+                MODEL,
+                Usage(input_tokens=1000, output_tokens=500),
             )
     await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-workspace-own")
     recorder = _Recorder()
@@ -705,7 +713,11 @@ async def test_byok_labels_only_anthropic_served_host_tokens(
     turn_id = await _turn(workspace_id, conversation_id, agent_id)
     async with workspace_tx() as connection:
         await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
+            connection,
+            workspace_id,
+            turn_id,
+            MODEL,
+            Usage(input_tokens=1000, output_tokens=500),
         )
         await record_sandbox_tokens(
             connection, workspace_id, turn_id, MODEL, Usage(input_tokens=200)
@@ -769,7 +781,11 @@ async def test_byok_follows_the_serving_providers_stored_key(
     await _settle(turn_id, age_seconds=0)
     async with workspace_tx() as connection:
         await record_turn_usage(
-            connection, workspace_id, turn_id, "anthropic.claude-opus-4-8", Usage(input_tokens=10)
+            connection,
+            workspace_id,
+            turn_id,
+            "anthropic.claude-opus-4-8",
+            Usage(input_tokens=10),
         )
     recorder = _Recorder()
     with ws(workspace_id):

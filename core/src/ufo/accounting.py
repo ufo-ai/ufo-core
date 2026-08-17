@@ -12,7 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.balance import BALANCE_HELD_MESSAGE, held_below_reserve
+from ufo.balance import BALANCE_HELD_MESSAGE, debit, held_below_reserve
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
@@ -86,6 +86,23 @@ def _prompt_tokens(usage: Usage) -> int:
     )
 
 
+async def workspace_owns_the_key(
+    connection: AsyncConnection, workspace_id: UUID, key_slot: str | None
+) -> bool:
+    """Whether the workspace's own provider key served this burn — the same rule the usage export
+    labels `byok` with, so the balance and the export never disagree about who paid."""
+    if not key_slot:
+        return False
+    return (
+        await connection.execute(
+            sa.select(tables.credential.c.slot).where(
+                tables.credential.c.workspace_id == workspace_id,
+                tables.credential.c.slot == key_slot,
+            )
+        )
+    ).one_or_none() is not None
+
+
 async def record_turn_usage(
     connection: AsyncConnection,
     workspace_id: UUID,
@@ -94,6 +111,7 @@ async def record_turn_usage(
     usage: Usage,
     attempt: str = "",
     pricing: Pricing = CORE_PRICING,
+    byok: bool = False,
 ) -> None:
     """One billing write per turn per run attempt; select-then-insert is replay-safe because DBOS
     re-executes a given attempt sequentially, never concurrently with itself. A turn parked mid-run
@@ -102,16 +120,29 @@ async def record_turn_usage(
 
     The row carries the burn's prompt split beside its total, so a terminal frame's cache share is a
     read of the same row the tokens, cost and model come off rather than a second account of the
-    same spend."""
+    same spend.
+
+    What the burn cost is what comes off the balance: one price, no margin. The debit shares this
+    transaction and sits after the replay guard, so a re-executed attempt takes nothing twice.
+
+    A burn the workspace's own provider key paid for debits nothing: the workspace already paid the
+    provider directly, and taking it off the balance too would charge twice for one call.
+    `byok` is decided once, when the turn is set up and against the key that will serve it, rather
+    than re-read here: credential rows can change while a turn runs, so a value read at terminal
+    would make a turn free because a key arrived mid-run, or charge for one the workspace's own key
+    paid because a key left. It is the same question the usage export freezes at mint."""
     total = _total_tokens(usage)
     if total == 0:
         return
     ledger_id = ledger_id_for(workspace_id, turn_id, TOKENS_DIMENSION, attempt)
-    billed = await connection.execute(
+    already = await connection.execute(
         sa.select(tables.ledger.c.id).where(tables.ledger.c.id == ledger_id)
     )
-    if billed.one_or_none() is not None:
+    if already.one_or_none() is not None:
         return
+    priced = pricing.micro_usd(model, usage)
+    billed = 0 if byok else priced
+    taken = await debit(connection, workspace_id, billed)
     await connection.execute(
         sa.insert(tables.ledger).values(
             id=ledger_id,
@@ -121,7 +152,8 @@ async def record_turn_usage(
             amount=total,
             prompt_tokens=_prompt_tokens(usage),
             cache_read_tokens=usage.cache_read_tokens,
-            priced_micro_usd=pricing.micro_usd(model, usage),
+            priced_micro_usd=priced,
+            debited_micro_usd=taken,
             model=model,
             price_digest=pricing.digest,
             created_at=sa.func.now(),
@@ -180,6 +212,7 @@ async def record_workspace_usage(
     model: str,
     usage: Usage,
     pricing: Pricing = CORE_PRICING,
+    byok: bool = False,
 ) -> None:
     """Bill a background job's metered model call to the workspace, not a turn: one priced `tokens`
     row with `turn_id` NULL, stamped with the model and price digest exactly as a turn's tokens are.
@@ -188,10 +221,17 @@ async def record_workspace_usage(
     charge) and bills that invocation, never a phantom double or a lost burn. It lands in the
     workspace spend total and every workspace-scoped cap window (which sum by `workspace_id`), and
     is excluded from per-member and per-agent attribution (which join through `turn` — a NULL FK
-    drops out), because a job's spend belongs to no member or agent."""
+    drops out), because a job's spend belongs to no member or agent.
+
+    It bills against the serving model's own rate: no agent authored this call, so there is no
+    delegated choice to charge for and nothing to route. A job served by the workspace's own key
+    bills nothing, exactly as a turn does."""
     total = _total_tokens(usage)
     if total == 0:
         return
+    priced = pricing.micro_usd(model, usage)
+    billed = 0 if byok else priced
+    taken = await debit(connection, workspace_id, billed)
     await connection.execute(
         sa.insert(tables.ledger).values(
             id=uuid4(),
@@ -201,7 +241,8 @@ async def record_workspace_usage(
             amount=total,
             prompt_tokens=_prompt_tokens(usage),
             cache_read_tokens=usage.cache_read_tokens,
-            priced_micro_usd=pricing.micro_usd(model, usage),
+            priced_micro_usd=priced,
+            debited_micro_usd=taken,
             model=model,
             price_digest=pricing.digest,
             created_at=sa.func.now(),
@@ -290,13 +331,17 @@ async def record_sandbox_tokens(
     dimension distinct from `tokens`, so its id can never collide with the host row
     `record_turn_usage` writes for the same turn. The row carries the burn's prompt split beside its
     total, exactly as the host row does, so `read_turn_cost` reads this dimension's cache share off
-    the same row its tokens and cost come from."""
+    the same row its tokens and cost come from.
+
+    The model host's key comes from the proxy's environment, so an in-sandbox call is always served
+    by the platform: it debits the balance whatever key the workspace holds for the host loop."""
     total = _total_tokens(usage)
     if total == 0:
         return
     priced = pricing.micro_usd(model, usage)
     prompt = _prompt_tokens(usage)
     ledger_id = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION)
+    taken = await debit(connection, workspace_id, priced)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     await connection.execute(
         insert(tables.ledger)
@@ -309,6 +354,7 @@ async def record_sandbox_tokens(
             prompt_tokens=prompt,
             cache_read_tokens=usage.cache_read_tokens,
             priced_micro_usd=priced,
+            debited_micro_usd=taken,
             model=model,
             price_digest=pricing.digest,
             created_at=sa.func.now(),
@@ -321,6 +367,7 @@ async def record_sandbox_tokens(
                 "prompt_tokens": tables.ledger.c.prompt_tokens + prompt,
                 "cache_read_tokens": tables.ledger.c.cache_read_tokens + usage.cache_read_tokens,
                 "priced_micro_usd": tables.ledger.c.priced_micro_usd + priced,
+                "debited_micro_usd": tables.ledger.c.debited_micro_usd + taken,
                 "updated_at": sa.func.now(),
             },
         )
@@ -375,7 +422,14 @@ async def _record_media_usage(
     amount: int,
     micro_usd: int,
 ) -> None:
+    """Meter one image or video generation, accumulating onto a per-turn row of its dimension.
+
+    It debits its own increment, exactly as a token burn does: a generated image or video is real
+    money on the platform key, so a balance that did not move for it would let an empty workspace
+    keep generating. `egress` is the one metered dimension that never debits — it counts requests
+    and prices at zero."""
     ledger_id = ledger_id_for(workspace_id, turn_id, dimension)
+    taken = await debit(connection, workspace_id, micro_usd)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     await connection.execute(
         insert(tables.ledger)
@@ -386,6 +440,7 @@ async def _record_media_usage(
             dimension=dimension,
             amount=amount,
             priced_micro_usd=micro_usd,
+            debited_micro_usd=taken,
             model=model,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
@@ -395,6 +450,7 @@ async def _record_media_usage(
             set_={
                 "amount": tables.ledger.c.amount + amount,
                 "priced_micro_usd": tables.ledger.c.priced_micro_usd + micro_usd,
+                "debited_micro_usd": tables.ledger.c.debited_micro_usd + taken,
                 "updated_at": sa.func.now(),
             },
         )

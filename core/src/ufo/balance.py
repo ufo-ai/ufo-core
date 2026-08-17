@@ -3,9 +3,9 @@ them.
 
 The balance is a mutable row rather than a sum over the purchases, because a lifetime balance has no
 window to bound its sum and a gate reads it before every model round. The purchases stay the record
-the balance is audited against: `sum(granted_micro_usd)` less what the ledger billed since the
-balance row was made equals `balance_micro_usd`, exactly, because a debit and its ledger row share
-one transaction."""
+the balance is audited against: `sum(granted_micro_usd)` less the ledger's whole
+`sum(debited_micro_usd)` equals `balance_micro_usd`, exactly, because a debit and the row recording
+it share one transaction and the row records what the balance actually moved."""
 
 import time
 from dataclasses import dataclass
@@ -169,6 +169,29 @@ async def credit(
     )
     _no_balance.pop(workspace_id, None)
     return True
+
+
+async def debit(connection: AsyncConnection, workspace_id: UUID, micro_usd: int) -> int:
+    """Take a burn off the balance, in the transaction that recorded it.
+
+    No floor: a turn that overshoots lands a negative balance the next credit absorbs. A check
+    constraint here would instead fail the ledger write, and losing the record of money we have
+    already spent is worse than carrying a negative number that says so.
+
+    A workspace with no balance row is a no-op, which is the self-host case — and the answer is
+    what was actually taken, not what was asked for, so a caller recording the deduction records
+    the one that happened."""
+    if micro_usd == 0:
+        return 0
+    taken = await connection.execute(
+        sa.update(tables.workspace_balance)
+        .where(tables.workspace_balance.c.workspace_id == workspace_id)
+        .values(
+            balance_micro_usd=tables.workspace_balance.c.balance_micro_usd - micro_usd,
+            updated_at=sa.func.now(),
+        )
+    )
+    return micro_usd if taken.rowcount == 1 else 0
 
 
 async def set_reserve(

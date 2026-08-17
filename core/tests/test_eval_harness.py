@@ -1101,6 +1101,9 @@ class StubResolver:
     def provider_for(self, model: str) -> str:
         return PROVIDER_ANTHROPIC
 
+    def key_slot_for(self, model: str) -> str | None:
+        return None
+
 
 @dataclass(frozen=True)
 class UncalledDbos:

@@ -30,6 +30,7 @@ from ufo.accounting import (
     ack_usage_exports,
     mint_usage_exports,
     read_pending_usage_exports,
+    workspace_owns_the_key,
 )
 from ufo.agent_scope import agent, agent_current
 from ufo.audience import (
@@ -737,6 +738,15 @@ class ModelAccess:
             return response.content
         return "".join(block.text for block in response.content if isinstance(block, TextBlock))
 
+    async def _serves_itself(self, model: str) -> bool:
+        """Whether the workspace's own provider key serves this job's call, decided beside the call
+        rather than at billing time — a background job is metered on the same terms a turn is, and
+        the workspace already paid its provider directly for what its own key served."""
+        async with workspace_tx() as connection:
+            return await workspace_owns_the_key(
+                connection, ws_current().workspace_id, self._resolver.key_slot_for(model)
+            )
+
     async def turn(self, request: ModelRequest) -> Message:
         """Run one tool-aware model turn and return its assistant message after metering it. A
         reasoning round's message opens with the blocks the model streamed, ahead of its text and
@@ -759,6 +769,7 @@ class ModelAccess:
         job dropped at shutdown must not read back as a round that answered in no tokens."""
         model = self._resolver.auto_model
         client = await self._resolver.client_for(model)
+        byok = await self._serves_itself(model)
         dimensions = {
             "model": model,
             "provider": self._resolver.provider_for(model),
@@ -806,7 +817,7 @@ class ModelAccess:
                     cache_write_5m_tokens=sum(u.cache_write_5m_tokens for u in usages),
                     cache_write_1h_tokens=sum(u.cache_write_1h_tokens for u in usages),
                 )
-                bill.usage(model, usage, self._resolver.pricing)
+                bill.usage(model, usage, self._resolver.pricing, byok)
         except BaseException as error:
             failure = {"error_class": type(error).__name__}
             raise

@@ -728,8 +728,25 @@ table per model; BYOK usage still meters (visibility without billing).
 
 A workspace may also hold a prepaid balance in micro-USD, credited once per `reference` so a repeated
 delivery of one payment adds nothing. An operator reads and moves it through `ufoctl balance`, which
-names the workspace explicitly on a deploy that serves more than one. The purchases are the record
-the balance is audited against: lifetime `granted_micro_usd` equals `balance_micro_usd`.
+names the workspace explicitly on a deploy that serves more than one.
+
+Every burn takes what it cost off that balance in the transaction that wrote the ledger row, so a
+turn, a background job, an in-sandbox call, and a generated image or video all move it. `egress` is
+the one metered dimension that never does: it counts requests and prices at zero.
+
+A burn the workspace's own provider key paid for is metered but never debited, whether a turn or a
+background job spent it — BYOK meters without billing. So the balance is not a sum over the ledger:
+lifetime `granted_micro_usd` less the ledger's priced total is an upper bound on what was taken, and
+the exempt rows are the difference. Each row records what it actually took as `debited_micro_usd` beside what it cost, so the
+reconstruction is exact and needs no window: lifetime `granted_micro_usd` less the ledger's whole
+debited total equals `balance_micro_usd`. A row written before the first credit debited nothing and
+carries zero, so counting only rows after it would discard real deductions on a row that spans the
+moment and hide a leak in exactly that direction. A BYOK row is priced and debits nothing, which is
+the difference between the two columns.
+
+A workspace with no balance row is unaffected, which is the self-host case. There is no floor: a
+turn that overshoots lands a negative balance the next credit absorbs, because failing the write
+instead would lose the record of money already spent.
 
 Seats decide who the agent
 answers, and nothing bounds how many hold one: the plan is one flat fee per workspace with
