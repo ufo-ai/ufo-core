@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from collections.abc import Callable
+from pathlib import Path, PurePosixPath
 
 from evals.harness.artifact_checks import (
     OOXML_PARTS,
@@ -28,6 +30,7 @@ from evals.harness.capability import (
     DescribedGrader,
     Grader,
     SharedArtifact,
+    ToolInvocation,
     grading_statement,
 )
 from evals.harness.harness import JsonObject
@@ -372,28 +375,92 @@ def lane_scorer(acceptable: frozenset[str]) -> Grader:
     )
 
 
-def delegation_only_scorer(forbidden: tuple[str, ...]) -> Grader:
-    """Pass iff the evaluated turn did the delegating and none of the work itself.
+def _checkout_names(workspace_dir: Path | None) -> tuple[str, ...]:
+    if workspace_dir is None or not workspace_dir.is_dir():
+        return ()
+    return tuple(
+        sorted(entry.name for entry in workspace_dir.iterdir() if (entry / ".git").exists())
+    )
 
-    Reads `own_tools` — the evaluated turn's own calls, before a child's are merged in — because a
+
+def _touches_checkout(call: ToolInvocation, checkouts: tuple[str, ...]) -> bool:
+    match call.name:
+        case "bash":
+            match call.input.get("command"):
+                case str() as command:
+                    try:
+                        values = tuple(shlex.split(command))
+                    except ValueError:
+                        return False
+                case _:
+                    return False
+        case "edit":
+            values = tuple(
+                value
+                for key in ("path", "file_path")
+                if isinstance(value := call.input.get(key), str)
+            )
+        case "grep":
+            return bool(checkouts)
+        case "glob":
+            match call.input.get("path"):
+                case str() as path if PurePosixPath(path).parts == ("/", "workspace"):
+                    return bool(checkouts)
+                case str() as path:
+                    values = (path,)
+                case _:
+                    return bool(checkouts)
+        case _:
+            return False
+    for value in values:
+        candidate = value.strip(";&|()<> ")
+        if "=" in candidate:
+            candidate = candidate.partition("=")[2]
+        parts = PurePosixPath(candidate).parts
+        if any(parts[:3] == ("/", "workspace", name) or parts[:1] == (name,) for name in checkouts):
+            return True
+    return False
+
+
+def delegation_only_scorer(forbidden: tuple[str, ...]) -> Grader:
+    """Pass iff the evaluated turn did the delegating and none of the repository work itself.
+
+    Reads `own_calls` — the evaluated turn's own calls, before a child's are merged in — because a
     delegated case's merged trajectory cannot tell whose call a `bash` was. The child shares the
     spawning turn's sandbox, so parent-side repository work is not futile; it is simply the wrong
-    agent doing it. The coding skill is explicit that the main agent explores and edits nothing
-    itself, and this grades that rule rather than restating it."""
+    agent doing it.
+
+    The rule is about the repository, so the check is too: a call counts only when it reaches into
+    a checkout. The same tools over the notes and patches a child left in the workspace are how the
+    parent reads a handoff at all — the coding skill directs it to those files, and the child's
+    finish result is an index of them — so forbidding the tool rather than the target would fail
+    every case that handed off correctly."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        used = tuple(tool for tool in forbidden if tool in output.own_tools)
-        evidence: JsonObject = {"ownTools": list(output.own_tools)}
-        if used:
+        checkouts = _checkout_names(output.workspace_dir)
+        offending = tuple(
+            call
+            for call in output.own_calls
+            if call.name in forbidden and _touches_checkout(call, checkouts)
+        )
+        evidence: JsonObject = {
+            "ownTools": list(output.own_tools),
+            "checkouts": list(checkouts),
+            "checkoutCalls": [call.name for call in offending],
+        }
+        if offending:
+            used = sorted({call.name for call in offending})
             return CapabilityVerdict(
                 False,
-                f"the evaluated turn did the work itself with {', '.join(used)} instead of "
-                "delegating it",
+                f"the evaluated turn worked the repository itself with {', '.join(used)} instead "
+                "of delegating it",
                 evidence,
             )
         return CapabilityVerdict(True, "delegated without working the repository itself", evidence)
 
-    return DescribedGrader(f"the evaluated turn calls none of {', '.join(forbidden)} itself", grade)
+    return DescribedGrader(
+        f"the evaluated turn reaches no checkout with {', '.join(forbidden)} itself", grade
+    )
 
 
 def combine(*graders: Grader) -> Grader:

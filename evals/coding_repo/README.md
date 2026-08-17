@@ -53,14 +53,15 @@ A captured deliverable earns a judge only after the run proves it is real:
   by a historyless route
 - for a patch: parses as a unified diff, applies to the pinned commit's tree, and touches at least
   one path the merged change touched
+- for a patch: passes its declared held-out pytest targets, overlaid after the candidate patch so
+  candidate-written tests cannot replace them. The held-out tree is the reference test tree plus
+  case-owned tests for requirements its reference tests do not detect
 - for a document: shared under the name the brief asked for, and not empty
-- the evaluated turn delegated rather than working the repository itself: it called none of `bash`,
-  `edit`, `grep`, `glob`. The child shares the spawning turn's sandbox, so this is not about which
-  files reach whom — it grades the coding skill's rule that the main agent explores and edits
-  nothing itself
+- the evaluated turn delegated rather than working the repository itself: its own `bash`, `edit`,
+  `grep`, or `glob` calls may read child handoffs, but may not reach a checkout
 
-`test_coding_repo_runner.py` holds the gate to the only standard that matters: every case's own
-merged diff passes the gate at that case's base commit.
+`test_coding_repo_runner.py` proves the reference test is held out: the base behavior fails it, the
+reference change passes it, and a candidate test cannot replace it.
 
 ## Run
 
@@ -73,10 +74,10 @@ uv run python -m evals --coding-repo --workspace <uuid> --concurrency 4
 ```
 
 `--coding-repo-case <case>` (repeatable) narrows the run, and `--coding-repo-submissions` moves the
-capture root. Base trees materialize under `.local/coding_repo/trees/`, one per pinned commit, and
-captured deliverables land under `.local/coding_repo/submissions/<case>/`. Every pin is verified when
-the suite loads, so a commit this clone lacks is a startup error rather than a failed case. Each
-selected case's captured bytes are dropped when the run starts, so a startup abort destroys no
+capture root. Base and reference trees materialize under `.local/coding_repo/trees/`. Captured
+deliverables land under `.local/coding_repo/submissions/<case>/`. Every pin and held-out test is
+verified when the suite loads, so missing history is a startup error rather than a failed case.
+Each selected case's captured bytes are dropped when the run starts, so a startup abort destroys no
 capture that no turn will replace, while a case that shares nothing this run still scores as having
 shared nothing rather than on the last run's bytes. A patch the gate refused is kept under
 `<case>/refused/`, readable but out of the offline judge's reach.

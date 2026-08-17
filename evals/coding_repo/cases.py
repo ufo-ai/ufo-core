@@ -9,8 +9,9 @@ exactly that one commit, so no later commit, and never the fix, is reachable fro
 What a case delivers decides where it is judged, because a judge scores only what it can read. A
 `reply` case answers in the turn's own text and is judged inside the run. A `patch` or `document`
 case hands back a file: the run gates it deterministically — fetched at the pin, and for a patch,
-applies to that tree and touches the paths the real change touched — and `evals.coding_repo.grading`
-scores the captured bytes offline, where the deliverable is not bounded by a reply's length.
+applies to that tree, touches the paths the real change touched, and passes the case's held-out
+tests — and `evals.coding_repo.grading` scores the captured bytes offline, where the deliverable is
+not bounded by a reply's length.
 
 A brief carries only what the requester knew — a symptom, an observation, an intent, sometimes a
 lead that is wrong. The mechanism, the file, and the shape of the answer are what the case measures,
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Literal
 
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -27,6 +29,7 @@ MAX_CRITERIA_PER_CASE = 12
 DOCUMENT_SUFFIX = ".md"
 PATCH_SUFFIX = ".patch"
 NOTES_SUFFIX = "-notes.md"
+PYTEST_TARGET_SEPARATOR = "::"
 
 type CodingKind = Literal["research", "feature", "fix"]
 type CodingDeliverable = Literal["reply", "patch", "document"]
@@ -37,10 +40,10 @@ class CodingCase:
     """One pinned task. `base_sha` is what the child fetches; `reference_sha` is the merged commit
     the judge reads as the reference answer, and `expected_paths` are the source files that commit
     changed, tests excluded — the deterministic floor a candidate patch must reach before its
-    quality is worth judging. `document_path` is the workspace path a document case is asked to
-    write, so the gate checks the file the brief named rather than any shared file. `essential`
-    names the criterion without which the answer is wrong, so a respectable fraction cannot hide a
-    missed root cause."""
+    quality is worth judging. `held_out_tests` are the reference commit's exact pytest targets.
+    `document_path` is the workspace path a document case is asked to write, so the gate checks the
+    file the brief named rather than any shared file. `essential` names the criterion without which
+    the answer is wrong, so a respectable fraction cannot hide a missed root cause."""
 
     name: str
     kind: CodingKind
@@ -50,6 +53,7 @@ class CodingCase:
     deliverable: CodingDeliverable = "reply"
     reference_sha: str = ""
     expected_paths: tuple[str, ...] = ()
+    held_out_tests: tuple[str, ...] = ()
     document_path: str = ""
     essential: int | None = None
 
@@ -89,10 +93,24 @@ class CodingCase:
                 )
             if not self.expected_paths:
                 raise ValueError(f"{self.name}: a patch case names the paths its answer changes")
+            if not self.held_out_tests:
+                raise ValueError(f"{self.name}: a patch case names its held-out tests")
+            for target in self.held_out_tests:
+                path, separator, node = target.partition(PYTEST_TARGET_SEPARATOR)
+                parts = PurePosixPath(path).parts
+                if (
+                    separator != PYTEST_TARGET_SEPARATOR
+                    or not node
+                    or PYTEST_TARGET_SEPARATOR in node
+                    or not node.startswith("test_")
+                    or PurePosixPath(path).is_absolute()
+                    or ".." in parts
+                ):
+                    raise ValueError(f"{self.name}: invalid held-out test target {target!r}")
             return
-        if self.reference_sha or self.expected_paths:
+        if self.reference_sha or self.expected_paths or self.held_out_tests:
             raise ValueError(
-                f"{self.name}: only a patch case names a reference commit or expected paths"
+                f"{self.name}: only a patch case names a reference commit, paths, or held-out tests"
             )
         if (self.deliverable == "document") != bool(self.document_path):
             raise ValueError(f"{self.name}: a document case names the path it writes")
@@ -275,6 +293,10 @@ FIX_CASES: tuple[CodingCase, ...] = (
             "core/src/ufo/ext/surface.py",
             "extensions/slack/ufo_ext_slack/surface.py",
         ),
+        held_out_tests=(
+            "extensions/slack/tests/test_ext_slack.py::"
+            "test_a_checkpoint_that_comes_due_after_the_turn_committed_posts_nothing",
+        ),
         brief=(
             "In Slack, an interim progress update sometimes lands in the thread below the final "
             "reply it was reporting progress towards, so the thread reads as though work continued "
@@ -313,6 +335,10 @@ FIX_CASES: tuple[CodingCase, ...] = (
         base_sha="2d1bdc506676c83015af907f7942b0c686c5ccf0",
         reference_sha="931fc84d43f4a546725339ebd164e2bbb9802d2a",
         expected_paths=("extensions/slack/ufo_ext_slack/surface.py",),
+        held_out_tests=(
+            "extensions/slack/tests/test_ext_slack.py::"
+            "test_a_cancelled_follower_leaves_the_status_standing",
+        ),
         brief=(
             "When we roll the serve deployment, Slack threads for turns that are still running go "
             "blank: the status disappears, then the turn is recovered and runs for another hour "
@@ -353,6 +379,10 @@ FIX_CASES: tuple[CodingCase, ...] = (
         base_sha="b956e7abf726464c04da6eb768eacc5d8fe99f07",
         reference_sha="4909102e06a296f63f91f44668a7db4a7d0de4ef",
         expected_paths=("core/src/ufo/db.py",),
+        held_out_tests=(
+            "core/tests/test_db.py::"
+            "test_a_migrated_sqlite_file_needs_no_journal_conversion_from_its_readers",
+        ),
         brief=(
             "A second connection opening a migrated sqlite file can fail outright with "
             "`sqlite3.OperationalError: database is locked`, and the busy timeout does not help "
@@ -393,6 +423,20 @@ FEATURE_CASES: tuple[CodingCase, ...] = (
         base_sha="2c4cce5e0bef004acd7760f7b51486bf9dcc826b",
         reference_sha="07a4c2a883af1d94b1fccc7ea0c2e08e94ffeb73",
         expected_paths=("extensions/slack/ufo_ext_slack/surface.py",),
+        held_out_tests=(
+            "extensions/slack/tests/test_ext_slack.py::"
+            "test_a_progress_post_carries_the_turns_own_narration_step_and_work",
+            "extensions/slack/tests/test_ext_slack.py::"
+            "test_a_progress_post_names_the_work_never_a_tool",
+            "extensions/slack/tests/test_ext_slack.py::"
+            "test_a_progress_summary_keeps_a_handful_of_steps_and_counts_the_rest",
+            "extensions/slack/tests/test_ext_slack.py::"
+            "test_a_progress_post_bounds_the_model_supplied_text_and_the_summary",
+            "extensions/slack/tests/test_ext_slack.py::"
+            "test_a_reply_to_a_still_running_turn_does_not_double_its_progress",
+            "extensions/slack/tests/test_ext_slack.py::"
+            "test_a_cost_tick_is_absorbed_without_reporting_anything",
+        ),
         brief=(
             "Our interim Slack progress posts close with a tool tally that tells a member "
             "nothing:\n\n"
@@ -436,6 +480,20 @@ FEATURE_CASES: tuple[CodingCase, ...] = (
             "core/src/ufo/models/anthropic.py",
             "core/src/ufo/models/openai.py",
         ),
+        held_out_tests=(
+            "core/tests/test_db.py::"
+            "test_a_refused_connect_counts_under_the_class_the_driver_really_raises",
+            "core/tests/test_engine.py::"
+            "test_a_streamed_rounds_timeout_keeps_the_class_the_client_retries_on",
+            "core/tests/test_engine.py::"
+            "test_a_gating_hook_that_fails_closed_is_not_counted_as_policy",
+            "core/tests/test_engine.py::"
+            "test_a_handler_raising_untrusted_content_keeps_its_own_series",
+            "core/tests/test_o11y.py::"
+            "test_an_error_class_the_code_does_not_act_on_folds_into_one_series",
+            "core/tests/test_o11y.py::"
+            "test_every_allowed_error_class_names_a_class_the_code_can_meet",
+        ),
         brief=(
             "`error_class` rides several of our metrics as an unbounded dimension: the value is "
             "whatever class raised — an extension handler, a gating hook, a provider SDK, a "
@@ -477,6 +535,11 @@ FEATURE_CASES: tuple[CodingCase, ...] = (
         expected_paths=(
             "core/src/ufo/sandbox/ingress_host.py",
             "docs/rfcs/0020-hosted-sites.md",
+        ),
+        held_out_tests=(
+            "core/tests/test_ingress_host.py::test_only_the_canonical_spelling_addresses_the_site",
+            "core/tests/test_short_site_label_held_out.py::"
+            "test_site_label_uses_four_signature_bytes",
         ),
         brief=(
             "A hosted site's hostname is 55 characters, and almost all of it is signature:\n\n"

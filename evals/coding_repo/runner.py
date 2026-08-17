@@ -6,7 +6,8 @@ The suite splits by where its cases can be judged. A `reply` case carries its cr
 harness's own semantic rubric and is judged inside the run. A `patch` or `document` case is gated
 deterministically here — delegated to the coding lane, worked at the pinned commit, and for a patch,
 applying to that commit's tree and touching the paths the real change touched — and its bytes are
-captured under the submissions root for `evals.coding_repo.grading` to score offline.
+captured under the submissions root for `evals.coding_repo.grading` to score offline. A patch then
+runs against its held-out test tree: the reference test tree plus case-owned tests.
 
 Base trees are materialized and every pin verified against the local clone at load time, before a
 turn runs, so a missing commit is a startup error and never a grader that fails a case for the
@@ -14,8 +15,10 @@ harness's own reasons."""
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -23,7 +26,13 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 
-from evals.coding_repo.cases import CASES, DOCUMENT_SUFFIX, CodingCase
+from evals.coding_repo.cases import (
+    CASES,
+    DOCUMENT_SUFFIX,
+    PATCH_SUFFIX,
+    PYTEST_TARGET_SEPARATOR,
+    CodingCase,
+)
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
@@ -43,14 +52,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ROOT = Path(".local/coding_repo")
 SUBMISSIONS_ROOT = LOCAL_ROOT / "submissions"
 TREES_ROOT = LOCAL_ROOT / "trees"
+HELD_OUT_ROOT = Path(__file__).with_name("held_out")
 REFUSED_DIR = "refused"
 CODING_REPO_PACKS = ("assistant", "assistant_hosted")
 ANSWERS_TASK = "coding_repo_answers"
 DELIVERABLES_TASK = "coding_repo_deliverables"
 CODING_LANE = "coding"
 BACKGROUND_ACK = "spawned "
-WORKFLOW_WAIT_SECONDS = 3_600.0
-ENVELOPE_REVISION = "pinned-fetch-share-deliverable-5"
+WORKFLOW_WAIT_SECONDS = 7_200.0
+TEST_TIMEOUT_SECONDS = 900.0
+ENVELOPE_REVISION = "pinned-fetch-share-held-out-tests"
 GIT_TIMEOUT_SECONDS = 300.0
 FORBIDDEN_ROUTES = (
     f"{REPO_SLUG}/zipball",
@@ -95,6 +106,37 @@ def load_coding_repo(
             _require_commit(case.reference_sha, case.name)
         if case.deliverable == "patch":
             _materialize_tree(case.base_sha, trees_root)
+            reference_tree = _materialize_tree(case.reference_sha, trees_root)
+            missing_tests = tuple(
+                path
+                for path in _test_paths(case.held_out_tests)
+                if not _held_out_source(case.name, reference_tree, path).is_file()
+            )
+            if missing_tests:
+                raise ValueError(
+                    f"coding_repo case {case.name!r} has missing held-out tests at "
+                    f"{case.reference_sha}: {', '.join(missing_tests)}"
+                )
+            missing_targets: list[str] = []
+            for path in _test_paths(case.held_out_tests):
+                functions = {
+                    node.name
+                    for node in ast.parse(
+                        _held_out_source(case.name, reference_tree, path).read_text()
+                    ).body
+                    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                }
+                missing_targets.extend(
+                    target
+                    for target in case.held_out_tests
+                    if target.partition(PYTEST_TARGET_SEPARATOR)[0] == path
+                    and target.partition(PYTEST_TARGET_SEPARATOR)[2] not in functions
+                )
+            if missing_targets:
+                raise ValueError(
+                    f"coding_repo case {case.name!r} has unknown held-out test targets at "
+                    f"{case.reference_sha}: {', '.join(missing_targets)}"
+                )
     answers = tuple(
         _capability_case(case, submissions_root, trees_root)
         for case in selected
@@ -175,6 +217,7 @@ def _capability_case(case: CodingCase, submissions_root: Path, trees_root: Path)
     ]
     if case.deliverable == "patch":
         graders.append(PatchCapture(case, submissions_root, trees_root))
+        graders.append(PatchRuns(case, submissions_root, trees_root))
     elif case.deliverable == "document":
         graders.append(DocumentCapture(case, submissions_root))
     return CapabilityCase(
@@ -238,7 +281,10 @@ type Grader = LaneAndRoute | PatchCapture | DocumentCapture | HarnessGrader
 @dataclass(frozen=True)
 class AllOf:
     """Every gate, in order, with each reason kept — a failure names the gate that failed and the
-    evidence of the gates that passed."""
+    evidence of the gates that passed.
+
+    A gate the harness could not put its question to carries its exclusion out: dropping it here
+    would score the harness's own inability to run as the candidate's failure."""
 
     graders: tuple[Grader, ...]
 
@@ -252,12 +298,14 @@ class AllOf:
         evidence: JsonObject = {}
         reasons: list[str] = []
         passed = True
+        excluded = False
         for grader in self.graders:
             verdict = await grader(output)
             evidence |= verdict.evidence
             reasons.append(verdict.reason)
             passed = passed and verdict.passed
-        return CapabilityVerdict(passed, "; ".join(reasons), evidence)
+            excluded = excluded or verdict.excluded
+        return CapabilityVerdict(passed, "; ".join(reasons), evidence, excluded)
 
 
 @dataclass(frozen=True)
@@ -481,6 +529,130 @@ def _payload(result: str) -> JsonObject:
     except json.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _test_paths(targets: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(target.partition(PYTEST_TARGET_SEPARATOR)[0] for target in targets))
+
+
+def _held_out_source(case_name: str, reference_tree: Path, path: str) -> Path:
+    corpus_test = HELD_OUT_ROOT / case_name / path
+    return corpus_test if corpus_test.is_file() else reference_tree / path
+
+
+@dataclass(frozen=True)
+class PatchRuns:
+    case: CodingCase
+    submissions_root: Path
+    trees_root: Path
+    timeout_seconds: float = TEST_TIMEOUT_SECONDS
+
+    @property
+    def grading(self) -> str:
+        return "the patch passes the held-out tests against the pinned tree"
+
+    async def __call__(self, output: CapabilityOutput) -> CapabilityVerdict:
+        patch = await asyncio.to_thread(self._captured_patch)
+        if patch is None:
+            return CapabilityVerdict(False, "no patch to run tests from")
+        content = await asyncio.to_thread(patch.read_bytes)
+        evidence: JsonObject = {"testTargets": list(self.case.held_out_tests)}
+        tree, detail = await self._patched_tree(content)
+        if tree is None:
+            return CapabilityVerdict(False, f"could not patch the tree to run tests: {detail}")
+        passed, report = await self._run_tests(tree)
+        evidence["testReport"] = report
+        if passed is None:
+            return CapabilityVerdict(
+                False, f"held-out tests could not run: {report}", evidence, excluded=True
+            )
+        if not passed:
+            return CapabilityVerdict(False, f"the held-out tests fail: {report}", evidence)
+        return CapabilityVerdict(True, "the held-out tests pass", evidence)
+
+    def _captured_patch(self) -> Path | None:
+        case_dir = self.submissions_root / self.case.name
+        if not case_dir.is_dir():
+            return None
+        captured = sorted(
+            (
+                path
+                for path in case_dir.iterdir()
+                if path.is_file() and path.suffix.lower() == PATCH_SUFFIX
+            ),
+            key=lambda path: path.stat().st_mtime,
+        )
+        return captured[-1] if captured else None
+
+    async def _patched_tree(self, patch: bytes) -> tuple[Path | None, str]:
+        source = self.trees_root / self.case.base_sha
+        reference = self.trees_root / self.case.reference_sha
+        target = self.trees_root / f"{self.case.base_sha}-run"
+        await asyncio.to_thread(shutil.rmtree, target, True)
+        await asyncio.to_thread(shutil.copytree, source, target, symlinks=True)
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "apply",
+            "-p1",
+            "-",
+            cwd=target,
+            env={**os.environ, "GIT_CEILING_DIRECTORIES": str(self.trees_root)},
+            stdin=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+        )
+        _, stderr = await process.communicate(patch)
+        if process.returncode:
+            return None, stderr.decode(errors="replace").strip()[:240]
+        detail = await asyncio.to_thread(
+            self._overlay_held_out_tests, target, reference, _test_paths(self.case.held_out_tests)
+        )
+        return (None, detail) if detail else (target, "")
+
+    def _overlay_held_out_tests(
+        self, target: Path, reference: Path, test_paths: tuple[str, ...]
+    ) -> str:
+        for path in test_paths:
+            destination = target / path
+            relative_parent = destination.parent.relative_to(target)
+            parent = target
+            for part in relative_parent.parts:
+                parent /= part
+                if parent.is_symlink():
+                    return f"candidate made held-out test parent {parent} a symlink"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.is_symlink():
+                destination.unlink()
+            source = _held_out_source(self.case.name, reference, path)
+            shutil.copy2(source, destination, follow_symlinks=False)
+        return ""
+
+    async def _run_tests(self, tree: Path) -> tuple[bool | None, str]:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "uv",
+                "run",
+                "--frozen",
+                "pytest",
+                *self.case.held_out_tests,
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                cwd=tree,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except OSError as error:
+            return None, str(error)
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            return None, f"pytest exceeded {self.timeout_seconds:.0f}s"
+        tail = stdout.decode(errors="replace").strip().splitlines()
+        report = " / ".join(tail[-3:])[:400]
+        return process.returncode == 0, report
 
 
 def _touched_paths(patch: str) -> tuple[str, ...]:

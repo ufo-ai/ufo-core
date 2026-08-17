@@ -181,6 +181,7 @@ class CapabilityOutput:
     cost_micro_usd: int = 0
     workspace_dir: Path | None = None
     own_tools: tuple[str, ...] = ()
+    own_calls: tuple[ToolInvocation, ...] = ()
     timing: CaseTiming | None = None
     handoffs: tuple[SubagentHandoff, ...] = ()
 

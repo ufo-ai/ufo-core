@@ -74,6 +74,7 @@ PRIVATE_HANDOFF_REDACTED = "[private handoff redacted]"
 REASONING_EVIDENCE = "[reasoning]\n{summary}"
 REDACTED_REASONING_EVIDENCE = "[reasoning redacted by the provider]"
 TERMINAL_CHILD_STATUSES = frozenset({"done", "failed", "cancelled"})
+TOKEN_DIMENSION = "tokens"
 CHILD_TRANSCRIPT_POLL_SECONDS = 0.2
 CHILD_TRANSCRIPT_POLL_ATTEMPTS = 25
 
@@ -323,7 +324,11 @@ class InProcessTarget:
                 )
             )
         output = capability_output(trajectory.messages)
-        output = replace(output, own_tools=tuple(call.name for call in output.calls))
+        output = replace(
+            output,
+            own_tools=tuple(call.name for call in output.calls),
+            own_calls=tuple(output.calls),
+        )
         status = await self._turn_status(turn_id)
         snapshot = trajectory_snapshot(conversation_id, turn_id, status, trajectory.messages)
         output, descendant_ids, missing_child = await self._merge_descendants(turn_id, output)
@@ -356,13 +361,24 @@ class InProcessTarget:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id.in_(list(turn_ids)))
+                    sa.select(
+                        sa.func.coalesce(
+                            sa.func.sum(
+                                sa.case(
+                                    (
+                                        tables.ledger.c.dimension == TOKEN_DIMENSION,
+                                        tables.ledger.c.amount,
+                                    ),
+                                    else_=0,
+                                )
+                            ),
+                            0,
+                        ),
+                        sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0),
+                    ).where(tables.ledger.c.turn_id.in_(list(turn_ids)))
                 )
-            ).all()
-        frames = tuple(
-            TerminalFrame.model_validate(row.terminal) for row in rows if row.terminal is not None
-        )
-        return sum(frame.tokens for frame in frames), sum(frame.cost_micro_usd for frame in frames)
+            ).one()
+        return int(rows[0]), int(rows[1])
 
     async def _merge_descendants(
         self, turn_id: UUID, output: CapabilityOutput

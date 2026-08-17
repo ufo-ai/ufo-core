@@ -876,6 +876,24 @@ def _research_transcript() -> tuple[Message, ...]:
     )
 
 
+async def _ledger_rows(connection, workspace_id, turn_id, tokens: int, cost_micro_usd: int) -> None:
+    if not tokens and not cost_micro_usd:
+        return
+    await connection.execute(
+        sa.insert(tables.ledger).values(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            turn_id=turn_id,
+            dimension="tokens",
+            amount=max(tokens, 1),
+            priced_micro_usd=cost_micro_usd,
+            model=MODEL,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+
+
 @dataclass
 class StubWorker:
     blob: FilesystemBlobStore
@@ -965,6 +983,9 @@ class StubWorker:
                     updated_at=sa.func.now(),
                 )
             )
+            await _ledger_rows(
+                connection, self.workspace_id, turn_id, self.tokens, self.cost_micro_usd
+            )
         if self.transcript is not None:
             await Transcript(blob=self.blob, conversation_id=conversation_id).write(
                 Conversation(seq=self.seq, messages=self.transcript)
@@ -984,9 +1005,10 @@ class StubWorker:
                     )
                 )
                 for seq in range(1, self.child_followup_turns + 2):
+                    child_id = self.child_turn_id if seq == 1 else uuid4()
                     await connection.execute(
                         sa.insert(tables.turn).values(
-                            id=self.child_turn_id if seq == 1 else uuid4(),
+                            id=child_id,
                             workspace_id=self.workspace_id,
                             conversation_id=child_conversation_id,
                             agent_id=agent_id,
@@ -1004,6 +1026,13 @@ class StubWorker:
                             created_at=sa.func.now(),
                             updated_at=sa.func.now(),
                         )
+                    )
+                    await _ledger_rows(
+                        connection,
+                        self.workspace_id,
+                        child_id,
+                        self.child_tokens,
+                        self.child_cost_micro_usd,
                     )
             if self.child_transcript_corrupt:
                 await self.blob.put(transcript_key(child_conversation_id), b"not a transcript")

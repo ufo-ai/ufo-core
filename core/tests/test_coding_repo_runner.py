@@ -5,7 +5,8 @@ the real answer would score every candidate against nothing."""
 import asyncio
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 from typing import NoReturn
 
@@ -33,8 +34,10 @@ from evals.coding_repo.runner import (
     DocumentCapture,
     LaneAndRoute,
     PatchCapture,
+    PatchRuns,
     _capability_case,
     _materialize_tree,
+    _test_paths,
     _touched_paths,
     load_coding_repo,
 )
@@ -131,6 +134,15 @@ def output(
     return CapabilityOutput(
         response="done", calls=tuple(calls), artifacts=artifacts, own_tools=own_tools
     )
+
+
+def stubbed_test_run(
+    monkeypatch: pytest.MonkeyPatch, outcome: bool | None, report: str = "stubbed"
+) -> None:
+    async def ran(_self: PatchRuns, _tree: Path) -> tuple[bool | None, str]:
+        return outcome, report
+
+    monkeypatch.setattr(PatchRuns, "_run_tests", ran)
 
 
 @pytest.mark.parametrize("case", PATCH_CASES, ids=lambda case: case.name)
@@ -305,6 +317,13 @@ def test_touched_paths_reads_every_diff_header() -> None:
     assert _touched_paths("no diff here") == ()
 
 
+def test_held_out_targets_name_each_test_file_once() -> None:
+    case = next(case for case in PATCH_CASES if len(case.held_out_tests) > 1)
+    assert _test_paths(case.held_out_tests) == tuple(
+        dict.fromkeys(target.partition("::")[0] for target in case.held_out_tests)
+    )
+
+
 def test_the_envelope_pins_the_commit_and_names_the_deliverable(tmp_path: Path) -> None:
     case = PATCH_CASES[0]
     capability = _capability_case(case, tmp_path / "submissions", tmp_path / "trees")
@@ -331,8 +350,12 @@ def test_the_envelope_states_the_setup_without_commands_to_run(tmp_path: Path) -
 
 
 def test_a_case_states_what_its_kind_requires() -> None:
-    for extra in ({"reference_sha": "1" * 40}, {"expected_paths": ("core/src/ufo/db.py",)}):
-        with pytest.raises(ValueError, match="a reference commit or expected paths"):
+    for extra in (
+        {"reference_sha": "1" * 40},
+        {"expected_paths": ("core/src/ufo/db.py",)},
+        {"held_out_tests": ("core/tests/test_db.py::test_db",)},
+    ):
+        with pytest.raises(ValueError, match="a reference commit, paths, or held-out tests"):
             CodingCase(
                 name="bad",
                 kind="research",
@@ -372,6 +395,29 @@ def test_a_case_states_what_its_kind_requires() -> None:
             brief="b",
             criteria=("c",),
             reference_sha="1" * 40,
+        )
+    with pytest.raises(ValueError, match="names its held-out tests"):
+        CodingCase(
+            name="bad",
+            kind="fix",
+            deliverable="patch",
+            base_sha="0" * 40,
+            brief="b",
+            criteria=("c",),
+            reference_sha="1" * 40,
+            expected_paths=("core/src/ufo/db.py",),
+        )
+    with pytest.raises(ValueError, match="invalid held-out test target"):
+        CodingCase(
+            name="bad",
+            kind="fix",
+            deliverable="patch",
+            base_sha="0" * 40,
+            brief="b",
+            criteria=("c",),
+            reference_sha="1" * 40,
+            expected_paths=("core/src/ufo/db.py",),
+            held_out_tests=("../test_db.py::test_db",),
         )
     with pytest.raises(ValueError, match=f"exceeds the judge's {MAX_CRITERIA_PER_CASE}"):
         CodingCase(
@@ -538,7 +584,7 @@ async def test_all_of_merges_evidence_and_joins_its_reasons() -> None:
     assert verdict.evidence["codingSpawns"] == 1
     assert verdict.evidence["ownTools"] == []
     assert "delegates to the 'coding' subagent" in grader.grading
-    assert "calls none of" in grader.grading
+    assert "reaches no checkout with" in grader.grading
 
 
 def test_the_cli_refuses_a_coding_repo_case_without_the_flag(
@@ -775,12 +821,17 @@ async def test_a_refused_patch_is_set_aside_out_of_the_offline_judges_reach(tmp_
     assert not (submissions / case.name / notes_name).exists()
 
 
-async def test_the_submissions_root_reaches_both_capture_graders(tmp_path: Path) -> None:
+async def test_the_submissions_root_reaches_both_capture_graders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The root the suite is loaded with is the root the graders write under — for a patch with its
-    note, and for a document."""
+    note, and for a document. The reference diff's own tests are the run gate's subject and have
+    their own tests, so the nested run is stood in for here."""
     case = PATCH_CASES[0]
     submissions, trees = tmp_path / "submissions", tmp_path / "trees"
     _materialize_tree(case.base_sha, trees)
+    _materialize_tree(case.reference_sha, trees)
+    stubbed_test_run(monkeypatch, True, "1 passed")
     patch_name, notes_name = f"{case.name}.patch", case.notes_name
     patch = reference_diff(case.reference_sha)
     verdict = await _capability_case(case, submissions, trees).grader(
@@ -933,18 +984,204 @@ def test_the_cli_drops_captures_under_the_root_it_is_given_once_the_run_starts(
     assert saved.read_bytes() == CAPTURED_DOCUMENT
 
 
-async def test_the_delegation_gate_refuses_a_turn_that_worked_the_repository_itself() -> None:
-    """The gate reads `own_tools`, not the merged trajectory: a parent that delegated cleanly passes
-    even though the child it spawned ran `bash` all over the repository, and a parent that ran the
-    forbidden tool itself fails whatever its merged calls say."""
+async def test_the_delegation_gate_reads_the_target_not_the_tool(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "org-repo" / ".git").mkdir(parents=True)
+    (workspace / "notes-recon.md").write_text("findings")
     grader = delegation_only_scorer(PARENT_FORBIDDEN_TOOLS)
-    verdict = await grader(output(own_tools=("read", "bash", "edit")))
-    assert not verdict.passed
-    assert "did the work itself with bash, edit" in verdict.reason
-    assert verdict.evidence["ownTools"] == ["read", "bash", "edit"]
-    assert (await grader(output(own_tools=("read", "share_file")))).passed
-    merged = await grader(
-        output(commands=("git fetch --depth 1 origin HEAD",), own_tools=("spawn", "write"))
+
+    def parent(*calls: ToolInvocation) -> CapabilityOutput:
+        return replace(
+            output(own_tools=tuple(call.name for call in calls)),
+            own_calls=calls,
+            workspace_dir=workspace,
+        )
+
+    handoff = await grader(
+        parent(
+            ToolInvocation(name="glob", input={"path": "/workspace", "pattern": "notes-recon.md"}),
+            ToolInvocation(name="bash", input={"command": "cd /workspace && wc -l notes-recon.md"}),
+        )
     )
-    assert merged.passed, merged.reason
-    assert merged.evidence["ownTools"] == ["spawn", "write"]
+    assert not handoff.passed
+    assert handoff.evidence["checkoutCalls"] == ["glob"]
+
+    scoped_handoff = await grader(
+        parent(
+            ToolInvocation(name="glob", input={"path": "/workspace/handoff", "pattern": "*.md"}),
+        )
+    )
+    assert scoped_handoff.passed, scoped_handoff.reason
+    assert scoped_handoff.evidence["checkouts"] == ["org-repo"]
+
+    inside = await grader(
+        parent(ToolInvocation(name="bash", input={"command": "cd /workspace/org-repo && git diff"}))
+    )
+    assert not inside.passed
+    assert "worked the repository itself with bash" in inside.reason
+    assert inside.evidence["checkoutCalls"] == ["bash"]
+    relative = await grader(
+        parent(ToolInvocation(name="bash", input={"command": "git -C org-repo diff"}))
+    )
+    assert not relative.passed
+    grep = await grader(
+        parent(
+            ToolInvocation(name="grep", input={"pattern": "progress", "glob": "org-repo/**/*.py"})
+        )
+    )
+    assert not grep.passed
+    assert grep.evidence["checkoutCalls"] == ["grep"]
+
+
+def sha1_of(seed: str) -> str:
+    return sha256(seed.encode()).hexdigest()[:40]
+
+
+def _tiny_tree(trees_root: Path, sha: str) -> Path:
+    tree = trees_root / sha
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "calc.py").write_text("def triple(n):\n    return n + n\n")
+    (tree / ".materialized").write_text(sha)
+    return tree
+
+
+def _new_file_patch(body: str, path: str) -> bytes:
+    lines = body.splitlines()
+    header = f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+    hunk = f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines)
+    return (header + hunk).encode()
+
+
+def _calc_patch(expression: str) -> bytes:
+    return (
+        "diff --git a/pkg/calc.py b/pkg/calc.py\n"
+        "--- a/pkg/calc.py\n"
+        "+++ b/pkg/calc.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def triple(n):\n"
+        "-    return n + n\n"
+        f"+    return {expression}\n"
+    ).encode()
+
+
+def _tiny_case(trees: Path, name: str) -> CodingCase:
+    base_sha = sha1_of(f"{name}-base")
+    reference_sha = sha1_of(f"{name}-reference")
+    _tiny_tree(trees, base_sha)
+    reference = _tiny_tree(trees, reference_sha)
+    (reference / "pkg" / "calc.py").write_text("def triple(n):\n    return n * 3\n")
+    (reference / "tests").mkdir()
+    (reference / "tests" / "test_calc.py").write_text(
+        "import sys\nsys.path.insert(0, '.')\nfrom pkg.calc import triple\n\n"
+        "def test_triple():\n    assert triple(3) == 9\n"
+    )
+    return replace(
+        PATCH_CASES[0],
+        base_sha=base_sha,
+        reference_sha=reference_sha,
+        held_out_tests=("tests/test_calc.py::test_triple",),
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "expression", "passed"), (("wrong", "n - n", False), ("reference", "n * 3", True))
+)
+async def test_the_patch_gate_uses_the_held_out_reference_test(
+    tmp_path: Path, name: str, expression: str, passed: bool
+) -> None:
+    trees = tmp_path / "trees"
+    case = _tiny_case(trees, name)
+    submissions = tmp_path / "submissions" / case.name
+    submissions.mkdir(parents=True)
+    patch = _calc_patch(expression)
+    if name == "wrong":
+        patch += _new_file_patch(
+            "import sys\nsys.path.insert(0, '.')\nfrom pkg.calc import triple\n\n"
+            "def test_triple():\n    assert triple(3) == 0\n",
+            "tests/test_calc.py",
+        )
+    (submissions / f"{case.name}.patch").write_bytes(patch)
+
+    verdict = await PatchRuns(case, tmp_path / "submissions", trees, timeout_seconds=180)(
+        output(own_tools=())
+    )
+
+    assert verdict.passed is passed, verdict.reason
+    assert verdict.evidence["testTargets"] == ["tests/test_calc.py::test_triple"]
+
+
+async def test_a_candidate_cannot_redirect_a_held_out_test_outside_its_tree(tmp_path: Path) -> None:
+    trees = tmp_path / "trees"
+    case = _tiny_case(trees, "symlink")
+    submissions = tmp_path / "submissions" / case.name
+    submissions.mkdir(parents=True)
+    (submissions / f"{case.name}.patch").write_bytes(
+        _calc_patch("n * 3") + b"diff --git a/tests b/tests\n"
+        b"new file mode 120000\n"
+        b"--- /dev/null\n"
+        b"+++ b/tests\n"
+        b"@@ -0,0 +1 @@\n"
+        b"+../outside\n"
+    )
+
+    verdict = await PatchRuns(case, tmp_path / "submissions", trees)(output(own_tools=()))
+
+    assert not verdict.passed
+    assert "held-out test parent" in verdict.reason
+    assert "symlink" in verdict.reason
+
+
+async def test_a_candidate_that_breaks_test_collection_fails_the_gate(tmp_path: Path) -> None:
+    trees = tmp_path / "trees"
+    case = _tiny_case(trees, "collection")
+    submissions = tmp_path / "submissions" / case.name
+    submissions.mkdir(parents=True)
+    (submissions / f"{case.name}.patch").write_bytes(
+        b"diff --git a/pkg/calc.py b/pkg/calc.py\n"
+        b"--- a/pkg/calc.py\n"
+        b"+++ b/pkg/calc.py\n"
+        b"@@ -1,2 +1,2 @@\n"
+        b"-def triple(n):\n"
+        b"+def other(n):\n"
+        b"     return n + n\n"
+    )
+
+    verdict = await PatchRuns(case, tmp_path / "submissions", trees)(output(own_tools=()))
+
+    assert not verdict.passed
+    assert not verdict.excluded
+    assert "held-out tests fail" in verdict.reason
+
+
+async def test_the_patch_gate_reads_the_patch_the_capture_gate_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trees = tmp_path / "trees"
+    case = _tiny_case(trees, "othername")
+    submissions = tmp_path / "submissions" / case.name
+    submissions.mkdir(parents=True)
+    (submissions / "fix.patch").write_bytes(_calc_patch("n * 3"))
+    stubbed_test_run(monkeypatch, True, "1 passed")
+
+    verdict = await PatchRuns(case, tmp_path / "submissions", trees)(output(own_tools=()))
+
+    assert verdict.passed, verdict.reason
+    assert verdict.evidence["testTargets"] == ["tests/test_calc.py::test_triple"]
+    assert verdict.evidence["testReport"] == "1 passed"
+
+
+async def test_a_run_that_could_not_happen_leaves_the_case_unscored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trees = tmp_path / "trees"
+    case = _tiny_case(trees, "unrun")
+    submissions = tmp_path / "submissions" / case.name
+    submissions.mkdir(parents=True)
+    (submissions / f"{case.name}.patch").write_bytes(_calc_patch("n * 3"))
+    stubbed_test_run(monkeypatch, None, "pytest exceeded 900s")
+
+    verdict = await AllOf((PatchRuns(case, tmp_path / "submissions", trees),))(output(own_tools=()))
+
+    assert not verdict.passed
+    assert verdict.excluded
+    assert "held-out tests could not run" in verdict.reason
