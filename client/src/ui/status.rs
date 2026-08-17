@@ -1,10 +1,13 @@
 //! The activity row and footer: spinner with elapsed time, the transient status, reconnect
 //! countdowns, and the terminal-integration signals (title, progress, bell) around a turn.
 
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use ratatui::text::{Line, Span};
 
+use crate::pr::Pr;
+use crate::ui::osc;
 use crate::ui::theme::Theme;
 use crate::ui::wrap;
 
@@ -106,11 +109,19 @@ pub fn elapsed(ran: Duration) -> String {
     }
 }
 
-/// The dock's last line: the workspace this client is talking to and the channel the conversation
-/// sits in, padded across `width`. Nothing where there is no host to state.
-pub fn footer(theme: &Theme, width: u16, workspace_host: &str, channel: &str) -> Line<'static> {
+/// The dock's last line: the workspace this client is talking to, the channel the conversation
+/// sits in, and the working directory's PR when one exists and fits, padded across `width`. The
+/// PR label carries OSC 8 markers so the terminal keeps it a link; the returned columns are its
+/// click target. Nothing where there is no host to state.
+pub fn footer(
+    theme: &Theme,
+    width: u16,
+    workspace_host: &str,
+    channel: &str,
+    pr: Option<&Pr>,
+) -> (Line<'static>, Option<Range<usize>>) {
     if workspace_host.is_empty() {
-        return Line::raw("");
+        return (Line::raw(""), None);
     }
     let channel = wrap::clip(channel, CHANNEL_COLS);
     let stated = if channel.is_empty() {
@@ -118,9 +129,28 @@ pub fn footer(theme: &Theme, width: u16, workspace_host: &str, channel: &str) ->
     } else {
         format!("{workspace_host}{SEPARATOR}{channel}")
     };
+    if let Some(pr) = pr {
+        let label = format!("PR #{}", pr.number);
+        let at = wrap::width(&stated) + wrap::width(SEPARATOR);
+        let full = at + wrap::width(&label);
+        if full <= width as usize {
+            let line = Line::from(vec![
+                Span::styled(format!("{stated}{SEPARATOR}"), theme.muted),
+                Span::styled(
+                    format!("{}{label}{}", osc::link_open(&pr.url), osc::LINK_CLOSE),
+                    theme.pr,
+                ),
+                Span::raw(" ".repeat(width as usize - full)),
+            ]);
+            return (line, Some(at..full));
+        }
+    }
     let text = wrap::clip(&stated, width as usize);
     let pad = (width as usize).saturating_sub(wrap::width(text));
-    Line::styled(format!("{text}{}", " ".repeat(pad)), theme.muted)
+    (
+        Line::styled(format!("{text}{}", " ".repeat(pad)), theme.muted),
+        None,
+    )
 }
 
 /// Terminal-integration escape emissions around a turn. Every function answers the bytes to
@@ -301,29 +331,65 @@ mod tests {
 
     #[test]
     fn footer_states_the_host_and_the_clipped_channel() {
-        let line = footer(&theme(), 40, "acme.ufo.dev", "engineering-standup");
+        let (line, pr) = footer(&theme(), 40, "acme.ufo.dev", "engineering-standup", None);
         assert_eq!(
             line.to_string(),
             format!("{:<40}", "acme.ufo.dev · engineer")
         );
         assert_eq!(line.width(), 40);
+        assert_eq!(pr, None);
     }
 
     #[test]
     fn footer_without_a_channel_is_the_host_alone() {
-        let line = footer(&theme(), 20, "acme.ufo.dev", "");
+        let (line, _) = footer(&theme(), 20, "acme.ufo.dev", "", None);
         assert_eq!(line.to_string(), format!("{:<20}", "acme.ufo.dev"));
     }
 
     #[test]
     fn footer_clips_to_the_width() {
-        let line = footer(&theme(), 10, "acme.ufo.dev", "general");
+        let (line, _) = footer(&theme(), 10, "acme.ufo.dev", "general", None);
         assert_eq!(line.to_string(), "acme.ufo.d");
     }
 
     #[test]
     fn footer_without_a_host_is_nothing() {
-        assert!(footer(&theme(), 40, "", "general").to_string().is_empty());
+        let (line, pr) = footer(&theme(), 40, "", "general", None);
+        assert!(line.to_string().is_empty());
+        assert_eq!(pr, None);
+    }
+
+    #[test]
+    fn footer_states_the_pr_as_a_link_and_its_columns() {
+        let pr = Pr {
+            number: 1892,
+            url: "https://github.com/acme/repo/pull/1892".to_string(),
+        };
+        let (line, columns) = footer(&theme(), 40, "acme.ufo.dev", "general", Some(&pr));
+        assert_eq!(
+            line.to_string(),
+            format!(
+                "acme.ufo.dev · general · {}PR #1892{}{}",
+                osc::link_open(&pr.url),
+                osc::LINK_CLOSE,
+                " ".repeat(40 - 33)
+            )
+        );
+        assert_eq!(columns, Some(25..33));
+    }
+
+    #[test]
+    fn footer_drops_the_pr_before_the_host_and_channel() {
+        let pr = Pr {
+            number: 1892,
+            url: "https://github.com/acme/repo/pull/1892".to_string(),
+        };
+        let (line, columns) = footer(&theme(), 30, "acme.ufo.dev", "general", Some(&pr));
+        assert_eq!(
+            line.to_string(),
+            format!("{:<30}", "acme.ufo.dev · general")
+        );
+        assert_eq!(columns, None);
     }
 
     #[test]

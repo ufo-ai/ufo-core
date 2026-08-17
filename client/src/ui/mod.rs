@@ -18,6 +18,7 @@ mod wrap;
 
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -32,6 +33,7 @@ use crossterm::tty::IsTty as _;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::pr::Pr;
 use crate::ui::editor::{AskState, Key, Outcome};
 use crate::ui::history::History;
 use crate::ui::osc::{Caps, ImageProtocol};
@@ -221,6 +223,8 @@ pub struct App {
     last_reply: String,
     host: String,
     channel: String,
+    pr: Option<Pr>,
+    pr_hit: Option<(u16, Range<usize>)>,
     cwd: PathBuf,
     working: bool,
     cols: u16,
@@ -269,6 +273,8 @@ impl App {
             last_reply: String::new(),
             host,
             channel,
+            pr: None,
+            pr_hit: None,
             cwd,
             working: false,
             cols,
@@ -281,6 +287,10 @@ impl App {
     pub fn set_endpoint(&mut self, host: String, channel: String) {
         self.host = host;
         self.channel = channel;
+    }
+
+    pub fn set_pr(&mut self, pr: Option<Pr>) {
+        self.pr = pr;
     }
 
     // ── directives ────────────────────────────────────────────────────────────────────────────
@@ -1004,6 +1014,14 @@ impl App {
             MouseEventKind::ScrollDown => self.scroll(-3),
             MouseEventKind::Moved => self.hover = Some((mouse.row, mouse.column)),
             MouseEventKind::Down(MouseButton::Left) => {
+                if let (Some((row, columns)), Some(pr)) = (self.pr_hit.as_ref(), self.pr.as_ref()) {
+                    if mouse.row == *row && columns.contains(&(mouse.column as usize)) {
+                        osc::open_url(&pr.url);
+                        self.flash = Some((format!("Opened {}", pr.url), Instant::now()));
+                        self.selection = None;
+                        return;
+                    }
+                }
                 if (mouse.row as usize) >= self.view_rows {
                     self.selection = None;
                     return;
@@ -1099,15 +1117,18 @@ impl App {
         let entry_at = dock.len();
         dock.extend(entry);
         dock.push(rule());
-        dock.push(status::footer(
+        let (footer, pr_columns) = status::footer(
             &self.theme,
             self.cols,
             &self.host,
             &self.channel,
-        ));
+            self.pr.as_ref(),
+        );
+        dock.push(footer);
 
         let avail = (self.rows as usize).saturating_sub(dock.len()).max(1);
         self.view_rows = avail;
+        self.pr_hit = pr_columns.map(|columns| ((avail + dock.len() - 1) as u16, columns));
         let live = self.live_tail();
         let window = self.retained.window(avail, &live, &self.theme);
         self.window_start = window.start;

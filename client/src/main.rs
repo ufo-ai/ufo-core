@@ -2,6 +2,7 @@ mod clipboard;
 mod config;
 mod jsonio;
 mod ops;
+mod pr;
 mod ui;
 mod wire;
 
@@ -743,6 +744,7 @@ enum LoopEvent {
     Term(TermEvent),
     Wire(WireEvent),
     Clip(ClipEntry, Result<Clip, String>),
+    Pr(Option<pr::Pr>),
     StdinClosed,
 }
 
@@ -777,6 +779,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     let channel_name = session.channel.clone();
     let cwd = runtime.cwd.clone();
     let stash_cwd = runtime.cwd.clone();
+    let pr_cwd = runtime.cwd.clone();
     let workspace_url = session.workspace_url.clone();
 
     let raw = ui::RawGuard::new();
@@ -797,6 +800,8 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     });
 
     let stop_evt = evt_tx.clone();
+    let pr_tx = evt_tx.clone();
+    thread::spawn(move || pr::watch(&pr_cwd, |found| pr_tx.send(LoopEvent::Pr(found)).is_ok()));
     let wire_evt = evt_tx;
     let wire = Wire {
         session,
@@ -973,6 +978,10 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             LoopEvent::Term(TermEvent::FocusGained) => app.set_focus(true),
             LoopEvent::Term(TermEvent::FocusLost) => app.set_focus(false),
             LoopEvent::Term(_) => {}
+            LoopEvent::Pr(found) => {
+                app.set_pr(found);
+                app.paint();
+            }
             LoopEvent::StdinClosed => {}
             LoopEvent::Wire(wire_event) => match wire_event {
                 WireEvent::Dir(directive) => {
@@ -1161,9 +1170,10 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
     let code = loop {
         let event = match evt_rx.recv() {
             Ok(LoopEvent::Wire(event)) => event,
-            Ok(LoopEvent::Term(_)) | Ok(LoopEvent::Clip(..)) | Ok(LoopEvent::StdinClosed) => {
-                continue
-            }
+            Ok(LoopEvent::Term(_))
+            | Ok(LoopEvent::Clip(..))
+            | Ok(LoopEvent::Pr(_))
+            | Ok(LoopEvent::StdinClosed) => continue,
             Err(_) => break 0,
         };
         match event {
@@ -1366,7 +1376,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                     Err(event) => emit_json(&event),
                 }
             }
-            LoopEvent::Term(_) | LoopEvent::Clip(..) => {}
+            LoopEvent::Term(_) | LoopEvent::Clip(..) | LoopEvent::Pr(_) => {}
             LoopEvent::StdinClosed => {
                 stdin_open = false;
                 if !in_turn {
