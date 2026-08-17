@@ -97,6 +97,7 @@ def _shipper_context() -> ExtensionContext:
         metronome.NAME,
         frozenset((metronome.ANTHROPIC_KEY_SLOT,)),
         model_resolver=_registry(),
+        model_job=f"{metronome.NAME}:{metronome.JOB_NAME}",
     )
 
 

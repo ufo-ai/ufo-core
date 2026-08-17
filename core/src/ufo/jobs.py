@@ -298,6 +298,19 @@ class PageChangeConsumer:
     spec: HookSpec
     discriminator: str
 
+    @property
+    def spec_name(self) -> str:
+        """The name `core_jobs` gives this consumer's own JobSpec."""
+        return f"{PAGE_CHANGE_JOB}:{self.extension}:{self.discriminator}"
+
+    @property
+    def job(self) -> str:
+        """That spec's binding key — in the `core` namespace, because the runner driving it is a
+        core job whatever extension declared the hook. What this consumer's model spend and latency
+        are attributed to on the `ufo.model_*` series, so the fact deriver's distillation reads
+        apart from the page indexer beside it."""
+        return f"{CORE_EXTENSION}:{self.spec_name}"
+
 
 @dataclass(frozen=True)
 class PageChangeRunner:
@@ -439,7 +452,7 @@ class PageChangeRunner:
         tick read, so an overlapping tick or an external writer that already moved it on is never
         rewound to an older place: losing that write means another writer owns the cursor, and this
         tick stops having only redone work a handler is idempotent under."""
-        context = self._context_for(consumer.extension, consumer.declared)
+        context = self._context_for(consumer)
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         stored = await context.store.get(cursor_key)
         if stored is not None and not isinstance(stored, str):
@@ -458,15 +471,15 @@ class PageChangeRunner:
             if len(batch.changes) < PAGE_CHANGE_BATCH:
                 return
 
-    def _context_for(self, extension: str, declared: frozenset[str]) -> ExtensionContext:
+    def _context_for(self, consumer: PageChangeConsumer) -> ExtensionContext:
         invoker = (
             None
             if self.invoker_factory is None
             else self.invoker_factory(ws_current().workspace_id)
         )
         return context_for(
-            extension,
-            declared,
+            consumer.extension,
+            consumer.declared,
             self.index,
             self.embed,
             self.pages,
@@ -474,6 +487,7 @@ class PageChangeRunner:
             self.sandboxes,
             invoker,
             _background_registry(self.registry, self.background_model),
+            consumer.job,
             probes=self.probes,
         )
 
@@ -536,7 +550,7 @@ def core_jobs(
 
     page_change = tuple(
         JobSpec(
-            name=f"{PAGE_CHANGE_JOB}:{consumer.extension}:{consumer.discriminator}",
+            name=consumer.spec_name,
             schedule=PAGE_CHANGE_SCHEDULE,
             handler=_drive_consumer(consumer),
             candidates=_consumer_candidates(consumer),
@@ -702,6 +716,7 @@ class JobRunner:
                 self.registry
                 if binding.spec.needs_deploy_model
                 else _background_registry(self.registry, self.background_model),
+                key,
                 probes=self.probes,
                 member_context_read=binding.member_context_read,
                 member_context_blob=self.blob,

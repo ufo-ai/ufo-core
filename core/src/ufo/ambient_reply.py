@@ -34,6 +34,7 @@ REPLY: AmbientDecision = "REPLY"
 NO_REPLY: AmbientDecision = "NO_REPLY"
 
 AMBIENT_REPLY_REVISION = "2026-08-11-ordered-rules-third-party-opinion"
+AMBIENT_REPLY_JOB = "core:ambient_reply"
 AMBIENT_HISTORY_MESSAGES = 12
 AMBIENT_MESSAGE_CHARS = 600
 AMBIENT_REPLY_MAX_TOKENS = 2_048
@@ -84,8 +85,10 @@ class AmbientMessage:
 
 class MeteredModel(Protocol):
     """The metered one-shot model call the decision runs on: `ModelAccess` pinned to the deploy's
-    ambient classifier model, so the key's workspace and the billed workspace are one. Held as a
-    Protocol so this decision stays out of the `ext.context` import cycle."""
+    ambient classifier model, so the key's workspace and the billed workspace are one, metered under
+    `AMBIENT_REPLY_JOB` — the gate fires off every turn the way a job does, and its own cost is what
+    the turns it prevents are weighed against. Held as a Protocol so this decision stays out of the
+    `ext.context` import cycle."""
 
     @property
     def model(self) -> str: ...

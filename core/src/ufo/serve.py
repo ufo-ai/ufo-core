@@ -20,7 +20,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ufo.activity import SKILL_LOAD_TOOL
-from ufo.ambient_reply import AmbientReplyClassifier
+from ufo.ambient_reply import AMBIENT_REPLY_JOB, AmbientReplyClassifier
 from ufo.bearer import LOGIN_PATH
 from ufo.blob import (
     BlobStore,
@@ -330,7 +330,10 @@ def run() -> None:
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
         ambient_reply=AmbientReplyClassifier(
-            model=ModelAccess(replace(registry, auto_model=config.models.ambient_reply_model))
+            model=ModelAccess(
+                replace(registry, auto_model=config.models.ambient_reply_model),
+                AMBIENT_REPLY_JOB,
+            )
         ),
         sandbox_sizes=carrier_spec.sizes,
         skills=skills,

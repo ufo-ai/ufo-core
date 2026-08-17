@@ -11,6 +11,7 @@ invoke, without reshaping what handlers already hold."""
 
 import hashlib
 import json
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
@@ -72,7 +73,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.pricing import Pricing
-from ufo.o11y import log
+from ufo.o11y import BACKGROUND_PROFILE, emit_histogram, emit_metric, log
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
 from ufo.schema import tables
@@ -637,6 +638,8 @@ class ModelResolver(Protocol):
 
     def key_slot_for(self, model: str) -> str | None: ...
 
+    def provider_for(self, model: str) -> str: ...
+
 
 @dataclass(frozen=True)
 class ModelAccess:
@@ -646,9 +649,17 @@ class ModelAccess:
     through the same `billable_event`, so the key's workspace and the billed workspace are one, by
     construction — never an unmetered direct egress. Both operations fix the request's model to the
     deploy default, so the model billed is always the model called; `turn` preserves requested tool
-    calls in the existing assistant `Message` shape and `complete` returns only its text."""
+    calls in the existing assistant `Message` shape and `complete` returns only its text.
+
+    `_job` is what its spend and latency are attributed to on the `ufo.model_*` series the turn
+    engine already feeds: the job key this seam was wired for — `<extension>:<job>`, the key
+    `bindings_from` registers, and the same shape for the two off-turn seams that run outside the
+    job table (`core:ambient_reply`, the eval harness). The label is one bounded set, decided at
+    boot by the installed extensions exactly as the `profile` dimension's set is, never a workspace,
+    conversation, or payload value."""
 
     _resolver: ModelResolver
+    _job: str
 
     @property
     def model(self) -> str:
@@ -668,51 +679,90 @@ class ModelAccess:
         """Run one tool-aware model turn and return its assistant message after metering it. A
         reasoning round's message opens with the blocks the model streamed, ahead of its text and
         tool calls: a handler that feeds tool results back through `turn` sends that message again,
-        and the provider requires the sequence unchanged beside the tool calls it authenticates."""
+        and the provider requires the sequence unchanged beside the tool calls it authenticates.
+
+        Metered onto the turn engine's own `model_round_ms` and `model_round_tokens_total` rather
+        than a series of its own: the question an operator asks is what one model costs and how long
+        it takes, and a second family would answer it twice — every dashboard, every rate, every
+        price comparison would have to sum both and would silently miss whichever one it forgot. So
+        the work shape rides the dimensions instead. `profile` is `background` where a turn writes
+        `main`, a spawned agent `agent`, and a subagent its profile name, and `job` names which
+        background one. A turn emits no `job` at all, so no turn series is split and the added cost
+        is one series per (job, model, provider) — the jobs a deploy registers at boot, times the
+        one background model they all run on.
+
+        A failed call is metered too, carrying the `error_class` a round records: a job whose model
+        call raises books no spend, so the ledger cannot show it, and the latency of the attempt is
+        the only trace that the model was reached at all. A cancellation is one of those classes — a
+        job dropped at shutdown must not read back as a round that answered in no tokens."""
         model = self._resolver.auto_model
         client = await self._resolver.client_for(model)
+        dimensions = {
+            "model": model,
+            "provider": self._resolver.provider_for(model),
+            "profile": BACKGROUND_PROFILE,
+            "job": self._job,
+        }
         parts: list[str] = []
         call_names: dict[str, str] = {}
         call_json: dict[str, list[str]] = {}
         call_order: list[str] = []
         reasoning: list[ThinkingBlock | RedactedThinkingBlock | ReasoningItemBlock] = []
         usages: list[Usage] = []
-        async with ws_current().billable_event() as bill:
-            async for event in client.complete(request.model_copy(update={"model": model})):
-                match event:
-                    case TextDelta(text=text):
-                        parts.append(text)
-                    case ToolCallStart(id=call_id, name=name):
-                        call_names[call_id] = name
-                        call_json[call_id] = []
-                        call_order.append(call_id)
-                    case ToolCallDelta(id=call_id, partial_json=partial):
-                        call_json[call_id].append(partial)
-                    case ThinkingBlock() | RedactedThinkingBlock() | ReasoningItemBlock():
-                        reasoning.append(event)
-                    case Usage():
-                        usages.append(event)
-            if not usages:
-                raise RuntimeError("model stream produced no usage")
-            tool_calls = tuple(
-                ToolUseBlock(
-                    id=call_id,
-                    name=call_names[call_id],
-                    input=json.loads("".join(call_json[call_id]) or "{}"),
+        failure: dict[str, str] = {}
+        started = time.monotonic()
+        try:
+            async with ws_current().billable_event() as bill:
+                async for event in client.complete(request.model_copy(update={"model": model})):
+                    match event:
+                        case TextDelta(text=text):
+                            parts.append(text)
+                        case ToolCallStart(id=call_id, name=name):
+                            call_names[call_id] = name
+                            call_json[call_id] = []
+                            call_order.append(call_id)
+                        case ToolCallDelta(id=call_id, partial_json=partial):
+                            call_json[call_id].append(partial)
+                        case ThinkingBlock() | RedactedThinkingBlock() | ReasoningItemBlock():
+                            reasoning.append(event)
+                        case Usage():
+                            usages.append(event)
+                if not usages:
+                    raise RuntimeError("model stream produced no usage")
+                tool_calls = tuple(
+                    ToolUseBlock(
+                        id=call_id,
+                        name=call_names[call_id],
+                        input=json.loads("".join(call_json[call_id]) or "{}"),
+                    )
+                    for call_id in call_order
                 )
-                for call_id in call_order
-            )
-            bill.usage(
-                model,
-                Usage(
+                usage = Usage(
                     input_tokens=sum(u.input_tokens for u in usages),
                     output_tokens=sum(u.output_tokens for u in usages),
                     cache_read_tokens=sum(u.cache_read_tokens for u in usages),
                     cache_write_5m_tokens=sum(u.cache_write_5m_tokens for u in usages),
                     cache_write_1h_tokens=sum(u.cache_write_1h_tokens for u in usages),
-                ),
-                self._resolver.pricing,
+                )
+                bill.usage(model, usage, self._resolver.pricing)
+        except BaseException as error:
+            failure = {"error_class": type(error).__name__}
+            raise
+        finally:
+            emit_histogram(
+                "model_round_ms",
+                int((time.monotonic() - started) * 1000),
+                **dimensions,
+                **failure,
             )
+        for kind, amount in (
+            ("input", usage.input_tokens),
+            ("output", usage.output_tokens),
+            ("cache_read", usage.cache_read_tokens),
+            ("cache_write", usage.cache_write_5m_tokens + usage.cache_write_1h_tokens),
+        ):
+            if amount:
+                emit_metric("model_round_tokens_total", amount, **dimensions, kind=kind)
         text = "".join(parts)
         if not tool_calls:
             return Message(role="assistant", content=text)
@@ -2309,6 +2359,7 @@ def context_for(
     sandboxes: ConversationSandbox | None = None,
     invoker: TurnInvoker | None = None,
     model_resolver: ModelResolver | None = None,
+    model_job: str | None = None,
     surfaces: frozenset[str] = frozenset(),
     credential_sources: tuple[tuple[str, CredentialSource], ...] = (),
     credential_store: CredentialStore | None = None,
@@ -2325,11 +2376,16 @@ def context_for(
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
     workspace is bound when a handler runs. `declared` gates credential slots and `surfaces` gates
     installation registration; a `model_resolver` wires the metered model seam, keyed and billed
-    to that same workspace. `public_base_url` is the deploy's externally reachable base, which a
+    to that same workspace, and `model_job` is the job key that seam's spend and latency are
+    attributed to — required wherever a resolver is wired, so a metered call can never reach the
+    `ufo.model_*` series unattributed.
+    `public_base_url` is the deploy's externally reachable base, which a
     kind listing rows a member opens needs and cannot reach any other way. A `tailer` lets a handler
     firing inside a turn watch that turn's frames — the one seam a hook's own side-channel work
     reads the loop through. `probes` is the off-turn sandbox exec, wired only where a handler runs
     outside every turn: a tool or in-turn hook already holds the turn's own sandbox."""
+    if model_resolver is not None and model_job is None:
+        raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     return ExtensionContext(
         store=ScopedStore(extension=extension),
         credentials=CredentialAccess(
@@ -2346,7 +2402,11 @@ def context_for(
         files=None if sandboxes is None else ConversationFiles(sandboxes),
         probes=probes,
         invoker=invoker,
-        model=None if model_resolver is None else ModelAccess(model_resolver),
+        model=(
+            None
+            if model_resolver is None or model_job is None
+            else ModelAccess(model_resolver, model_job)
+        ),
         key_slot_for=None if model_resolver is None else model_resolver.key_slot_for,
         public_base_url=public_base_url,
         tailer=tailer,

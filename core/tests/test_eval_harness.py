@@ -156,6 +156,7 @@ from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
     MAX_IMAGE_BYTES_PER_REQUEST,
+    PROVIDER_ANTHROPIC,
     ImageBlock,
     ImageSource,
     Message,
@@ -188,6 +189,7 @@ from ufo.transcript import (
 from ufo.workspace import init_workspace_credentials, ws
 
 MODEL = "claude-opus-4-8"
+JUDGE_JOB = "evals:judge"
 AGENT_REASONING = "high"
 PROMPT = "You are a helpful assistant."
 EXTENSION = "evals"
@@ -1066,6 +1068,9 @@ class StubResolver:
 
     async def client_for(self, model: str) -> ModelClient:
         return self.client
+
+    def provider_for(self, model: str) -> str:
+        return PROVIDER_ANTHROPIC
 
 
 @dataclass(frozen=True)
@@ -2324,7 +2329,8 @@ async def test_model_judge_runs_through_case_runner_and_bills_workspace(db: None
                     '{"items":[{"passed":false,"reason":"causation is asserted as fact"}]}',
                     Usage(input_tokens=7, output_tokens=3),
                 ),
-            )
+            ),
+            JUDGE_JOB,
         )
     )
     target = InProcessTarget(
@@ -2366,7 +2372,9 @@ async def test_visual_judge_parses_a_prose_wrapped_verdict_through_the_metered_l
         'I looked closely.\n{"items":[{"passed":false,"reason":"box clipped at left"}]}',
         Usage(input_tokens=9, output_tokens=4),
     )
-    judge = ModelJudge(ModelAccess(StubResolver(MODEL, CORE_PRICING, client)), reasoning="high")
+    judge = ModelJudge(
+        ModelAccess(StubResolver(MODEL, CORE_PRICING, client), JUDGE_JOB), reasoning="high"
+    )
     page = ImageBlock(source=ImageSource(media_type="image/png", data="cGl4"))
 
     with ws(workspace_id):

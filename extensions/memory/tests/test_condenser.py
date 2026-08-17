@@ -66,6 +66,7 @@ from ufo.loop.delivery import DeliverySweep
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import (
+    PROVIDER_ANTHROPIC,
     ModelClient,
     ModelEvent,
     ModelRequest,
@@ -82,6 +83,8 @@ from ufo.workspace import ws
 
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 AUTO_MODEL = "claude-opus-4-8"
+CONSOLIDATE_MODEL_JOB = f"memory:{memory_manifest.CONSOLIDATE_JOB}"
+DERIVE_MODEL_JOB = "core:page_change:memory:derive_facts"
 PAGE_BODY = "The acquisition codename is polaris and the deal closes in the third quarter."
 EDITED_PAGE_BODY = "The acquisition codename is meridian and the deal closes in the third quarter."
 LAST_PUBLISHABLE_CHECK = 2
@@ -301,6 +304,9 @@ class _Resolver:
     def key_slot_for(self, model: str) -> str | None:
         return None
 
+    def provider_for(self, model: str) -> str:
+        return PROVIDER_ANTHROPIC
+
 
 def _model(payload: str) -> ModelAccess:
     return ModelAccess(
@@ -308,7 +314,8 @@ def _model(payload: str) -> ModelAccess:
             AUTO_MODEL,
             CORE_PRICING,
             StubModelClient(payload, Usage(input_tokens=10, output_tokens=5)),
-        )
+        ),
+        CONSOLIDATE_MODEL_JOB,
     )
 
 
@@ -539,7 +546,10 @@ def _derive_consumer(runner: PageChangeRunner) -> object:
 def _scripted(store: MemoryStore, *payloads: str) -> FactDeriver:
     return FactDeriver(
         store=store,
-        model=ModelAccess(_Resolver(AUTO_MODEL, CORE_PRICING, ScriptedExtractionClient(payloads))),
+        model=ModelAccess(
+            _Resolver(AUTO_MODEL, CORE_PRICING, ScriptedExtractionClient(payloads)),
+            DERIVE_MODEL_JOB,
+        ),
     )
 
 
@@ -857,7 +867,7 @@ async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
         }
     )
     client = ExtractionModelClient(payload, Usage(input_tokens=10, output_tokens=5))
-    model = ModelAccess(_Resolver(AUTO_MODEL, CORE_PRICING, client))
+    model = ModelAccess(_Resolver(AUTO_MODEL, CORE_PRICING, client), DERIVE_MODEL_JOB)
     private_subject = member_subject(uuid4())
     private = PageChange(
         page_id=page_id,
@@ -1640,7 +1650,8 @@ async def test_consolidation_revalidates_donors_after_the_model_call(db: None) -
             AUTO_MODEL,
             CORE_PRICING,
             SupersedingModelClient(originals[0]),
-        )
+        ),
+        CONSOLIDATE_MODEL_JOB,
     )
     with ws(workspace_id):
         await MemoryConsolidator(

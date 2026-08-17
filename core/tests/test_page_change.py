@@ -15,14 +15,18 @@ instead of rewinding the cursor and replaying the batch. No mock call-log — a 
 through its capability APIs."""
 
 import hashlib
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 import ufo_ext_sample as sample
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
+from ufo import o11y
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
@@ -40,9 +44,12 @@ from ufo.jobs import (
 )
 from ufo.loop.delivery import DeliverySweep
 from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_PRICING
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.models.interface import Message, ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
+from ufo.o11y import BACKGROUND_PROFILE
 from ufo.schema import tables
+from ufo.schema.records import Usage
 from ufo.sources.sync import (
     CorePageFeed,
     FolderSource,
@@ -54,6 +61,7 @@ from ufo.sources.sync import (
 from ufo.subjects import SHARED_SUBJECT
 from ufo.workspace import ws
 
+BACKGROUND_MODEL = "gpt-5.6-luna"
 RACER_EXTENSION = "racer_ext"
 RACER_CURSOR_KEY = f"{PAGE_CHANGE_CURSOR_KEY}:_advance_the_cursor_then_record"
 CONCURRENT_CURSOR = f"9000|{UUID(int=9000)}"
@@ -125,6 +133,24 @@ def _runner(
 async def _drive_all(runner: PageChangeRunner) -> None:
     for consumer in runner.consumers():
         await runner.drive(consumer)
+
+
+@dataclass(frozen=True)
+class _StubModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="one fact")
+        yield Usage(input_tokens=6, output_tokens=2)
+
+
+def _stub_registry() -> ModelRegistry:
+    return ModelRegistry(
+        specs={
+            spec.id: replace(spec, client=lambda spec, key: _StubModel(), key_slot="", key_env="")
+            for spec in CORE_MODEL_SPECS
+        },
+        pricing=CORE_PRICING,
+        auto_model="claude-opus-5",
+    )
 
 
 async def test_runner_delivers_changed_pages_and_advances_the_cursor(
@@ -199,6 +225,63 @@ async def test_a_page_change_consumer_runs_on_the_background_jobs_model(
 
     assert seen == ["gpt-5.6-luna"]
     assert registry.auto_model == "claude-opus-5"
+
+
+async def test_a_consumer_meters_its_model_call_under_its_own_page_change_job(
+    db: None, tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each consumer drives as its own job, so each one's model spend reads apart: the fact
+    deriver's distillation is labelled with the `core:page_change:<ext>:<hook>` key its JobSpec is
+    registered under, not with the extension that declared the hook."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _seed_page(blob, workspace_id, "a page the deriver distills")
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+
+    async def _derive_facts(ctx: HookContext) -> HookOutcome:
+        assert ctx.ext.model is not None
+        await ctx.ext.model.turn(
+            ModelRequest(
+                model="auto",
+                system="distill",
+                messages=(Message(role="user", content="one page"),),
+                max_tokens=64,
+            )
+        )
+        return None
+
+    runner = PageChangeRunner(
+        manifests=(
+            Manifest(
+                name="deriver_ext",
+                version="0",
+                hooks=(HookSpec(event="page_change", handler=_derive_facts),),
+            ),
+        ),
+        pages=CorePageFeed(blob=blob),
+        registry=_stub_registry(),
+        background_model=BACKGROUND_MODEL,
+    )
+    with ws(workspace_id):
+        await _drive_all(runner)
+
+    data = reader.get_metrics_data()
+    assert data is not None
+    tokens = [
+        point
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "ufo.model_round_tokens_total"
+        for point in metric.data.data_points
+    ]
+    assert {point.attributes["job"] for point in tokens} == {
+        f"{CORE_EXTENSION}:{PAGE_CHANGE_JOB}:deriver_ext:_derive_facts"
+    }
+    assert {point.attributes["profile"] for point in tokens} == {BACKGROUND_PROFILE}
 
 
 async def _raise(ctx: HookContext) -> HookOutcome:

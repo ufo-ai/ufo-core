@@ -1204,7 +1204,13 @@ async def test_chat_title_job_rewrites_the_rail_label_from_the_opening_exchange(
     candidates = store_key_workspaces(EXTENSION_WEB, web_surface.CHAT_PENDING_PREFIX)
     assert workspace_id in await candidates()
 
-    ctx = context_for(EXTENSION_WEB, frozenset(), blob=blob, model_resolver=STANDIN_REGISTRY)
+    ctx = context_for(
+        EXTENSION_WEB,
+        frozenset(),
+        blob=blob,
+        model_resolver=STANDIN_REGISTRY,
+        model_job=f"{EXTENSION_WEB}:{web_surface.TITLE_JOB_NAME}",
+    )
     assert ctx.corpus is not None
     with ws(workspace_id):
         async with asyncio.timeout(5):

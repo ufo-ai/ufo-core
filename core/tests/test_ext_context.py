@@ -1,4 +1,5 @@
-from collections.abc import AsyncIterator, Mapping
+import asyncio
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,7 +8,14 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    HistogramDataPoint,
+    InMemoryMetricReader,
+    NumberDataPoint,
+)
 
+from ufo import o11y
 from ufo.agent_scope import agent
 from ufo.audience import SHARED_AUDIENCE
 from ufo.blob import FilesystemBlobStore
@@ -34,6 +42,7 @@ from ufo.ext.surface import (
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
+    PROVIDER_ANTHROPIC,
     Message,
     ModelClient,
     ModelEvent,
@@ -48,6 +57,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.pricing import Pricing
+from ufo.o11y import BACKGROUND_PROFILE
 from ufo.sandbox import terminal
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
@@ -59,6 +69,9 @@ from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import WorkspaceUnbound, init_workspace_credentials, ws
+
+MODEL = "claude-opus-4-8"
+JOB = "memory:memory_consolidate"
 
 
 async def _workspace() -> UUID:
@@ -108,6 +121,26 @@ class ReasoningModel:
 
 
 @dataclass(frozen=True)
+class FailingModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="half an answer")
+        raise TimeoutError("provider went away")
+
+
+@dataclass(frozen=True)
+class CachingModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="summarized")
+        yield Usage(
+            input_tokens=11,
+            output_tokens=3,
+            cache_read_tokens=40,
+            cache_write_5m_tokens=5,
+            cache_write_1h_tokens=2,
+        )
+
+
+@dataclass(frozen=True)
 class StubResolver:
     """The model registry as `ModelAccess` reads it, wired to one scripted client."""
 
@@ -115,7 +148,7 @@ class StubResolver:
 
     @property
     def auto_model(self) -> str:
-        return "claude-opus-4-8"
+        return MODEL
 
     @property
     def pricing(self) -> Pricing:
@@ -127,9 +160,36 @@ class StubResolver:
     def key_slot_for(self, model: str) -> str | None:
         return None
 
+    def provider_for(self, model: str) -> str:
+        return PROVIDER_ANTHROPIC
 
-async def _turn(model: ModelClient) -> Message:
-    context = context_for("core", frozenset(), model_resolver=StubResolver(model))
+
+def _metric_capture(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    monkeypatch.setattr(o11y, "_up_down_counters", {})
+    return reader
+
+
+def _exported_metrics(
+    reader: InMemoryMetricReader,
+) -> dict[str, Sequence[HistogramDataPoint | NumberDataPoint]]:
+    data = reader.get_metrics_data()
+    if data is None:
+        return {}
+    return {
+        metric.name: metric.data.data_points
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+
+
+async def _turn(model: ModelClient, job: str = JOB) -> Message:
+    context = context_for("core", frozenset(), model_resolver=StubResolver(model), model_job=job)
     assert context.model is not None
     with ws(await _workspace()):
         return await context.model.turn(
@@ -160,6 +220,128 @@ async def test_model_turn_without_tool_calls_stays_plain_text(db: None) -> None:
     """A round with nothing to authenticate returns its text: there is no tool call coming back, so
     the reasoning has no continuation to ride and never becomes a blocks tuple."""
     assert (await _turn(ReasoningModel(with_tool=False))).content == "checking"
+
+
+async def test_a_background_call_meters_its_tokens_and_latency_under_its_job(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam a job's `ctx.model` reaches feeds the turn engine's own model series, so one query
+    reads member turns and background work: `profile` separates them and `job` says which background
+    one spent it. Cache classes are counted apart, and the two write TTLs fold into one
+    `cache_write` exactly as a round's do."""
+    reader = _metric_capture(monkeypatch)
+    assert (await _turn(CachingModel())).content == "summarized"
+    points = _exported_metrics(reader)
+    assert {
+        (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
+    } == {("input", 11), ("output", 3), ("cache_read", 40), ("cache_write", 7)}
+    assert {
+        (
+            point.attributes["model"],
+            point.attributes["provider"],
+            point.attributes["profile"],
+            point.attributes["job"],
+        )
+        for point in points["ufo.model_round_tokens_total"]
+    } == {(MODEL, PROVIDER_ANTHROPIC, BACKGROUND_PROFILE, JOB)}
+    assert [(point.count, dict(point.attributes)) for point in points["ufo.model_round_ms"]] == [
+        (
+            1,
+            {
+                "model": MODEL,
+                "provider": PROVIDER_ANTHROPIC,
+                "profile": BACKGROUND_PROFILE,
+                "job": JOB,
+            },
+        )
+    ]
+
+
+async def test_two_jobs_on_one_model_meter_as_two_series(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every background job runs on the one configured model, so the model alone cannot say which
+    work spent the tokens — the whole point of the `job` dimension. Two jobs calling the same model
+    keep their own series."""
+    reader = _metric_capture(monkeypatch)
+    await _turn(CachingModel(), job=JOB)
+    await _turn(CachingModel(), job="web:chat_titles")
+    points = _exported_metrics(reader)
+    assert {
+        (point.attributes["job"], point.attributes["kind"], point.value)
+        for point in points["ufo.model_round_tokens_total"]
+    } >= {(JOB, "input", 11), ("web:chat_titles", "input", 11)}
+
+
+async def test_a_failed_background_call_meters_its_latency_with_the_error_class(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call that raises books no spend, so the ledger keeps no trace of it at all. The latency
+    observation carrying `error_class` is the only record that the job reached the model, and it
+    counts no tokens — nothing was billed."""
+    reader = _metric_capture(monkeypatch)
+    with pytest.raises(TimeoutError, match="provider went away"):
+        await _turn(FailingModel())
+    points = _exported_metrics(reader)
+    assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
+        {
+            "model": MODEL,
+            "provider": PROVIDER_ANTHROPIC,
+            "profile": BACKGROUND_PROFILE,
+            "job": JOB,
+            "error_class": "TimeoutError",
+        }
+    ]
+    assert "ufo.model_round_tokens_total" not in points
+
+
+async def test_a_stream_with_no_usage_meters_the_failure_it_raises(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unpriceable stream is this seam's own refusal rather than the provider's, and it is
+    metered the same way — a job whose model answers without usage is invisible in the ledger."""
+    reader = _metric_capture(monkeypatch)
+
+    @dataclass(frozen=True)
+    class NoUsage:
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            yield TextDelta(text="unpriceable")
+
+    with pytest.raises(RuntimeError, match="produced no usage"):
+        await _turn(NoUsage())
+    points = _exported_metrics(reader)
+    assert [point.attributes["error_class"] for point in points["ufo.model_round_ms"]] == [
+        "RuntimeError"
+    ]
+
+
+async def test_a_cancelled_background_call_meters_the_cancellation(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job dropped mid-call at shutdown is cancelled, not failed, and a cancellation that went
+    unlabelled would read back as a round that answered in no tokens at all."""
+    reader = _metric_capture(monkeypatch)
+
+    @dataclass(frozen=True)
+    class Cancelled:
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            yield TextDelta(text="half")
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _turn(Cancelled())
+    points = _exported_metrics(reader)
+    assert [point.attributes["error_class"] for point in points["ufo.model_round_ms"]] == [
+        "CancelledError"
+    ]
+
+
+async def test_a_wired_model_seam_without_its_job_fails_at_the_wiring(db: None) -> None:
+    """The label is what keeps the series attributable, so a caller that wires the seam and omits it
+    fails where the context is built — never at the first call, mid-job, with an unlabelled series
+    already minted."""
+    with pytest.raises(ValueError, match="model_job"):
+        context_for("core", frozenset(), model_resolver=StubResolver(CachingModel()))
 
 
 async def test_scoped_store_round_trips_json_values(db: None) -> None:

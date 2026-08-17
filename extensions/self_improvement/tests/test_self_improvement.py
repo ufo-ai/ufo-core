@@ -42,6 +42,7 @@ from ufo.governance import prompt_digest
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
+    PROVIDER_ANTHROPIC,
     Message,
     ModelClient,
     ModelEvent,
@@ -64,6 +65,7 @@ IMPROVED_PROMPT = (
     f"{SEED_PROMPT}\nWhen a tool errors, retry with corrected arguments. {IMPROVED_MARKER}"
 )
 MODEL = "claude-opus-4-8"
+REPLAY_JOB = f"self_improvement:{si.EVAL_JOB}"
 
 
 @dataclass(frozen=True)
@@ -369,11 +371,14 @@ class ModelResolver:
         assert model == self.auto_model
         return self.client
 
+    def provider_for(self, model: str) -> str:
+        return PROVIDER_ANTHROPIC
+
 
 async def test_replay_uses_metered_model_access_and_feeds_archived_results(db: None) -> None:
     workspace_id = await _workspace()
     client = MeteredReplayClient(requests=[])
-    model = ModelAccess(ModelResolver(MODEL, CORE_PRICING, client))
+    model = ModelAccess(ModelResolver(MODEL, CORE_PRICING, client), REPLAY_JOB)
 
     with ws(workspace_id):
         result = await ReplayEvaluation(ModelAccessLeg(model)).replay(

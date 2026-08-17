@@ -84,9 +84,17 @@ ERROR_CLASS_DIMENSION = "error_class"
 PROFILE_DIMENSION = "profile"
 MAIN_PROFILE = "main"
 AGENT_PROFILE = "agent"
+BACKGROUND_PROFILE = "background"
+JOB_DIMENSION = "job"
 HISTOGRAMS = {
     "db_tx_acquire_ms": ("path",),
-    "model_round_ms": ("model", "provider", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
+    "model_round_ms": (
+        "model",
+        "provider",
+        ERROR_CLASS_DIMENSION,
+        PROFILE_DIMENSION,
+        JOB_DIMENSION,
+    ),
     "model_first_visible_event_ms": (
         "model",
         "provider",

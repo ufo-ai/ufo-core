@@ -68,6 +68,12 @@ class ModelRegistry:
             ) from error
         return spec.client(spec, key)
 
+    def provider_for(self, model: str) -> str:
+        """The provider that serves `model` — the `provider` metric dimension its calls are metered
+        under, so an off-turn call splits by backend the way a turn's round does. Loud on an id no
+        spec describes, like every other read through `spec`."""
+        return self.spec(model).provider
+
     def key_slot_for(self, model: str) -> str | None:
         """The BYOK slot whose stored value would key this model's calls — total instead of loud: an
         unclaimed model (a historical ledger row from a removed spec) or a keyless spec answers

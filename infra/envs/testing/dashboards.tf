@@ -205,6 +205,11 @@ resource "datadog_dashboard" "model_latency" {
 
         Read a difference only where `rounds by provider` is high enough to carry a percentile and
         `failed rounds` and `provider retries` are flat.
+
+        The `background job` graphs are those same series for the model calls made off a turn:
+        `profile:background`, each tagged with the `job` that made it — memory consolidation, fact
+        derivation, chat titles, the ambient reply gate. One configured model serves all of them, so
+        a rise there is that job's own volume or payload, never a route change.
       EOT
       background_color = "yellow"
       font_size        = "14"
@@ -300,6 +305,40 @@ resource "datadog_dashboard" "model_latency" {
       title = "failed rounds by provider and class"
       request {
         q            = "count:ufo.model_round_ms{$env,error_class:*} by {provider,model,profile,error_class}"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "background job tokens by job and kind"
+      request {
+        q            = "sum:ufo.model_round_tokens_total{$env,profile:background} by {job,kind}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "background job whole round by job"
+      request {
+        q            = "p50:ufo.model_round_ms{$env,profile:background,!error_class:*} by {job,model}"
+        display_type = "line"
+      }
+      request {
+        q            = "p95:ufo.model_round_ms{$env,profile:background,!error_class:*} by {job,model}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "background job rounds by job and class"
+      request {
+        q            = "count:ufo.model_round_ms{$env,profile:background} by {job,error_class}"
         display_type = "bars"
       }
     }

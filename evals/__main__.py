@@ -136,6 +136,9 @@ from ufo.workspace import init_workspace_credentials, ws
 
 DEFAULT_OUT = Path("eval-reports")
 EVAL_SHARE_BUCKET_ENV = "UFO_EVAL_SHARE_BUCKET"
+EVAL_TARGET_JOB = "evals:target"
+EVAL_JUDGE_JOB = "evals:judge"
+MCP_ATLAS_JOB = "evals:mcp_atlas"
 MCP_ATLAS_URL_ENV = "MCP_ATLAS_URL"
 MCP_ATLAS_EXTERNAL_URL_ENV = "MCP_ATLAS_EXTERNAL_URL"
 MCP_ATLAS_TIMEOUT_SECONDS = 1_800.0
@@ -644,6 +647,7 @@ async def _run(
                     workspace_id=workspace_id,
                 ),
                 model_resolver=registry,
+                model_job=EVAL_TARGET_JOB,
             )
             if ctx.model is None:
                 raise RuntimeError("eval context requires model access")
@@ -814,6 +818,7 @@ async def _mcp_atlas_target(
         "evals",
         frozenset(),
         model_resolver=replace(registry, auto_model=resolved_model),
+        model_job=MCP_ATLAS_JOB,
     )
     if target_context.model is None:
         raise RuntimeError("MCP-Atlas target requires model access")
@@ -893,6 +898,7 @@ def _model_leg(
         "evals",
         frozenset(),
         model_resolver=replace(registry, auto_model=model),
+        model_job=EVAL_JUDGE_JOB,
     )
     if context.model is None:
         raise RuntimeError(f"eval model leg {model!r} requires model access")

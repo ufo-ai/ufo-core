@@ -1,29 +1,57 @@
 import asyncio
 import logging
 import threading
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 from dbos import DBOS
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from ufo import jobs as jobs_module
+from ufo import o11y
 from ufo.candidates import owner_candidates
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore
 from ufo.ext.manifest import JobSpec
 from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
-from ufo.models.catalog import CORE_PRICING
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.models.interface import Message, ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
+from ufo.o11y import BACKGROUND_PROFILE
 from ufo.schema import tables
+from ufo.schema.records import Usage
 from ufo.workspace import ws, ws_current
 
 FIRE_TIMEOUT_SECONDS = 25
 MARKER_KEY = "fired"
 MARKER_VALUE = {"ran": True}
 DORMANT_CRON = "0 0 5 * * *"
+BACKGROUND_MODEL = "gpt-5.6-luna"
+
+
+@dataclass(frozen=True)
+class _StubModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="one summary")
+        yield Usage(input_tokens=9, output_tokens=4)
+
+
+def _stub_registry() -> ModelRegistry:
+    """The deploy registry with every core spec served by one stub client, so a job's model call
+    runs the real seam — client resolution, pricing, metering — without a provider."""
+    return ModelRegistry(
+        specs={
+            spec.id: replace(spec, client=lambda spec, key: _StubModel(), key_slot="", key_env="")
+            for spec in CORE_MODEL_SPECS
+        },
+        pricing=CORE_PRICING,
+        auto_model="claude-opus-5",
+    )
 
 
 async def _workspace() -> UUID:
@@ -158,6 +186,61 @@ async def test_a_job_runs_its_own_model_calls_on_the_background_jobs_model(db: N
     await runner.fire(f"{CORE_EXTENSION}:titles", workspace_id)
     assert seen == ["gpt-5.6-luna"]
     assert registry.auto_model == "claude-opus-5"
+
+
+async def test_a_job_model_call_meters_its_tokens_and_latency_under_the_key_that_fired(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every background job shares one model, so the model alone cannot say which work spent the
+    tokens — the key the dispatcher fired is what the series carry. The handler never passes it: the
+    label comes off the fire path, so a job cannot mislabel its own spend."""
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:summaries"
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+
+    async def _summarize(context: ExtensionContext) -> None:
+        assert context.model is not None
+        await context.model.turn(
+            ModelRequest(
+                model="auto",
+                system="summarize",
+                messages=(Message(role="user", content="two facts"),),
+                max_tokens=64,
+            )
+        )
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(
+        name="summaries", schedule="* * * * * *", handler=_summarize, candidates=_candidate
+    )
+    runner = JobRunner(
+        bindings=bindings_from((), (spec,)),
+        registry=_stub_registry(),
+        background_model=BACKGROUND_MODEL,
+    )
+    await runner.fire(key, workspace_id)
+
+    data = reader.get_metrics_data()
+    assert data is not None
+    points = {
+        metric.name: metric.data.data_points
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+    assert {
+        (point.attributes["job"], point.attributes["kind"], point.value)
+        for point in points["ufo.model_round_tokens_total"]
+    } == {(key, "input", 9), (key, "output", 4)}
+    assert [
+        (point.attributes["job"], point.attributes["profile"], point.attributes["model"])
+        for point in points["ufo.model_round_ms"]
+    ] == [(key, BACKGROUND_PROFILE, BACKGROUND_MODEL)]
 
 
 async def test_a_job_that_needs_the_deploy_model_keeps_it(db: None) -> None:
