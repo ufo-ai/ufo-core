@@ -1,3 +1,19 @@
+import {
+  IconBrandAirtable,
+  IconBrandAsana,
+  IconBrandGithub,
+  IconBrandGmail,
+  IconBrandGoogleDrive,
+  IconBrandInstagram,
+  IconBrandIntercom,
+  IconBrandJira,
+  IconBrandMonday,
+  IconBrandNotion,
+  IconBrandSentry,
+  IconBrandSlack,
+  IconBrandStripe,
+  IconPlug,
+} from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
@@ -53,6 +69,37 @@ const ACCESS = { label: "Access", fact: true };
 const POOL_COLUMNS = [PROVIDER, "Account", ACCESS, "Agents"];
 const AGENT_COLUMNS = [PROVIDER, "Account", ACCESS];
 const ATTACH_AGENT = "attach-agent";
+
+const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
+  airtable: IconBrandAirtable,
+  asana: IconBrandAsana,
+  github: IconBrandGithub,
+  gmail: IconBrandGmail,
+  googledrive: IconBrandGoogleDrive,
+  instagram: IconBrandInstagram,
+  intercom: IconBrandIntercom,
+  jira: IconBrandJira,
+  monday: IconBrandMonday,
+  notion: IconBrandNotion,
+  sentry: IconBrandSentry,
+  slack: IconBrandSlack,
+  stripe: IconBrandStripe,
+};
+
+/** The provider a connection is on, drawn before the words that name it. The brokers reach far
+ *  more providers than the icon set draws, so one the set does not carry takes the plain connector
+ *  glyph and every option in the list still starts on the same line. */
+function ProviderGlyph({ provider }: { provider: string }) {
+  const Glyph = PROVIDER_GLYPHS[provider] ?? IconPlug;
+  return <Glyph className="size-icon shrink-0 text-ink-soft" aria-hidden />;
+}
+
+/** What names the account to the member: the label the provider gave it, else the address it is
+ *  held under. The broker's id names neither, so it stands only where the connection carries
+ *  nothing else — the record that opens beside the table is where it is read. */
+function accountName(entry: Connection): string {
+  return entry.account_label ?? entry.owner_email ?? entry.account_id ?? "—";
+}
 
 /** What the record standing beside the table is headed by. A member holding two accounts on one
  *  provider tells them apart by the account, so that is the name; a connection the provider named
@@ -131,7 +178,7 @@ export function WorkspaceConnectors({ place }: { place: Placement }) {
               {(entry) => (
                 <>
                   <TdFact>{entry.provider}</TdFact>
-                  <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
+                  <Td>{accountName(entry)}</Td>
                   <TdFact>{entry.shared ? "Workspace" : "Only you"}</TdFact>
                   <Td>{(entry.agents ?? []).map((agent) => agent.name).join(", ") || "—"}</Td>
                 </>
@@ -472,7 +519,22 @@ function ConnectorList({
                     {pool.phase === "ready"
                       ? pool.payload.connections
                           .filter((entry) => !(entry.agents ?? []).some((attached) => attached.id === agent.id))
-                          .map((entry) => <SelectItem key={entry.grant} value={entry.grant}>{entry.account_label ?? entry.account_id}</SelectItem>)
+                          .map((entry) => (
+                            <SelectItem
+                              key={entry.grant}
+                              value={entry.grant}
+                              textValue={entry.provider + " " + accountName(entry)}
+                            >
+                              <span className="flex min-w-0 items-center gap-sm">
+                                <ProviderGlyph provider={entry.provider} />
+                                <span className="shrink-0">{entry.provider}</span>
+                                <span className="min-w-0 truncate">{accountName(entry)}</span>
+                                <span className="shrink-0 text-ink-soft">
+                                  {ownerLabel(entry.owner_email, viewer)}
+                                </span>
+                              </span>
+                            </SelectItem>
+                          ))
                       : null}
                   </SelectContent>
                 </Select>
@@ -527,7 +589,7 @@ function ConnectorList({
               {(entry) => (
                 <>
                   <TdFact>{entry.provider}</TdFact>
-                  <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
+                  <Td>{accountName(entry)}</Td>
                   <TdFact>{entry.shared ? "Workspace" : "Only you"}</TdFact>
                 </>
               )}

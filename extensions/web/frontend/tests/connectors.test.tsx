@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -243,11 +243,47 @@ test("a revoked connection stays shut when the grant comes back on a later read"
   await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
   await waitFor(() => expect(screen.queryByRole("complementary", { name: "acct" })).toBeNull());
 
-  await pick("Connection", "acct");
+  await userEvent.click(await screen.findByRole("combobox", { name: "Connection" }));
+  await userEvent.click(await screen.findByRole("option", { name: /github/ }));
   await userEvent.click(screen.getByRole("button", { name: "Attach" }));
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.queryByRole("complementary", { name: "acct" })).toBeNull();
+});
+
+test("the attach picker names the provider and the account, not the broker id", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  wire({
+    "/connections": (url) =>
+      json({
+        connections: url.includes("/agents/")
+          ? []
+          : [{ ...grant("github", true, "g1"), account_label: "Work GitHub", agents: [] }],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("combobox", { name: "Connection" }));
+
+  const option = await screen.findByRole("option", { name: /Work GitHub/ });
+  expect(option.textContent).toContain("github");
+  expect(option.textContent).toContain("You");
+  expect(option.textContent).not.toContain("acct");
+});
+
+test("the account column names the account the member holds, not the broker id", async () => {
+  location.hash = "#/workspace/connectors";
+  wire({
+    "/connections": () => json({ connections: [grant("github", false, "g1")] }),
+    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const pool = within(await screen.findByRole("table"));
+  expect(pool.getByText("member@example.com")).toBeTruthy();
+  expect(pool.queryByText("acct")).toBeNull();
 });
 
 test("an empty pool states that no connector is connected yet", async () => {
