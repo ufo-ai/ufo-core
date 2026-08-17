@@ -106,6 +106,15 @@ carrier's other commands — signalling that would stop the very call doing the 
 EXEC_STOP_TIMEOUT_SECONDS = 15
 SILENT_PROBE_CMD = "true"
 SILENT_PROBE_SECONDS = 10
+SILENT_MARK_SECONDS = 60
+"""How long one container's silence stays evidence about it. Inside the span a marked box is asked
+one bounded word before a command commits its whole deadline, and a box that cannot answer that word
+fails the command at once. Past the span the mark is gone and the next command runs as any other
+would, because silence is also what a merely saturated box does — load 16 on four cores with memory
+exhausted answers nothing for a while and then answers everything — and a mark with no end condemns
+that box for the whole life of the process. A minute is longer than the stop and the probe that set
+the mark, and shorter than a turn, so a box that was busy comes back inside the turn that met it and
+one that is really gone is re-marked by the next unanswered call rather than remembered forever."""
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
 E2B_NETWORK: SandboxNetworkOpts = {"allow_public_traffic": False}
@@ -297,11 +306,15 @@ class E2BCarrier:
     """How long to wait before re-issuing a resume the provider's control plane left unanswered."""
     resume_total_timeout_seconds: float = RESUME_TOTAL_TIMEOUT_SECONDS
     """The ceiling on a whole retried resume, attempts and backoff together."""
+    silent_mark_seconds: float = SILENT_MARK_SECONDS
+    """How long a container's silence keeps refusing commands before the box is tried again."""
     _live: dict[UUID, _Lease] = field(default_factory=dict)
-    _silent: set[str] = field(default_factory=set)
-    """Containers whose command channel did not answer the stop after their own deadline fired. A
-    box that reaches this has already failed to answer twice, and every later command on it would
-    otherwise pay its whole deadline before saying so."""
+    _silent: dict[str, float] = field(default_factory=dict)
+    """Containers whose command channel did not answer the stop after their own deadline fired, each
+    against the clock reading its silence stops being evidence at. A box that reaches this has
+    already failed to answer twice, and every later command on it would otherwise pay its whole
+    deadline before saying so — but only until the mark runs out, since the same silence is what a
+    saturated box gives while it thrashes."""
     _launched: dict[tuple[str, UUID | None], set[int]] = field(default_factory=dict)
     """Per container and turn, the process groups this carrier launched and has not seen end — what
     a member's cancel stops through `stop_commands`. The container is in the key because a pid means
@@ -615,9 +628,10 @@ class E2BCarrier:
         A deadline that fires before the launch answers has no pid to name and nothing yet running
         behind it — and is the plainest reading of a gone channel there is, since detaching returns
         as soon as the command has a pid and cannot legitimately outlast a caller's whole budget.
-        That box is remembered here, because a container silent enough to swallow its own launch
-        never reaches the stop that would otherwise have noticed. The stop is best-effort and
-        swallowed, since what the caller must still be told is the deadline its own command hit.
+        That box is remembered here for a bounded span, because a container silent enough to swallow
+        its own launch never reaches the stop that would otherwise have noticed. The stop is
+        best-effort and swallowed, since what the caller must still be told is the deadline its own
+        command hit.
 
         A stream severed while the command runs arrives as neither of those SDK exceptions, and as
         no class this can name. The command itself keeps running inside the sandbox and completes,
@@ -652,7 +666,7 @@ class E2BCarrier:
         except TimeoutException as error:
             emit_metric("sandbox_exec_timeout_total", carrier=CARRIER_NAME)
             if running is None:
-                self._silent.add(handle.container_id)
+                self._mark_silent(handle.container_id)
             else:
                 await self._stop_group(sandbox, handle.container_id, running.pid)
             return ExecResult(
@@ -722,15 +736,22 @@ class E2BCarrier:
         A stop the box never answers is also the reading that outlives this call. The command is
         one word against a container that has just failed to finish another, so a deadline here is
         the channel being gone rather than the work being slow — the two the vitals probe was
-        written to separate, and the counter alone separates nowhere. That container is remembered,
-        so the next command asks whether it is there before agreeing to wait for it."""
+        written to separate, and the counter alone separates nowhere. That container is remembered
+        for a bounded span, so the next command inside it asks whether the box is there before
+        agreeing to wait for it."""
         try:
             await sandbox.commands.run(f"kill -9 -{pid}", timeout=EXEC_STOP_TIMEOUT_SECONDS)
         except TimeoutException:
-            self._silent.add(container_id)
+            self._mark_silent(container_id)
             emit_metric("sandbox_exec_stop_failed_total", carrier=CARRIER_NAME)
         except Exception:
             emit_metric("sandbox_exec_stop_failed_total", carrier=CARRIER_NAME)
+
+    def _mark_silent(self, container_id: str) -> None:
+        """Remember a container that did not answer, and until when. The span is measured from this
+        silence and never from the probes that follow it, so a box no probe can reach still gets a
+        real command a bounded time after the fault instead of one refusal renewing the next."""
+        self._silent[container_id] = self.clock() + self.silent_mark_seconds
 
     async def _still_there(self, sandbox: E2BSandbox, container_id: str) -> None:
         """One bounded word to a container that stopped answering, before another command commits
@@ -740,8 +761,20 @@ class E2BCarrier:
         against the ten minutes a caller would otherwise wait to learn the same thing.
 
         Answering clears the mark: a channel that came back is a working box, and nothing here
-        should outlive the fault it recorded."""
-        if container_id not in self._silent:
+        should outlive the fault it recorded.
+
+        Neither does the mark itself. A box saturated enough to miss a deadline can be too busy to
+        answer even this word, and refusing on that reading alone made one loaded minute condemn a
+        live container for the rest of the process — the member's turn ended on `stopped answering
+        commands` while the box was thrashing, not gone. So the mark expires: past its span the
+        container is tried with the command it was given, and a box that really is gone earns the
+        mark again through the deadline that command hits."""
+        marked_until = self._silent.get(container_id)
+        if marked_until is None:
+            return
+        if self.clock() >= marked_until:
+            del self._silent[container_id]
+            log("sandbox.e2b.silent_mark_expired", sandbox_id=container_id)
             return
         try:
             await sandbox.commands.run(SILENT_PROBE_CMD, timeout=SILENT_PROBE_SECONDS)
@@ -750,7 +783,7 @@ class E2BCarrier:
             raise SandboxUnreachable(
                 f"sandbox {container_id} stopped answering commands"
             ) from error
-        self._silent.discard(container_id)
+        self._silent.pop(container_id, None)
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """Upload through the sandbox's filesystem API, which creates the parent directories and

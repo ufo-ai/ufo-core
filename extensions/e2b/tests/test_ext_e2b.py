@@ -61,6 +61,7 @@ from ufo_ext_e2b import (
     RESUME_TRANSPORT_RETRIES,
     SANDBOX_LEASE_SECONDS,
     SENTINEL_MODEL_KEY,
+    SILENT_MARK_SECONDS,
     SILENT_PROBE_CMD,
     SYSTEM_CA_BUNDLE,
     WORKSPACE_ENSURE_TIMEOUT_SECONDS,
@@ -1537,6 +1538,59 @@ async def test_a_launch_the_box_cannot_answer_is_the_box_going_silent() -> None:
     with pytest.raises(SandboxUnreachable):
         await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 60)
 
+    assert [cmd for cmd, _, _ in commands.runs[before:]] == [SILENT_PROBE_CMD]
+
+
+async def test_a_box_the_probe_cannot_reach_is_tried_again_once_the_mark_expires(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """What the 2026-08-17 turns met: the container was alive and saturated — load 16.55 on four
+    cores, 3930 MB of 4096 used, no swap — so it answered neither the stop nor the one word this
+    probe asks, and every later command of the turn was refused for a box that was thrashing rather
+    than gone. The mark holds one fault's evidence and ends with it: past the span the command the
+    caller asked for is what tries the box. A refused probe does not renew the span either, or each
+    refusal would carry the next one and the mark would outlive the process."""
+    clock = _Clock()
+    sdk, carrier = _leased(clock)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.raises = TimeoutException("timed out")
+    commands.stops_fail = True
+    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
+    commands.raises = None
+    commands.timeout_on = (SILENT_PROBE_CMD,)
+    clock.advance(SILENT_MARK_SECONDS - 1)
+    with pytest.raises(SandboxUnreachable):
+        await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
+    clock.advance(2)
+    before = len(commands.runs)
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        recovered = await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
+
+    assert recovered.exit_code == 0
+    assert [cmd for cmd, _, _ in commands.runs[before:]] == ["setsid bash -lc 'cat /proc/loadavg'"]
+    assert _events(caplog, "sandbox.e2b.silent_mark_expired") == [{"sandbox_id": "sbx-1"}]
+
+
+async def test_a_box_that_is_really_gone_earns_the_mark_again() -> None:
+    """Expiry costs the fast fail nothing worth keeping. One command past the span pays its own
+    deadline, the silence that deadline meets marks the container again, and the commands behind it
+    are refused at once instead of each waiting ten minutes to learn what this one established."""
+    clock = _Clock()
+    sdk, carrier = _leased(clock)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.launch_never_answers = True
+    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
+    clock.advance(SILENT_MARK_SECONDS + 1)
+
+    tried = await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
+
+    assert tried.exit_code == EXEC_TIMEOUT_CODE
+    before = len(commands.runs)
+    with pytest.raises(SandboxUnreachable):
+        await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
     assert [cmd for cmd, _, _ in commands.runs[before:]] == [SILENT_PROBE_CMD]
 
 
