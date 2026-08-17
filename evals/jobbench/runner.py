@@ -16,6 +16,7 @@ from evals.harness.capability import (
     CapabilityOutput,
     CapabilityVerdict,
     WorkspaceFile,
+    shared_file_names,
 )
 from evals.harness.harness import Json, JsonObject
 from evals.harness.registry import EvalTask, capability_task
@@ -120,9 +121,7 @@ class SubmissionCapture:
     rubric: tuple[RubricItem, ...]
 
     async def __call__(self, output: CapabilityOutput) -> CapabilityVerdict:
-        share_calls = tuple(
-            call for call in output.calls if call.name == "share_file" and call.succeeded
-        )
+        submitted = tuple(name for call in output.calls for name in shared_file_names(call))
         evidence: JsonObject = {
             "submissionCount": len(output.artifacts),
             "gradingRubric": [
@@ -138,7 +137,7 @@ class SubmissionCapture:
             return CapabilityVerdict(
                 False, "no artifact was submitted through share_file", evidence
             )
-        if len(share_calls) != len(output.artifacts):
+        if len(submitted) != len(output.artifacts):
             return CapabilityVerdict(
                 False, "successful share_file calls do not match collected artifacts", evidence
             )

@@ -1554,8 +1554,8 @@ async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
         second_ctx, _ = await _workspace_context(second, tmp_path / "two")
         await first_ctx.sandbox.bash("printf 'older' > alpha.txt")
         await second_ctx.sandbox.bash("printf 'newer' > beta.txt")
-        await _text(tools, "share_file", first_ctx, file_path="alpha.txt")
-        await _text(tools, "share_file", second_ctx, file_path="beta.txt")
+        await _text(tools, "share_file", first_ctx, files=[{"file_path": "alpha.txt"}])
+        await _text(tools, "share_file", second_ctx, files=[{"file_path": "beta.txt"}])
         async with workspace_tx() as connection:
             for filename, day in (("alpha.txt", 3), ("beta.txt", 4)):
                 await connection.execute(
@@ -1613,8 +1613,13 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
 
         name = f"{turn.conversation_id.hex[:8]}-report-txt"
         shared = json.loads(
-            await _text(tools, "share_file", ctx, file_path="report.txt", subject="Q3 numbers")
-        )
+            await _text(
+                tools,
+                "share_file",
+                ctx,
+                files=[{"file_path": "report.txt", "subject": "Q3 numbers"}],
+            )
+        )[0]
         assert shared["artifact"] == name
 
         listing = json.loads(
@@ -1711,7 +1716,9 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         assert claims.filename == "report.txt"
 
         await ctx.sandbox.bash("printf 'revised numbers' > report.txt")
-        reshared = json.loads(await _text(tools, "share_file", ctx, file_path="report.txt"))
+        reshared = json.loads(
+            await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        )[0]
         assert reshared["artifact"] == name
         listing = json.loads(
             await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
@@ -1738,9 +1745,9 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
         name = f"{turn.conversation_id.hex[:8]}-report-txt"
         ctx, _ = await _workspace_context(turn, tmp_path)
         await ctx.sandbox.bash("printf 'v1' > report.txt")
-        await _text(tools, "share_file", ctx, file_path="report.txt")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
         await ctx.sandbox.bash("printf 'v2' > report.txt")
-        await _text(tools, "share_file", ctx, file_path="report.txt")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
         async with workspace_tx() as connection:
             blob_keys = (
                 (

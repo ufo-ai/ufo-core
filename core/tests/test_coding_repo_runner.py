@@ -125,8 +125,8 @@ def output(
     calls.extend(
         ToolInvocation(
             name="share_file",
-            input={"path": f"/workspace/{name}"},
-            result=json.dumps({"name": name}),
+            input={"files": [{"file_path": f"/workspace/{name}"}]},
+            result=json.dumps([{"name": name}]),
             has_result=True,
         )
         for name in shared_names

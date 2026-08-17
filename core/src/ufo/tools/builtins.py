@@ -9,11 +9,12 @@ container and only a bounded JSON result crosses back — the host never pulls a
 loop on it. `read` records every path it returns so `edit`/`write` can refuse to touch a file the
 turn has not read — the guard that keeps a blind string-replace from clobbering content the model
 never saw. `glob` and `grep` run the in-sandbox `sbxfs` matcher and ripgrep, so file discovery and
-content search happen in the container and a bounded result crosses back. `share_file` lands a
-produced workspace file in the blob store under `artifacts/<uuid>/` — on S3 the sandbox uploads it
-itself to a presigned PUT bound to the size and sha256 a preflight measured — and returns a
-TTL-token URL core's artifact route serves: the only path that hands a file back outside the
-sandbox, with no read cap and no whole-file buffer.
+content search happen in the container and a bounded result crosses back. `share_file` lands
+produced workspace files in the blob store under `artifacts/<uuid>/` — a directory as a `.tar.gz`
+of itself, and on S3 the sandbox uploads each itself to a presigned PUT bound to the size and
+sha256 a preflight measured — and returns a TTL-token URL per file that core's artifact route
+serves: the only path that hands a file back outside the sandbox, with no read cap and no
+whole-file buffer.
 `spawn` delegates a typed subtask to a child turn through `ctx.spawn` — a subagent profile or a
 workspace agent, one verb over both. `ask_user` is
 chat-native: it
@@ -34,7 +35,7 @@ import mimetypes
 import shlex
 from base64 import b64encode
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -115,6 +116,14 @@ test -f "$pdf"
 pdftoppm -png -r {dpi} -f 1 -l 1 -singlefile "$pdf" "$stem"
 test -f "$stem.png"
 """
+
+SHARE_DIR_PROBE_CMD = "[ -d {path} ] && [ ! -L {path} ]"
+SHARE_PACK_TIMEOUT_SECONDS = 900
+SHARE_PACK_CMD = (
+    "root={path}\n"
+    'name=$(basename "$root")\n'
+    'tar -czf {archive} -C "$(dirname "$root")" {exclude} "$name"'
+)
 
 SHARE_PREFLIGHT_CMD = (
     "p={path}\n"
@@ -263,8 +272,11 @@ class GrepInput(BaseModel):
     )
 
 
-class ShareFileInput(BaseModel):
-    file_path: str = Field(description="Absolute path to the file to share.")
+class SharedFileSpec(BaseModel):
+    file_path: str = Field(
+        description="Absolute path to the file to share. A directory path is packed and shared "
+        "as a .tar.gz archive of that directory — no need to tar it yourself."
+    )
     name: str | None = Field(
         default=None,
         description="Logical asset name, e.g. 'quarterly_report.xlsx'. Use the SAME name when "
@@ -274,6 +286,12 @@ class ShareFileInput(BaseModel):
     )
     subject: str | None = Field(
         default=None, description="Optional caption shown when a chat surface posts the file."
+    )
+
+
+class ShareFileInput(BaseModel):
+    files: list[SharedFileSpec] = Field(
+        min_length=1, description="The files to share, delivered in this order."
     )
     user_description: str = Field(
         description="What you are sending them, in plain language for the activity timeline."
@@ -699,30 +717,82 @@ async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> Arti
     )
 
 
-async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
-    """Land a produced workspace file in the artifact store under `artifacts/<uuid>/<name>`, record
-    it as a shared_artifact of this turn, and mint a TTL download token core's artifact route
-    serves — the only path a produced file leaves the sandbox. A preflight in the container confines
-    the path through the containment guard and streams the file off the fd that descent pinned to
-    derive its size and sha256 without loading it whole, so a link the agent planted at the name is
-    refused rather than copied out, and the upload is then bound to those two measurements, so
-    nothing crosses on the sandbox's word and no whole-file buffer ever forms in this process. The
-    shared_artifact record is what an async surface (Slack) reads to upload the file into the turn's
-    posted reply; `subject` is an optional caption — absent, the file renders under its plain
-    name."""
-    if not ctx.artifact_token_secret:
-        raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
-    scoped = workspace_path(args.file_path)
+@dataclass(frozen=True)
+class _StagedShare:
+    """One file of a share, already stored: the measurements the upload was bound to, the blob key
+    it landed under, and the preview rendered beside it — everything the row insert and the result
+    entry need."""
+
+    safe_name: str
+    key: str
+    size_bytes: int
+    digest: str
+    is_text: bool
+    subject: str | None
+    preview: ArtifactPreview | None
+
+
+async def _packed_directory(ctx: ToolContext, scoped: str) -> str | None:
+    """A directory at the share path becomes a `.tar.gz` of itself, packed in the container into
+    the engine's own offload dir — the archive is the file the rest of the share measures, uploads,
+    and names. A regular file passes through as None, and a symlink at the path falls through to
+    the preflight's refusal. A pack that reaches the offload dir (the workspace root) leaves it
+    out: the archive is written there, so packing it would tar the archive into itself and ship
+    the engine's scratch renders beside the member's tree.
+
+    The exclusion is the member name `tar` itself stores, which the shell derives from the packed
+    directory rather than from the logical path: the local and terminal carriers serve `/workspace`
+    from a host directory named after the conversation, so a pattern spelled `workspace/...` here
+    would match nothing there and the offload dir would pack."""
+    probe = await ctx.sandbox.bash(
+        SHARE_DIR_PROBE_CMD.format(path=shlex.quote(scoped)),
+        timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
+    )
+    if probe.exit_code != 0:
+        return None
+    await ctx.sandbox.ensure_tool_output_dir()
+    packed = f"{TOOL_OUTPUT_DIR}/share-{uuid4().hex}.tar.gz"
+    root = scoped.rstrip("/")
+    exclude = ""
+    if TOOL_OUTPUT_DIR.startswith(f"{root}/"):
+        offload = TOOL_OUTPUT_DIR.removeprefix(f"{root}/")
+        exclude = f'--exclude="$name/{offload}"'
+    pack = await ctx.sandbox.bash(
+        SHARE_PACK_CMD.format(
+            path=shlex.quote(scoped), archive=shlex.quote(packed), exclude=exclude
+        ),
+        timeout_s=SHARE_PACK_TIMEOUT_SECONDS,
+    )
+    if pack.exit_code != 0:
+        raise RuntimeError(pack.stderr.strip() or f"packing {scoped} failed")
+    return packed
+
+
+async def _staged_share(ctx: ToolContext, spec: SharedFileSpec) -> _StagedShare:
+    """Stage one file into the artifact store under `artifacts/<uuid>/<name>`. A directory is
+    packed into a `.tar.gz` of itself first (`_packed_directory`) and the archive is what shares.
+    A preflight in the container confines the path through the containment guard and streams the
+    file off the fd that descent pinned to derive its size and sha256 without loading it whole, so
+    a link the agent planted at the name is refused rather than copied out, and the upload is then
+    bound to those two measurements, so nothing crosses on the sandbox's word and no whole-file
+    buffer ever forms in this process."""
+    scoped = workspace_path(spec.file_path)
+    normalized = spec.file_path.replace("\\", "/")
+    packed = await _packed_directory(ctx, scoped)
+    source = scoped if packed is None else packed
+    default_name = normalized if packed is None else f"{PurePosixPath(normalized).name}.tar.gz"
+    source_suffix = PurePosixPath(normalized).suffix if packed is None else ".tar.gz"
     preflight = await ctx.sandbox.bash(
-        SHARE_PREFLIGHT_CMD.format(path=shlex.quote(scoped)),
+        SHARE_PREFLIGHT_CMD.format(path=shlex.quote(source)),
         timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
     )
     if preflight.exit_code != 0:
-        raise RuntimeError(preflight.stderr.strip() or "artifact preflight failed")
+        raise RuntimeError(
+            preflight.stderr.strip() or f"artifact preflight failed for {spec.file_path}"
+        )
     stat = json.loads(preflight.stdout)
-    basename = PurePosixPath((args.name or args.file_path).replace("\\", "/")).name
+    basename = PurePosixPath((spec.name or default_name).replace("\\", "/")).name
     safe_name = basename if basename not in ("", ".", "..") else ARTIFACT_FALLBACK_NAME
-    source_suffix = PurePosixPath(args.file_path.replace("\\", "/")).suffix
     if (
         source_suffix
         and mimetypes.guess_type(safe_name)[0] is None
@@ -730,28 +800,52 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     ):
         safe_name += source_suffix
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
-    await _store_artifact(ctx, scoped, key, int(stat["size"]), str(stat["digest"]))
-    media_type = artifact_media_type(safe_name)
-    preview = await _shared_preview(ctx, scoped, safe_name)
+    await _store_artifact(ctx, source, key, int(stat["size"]), str(stat["digest"]))
+    preview = await _shared_preview(ctx, source, safe_name)
+    return _StagedShare(
+        safe_name=safe_name,
+        key=key,
+        size_bytes=int(stat["size"]),
+        digest=str(stat["digest"]),
+        is_text=bool(stat["is_text"]),
+        subject=spec.subject,
+        preview=preview,
+    )
+
+
+async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
+    """Land produced workspace files in the artifact store, record each as a shared_artifact of
+    this turn, and mint a TTL download token per file that core's artifact route serves — the only
+    path a produced file leaves the sandbox. Every file stages (`_staged_share`) before any row
+    lands, so a refused path shares nothing, and the rows commit in one transaction with
+    `created_at` stamped a microsecond apart in list order — share order is what every surface
+    orders on, so the files arrive in the order the call named them. The shared_artifact records
+    are what an async surface (Slack) reads to upload the files into the turn's posted reply; a
+    file's `subject` is an optional caption — absent, the file renders under its plain name."""
+    if not ctx.artifact_token_secret:
+        raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
+    staged = [await _staged_share(ctx, spec) for spec in args.files]
     shared_at = datetime.now(UTC)
     async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.shared_artifact).values(
-                id=uuid4(),
-                turn_id=ctx.turn.id,
-                blob_key=key,
-                workspace_id=ctx.turn.workspace_id,
-                filename=safe_name,
-                subject=args.subject,
-                media_type=media_type,
-                size_bytes=stat["size"],
-                preview_blob_key=None if preview is None else preview.blob_key,
-                preview_media_type=None if preview is None else preview.media_type,
-                preview_size_bytes=None if preview is None else preview.size_bytes,
-                created_at=shared_at,
-                updated_at=shared_at,
+        for index, share in enumerate(staged):
+            stamp = shared_at + timedelta(microseconds=index)
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    id=uuid4(),
+                    turn_id=ctx.turn.id,
+                    blob_key=share.key,
+                    workspace_id=ctx.turn.workspace_id,
+                    filename=share.safe_name,
+                    subject=share.subject,
+                    media_type=artifact_media_type(share.safe_name),
+                    size_bytes=share.size_bytes,
+                    preview_blob_key=None if share.preview is None else share.preview.blob_key,
+                    preview_media_type=None if share.preview is None else share.preview.media_type,
+                    preview_size_bytes=None if share.preview is None else share.preview.size_bytes,
+                    created_at=stamp,
+                    updated_at=stamp,
+                )
             )
-        )
         identities = (
             await connection.execute(
                 sa.select(tables.turn.c.conversation_id, tables.shared_artifact.c.filename)
@@ -764,24 +858,30 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
                 .distinct()
             )
         ).all()
-    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
-    url = mint_artifact_url(
-        ctx.artifact_token_secret, key, expires_at, workspace_id=ctx.turn.workspace_id
+    object_names = artifact_object_names(
+        [(row.conversation_id, row.filename) for row in identities]
     )
+    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
     return ToolResult(
         content=(
             TextContent(
                 text=json.dumps(
-                    {
-                        "url": url,
-                        "name": safe_name,
-                        "artifact": artifact_object_names(
-                            [(row.conversation_id, row.filename) for row in identities]
-                        )[(ctx.turn.conversation_id, safe_name)],
-                        "size_bytes": int(stat["size"]),
-                        "digest": str(stat["digest"]),
-                        "is_text": bool(stat["is_text"]),
-                    }
+                    [
+                        {
+                            "url": mint_artifact_url(
+                                ctx.artifact_token_secret,
+                                share.key,
+                                expires_at,
+                                workspace_id=ctx.turn.workspace_id,
+                            ),
+                            "name": share.safe_name,
+                            "artifact": object_names[(ctx.turn.conversation_id, share.safe_name)],
+                            "size_bytes": share.size_bytes,
+                            "digest": share.digest,
+                            "is_text": share.is_text,
+                        }
+                        for share in staged
+                    ]
                 )
             ),
         )
@@ -1052,16 +1152,18 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="share_file",
         description=(
-            "Send a file to the user as a downloadable link. The ONLY way to make a produced file "
-            "visible outside the sandbox — the user CANNOT see a workspace file until this is "
-            "called. The file must be under the /workspace directory. Any file type works "
-            "(reports, code, csv, json, images, PDFs, archives) up to 5 GiB; it is streamed out, "
-            "never read whole into memory. `name` sets the download name — include the extension "
-            "(e.g. 'report.xlsx') so the recipient gets an openable file; any directory "
-            "components in it are stripped. `subject` is an optional caption shown when a chat "
-            "surface posts the file. Supports version history: use the same `name` parameter "
-            "for updated versions. Files shared in other sessions can be fetched into the "
-            "workspace as `artifact` objects with object_get."
+            "Send files to the user as downloadable links, delivered in list order. The ONLY way "
+            "to make a produced file visible outside the sandbox — the user CANNOT see a "
+            "workspace file until this is called. Every file must be under the /workspace "
+            "directory. Any file type works (reports, code, csv, json, images, PDFs, archives) "
+            "up to 5 GiB each; each is streamed out, never read whole into memory. A directory "
+            "path is packed automatically and delivered as a .tar.gz archive of that directory — "
+            "pass the directory itself rather than tarring it first. Per file, "
+            "`name` sets the download name — include the extension (e.g. 'report.xlsx') so the "
+            "recipient gets an openable file; any directory components in it are stripped — and "
+            "`subject` is an optional caption shown when a chat surface posts the file. Supports "
+            "version history: use the same `name` for updated versions. Files shared in other "
+            "sessions can be fetched into the workspace as `artifact` objects with object_get."
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,

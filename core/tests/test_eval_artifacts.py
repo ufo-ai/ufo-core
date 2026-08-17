@@ -40,8 +40,8 @@ def _output(name: str, content: bytes) -> CapabilityOutput:
         (
             ToolInvocation(
                 "share_file",
-                {"file_path": f"/workspace/{name}"},
-                f'{{"name":"{name}"}}',
+                {"files": [{"file_path": f"/workspace/{name}"}]},
+                f'[{{"name":"{name}"}}]',
                 has_result=True,
             ),
         ),
@@ -260,8 +260,8 @@ def _delivery(files: dict[str, bytes]) -> CapabilityOutput:
         tuple(
             ToolInvocation(
                 "share_file",
-                {"file_path": f"/workspace/{name}"},
-                f'{{"name":"{name}"}}',
+                {"files": [{"file_path": f"/workspace/{name}"}]},
+                f'[{{"name":"{name}"}}]',
                 has_result=True,
             )
             for name in files

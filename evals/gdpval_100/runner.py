@@ -11,6 +11,7 @@ from evals.harness.capability import (
     CapabilityReference,
     CapabilityVerdict,
     DescribedGrader,
+    shared_file_names,
 )
 from evals.harness.harness import JsonObject
 from evals.harness.registry import EvalTask, capability_task
@@ -132,9 +133,7 @@ def _envelope(reference_paths: tuple[str, ...]) -> str:
 
 
 async def _submission_check(output: CapabilityOutput) -> CapabilityVerdict:
-    share_calls = tuple(
-        call for call in output.calls if call.name == "share_file" and call.succeeded
-    )
+    submitted = tuple(name for call in output.calls for name in shared_file_names(call))
     references = output.artifact_references
     evidence: JsonObject = {
         "submissionCount": len(references),
@@ -142,7 +141,7 @@ async def _submission_check(output: CapabilityOutput) -> CapabilityVerdict:
     }
     if not references:
         return CapabilityVerdict(False, "no artifact was submitted through share_file", evidence)
-    if len(share_calls) != len(references):
+    if len(submitted) != len(references):
         return CapabilityVerdict(
             False,
             "successful share_file calls do not match durable submitted artifacts",

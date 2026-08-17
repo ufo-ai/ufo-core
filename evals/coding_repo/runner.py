@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import json
 import os
 import re
 import shutil
@@ -39,6 +38,7 @@ from evals.harness.capability import (
     CapabilityVerdict,
     SharedArtifact,
     grading_statement,
+    shared_file_names,
 )
 from evals.harness.capability import Grader as HarnessGrader
 from evals.harness.harness import EvalReport, JsonObject
@@ -501,11 +501,7 @@ def _delivered(
         return None, f"artifact collection failed: {output.artifact_error}"
     shared: set[str] = set()
     for call in output.calls:
-        if call.name != "share_file" or not call.succeeded:
-            continue
-        delivered = _payload(call.result).get("name")
-        if isinstance(delivered, str):
-            shared.add(delivered)
+        shared.update(shared_file_names(call))
     candidates = tuple(
         artifact
         for artifact in output.artifacts
@@ -521,14 +517,6 @@ def _delivered(
     if not candidates:
         return None, f"did not share a {suffix} file"
     return candidates[-1], ""
-
-
-def _payload(result: str) -> JsonObject:
-    try:
-        decoded = json.loads(result)
-    except json.JSONDecodeError:
-        return {}
-    return decoded if isinstance(decoded, dict) else {}
 
 
 def _test_paths(targets: tuple[str, ...]) -> tuple[str, ...]:

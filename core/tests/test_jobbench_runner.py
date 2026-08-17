@@ -1,6 +1,7 @@
 """JobBench boundary tasks from a materialized snapshot: dossier staging under `references/`, the
 fixed submission envelope, and the submission-capture grader's verdicts and saved deliverables."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -53,11 +54,20 @@ RUBRIC = (RubricItem(rubric="Ties out the balance?", weight=10, criteria=("state
 
 def _output(
     artifacts: tuple[SharedArtifact, ...],
-    share_calls: int,
+    shared: int,
     artifact_error: str = "",
 ) -> CapabilityOutput:
-    calls = tuple(
-        ToolInvocation(name="share_file", input={}, has_result=True) for _ in range(share_calls)
+    calls = (
+        (
+            ToolInvocation(
+                name="share_file",
+                input={"files": [{"file_path": f"/workspace/file{i}"} for i in range(shared)]},
+                result=json.dumps([{"name": f"file{i}"} for i in range(shared)]),
+                has_result=True,
+            ),
+        )
+        if shared
+        else ()
     )
     return CapabilityOutput(
         response="done",
@@ -69,7 +79,7 @@ def _output(
 
 async def test_submission_capture_requires_artifacts(tmp_path: Path) -> None:
     grader = SubmissionCapture(SMOKE_CASE, tmp_path / "submissions", RUBRIC)
-    verdict = await grader(_output((), share_calls=0))
+    verdict = await grader(_output((), shared=0))
     assert not verdict.passed
     assert "no artifact" in verdict.reason
 
@@ -77,7 +87,7 @@ async def test_submission_capture_requires_artifacts(tmp_path: Path) -> None:
 async def test_submission_capture_surfaces_artifact_errors(tmp_path: Path) -> None:
     grader = SubmissionCapture(SMOKE_CASE, tmp_path / "submissions", RUBRIC)
     artifact = SharedArtifact("memo.md", b"memo")
-    verdict = await grader(_output((artifact,), share_calls=1, artifact_error="missing blob"))
+    verdict = await grader(_output((artifact,), shared=1, artifact_error="missing blob"))
     assert not verdict.passed
     assert "missing blob" in verdict.reason
 
@@ -85,7 +95,7 @@ async def test_submission_capture_surfaces_artifact_errors(tmp_path: Path) -> No
 async def test_submission_capture_requires_matching_share_calls(tmp_path: Path) -> None:
     grader = SubmissionCapture(SMOKE_CASE, tmp_path / "submissions", RUBRIC)
     artifact = SharedArtifact("memo.md", b"memo")
-    verdict = await grader(_output((artifact,), share_calls=2))
+    verdict = await grader(_output((artifact,), shared=2))
     assert not verdict.passed
     assert "do not match" in verdict.reason
 
@@ -96,7 +106,7 @@ async def test_submission_capture_rejects_colliding_names(tmp_path: Path) -> Non
         SharedArtifact("reports/memo.md", b"one"),
         SharedArtifact("Memo.md", b"two"),
     )
-    verdict = await grader(_output(artifacts, share_calls=2))
+    verdict = await grader(_output(artifacts, shared=2))
     assert not verdict.passed
     assert "collide" in verdict.reason
 
@@ -111,7 +121,7 @@ async def test_submission_capture_saves_deliverables(tmp_path: Path) -> None:
         SharedArtifact("memo.md", b"the memo"),
         SharedArtifact("schedule.csv", b"a,b\n1,2\n"),
     )
-    verdict = await grader(_output(artifacts, share_calls=2))
+    verdict = await grader(_output(artifacts, shared=2))
     assert verdict.passed
     assert not stale.exists()
     case_dir = submissions_root / SMOKE_CASE

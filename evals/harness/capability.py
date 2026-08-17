@@ -6,6 +6,7 @@ retain text, completion, and error state; the agent's configured tool set remain
 
 from __future__ import annotations
 
+import json
 import re
 from base64 import b64encode
 from collections.abc import Awaitable, Callable
@@ -88,6 +89,24 @@ class ToolInvocation:
     @property
     def succeeded(self) -> bool:
         return self.has_result and not self.is_error
+
+
+def shared_file_names(call: ToolInvocation) -> tuple[str, ...]:
+    """The download names one successful `share_file` call delivered, in share order, read from
+    its result payload — one entry per file the call's list named."""
+    if call.name != "share_file" or not call.succeeded:
+        return ()
+    try:
+        payload = json.loads(call.result)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(
+        entry["name"]
+        for entry in payload
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    )
 
 
 @dataclass(frozen=True)

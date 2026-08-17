@@ -39,6 +39,7 @@ from evals.harness.capability import (
     DescribedGrader,
     Grader,
     WorkspaceFile,
+    shared_file_names,
     written_markdown,
 )
 from evals.harness.harness import JsonObject
@@ -157,9 +158,7 @@ def written_report_scorer(
             failures.append(f"summary has {summary.bullets} bullet lines")
         if output.artifact_error:
             failures.append(f"artifact inspection failed: {output.artifact_error}")
-        shared = tuple(
-            call for call in output.calls if call.name == "share_file" and call.succeeded
-        )
+        shared = tuple(name for call in output.calls for name in shared_file_names(call))
         delivered = max(len(shared), len(output.artifacts))
         if delivered:
             failures.append(f"shared {delivered} files for an ask that named none")

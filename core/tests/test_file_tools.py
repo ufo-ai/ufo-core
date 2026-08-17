@@ -11,10 +11,12 @@ import hashlib
 import json
 import re
 import struct
+import tarfile
 import zlib
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import uuid4
@@ -42,6 +44,7 @@ from ufo.loop.engine import (
 from ufo.loop.prompts.render import rendered_prompt
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import ModelEvent, ModelRequest, ToolResultBlock, ToolUseBlock
+from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ProxyEndpoint,
     SandboxHandle,
@@ -284,6 +287,11 @@ async def _run(tool_name: str, ctx: ToolContext, **args: object):
         return await tool.handler(
             ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
         )
+
+
+async def _share(ctx: ToolContext, **spec: object) -> dict:
+    result = await _run("share_file", ctx, files=[spec])
+    return json.loads(result.content[0].text)[0]
 
 
 async def test_read_numbers_lines_and_appends_truncation_footer(
@@ -530,8 +538,7 @@ async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
     payload = b"\x00\x01\x02\x03\x04\x05\x06\x07" * (OVER_INMEMORY_BYTES // 8 + 200000)
     assert len(payload) > OVER_INMEMORY_BYTES
     await ctx.sandbox.write_file("big.bin", payload)
-    result = await _run("share_file", ctx, file_path="big.bin")
-    shared = json.loads(result.content[0].text)
+    shared = await _share(ctx, file_path="big.bin")
     assert shared["size_bytes"] == len(payload)
     assert shared["digest"] == "sha256:" + hashlib.sha256(payload).hexdigest()
     assert shared["is_text"] is False
@@ -549,8 +556,7 @@ async def test_share_file_text_preflight_and_download_url(
     await _seed_turn_rows(ctx.turn)
     body = b"the produced report\n"
     await ctx.sandbox.write_file("report.txt", body)
-    result = await _run("share_file", ctx, file_path="report.txt")
-    shared = json.loads(result.content[0].text)
+    shared = await _share(ctx, file_path="report.txt")
     assert shared["is_text"] is True
     assert shared["digest"] == "sha256:" + hashlib.sha256(body).hexdigest()
     claims = _download_claims(shared["url"])
@@ -558,6 +564,133 @@ async def test_share_file_text_preflight_and_download_url(
     assert parts[0] == "artifacts" and len(parts) == 3 and parts[-1] == "report.txt"
     with ws(ctx.turn.workspace_id):
         assert await ctx.blob.get(claims.blob_key) == body
+
+
+async def test_share_file_packs_a_directory_into_a_tarball(
+    file_ctx: tuple[ToolContext, Path],
+    db: None,
+) -> None:
+    """A directory path shares as a `.tar.gz` of itself: the archive is packed in the container,
+    named after the directory (a caller name without an extension gains `.tar.gz`), and unpacks
+    back to the directory's own tree."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    await ctx.sandbox.bash(
+        "mkdir -p /workspace/reports/nested"
+        " && printf 'summary' > /workspace/reports/summary.txt"
+        " && printf 'detail' > /workspace/reports/nested/detail.txt"
+    )
+    shared = await _share(ctx, file_path="reports")
+    assert shared["name"] == "reports.tar.gz"
+    assert shared["is_text"] is False
+    claims = _download_claims(shared["url"])
+    with ws(ctx.turn.workspace_id):
+        archive = await ctx.blob.get(claims.blob_key)
+    with tarfile.open(fileobj=BytesIO(archive), mode="r:gz") as tar:
+        members = {member.name: member for member in tar.getmembers()}
+        summary = tar.extractfile(members["reports/summary.txt"])
+        assert summary is not None and summary.read() == b"summary"
+        detail = tar.extractfile(members["reports/nested/detail.txt"])
+        assert detail is not None and detail.read() == b"detail"
+
+    named = await _share(ctx, file_path="reports", name="q3_bundle")
+    assert named["name"] == "q3_bundle.tar.gz"
+
+    root = await _share(ctx, file_path="/workspace")
+    assert root["name"] == "workspace.tar.gz"
+    with ws(ctx.turn.workspace_id):
+        whole = await ctx.blob.get(_download_claims(root["url"]).blob_key)
+    with tarfile.open(fileobj=BytesIO(whole), mode="r:gz") as tar:
+        names = tar.getnames()
+        assert "workspace/reports/summary.txt" in names
+        assert not any(".tool-output" in name for name in names)
+
+
+async def test_share_file_packs_a_workspace_a_carrier_serves_under_another_name(
+    file_ctx: tuple[ToolContext, Path],
+    tmp_path: Path,
+    db: None,
+) -> None:
+    """The local and terminal carriers serve `/workspace` from a host directory named after the
+    conversation, so `tar` stores every member under that name instead of `workspace` — the whole
+    workspace still shares without the engine's offload dir in the archive."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    conversation = uuid4()
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=conversation,
+            image_ref="ufo-sandbox:latest",
+            workspace_host_path=str(tmp_path / str(conversation)),
+            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+            run_token="pack-run",
+        )
+    )
+    local = replace(ctx, sandbox=SandboxSession(carrier=carrier, handle=handle))
+    await local.sandbox.bash(
+        "mkdir -p /workspace/reports && printf 'summary' > /workspace/reports/summary.txt"
+    )
+    await local.sandbox.ensure_tool_output_dir()
+    await local.sandbox.write_file(".tool-output/scratch.txt", b"engine scratch")
+
+    root = await _share(local, file_path="/workspace")
+
+    assert root["name"] == "workspace.tar.gz"
+    with ws(ctx.turn.workspace_id):
+        whole = await ctx.blob.get(_download_claims(root["url"]).blob_key)
+    with tarfile.open(fileobj=BytesIO(whole), mode="r:gz") as tar:
+        names = tar.getnames()
+        assert f"{conversation}/reports/summary.txt" in names
+        assert not any(".tool-output" in name for name in names)
+
+
+async def test_share_file_delivers_a_list_in_share_order(
+    file_ctx: tuple[ToolContext, Path],
+    db: None,
+) -> None:
+    """One call, several files: each lands its own row, URL, and per-file name/subject, and the
+    rows' `created_at` stamps carry the list order — `(created_at, blob_key)` is what every surface
+    sorts shared files by, so the order must never fall to the random blob key."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    bodies = {name: f"{name} body\n".encode() for name in ("one.txt", "two.txt", "three.txt")}
+    for name, body in bodies.items():
+        await ctx.sandbox.write_file(name, body)
+    result = await _run(
+        "share_file",
+        ctx,
+        files=[
+            {"file_path": "one.txt", "subject": "first"},
+            {"file_path": "two.txt"},
+            {"file_path": "three.txt", "name": "renamed_three"},
+        ],
+    )
+    shared = json.loads(result.content[0].text)
+    assert [entry["name"] for entry in shared] == ["one.txt", "two.txt", "renamed_three.txt"]
+    for entry, body in zip(shared, bodies.values(), strict=True):
+        assert entry["digest"] == "sha256:" + hashlib.sha256(body).hexdigest()
+        claims = _download_claims(entry["url"])
+        with ws(ctx.turn.workspace_id):
+            assert await ctx.blob.get(claims.blob_key) == body
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.shared_artifact.c.filename,
+                    tables.shared_artifact.c.subject,
+                    tables.shared_artifact.c.created_at,
+                )
+                .where(tables.shared_artifact.c.turn_id == ctx.turn.id)
+                .order_by(tables.shared_artifact.c.created_at, tables.shared_artifact.c.blob_key)
+            )
+        ).all()
+    assert [(row.filename, row.subject) for row in rows] == [
+        ("one.txt", "first"),
+        ("two.txt", None),
+        ("renamed_three.txt", None),
+    ]
+    assert len({row.created_at for row in rows}) == 3
 
 
 async def _shared_row(blob_key: str) -> sa.Row:
@@ -635,8 +768,7 @@ async def test_share_file_renders_a_document_first_page_beside_its_bytes(
     await _seed_turn_rows(ctx.turn)
     built = await ctx.sandbox.bash(build, timeout_s=180)
     assert built.exit_code == 0, built.stderr
-    result = await _run("share_file", ctx, file_path=filename)
-    claims = _download_claims(json.loads(result.content[0].text)["url"])
+    claims = _download_claims((await _share(ctx, file_path=filename))["url"])
     row = await _shared_row(claims.blob_key)
     assert row.preview_blob_key is not None and row.preview_blob_key != claims.blob_key
     assert row.preview_media_type == "image/png"
@@ -655,8 +787,7 @@ async def test_share_file_leaves_a_plain_file_without_a_rendered_page(
     ctx, _ = file_ctx
     await _seed_turn_rows(ctx.turn)
     await ctx.sandbox.write_file("report.txt", b"the produced report\n")
-    result = await _run("share_file", ctx, file_path="report.txt")
-    claims = _download_claims(json.loads(result.content[0].text)["url"])
+    claims = _download_claims((await _share(ctx, file_path="report.txt"))["url"])
     row = await _shared_row(claims.blob_key)
     assert row.preview_blob_key is None
     assert row.preview_media_type is None
@@ -672,8 +803,7 @@ async def test_share_file_shares_a_document_whose_render_fails(
     ctx, _ = file_ctx
     await _seed_turn_rows(ctx.turn)
     await ctx.sandbox.write_file("broken.pdf", b"not a pdf at all\n")
-    result = await _run("share_file", ctx, file_path="broken.pdf")
-    claims = _download_claims(json.loads(result.content[0].text)["url"])
+    claims = _download_claims((await _share(ctx, file_path="broken.pdf"))["url"])
     with ws(ctx.turn.workspace_id):
         assert await ctx.blob.get(claims.blob_key) == b"not a pdf at all\n"
     assert (await _shared_row(claims.blob_key)).preview_blob_key is None
@@ -700,13 +830,10 @@ async def test_share_file_uploads_from_inside_the_sandbox_on_the_s3_backend(
     payload = bytes(range(256)) * 8192
     await ctx.sandbox.write_file("figures.bin", payload)
 
-    result = await _run(
-        "share_file",
-        replace(ctx, blob=WorkspaceBlobStore(backend=sandbox_store)),
-        file_path="figures.bin",
+    shared = await _share(
+        replace(ctx, blob=WorkspaceBlobStore(backend=sandbox_store)), file_path="figures.bin"
     )
 
-    shared = json.loads(result.content[0].text)
     assert shared["size_bytes"] == len(payload)
     claims = _download_claims(shared["url"])
     with ws(ctx.turn.workspace_id):
@@ -728,10 +855,8 @@ async def test_share_file_refuses_a_file_over_the_artifact_cap(
     await ctx.sandbox.write_file("oversize.bin", b"nine byte")
 
     with pytest.raises(ValueError, match="capped at 8 bytes"):
-        await _run(
-            "share_file",
-            replace(ctx, blob=WorkspaceBlobStore(backend=s3_store)),
-            file_path="oversize.bin",
+        await _share(
+            replace(ctx, blob=WorkspaceBlobStore(backend=s3_store)), file_path="oversize.bin"
         )
 
     async with workspace_tx() as connection:
@@ -752,8 +877,8 @@ async def test_share_file_confines_a_traversal_name(
     ctx, _ = file_ctx
     await _seed_turn_rows(ctx.turn)
     await ctx.sandbox.write_file("report.txt", b"data")
-    result = await _run("share_file", ctx, file_path="report.txt", name="../../conversations/x")
-    claims = _download_claims(json.loads(result.content[0].text)["url"])
+    shared = await _share(ctx, file_path="report.txt", name="../../conversations/x")
+    claims = _download_claims(shared["url"])
     parts = claims.blob_key.split("/")
     assert parts[0] == "artifacts" and ".." not in parts and parts[-1] == "x.txt"
     assert claims.filename == "x.txt"
@@ -769,14 +894,11 @@ async def test_share_file_appends_the_source_extension_to_a_display_name(
     ctx, _ = file_ctx
     await _seed_turn_rows(ctx.turn)
     await ctx.sandbox.write_file("risk.xlsx", b"PK\x03\x04fake")
-    result = await _run("share_file", ctx, file_path="risk.xlsx", name="Q1_Risk_Report")
-    claims = _download_claims(json.loads(result.content[0].text)["url"])
-    assert claims.filename == "Q1_Risk_Report.xlsx"
+    shared = await _share(ctx, file_path="risk.xlsx", name="Q1_Risk_Report")
+    assert _download_claims(shared["url"]).filename == "Q1_Risk_Report.xlsx"
 
-    named = await _run("share_file", ctx, file_path="risk.xlsx", name="already_named.xlsx")
-    assert _download_claims(json.loads(named.content[0].text)["url"]).filename == (
-        "already_named.xlsx"
-    )
+    named = await _share(ctx, file_path="risk.xlsx", name="already_named.xlsx")
+    assert _download_claims(named["url"]).filename == "already_named.xlsx"
 
 
 class _NoArgs(BaseModel):

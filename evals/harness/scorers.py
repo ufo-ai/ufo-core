@@ -6,7 +6,6 @@ Every grader FAILS on bad output."""
 
 from __future__ import annotations
 
-import json
 import re
 import shlex
 from collections.abc import Callable
@@ -32,6 +31,7 @@ from evals.harness.capability import (
     SharedArtifact,
     ToolInvocation,
     grading_statement,
+    shared_file_names,
 )
 from evals.harness.harness import JsonObject
 
@@ -340,16 +340,9 @@ def rendered_pages_scorer(min_pages: int = 1, max_pages: int | None = None) -> G
 def _delivered_artifact(output: CapabilityOutput, suffix: str) -> SharedArtifact | None:
     artifacts = {artifact.name: artifact for artifact in output.artifacts}
     for call in output.calls:
-        if call.name != "share_file" or not call.succeeded:
-            continue
-        try:
-            payload = json.loads(call.result)
-        except json.JSONDecodeError:
-            continue
-        match payload:
-            case {"name": str() as name} if name.lower().endswith(suffix.lower()):
-                if artifact := artifacts.get(name):
-                    return artifact
+        for name in shared_file_names(call):
+            if name.lower().endswith(suffix.lower()) and (artifact := artifacts.get(name)):
+                return artifact
     return None
 
 

@@ -2862,8 +2862,8 @@ async def test_shared_artifact_scorer_requires_successful_delivery_with_expected
         (
             ToolInvocation(
                 "share_file",
-                {"file_path": "/workspace/forecast.xlsx"},
-                '{"name":"forecast.xlsx"}',
+                {"files": [{"file_path": "/workspace/forecast.xlsx"}]},
+                '[{"name":"forecast.xlsx"}]',
                 has_result=True,
             ),
         ),
@@ -2874,7 +2874,7 @@ async def test_shared_artifact_scorer_requires_successful_delivery_with_expected
         (
             ToolInvocation(
                 "share_file",
-                {"file_path": "/workspace/forecast.xlsx"},
+                {"files": [{"file_path": "/workspace/forecast.xlsx"}]},
                 "export failed",
                 has_result=True,
                 is_error=True,
@@ -2892,8 +2892,8 @@ async def test_shared_artifact_scorer_requires_successful_delivery_with_expected
                 (
                     ToolInvocation(
                         "share_file",
-                        {"file_path": "/workspace/forecast.xlsx"},
-                        '{"name":"forecast.xlsx"}',
+                        {"files": [{"file_path": "/workspace/forecast.xlsx"}]},
+                        '[{"name":"forecast.xlsx"}]',
                     ),
                 ),
                 artifacts=(SharedArtifact("forecast.xlsx", b"workbook"),),
@@ -2917,8 +2917,8 @@ async def test_shared_artifact_scorer_requires_successful_delivery_with_expected
                 (
                     ToolInvocation(
                         "share_file",
-                        {"file_path": "/workspace/forecast.xlsx"},
-                        '{"name":"forecast.xlsx"}',
+                        {"files": [{"file_path": "/workspace/forecast.xlsx"}]},
+                        '[{"name":"forecast.xlsx"}]',
                         has_result=True,
                     ),
                 ),
@@ -2968,13 +2968,15 @@ async def test_target_loads_the_successfully_shared_artifact_for_grading(
             role="assistant",
             content=(
                 ToolUseBlock(
-                    id="share", name="share_file", input={"file_path": "/workspace/site.tar.gz"}
+                    id="share",
+                    name="share_file",
+                    input={"files": [{"file_path": "/workspace/site.tar.gz"}]},
                 ),
             ),
         ),
         Message(
             role="user",
-            content=(ToolResultBlock(tool_use_id="share", content='{"name":"site.tar.gz"}'),),
+            content=(ToolResultBlock(tool_use_id="share", content='[{"name":"site.tar.gz"}]'),),
         ),
         Message(role="assistant", content="Done."),
     )
@@ -3295,8 +3297,8 @@ async def test_written_report_scorer_fails_a_report_the_member_received(tmp_path
         (
             ToolInvocation(
                 "share_file",
-                {"file_path": str(report)},
-                '{"name":"report.md"}',
+                {"files": [{"file_path": str(report)}]},
+                '[{"name":"report.md"}]',
                 has_result=True,
             ),
         ),
@@ -3374,7 +3376,10 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
         has_result=True,
     )
     share = ToolInvocation(
-        "share_file", {"file_path": report_path}, '{"name":"evidence.md"}', has_result=True
+        "share_file",
+        {"files": [{"file_path": report_path}]},
+        '[{"name":"evidence.md"}]',
+        has_result=True,
     )
     write = ToolInvocation(
         "write", {"file_path": report_path, "content": report}, "ok", has_result=True

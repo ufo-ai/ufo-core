@@ -446,7 +446,12 @@ def test_file_tool_paths_bound_the_serialized_envelope() -> None:
 async def test_share_file_without_a_secret_fails_loud_and_writes_nothing(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path, artifact_secret="")
     with pytest.raises(RuntimeError, match="not configured"):
-        await run("share_file", ctx, file_path="report.txt", user_description="sending the report")
+        await run(
+            "share_file",
+            ctx,
+            files=[{"file_path": "report.txt"}],
+            user_description="sending the report",
+        )
     assert not (tmp_path / "artifacts").exists()
 
 

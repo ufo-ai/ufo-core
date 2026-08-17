@@ -93,8 +93,8 @@ class SubmittedTarget:
                 (
                     ToolInvocation(
                         "share_file",
-                        {"file_path": "/workspace/forecast.xlsx"},
-                        '{"name":"forecast.xlsx"}',
+                        {"files": [{"file_path": "/workspace/forecast.xlsx"}]},
+                        '[{"name":"forecast.xlsx"}]',
                         has_result=True,
                     ),
                 ),
@@ -243,8 +243,8 @@ async def test_submission_grader_rejects_share_calls_without_matching_durable_ar
             (
                 ToolInvocation(
                     "share_file",
-                    {"file_path": "/workspace/forecast.xlsx"},
-                    '{"name":"forecast.xlsx"}',
+                    {"files": [{"file_path": "/workspace/forecast.xlsx"}]},
+                    '[{"name":"forecast.xlsx"}]',
                     has_result=True,
                 ),
             ),
