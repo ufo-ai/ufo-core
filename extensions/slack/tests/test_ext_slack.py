@@ -14,9 +14,10 @@ import json
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -26,6 +27,7 @@ import httpx
 import pytest
 import sqlalchemy as sa
 import ufo_ext_slack.surface as slack
+import ufo_ext_web.surface as web_surface
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -33,6 +35,7 @@ from starlette.requests import Request as StarletteRequest
 from ufo_ext_connectors.tools import ATTRIBUTION_MRKDWN
 from ufo_ext_slack.hooks import attribute_connector_send
 from ufo_ext_slack.manifest import manifest as slack_manifest
+from ufo_ext_web.audience import EXTENSION_WEB
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     NO_SUBAGENTS,
@@ -52,6 +55,7 @@ from ufo.credentials import (
     seal_credential_request,
 )
 from ufo.db import current_workspace, workspace_tx
+from ufo.ext.context import context_for
 from ufo.ext.loader import turn_hooks, turn_tools
 from ufo.ext.manifest import UserPromptSubmit
 from ufo.ext.surface import (
@@ -79,6 +83,9 @@ from ufo.hub import (
 )
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.queue import _load_turn
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.models.interface import Message, ModelEvent, ModelRequest, TextBlock, Usage
+from ufo.models.registry import ModelRegistry
 from ufo.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
     WORKSPACE_WRITE_MAX_BYTES,
@@ -103,8 +110,10 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
+from ufo.sdk.jobs import untitled_conversation_workspaces
 from ufo.seats import UNRESOLVED_SPEAKER_MESSAGE
 from ufo.serve import _mount_shared_surfaces
+from ufo.transcript import Conversation, encode, transcript_key
 from ufo.workspace import init_workspace_credentials, ws
 
 TEAM_ID = "T0000001"
@@ -9604,3 +9613,132 @@ async def test_an_attachment_read_that_comes_back_empty_still_answers(
             )
         ).scalar_one()
     assert "F9" not in (await _load_turn(turn))[0].inbound
+
+
+@dataclass(frozen=True)
+class ExcerptEchoModel:
+    """Answers with the excerpt it was handed, so the name the job writes states what it read."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text=str(request.messages[0].content))
+        yield Usage(input_tokens=7, output_tokens=3)
+
+
+EXCERPT_ECHO_REGISTRY = ModelRegistry(
+    specs={
+        spec.id: replace(spec, client=lambda spec, key: ExcerptEchoModel(), key_slot="", key_env="")
+        for spec in CORE_MODEL_SPECS
+    },
+    pricing=CORE_PRICING,
+    auto_model="claude-opus-4-8",
+)
+
+
+async def test_a_thread_is_named_once_from_the_exchange_that_opened_it(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A thread arrives named with the member's first sentence, and the titling job names it again
+    from the exchange that opened it — the string the portal states. The name is written from the
+    member's own words out of the fence the surface wrote, so the ambient room digest around them
+    names nothing. Whether a summary has named it is on the conversation row, so this surface holds
+    no marker of its own: once the job has run the thread is no work, and a later message in it
+    leaves the name it has."""
+    workspace_id, _ = await _seed()
+    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    opening = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="100.5",
+        text=f"<@{BOT_USER_ID}> read the March totals",
+    )
+    async with client:
+        admitted = await client.post(
+            EVENTS_PATH, content=opening, headers=_sign(opening, int(time.time()))
+        )
+    assert admitted.status_code == 200
+    async with workspace_tx() as connection:
+        conversation = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id, tables.conversation.c.title).where(
+                    tables.conversation.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert conversation.title == f"<@{BOT_USER_ID}> read the March totals"
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text="The March totals are in.").model_dump(
+                    mode="json"
+                ),
+            )
+            .where(tables.turn.c.id == turn_id)
+        )
+    marker = mint_marker()
+    digest = (
+        f"<{AMBIENT_CONTEXT_ELEMENT}_{marker}>\nsomeone else asked about the offsite\n"
+        f"</{AMBIENT_CONTEXT_ELEMENT}_{marker}>\n"
+    )
+    transcript = Conversation(
+        seq=1,
+        messages=(
+            Message(
+                role="user",
+                content=fence_member_message(marker, digest, "read the March totals", ""),
+            ),
+            Message(role="assistant", content=(TextBlock(text="The March totals are in."),)),
+        ),
+    )
+    ctx = context_for(
+        EXTENSION_WEB,
+        frozenset(),
+        blob=blob,
+        model_resolver=EXCERPT_ECHO_REGISTRY,
+        model_job=f"{EXTENSION_WEB}:{web_surface.TITLE_JOB_NAME}",
+    )
+    candidates = untitled_conversation_workspaces()
+    assert workspace_id in await candidates()
+    with ws(workspace_id):
+        await blob.put(transcript_key(conversation.id), encode(transcript))
+        assert await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH) == (conversation.id,)
+        await web_surface.summarize_chat_titles(ctx)
+        assert await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH) == ()
+    assert workspace_id not in await candidates()
+    assert await _title(conversation.id) == "read the March totals The March totals are in."
+
+    later = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="200.5",
+        thread_ts="100.5",
+        text=f"<@{BOT_USER_ID}> and April?",
+    )
+    _, follower, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    async with follower:
+        followed = await follower.post(
+            EVENTS_PATH, content=later, headers=_sign(later, int(time.time()))
+        )
+    assert followed.status_code == 200
+    assert workspace_id not in await candidates()
+    assert await _title(conversation.id) == "read the March totals The March totals are in."
+
+
+async def _title(conversation_id: UUID) -> str | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.conversation.c.title).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()

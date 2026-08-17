@@ -48,7 +48,9 @@ export function Disclose({
 }: {
   agent: Agent;
   conversation: Conversation;
-  onBack: () => void;
+  /** Absent where the pane above already leads back out — a header naming the agent is one, and a
+   *  way out under it would be a second. */
+  onBack?: () => void;
   onOpened: () => void;
 }) {
   const [outcome, setOutcome] = useState<NoticeState>(QUIET);
@@ -82,7 +84,7 @@ export function Disclose({
 
   return (
     <>
-      <Back onBack={onBack} />
+      {onBack ? <Back onBack={onBack} /> : null}
       <Section title={conversationTitle(conversation, viewer)}>
         <p className="m-0 max-w-hint">
           This conversation is private to {owner} and may contain private information. Opening it
@@ -118,10 +120,10 @@ export function who(
   return sender ? speakerName(sender) : owned;
 }
 
-/** What a conversation is called: the words it opened with — the same cut the rail labels a chat
- *  with, so an index row and a rail row never name one conversation two ways — else whose it is,
- *  which is all a row the member may not read has to state. */
-function subject(conversation: Conversation, viewer: string | null): string {
+/** What a conversation is called: the name the titling job wrote for it — the same string the rail
+ *  labels a chat with, so an index row and a rail row never name one conversation two ways — else
+ *  whose it is, which is all a row the member may not read has to state. */
+export function subject(conversation: Conversation, viewer: string | null): string {
   return conversation.description || who(conversation, viewer);
 }
 
@@ -399,11 +401,18 @@ export function ConversationDetail({
   agent,
   conversation,
   onBack,
+  title,
   onOpenArtifacts,
 }: {
   agent: Agent;
   conversation: Conversation;
-  onBack: () => void;
+  /** Absent where the pane above already leads back out — a header naming the agent is one, and a
+   *  way out under it would be a second. */
+  onBack?: () => void;
+  /** Absent where the transcript is headed the way the row that opened it named it. A pane that
+   *  states where the conversation came from in its own header passes what the conversation is
+   *  called instead, so the origin is stated once. */
+  title?: ReactNode;
   onOpenArtifacts?: () => void;
 }) {
   const path = "/agents/" + agent.id + "/conversations/" + conversation.id;
@@ -412,11 +421,11 @@ export function ConversationDetail({
 
   return (
     <>
-      <Back onBack={onBack} />
+      {onBack ? <Back onBack={onBack} /> : null}
       <Panel state={state} failed={unreadable}>
         {(payload) => (
           <ConversationTranscript
-            title={conversationTitle(conversation, viewer)}
+            title={title ?? conversationTitle(conversation, viewer)}
             messages={payload.messages}
             onOpenArtifacts={onOpenArtifacts}
           />

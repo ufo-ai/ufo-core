@@ -513,6 +513,29 @@ async def retitle_conversation(workspace_id: UUID, conversation_id: UUID, title:
         )
 
 
+async def summarize_conversation_title(
+    workspace_id: UUID, conversation_id: UUID, title: str
+) -> None:
+    """Name a conversation what the titling job's summary of its opening exchange calls it, and
+    record on the row that the summary has run. The two are one write: the record is what takes the
+    conversation out of the job's candidate set, and a summary written without it would be paid for
+    again on the next tick.
+
+    A blank summary is not a name and leaves the conversation called what its opening words called
+    it — the record still lands, so an exchange no model can name costs one summary rather than one
+    every tick."""
+    named = title.strip()[:CONVERSATION_TITLE_CHARS]
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(
+                tables.conversation.c.workspace_id == workspace_id,
+                tables.conversation.c.id == conversation_id,
+            )
+            .values(title=named or tables.conversation.c.title, title_summarized=True)
+        )
+
+
 class AgentSummary(BaseModel):
     """One workspace agent as a surface lists it — the read a surface whose member picks an agent
     (the web portal's switcher) filters through its own audience authority.

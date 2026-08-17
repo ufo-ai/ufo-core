@@ -532,28 +532,31 @@ test("a permalink read the server faults on states the fault rather than a denia
   expect(screen.queryByText(NOT_SHARED)).toBeNull();
 });
 
+function slackConversation(fields: Record<string, unknown> = {}) {
+  return {
+    id: CONVO_ID,
+    agent: { id: AGENT_ID, name: AGENT.name },
+    surface: "slack",
+    surface_label: "#ops-warehouse",
+    audience: "shared",
+    member_email: null,
+    description: "Warehouse restock plan",
+    source: "https://acme.slack.com/archives/C1/p1700000000000100",
+    turn_count: 1,
+    created_at: "2026-08-01T08:00:00Z",
+    last_turn_at: "2026-08-01T08:01:00Z",
+    readable: true,
+    disclosable: false,
+    ...fields,
+  };
+}
+
 test("a Slack conversation permalink opens its read-only transcript", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
     "/api/chats": (url) =>
       url.includes("conversation=")
-        ? json({
-            chats: [],
-            conversation: {
-              id: CONVO_ID,
-              agent: { id: AGENT_ID, name: AGENT.name },
-              surface: "slack",
-              surface_label: "#ops-warehouse",
-              audience: "shared",
-              member_email: null,
-              source: "https://acme.slack.com/archives/C1/p1700000000000100",
-              turn_count: 1,
-              created_at: "2026-08-01T08:00:00Z",
-              last_turn_at: "2026-08-01T08:01:00Z",
-              readable: true,
-              disclosable: false,
-            },
-          })
+        ? json({ chats: [], conversation: slackConversation() })
         : json({ chats: [] }),
     ["/conversations/" + CONVO_ID + "/transcript"]: () =>
       json({
@@ -572,17 +575,70 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
     screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
   ).toBeTruthy();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
-  const out = screen.getByRole("link", { name: "#ops-warehouse ↗" });
-  expect(out.getAttribute("href")).toBe("https://acme.slack.com/archives/C1/p1700000000000100");
-  const heading = screen.getByRole("heading", {
-    name: AGENT.name + " · #ops-warehouse ↗ · Workspace",
+  expect(screen.getByRole("heading", { name: "Warehouse restock plan" })).toBeTruthy();
+});
+
+/** The pane a conversation another surface holds is read in is headed the way a portal chat's is:
+ *  the agent it ran under, the model it ran on, and the way back to the agents index — never a way
+ *  out to a list of conversations standing over the transcript in place of a header. */
+test("a Slack conversation is headed like a web thread, marked with its way out to Slack", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({ chats: [], conversation: slackConversation() })
+        : json({ chats: [] }),
+    ["/conversations/" + CONVO_ID + "/transcript"]: () =>
+      json({ messages: [{ role: "user", text: "from Slack" }] }),
   });
-  expect(heading.contains(out)).toBe(true);
-  const drawn = out.className.split(" ");
-  expect(drawn).toContain("text-inherit");
-  expect(drawn).toContain("no-underline");
-  expect(drawn).not.toContain("underline");
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await screen.findByText("from Slack");
+  const header = within(screen.getByRole("main"));
+  expect(header.getByText(AGENT.name)).toBeTruthy();
+  expect(header.getByText(AGENT.model)).toBeTruthy();
+  expect(header.queryByRole("button", { name: "All conversations" })).toBeNull();
+
+  const out = header.getByRole("link", { name: "Open #ops-warehouse in Slack" });
+  expect(out.getAttribute("href")).toBe("https://acme.slack.com/archives/C1/p1700000000000100");
+  expect(out.getAttribute("target")).toBe("_blank");
+  expect(out.textContent).toContain("#ops-warehouse");
   expect(within(out).getByText("↗").className).toContain("text-ink-soft");
+  const mark = out.querySelector("svg");
+  expect(mark?.getAttribute("class")).toContain("size-(--size-surface-mark)");
+
+  await userEvent.click(header.getByRole("button", { name: "Back to Agents" }));
+  expect(location.hash).toBe("#/agents");
+});
+
+/** A terminal session is not a place a link can land, so the same mark states the surface and goes
+ *  nowhere. */
+test("a terminal conversation is marked with its surface and no way out", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  const terminal = slackConversation({
+    surface: "ufo",
+    surface_label: null,
+    source: null,
+    description: "Deploy the branch",
+  });
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({ chats: [], conversation: terminal })
+        : json({ chats: [] }),
+    ["/conversations/" + CONVO_ID + "/transcript"]: () =>
+      json({ messages: [{ role: "user", text: "from the CLI" }] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await screen.findByText("from the CLI");
+  const header = within(screen.getByRole("main"));
+  expect(header.getByRole("heading", { name: "Deploy the branch" })).toBeTruthy();
+  expect(header.getByText("Terminal")).toBeTruthy();
+  expect(header.queryByRole("link")).toBeNull();
+  expect(
+    screen.getByText("This conversation is read-only here. Reply in Terminal to continue it."),
+  ).toBeTruthy();
 });
 
 /** A conversation another surface holds shares files the same way the chat does, so its markdown

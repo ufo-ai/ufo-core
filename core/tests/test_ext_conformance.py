@@ -1227,6 +1227,17 @@ async def _seed_trajectory(
     return agent_id
 
 
+async def _conversation_of(agent_id: UUID) -> UUID:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.agent_id == agent_id
+                )
+            )
+        ).scalar_one()
+
+
 async def _sole_conversation() -> UUID:
     async with workspace_tx() as connection:
         return (await connection.execute(sa.select(tables.conversation.c.id))).scalar_one()
@@ -1307,6 +1318,7 @@ async def test_job_context_confines_blob_to_a_workspace_scoped_trajectory_read(
     assert "blob" not in {field.name for field in fields(context)}
     assert isinstance(context.corpus, TrajectoryCorpus)
     assert {name for name in dir(context.corpus) if not name.startswith("_")} == {
+        "conversations",
         "trajectories",
         "workspace_id",
         "limit",
@@ -1337,6 +1349,35 @@ async def test_the_corpus_reads_only_the_most_recent_conversations(
     with ws(workspace_id):
         trajectories = await corpus.trajectories()
     assert [trajectory.agent_id for trajectory in trajectories] == [recent_agent]
+
+
+async def test_the_corpus_reads_the_conversations_a_handler_names_whatever_the_bound(
+    db: None, tmp_path: Path
+) -> None:
+    """A job that already knows which conversations it works on reads exactly those: a
+    conversation older than the `limit` most recent still answers, and no transcript around it is
+    decoded to reach it. The workspace stays the boundary — an id another workspace holds answers
+    nothing."""
+    workspace_id, other = await _workspace(), await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    older_agent = await _seed_trajectory(workspace_id, blob)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .values(created_at=datetime.now(UTC) - timedelta(days=30))
+            .where(tables.conversation.c.workspace_id == workspace_id)
+        )
+    await _seed_trajectory(workspace_id, blob)
+    elsewhere_agent = await _seed_trajectory(other, blob)
+
+    corpus = TrajectoryCorpus(blob, limit=1)
+    with ws(workspace_id):
+        older = await _conversation_of(older_agent)
+        elsewhere = await _conversation_of(elsewhere_agent)
+        assert [trajectory.agent_id for trajectory in await corpus.conversations((older,))] == [
+            older_agent
+        ]
+        assert await corpus.conversations((elsewhere,)) == ()
 
 
 async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(

@@ -22,7 +22,7 @@ import { Admin } from "@/views/Admin";
 import { Agents } from "@/views/Agents";
 import { ChatPane } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
-import { ConversationDetail, Disclose } from "@/views/Conversations";
+import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { SignIn } from "@/views/SignIn";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
@@ -33,10 +33,12 @@ import {
   isPortalChat,
   Viewer,
   origin,
+  slackLink,
   speakerName,
   surfaceWord,
+  useViewer,
 } from "@/lib/audience";
-import { COLUMN, Pane } from "@/kernel/pane";
+import { COLUMN, Pane, PaneHeader } from "@/kernel/pane";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -560,7 +562,7 @@ function RoutedPane({
           conversation={linkedConversation}
           slot={route.slot}
           onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
-          onOpenAgent={onOpenAgent}
+          onAgentsIndex={onAgentsIndex}
         />
       );
     }
@@ -622,21 +624,26 @@ function RoutedPane({
   );
 }
 
+/** A conversation another surface holds, read in the portal: the thread pane a portal chat wears,
+ *  headed the same way — the agent it ran under and the model it ran on, reached back out of the
+ *  same way — with the surface it is happening on marked at the far end of that header. The header
+ *  is what says where the member is, so the transcript under it is headed by what the conversation
+ *  is called and nothing leads back out twice. */
 function LinkedPane({
   agent,
   conversation,
   slot,
   onSelectSlot,
-  onOpenAgent,
+  onAgentsIndex,
 }: {
   agent: Agent;
   conversation: OwnedConversation;
   slot?: string;
   onSelectSlot: (slot: string | null) => void;
-  onOpenAgent: (agentId: string, tab?: AgentTab) => void;
+  onAgentsIndex: () => void;
 }) {
   const [disclosed, setDisclosed] = useState(false);
-  const back = () => onOpenAgent(agent.id, "conversations");
+  const viewer = useViewer();
   const readable = conversation.readable || disclosed;
   return (
     <Pane>
@@ -647,13 +654,19 @@ function LinkedPane({
         )}
       >
         <div className="flex min-h-0 min-w-0 flex-col">
+          <PaneHeader
+            parent={{ label: "Agents", onGo: onAgentsIndex }}
+            current={agent.name}
+            note={<span className="font-mono text-mono text-ink-soft">{agent.model}</span>}
+            actions={<SurfaceMark conversation={conversation} />}
+          />
           <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
             {readable ? (
               <>
                 <ConversationDetail
                   agent={agent}
                   conversation={conversation}
-                  onBack={back}
+                  title={subject(conversation, viewer)}
                   onOpenArtifacts={() => onSelectSlot("artifacts")}
                 />
                 <p className="max-w-hint text-ink-soft">
@@ -665,7 +678,6 @@ function LinkedPane({
               <Disclose
                 agent={agent}
                 conversation={conversation}
-                onBack={back}
                 onOpened={() => setDisclosed(true)}
               />
             )}
@@ -1026,6 +1038,51 @@ function SurfaceGlyph({ surface }: { surface: string }) {
   if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_GLYPH} aria-hidden />;
   if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_GLYPH} aria-hidden />;
   return null;
+}
+
+const SURFACE_MARK = "size-(--size-surface-mark) shrink-0";
+
+function surfaceMark(surface: string): React.ReactNode {
+  if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_MARK} aria-hidden />;
+  if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_MARK} aria-hidden />;
+  return null;
+}
+
+/** The surface a conversation is happening on, at the head of the pane that reads it: the mark drawn
+ *  larger than a rail row's glyph, and the room the surface named beside it. Where that surface
+ *  reported where the conversation opened, the pair is the way out to it — drawn the way every act
+ *  that leaves the portal is, keeping the line's own colour with no resting underline and the arrow
+ *  muted beside the words. Where it reported none, the same pair states the fact and goes nowhere:
+ *  a terminal session is not a place a link can land.
+ *
+ *  A surface with no mark of its own draws nothing at all. The header already names the agent, and
+ *  a conversation read here is read-only whatever holds it, which the line under the transcript
+ *  says in words. */
+function SurfaceMark({ conversation }: { conversation: OwnedConversation }) {
+  const mark = surfaceMark(conversation.surface);
+  if (mark === null) return null;
+  const where = origin(conversation);
+  const href = slackLink(conversation.surface, conversation.source);
+  if (href === null) {
+    return (
+      <span className="flex items-center gap-xs whitespace-nowrap text-ink-soft">
+        {mark}
+        {where}
+      </span>
+    );
+  }
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={"Open " + where + " in " + surfaceWord(conversation.surface)}
+      className="flex items-center gap-xs whitespace-nowrap text-inherit no-underline hover:underline focus-visible:underline"
+    >
+      {mark}
+      {where} <span className="text-ink-soft">↗</span>
+    </a>
+  );
 }
 
 const NewChatGlyph = () => <IconEdit className="size-(--size-glyph) shrink-0" aria-hidden />;

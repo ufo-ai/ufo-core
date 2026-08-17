@@ -55,6 +55,7 @@ from ufo.ext.surface import (
     SurfaceInstallationAccess,
     TurnTailer,
     retitle_conversation,
+    summarize_conversation_title,
 )
 from ufo.governance import Governance, prompt_digest
 from ufo.hub import LiveFrame
@@ -82,6 +83,7 @@ from ufo.schema.records import (
     SUBAGENT_SURFACE,
     AgentChange,
     ProposalRef,
+    TurnStatus,
     Usage,
 )
 from ufo.seats import workspace_domain
@@ -328,12 +330,12 @@ TRAJECTORY_CORPUS_CONVERSATIONS = 200
 @dataclass(frozen=True)
 class TrajectoryCorpus:
     """A handler's read reach into blob storage: this workspace's conversation transcripts, read
-    only. The store stays module-private (`_blob`), so the only operation exposed is enumerating
-    this workspace's trajectories — never an arbitrary blob get or put over another conversation or
-    an artifact. The read is bounded to the `limit` most recently created conversations, so a
-    workspace with a long history hands a job a bounded corpus, never every transcript it ever
-    produced. A conversation whose transcript is missing or corrupt is skipped-with-log, never
-    aborting the whole corpus."""
+    only. The store stays module-private (`_blob`), so the only operations exposed are enumerating
+    this workspace's trajectories and reading the ones a handler names — never an arbitrary blob get
+    or put over another conversation or an artifact. The enumeration is bounded to the `limit` most
+    recently created conversations, so a workspace with a long history hands a job a bounded corpus,
+    never every transcript it ever produced. A conversation whose transcript is missing or corrupt
+    is skipped-with-log, never aborting the whole corpus."""
 
     _blob: WorkspaceBlobStore
     limit: int = TRAJECTORY_CORPUS_CONVERSATIONS
@@ -343,13 +345,29 @@ class TrajectoryCorpus:
         return ws_current().workspace_id
 
     async def trajectories(self) -> tuple[Trajectory, ...]:
-        recent = (
+        return await self._read(
             sa.select(tables.conversation.c.id)
             .where(tables.conversation.c.workspace_id == self.workspace_id)
             .order_by(tables.conversation.c.created_at.desc(), tables.conversation.c.id.desc())
             .limit(self.limit)
             .scalar_subquery()
         )
+
+    async def conversations(self, conversation_ids: tuple[UUID, ...]) -> tuple[Trajectory, ...]:
+        """The transcripts of exactly these conversations — the read a job that already knows which
+        conversations it works on takes, so it decodes what it works on rather than the corpus
+        around it, and reaches a conversation older than the `limit` most recent one. The workspace
+        is still the boundary: an id another workspace holds answers nothing."""
+        return await self._read(
+            sa.select(tables.conversation.c.id)
+            .where(
+                tables.conversation.c.workspace_id == self.workspace_id,
+                tables.conversation.c.id.in_(conversation_ids),
+            )
+            .scalar_subquery()
+        )
+
+    async def _read(self, chosen: sa.ScalarSelect[UUID]) -> tuple[Trajectory, ...]:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -364,7 +382,7 @@ class TrajectoryCorpus:
                             tables.turn.c.conversation_id == tables.conversation.c.id,
                         ).join(tables.agent, tables.agent.c.id == tables.turn.c.agent_id)
                     )
-                    .where(tables.conversation.c.id.in_(recent))
+                    .where(tables.conversation.c.id.in_(chosen))
                     .distinct()
                     .order_by(tables.conversation.c.id)
                 )
@@ -584,23 +602,38 @@ def connection_workspaces() -> WorkspaceCandidates:
     return owner_candidates(with_a_main_agent_connection)
 
 
-def store_key_workspaces(extension: str, prefix: str) -> WorkspaceCandidates:
-    """The candidate seam a store-backed job declares: the workspaces holding at least one of the
-    extension's own `ext_store` keys under `prefix`. Core owns `ext_store`, so it owns this query —
-    an extension names its pending-work key space without reaching the cross-workspace engine, and
-    a workspace with no such key never fires the handler."""
+ANSWERED: TurnStatus = "done"
 
-    def with_a_key() -> sa.Select[tuple[UUID]]:
-        return (
-            sa.select(tables.ext_store.c.workspace_id)
-            .where(
-                tables.ext_store.c.extension == extension,
-                tables.ext_store.c.key.startswith(prefix, autoescape=True),
+
+def awaiting_a_title() -> sa.ColumnElement[bool]:
+    """A conversation the titling job still owes a summary: no summary has named it, and a member
+    turn of it has answered. Both halves are the filter. A conversation nobody spoke in is an
+    extension's errand or a subagent's run, named by the payload that opened it and read by nobody
+    who needs a summary. A conversation whose member turns have all yet to answer — still running,
+    or refused and cancelled at admission — has no exchange to summarize, so it is not work either:
+    the transcript the summary is written from is what the run that ends a turn writes."""
+    return sa.and_(
+        tables.conversation.c.title_summarized.is_(False),
+        sa.exists(
+            sa.select(tables.turn.c.id).where(
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.admission_source == MEMBER_ADMISSION,
+                tables.turn.c.status == ANSWERED,
             )
-            .distinct()
-        )
+        ),
+    )
 
-    return owner_candidates(with_a_key)
+
+def untitled_conversation_workspaces() -> WorkspaceCandidates:
+    """The candidate seam the titling job declares: the workspaces holding a conversation a member
+    spoke in that no summary has named yet. Core owns `conversation`/`turn` and the title on that
+    row, so it owns this query — the job names the work without knowing which surfaces exist, and a
+    workspace whose conversations are all named never fires the handler."""
+
+    def with_an_unsummarized_title() -> sa.Select[tuple[UUID]]:
+        return sa.select(tables.conversation.c.workspace_id).where(awaiting_a_title()).distinct()
+
+    return owner_candidates(with_an_unsummarized_title)
 
 
 def unseeded_agent_workspaces(extension: str, prefix: str) -> WorkspaceCandidates:
@@ -1549,6 +1582,39 @@ class ExtensionContext:
         """Name a conversation of this workspace — what a job that reads a conversation and writes
         a better name for it than its opening words calls the result."""
         await retitle_conversation(self.workspace_id, conversation_id, title)
+
+    async def conversations_awaiting_title(self, limit: int) -> tuple[UUID, ...]:
+        """This workspace's conversations a member spoke in and an agent answered that no summary
+        has named yet, newest first and at most `limit` of them — the work the titling job takes per
+        tick, whatever surface holds them. Newest first because a conversation opened a minute ago
+        is the one a member is looking at, and a backlog is drained behind it.
+
+        The bound is the job's spend per tick, not a page: the handler records a summary against
+        every conversation it takes, so each tick reads the next `limit` and a backlog drains rather
+        than a batch of conversations nothing can name standing in front of it forever."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id)
+                    .where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        awaiting_a_title(),
+                    )
+                    .order_by(
+                        tables.conversation.c.created_at.desc(),
+                        tables.conversation.c.id.desc(),
+                    )
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(row.id for row in rows)
+
+    async def summarized_conversation_title(self, conversation_id: UUID, title: str) -> None:
+        """Name a conversation of this workspace what a summary of its opening exchange calls it,
+        and record that the summary has run — which is what takes it out of
+        `conversations_awaiting_title`. A summary the model wrote nothing usable for still records
+        the attempt, so one conversation costs one summary."""
+        await summarize_conversation_title(self.workspace_id, conversation_id, title)
 
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new

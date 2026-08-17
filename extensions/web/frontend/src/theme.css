@@ -259,6 +259,10 @@
   --size-fact: 16ch;
   --size-glyph: 16px;
   --size-icon: 1em;
+  /* The mark for the surface a conversation is happening on, at the head of the pane that reads it.
+     Larger than the glyph a rail row carries: a row states the surface beside a title the member is
+     scanning past, a header states it about the one conversation on the screen. */
+  --size-surface-mark: 24px;
   --size-reveal: 280px;
   --size-row: 32px;
   --size-textarea: 12em;

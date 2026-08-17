@@ -151,7 +151,7 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience, room_audience
-from ufo.sdk.jobs import store_key_workspaces, unseeded_agent_workspaces
+from ufo.sdk.jobs import unseeded_agent_workspaces, untitled_conversation_workspaces
 from ufo.sdk.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
@@ -1171,7 +1171,7 @@ async def test_a_reported_timezone_lands_on_the_turn_and_an_unknown_one_drops(
     assert contexts[turns["Mars/Olympus_Mons"]]["timezone"] is None
 
 
-def test_title_excerpt_waits_for_an_assistant_reply_and_bounds_both_sides() -> None:
+def test_title_excerpt_needs_an_assistant_reply_and_bounds_both_sides() -> None:
     opening = Message(role="user", content="Draft the onboarding plan")
     assert web_surface._title_excerpt((opening,)) == ""
     reply = Message(role="assistant", content=(TextBlock(text="Here is the plan."),))
@@ -1181,6 +1181,28 @@ def test_title_excerpt_waits_for_an_assistant_reply_and_bounds_both_sides() -> N
     long = Message(role="user", content="x" * (web_surface.TITLE_EXCERPT_CHARS + 500))
     assert web_surface._title_excerpt((long, reply)) == (
         "x" * web_surface.TITLE_EXCERPT_CHARS + "\n\nHere is the plan."
+    )
+
+
+def test_title_excerpt_reads_the_member_s_own_words_out_of_the_inbound() -> None:
+    """A channel surface's inbound is the ambient digest of the room, the member's own words fenced
+    inside it, and the engine's context tag over the whole. A title written from all of that names
+    the room and the wire rather than the conversation, so the excerpt is the fenced words alone."""
+    marker = mint_marker()
+    fenced = fence_member_message(
+        marker,
+        f"<{AMBIENT_CONTEXT_ELEMENT}_{marker}>\nOthers said: restock the depot\n"
+        f"</{AMBIENT_CONTEXT_ELEMENT}_{marker}>\n",
+        "Order more pallets before Friday",
+        "",
+    )
+    inbound = Message(
+        role="user",
+        content=f"<context>\nmessage_ref: {uuid4()}\n</context>\n{fenced}",
+    )
+    reply = Message(role="assistant", content=(TextBlock(text="Ordered them."),))
+    assert web_surface._title_excerpt((inbound, reply)) == (
+        "Order more pallets before Friday\n\nOrdered them."
     )
 
 
@@ -1203,7 +1225,7 @@ async def test_chat_title_job_rewrites_the_rail_label_from_the_opening_exchange(
     assert admitted.json()["title"].startswith("Draft next week's onboarding plan")
     await _consume(client, token, admitted.json()["turn_id"])
 
-    candidates = store_key_workspaces(EXTENSION_WEB, web_surface.CHAT_PENDING_PREFIX)
+    candidates = untitled_conversation_workspaces()
     assert workspace_id in await candidates()
 
     ctx = context_for(
@@ -1217,13 +1239,12 @@ async def test_chat_title_job_rewrites_the_rail_label_from_the_opening_exchange(
     with ws(workspace_id):
         async with asyncio.timeout(5):
             while True:
-                trajectories = {t.conversation_id: t for t in await ctx.corpus.trajectories()}
-                trajectory = trajectories.get(UUID(opened))
-                if trajectory is not None and web_surface._title_excerpt(trajectory.messages):
+                read = await ctx.corpus.conversations((UUID(opened),))
+                if read and web_surface._title_excerpt(read[0].messages):
                     break
                 await asyncio.sleep(0.01)
         await web_surface.summarize_chat_titles(ctx)
-        assert await ctx.store.list(web_surface.CHAT_PENDING_PREFIX) == ()
+        assert await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH) == ()
 
     rail = await client.get("/surface/web/api/chats", headers=headers)
     assert rail.status_code == 200
@@ -1234,6 +1255,142 @@ async def test_chat_title_job_rewrites_the_rail_label_from_the_opening_exchange(
 
     with ws(workspace_id):
         await web_surface.summarize_chat_titles(context_for(EXTENSION_WEB, frozenset()))
+
+
+async def test_chat_titles_name_every_surface_s_conversations_and_summarize_each_once(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The rail lists a Slack thread and a terminal session beside a portal chat, so the job names
+    all three: a conversation open before the job ever ran is a candidate like a new one, and the
+    surface that holds it is not a filter. Every candidate a tick takes is recorded, so the backlog
+    behind it drains: a transcript that states no reply keeps the name its opening words gave it,
+    costs no model call, and is not read again. The one conversation read again is the one whose
+    transcript has not landed yet — its exchange is coming, so it is named on a later tick rather
+    than from nothing."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "surfaces@example.com")
+    slack_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="D1:1.0",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="slack",
+        surface_label="Direct message",
+    )
+    await _seed_listed_turn(
+        workspace_id, slack_id, agent_id, seq=1, inbound="Order more pallets before Friday"
+    )
+    cli_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="tty:1",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="ufo",
+    )
+    await _seed_listed_turn(workspace_id, cli_id, agent_id, seq=1, inbound="Deploy the branch")
+    unanswered_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="tty:2",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="ufo",
+    )
+    await _seed_listed_turn(workspace_id, unanswered_id, agent_id, seq=1, inbound="Still failed")
+    landing_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="tty:3",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="ufo",
+    )
+    await _seed_listed_turn(workspace_id, landing_id, agent_id, seq=1, inbound="Just answered")
+    errand_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="errand/1",
+        audience="shared",
+        member_id=None,
+        surface="extension:sweep",
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        errand_id,
+        agent_id,
+        seq=1,
+        inbound="{}",
+        subagent_profile="general_purpose",
+    )
+    for named in (slack_id, cli_id):
+        await _write_transcript(
+            blob,
+            named,
+            Conversation(
+                seq=1,
+                messages=(
+                    Message(role="user", content="what the member said"),
+                    Message(role="assistant", content=(TextBlock(text="what the agent did"),)),
+                ),
+            ),
+        )
+    await _write_transcript(
+        blob,
+        unanswered_id,
+        Conversation(seq=1, messages=(Message(role="user", content="Still failed"),)),
+    )
+
+    ctx = context_for(
+        EXTENSION_WEB,
+        frozenset(),
+        blob=blob,
+        model_resolver=STANDIN_REGISTRY,
+        model_job=f"{EXTENSION_WEB}:{web_surface.TITLE_JOB_NAME}",
+    )
+    with ws(workspace_id):
+        assert set(await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH)) == {
+            slack_id,
+            cli_id,
+            unanswered_id,
+            landing_id,
+        }
+        await web_surface.summarize_chat_titles(ctx)
+        assert await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH) == (landing_id,)
+
+    rail = await client.get(
+        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert rail.status_code == 200
+    listed = {row["conversation_id"]: row["title"] for row in rail.json()["chats"]}
+    assert listed[str(slack_id)] == "echo:1"
+    assert listed[str(cli_id)] == "echo:1"
+    assert listed[str(unanswered_id)] == "Still failed"
+    assert listed[str(landing_id)] == "Just answered"
+
+    await _write_transcript(
+        blob,
+        landing_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content="Just answered"),
+                Message(role="assistant", content=(TextBlock(text="here it is"),)),
+            ),
+        ),
+    )
+    with ws(workspace_id):
+        await web_surface.summarize_chat_titles(ctx)
+        assert await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH) == ()
+    named = await client.get(
+        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert {row["conversation_id"]: row["title"] for row in named.json()["chats"]}[
+        str(landing_id)
+    ] == "echo:1"
 
 
 async def test_transcript_route_returns_durable_tool_activity(

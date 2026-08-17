@@ -20,10 +20,10 @@ from ufo.ext.context import (
     seated_member_workspaces as seated_member_workspaces,
 )
 from ufo.ext.context import (
-    store_key_workspaces as store_key_workspaces,
+    unseeded_agent_workspaces as unseeded_agent_workspaces,
 )
 from ufo.ext.context import (
-    unseeded_agent_workspaces as unseeded_agent_workspaces,
+    untitled_conversation_workspaces as untitled_conversation_workspaces,
 )
 from ufo.ext.manifest import (
     JobSpec as JobSpec,

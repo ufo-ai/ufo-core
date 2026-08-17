@@ -33,11 +33,13 @@ from ufo.ext.context import (
     UndeclaredCredentialSlot,
     context_for,
     conversation_agent_id,
+    untitled_conversation_workspaces,
 )
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.ext.surface import (
     SurfaceInstallationConflict,
     UndeclaredSurface,
+    retitle_conversation,
 )
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.models.catalog import CORE_PRICING
@@ -816,7 +818,12 @@ async def _conversation(workspace_id: UUID) -> UUID:
 
 
 async def _seed_turn(
-    workspace_id: UUID, conversation_id: UUID, seq: int, status: str, terminal: dict | None
+    workspace_id: UUID,
+    conversation_id: UUID,
+    seq: int,
+    status: str,
+    terminal: dict | None,
+    source: str = "internal",
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -834,12 +841,99 @@ async def _seed_turn(
                 seq=seq,
                 status=status,
                 inbound="hi",
+                admission_source=source,
                 terminal=terminal,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
     return turn_id
+
+
+DONE = {"status": "done"}
+
+
+async def _opened_at(conversation_id: UUID, moment: datetime) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .values(created_at=moment)
+            .where(tables.conversation.c.id == conversation_id)
+        )
+
+
+async def _named(conversation_id: UUID) -> tuple[str | None, bool]:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.conversation.c.title, tables.conversation.c.title_summarized
+                ).where(tables.conversation.c.id == conversation_id)
+            )
+        ).one()
+    return row.title, bool(row.title_summarized)
+
+
+async def test_conversations_awaiting_title_names_what_a_member_spoke_in_newest_first(
+    db: None,
+) -> None:
+    """The titling job's work: a conversation a member spoke in and an agent answered that no
+    summary has named. An errand nobody spoke in is named by the payload that opened it and is not
+    work; a conversation whose member turn has yet to answer has no exchange to summarize and is not
+    work either, so nothing is named from an empty transcript and nothing is read for one on every
+    tick; another workspace's conversation is never this workspace's; and the newest come first, so
+    the conversation a member is looking at is named ahead of a backlog behind it."""
+    workspace_id, other = await _workspace(), await _workspace()
+    with ws(other):
+        elsewhere = await _conversation(other)
+        await _seed_turn(other, elsewhere, 1, "done", DONE, source="member")
+    with ws(workspace_id):
+        newest, older, errand, turnless, running = (
+            await _conversation(workspace_id),
+            await _conversation(workspace_id),
+            await _conversation(workspace_id),
+            await _conversation(workspace_id),
+            await _conversation(workspace_id),
+        )
+        await _opened_at(newest, datetime(2026, 8, 2, tzinfo=UTC))
+        await _opened_at(older, datetime(2026, 8, 1, tzinfo=UTC))
+        await _seed_turn(workspace_id, newest, 1, "done", DONE, source="member")
+        await _seed_turn(workspace_id, older, 1, "done", DONE, source="member")
+        await _seed_turn(workspace_id, errand, 1, "done", DONE)
+        await _seed_turn(workspace_id, running, 1, "running", None, source="member")
+        context = context_for("sample", frozenset())
+
+        assert await context.conversations_awaiting_title(5) == (newest, older)
+        assert await context.conversations_awaiting_title(1) == (newest,)
+        assert turnless not in await context.conversations_awaiting_title(5)
+        assert running not in await context.conversations_awaiting_title(5)
+
+    assert workspace_id in await untitled_conversation_workspaces()()
+
+
+async def test_summarizing_a_title_names_the_conversation_and_records_the_attempt(
+    db: None,
+) -> None:
+    """One write does both, so a summary is paid for once: the name lands and the conversation
+    leaves the candidate set. A summary the model wrote nothing usable for leaves the conversation
+    called what its opening words called it and still leaves the set, so an exchange no model can
+    name costs one summary rather than one every tick."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        named, unnameable = await _conversation(workspace_id), await _conversation(workspace_id)
+        for conversation_id in (named, unnameable):
+            await _seed_turn(workspace_id, conversation_id, 1, "done", DONE, source="member")
+            await retitle_conversation(workspace_id, conversation_id, "what they typed first")
+        context = context_for("sample", frozenset())
+
+        await context.summarized_conversation_title(named, "Restock the depot")
+        await context.summarized_conversation_title(unnameable, "   ")
+
+        assert await _named(named) == ("Restock the depot", True)
+        assert await _named(unnameable) == ("what they typed first", True)
+        assert await context.conversations_awaiting_title(5) == ()
+
+    assert workspace_id not in await untitled_conversation_workspaces()()
 
 
 async def test_conversation_facts_answers_a_page_in_one_read(db: None) -> None:

@@ -128,6 +128,7 @@ conversation = sa.Table(
     sa.Column("queue_key", sa.Text, nullable=False),
     sa.Column("surface_label", sa.Text, nullable=True),
     sa.Column("title", sa.Text, nullable=True),
+    sa.Column("title_summarized", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column(
         "audience",
@@ -163,6 +164,12 @@ conversation = sa.Table(
         "workspace_id",
         postgresql_where=sa.text("sandbox_handle is not null"),
         sqlite_where=sa.text("sandbox_handle is not null"),
+    ),
+    sa.Index(
+        "conversation_awaiting_title",
+        "workspace_id",
+        postgresql_where=sa.text("not title_summarized"),
+        sqlite_where=sa.text("not title_summarized"),
     ),
 )
 

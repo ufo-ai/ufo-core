@@ -1,19 +1,20 @@
 """The web extension's manifest: one surface on the core seam, live mode, the admin-only chat
 verbs the portal's own acts ride (#645 — the web surface is its audience authority), and the
-title job that rewrites each new chat's rail label from its opening exchange. No
-credential slots (its session cookie carries the member's own token, not a bot secret) and no
-config knob — installed means mounted, like Slack. The surface admits without writeback and tails
-the hub in its own stream route, and claims the browser home, so the deploy's bare host opens the
-portal."""
+title job that rewrites each conversation's rail label from its opening exchange — every surface's,
+since the rail lists a Slack thread and a CLI session beside a portal chat and names them all the
+same way, so the job's candidates are core's conversations awaiting a summary rather than a key
+space of this extension's own. No credential slots (its session cookie carries the member's own
+token, not a bot secret) and no config knob — installed means mounted, like Slack. The surface
+admits without writeback and tails the hub in its own stream route, and claims the browser home, so
+the deploy's bare host opens the portal."""
 
-from ufo.sdk.jobs import JobSpec, store_key_workspaces, unseeded_agent_workspaces
+from ufo.sdk.jobs import JobSpec, unseeded_agent_workspaces, untitled_conversation_workspaces
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo_ext_web.audience import EXTENSION_WEB, WEB_ACCESS_TOOLS
 from ufo_ext_web.surface import (
     ARTIFACTS_SLOT,
     CHANGES_SLOT,
-    CHAT_PENDING_PREFIX,
     HOMEPAGE_SEED_PREFIX,
     ROUTES,
     SEED_JOB_NAME,
@@ -44,7 +45,7 @@ def manifest() -> Manifest:
                 name=TITLE_JOB_NAME,
                 schedule=TITLE_JOB_SCHEDULE,
                 handler=summarize_chat_titles,
-                candidates=store_key_workspaces(EXTENSION_WEB, CHAT_PENDING_PREFIX),
+                candidates=untitled_conversation_workspaces(),
             ),
             JobSpec(
                 name=SEED_JOB_NAME,

@@ -148,9 +148,9 @@ OTHER_CONVERSATION_LIMIT = 25
 SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
 CHAT_STORE_PREFIX = "chat/"
-CHAT_PENDING_PREFIX = "chat_title_pending/"
 TITLE_JOB_NAME = "chat_titles"
 TITLE_JOB_SCHEDULE = "*/15 * * * * *"
+TITLE_BATCH = 5
 HOMEPAGE_SEED_PREFIX = "homepage-seed/"
 SEED_JOB_NAME = "seed_homepages"
 SEED_JOB_SCHEDULE = "0 */5 * * * *"
@@ -463,65 +463,74 @@ class ChatRecord(BaseModel):
     email: str
 
 
-def _message_text(message: Message) -> str:
-    if isinstance(message.content, str):
-        return message.content
-    return "".join(block.text for block in message.content if isinstance(block, TextBlock))
-
-
 def _title_excerpt(messages: tuple[Message, ...]) -> str:
     """The opening exchange the title is written from — the first user and first assistant texts,
-    each bounded, joined. Empty until an assistant message exists: a conversation whose first turn
-    has not answered keeps its first-message title and its pending marker for the next tick."""
+    each bounded, joined. The member's side is their own words out of the fence, so a thread a
+    channel surface opened is named over what the member said rather than over the ambient digest
+    and markup wrapped around it. Empty where no assistant message stands: a transcript whose turns
+    all failed holds nothing a title can be written from, and the conversation keeps the name its
+    opening words gave it."""
     if all(message.role != "assistant" for message in messages):
         return ""
     parts = []
     for role in ("user", "assistant"):
-        text = next(
-            (_message_text(message) for message in messages if message.role == role), ""
-        ).strip()
-        if text:
-            parts.append(text[:TITLE_EXCERPT_CHARS])
+        spoken = next((message for message in messages if message.role == role), None)
+        if spoken is None:
+            continue
+        text = _rendered_text(spoken)
+        said = member_message_text(text).strip() if role == "user" else text
+        if said:
+            parts.append(said[:TITLE_EXCERPT_CHARS])
     return "\n\n".join(parts)
 
 
 async def summarize_chat_titles(ctx: ExtensionContext) -> None:
-    """Retitle each newly opened chat from its opening exchange — the batch job behind the rail's
-    summary titles, naming the conversation over the opening words the turn that opened it named it
-    with. The pending marker written at open is the whole state machine: the job fires only in
-    workspaces holding one, a marker whose conversation has answered is summarized and deleted, and
-    one whose conversation has not yet answered waits for the next tick. The marker is deleted
-    whether or not the model wrote a name, so one conversation costs at most one summary."""
-    pending = await ctx.store.list(CHAT_PENDING_PREFIX)
-    if not pending:
+    """Name each conversation a member spoke in from its opening exchange — the batch job behind
+    the rail's summary titles, naming the conversation over the opening words the turn that opened
+    it named it with. Every surface's conversations, not the portal's alone: a Slack thread and a
+    CLI session are read here the same way a portal chat is, so one rail row is named like the row
+    beside it.
+
+    Core's candidate read is the whole state machine: it answers the conversations a member spoke in
+    and an agent answered that no summary has named yet, newest first, and the write that names one
+    records the summary as run. Every candidate a tick takes is recorded — an exchange the model
+    names nothing usable for, and one whose transcript states no answer at all, keep the name their
+    opening words gave them and are recorded all the same. So one conversation costs one summary,
+    and a backlog drains rather than standing behind a batch of conversations nothing can name.
+
+    The transcripts read are the batch's own, so a conversation reaches its title however long the
+    history in front of it is. One that has not landed yet is read again on the next tick: the run
+    that ends a turn writes the transcript just after it commits the turn, so a candidate taken
+    inside that moment is a conversation whose exchange is coming, not one nothing can name."""
+    awaiting = await ctx.conversations_awaiting_title(TITLE_BATCH)
+    if not awaiting:
         return
     if ctx.corpus is None or ctx.model is None:
         raise RuntimeError("chat titles need trajectory and model access; serve wires both")
-    trajectories = {t.conversation_id: t for t in await ctx.corpus.trajectories()}
-    for key, _ in pending:
-        conversation_id = UUID(key.removeprefix(CHAT_PENDING_PREFIX))
-        if await ctx.store.get(_chat_row_key(conversation_id)) is None:
-            await ctx.store.delete(key)
-            continue
+    trajectories = {t.conversation_id: t for t in await ctx.corpus.conversations(awaiting)}
+    for conversation_id in awaiting:
         trajectory = trajectories.get(conversation_id)
-        excerpt = "" if trajectory is None else _title_excerpt(trajectory.messages)
-        if not excerpt:
+        if trajectory is None:
             continue
-        summary = _chat_title(
-            await ctx.model.complete(
-                ModelRequest(
-                    model=ctx.model.model,
-                    system=TITLE_SYSTEM_PROMPT,
-                    messages=(Message(role="user", content=excerpt),),
-                    max_tokens=TITLE_MAX_TOKENS,
-                    conversation_cache_ttl="5m",
-                    reasoning="off",
-                )
-            ),
-            (),
+        excerpt = _title_excerpt(trajectory.messages)
+        summary = (
+            ""
+            if not excerpt
+            else _chat_title(
+                await ctx.model.complete(
+                    ModelRequest(
+                        model=ctx.model.model,
+                        system=TITLE_SYSTEM_PROMPT,
+                        messages=(Message(role="user", content=excerpt),),
+                        max_tokens=TITLE_MAX_TOKENS,
+                        conversation_cache_ttl="5m",
+                        reasoning="off",
+                    )
+                ),
+                (),
+            )
         )
-        await ctx.retitle_conversation(conversation_id, summary)
-        await ctx.store.delete(key)
+        await ctx.summarized_conversation_title(conversation_id, summary)
 
 
 async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> None:
@@ -618,7 +627,6 @@ async def _open_conversation(
             raise RuntimeError(f"conversation {conversation_id} has no chat row")
         return conversation_id, await _named(ctx, agent_id, member_id, conversation_id)
     await ctx.retitle_conversation(conversation_id, title)
-    await store.put(f"{CHAT_PENDING_PREFIX}{minted}", {})
     return conversation_id, title
 
 
