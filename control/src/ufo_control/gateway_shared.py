@@ -7,6 +7,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 import asyncpg
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
+from ufo.balance import credit, set_reserve
 from ufo.db import workspace_tx
 from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
@@ -68,6 +69,17 @@ def agent_prompt(profile: SignupProfile | None) -> str:
             INTAKE_FIELDS.format(business=_inert(profile.business), goals=_inert(profile.goals)),
         ),
     )
+
+
+# What a workspace founded here starts with, and the headroom a turn needs to begin. Only the entry
+# that creates the workspace grants it: a later member joining an existing one must not fund it, or
+# a workspace that predates the balance would be handed a ceiling — and a gate — by whoever next
+# signed in. The grant is
+# marketing spend priced at our own cost and is stated in no member-visible string; at the rates
+# a turn is billed today it is roughly forty member turns. The reserve is one round, so a
+# nearly-empty workspace never admits a turn that can only spend once and park.
+SIGNUP_GRANT_MICRO_USD = 100_000_000
+SIGNUP_RESERVE_MICRO_USD = 2_000_000
 
 
 def serve_dsn() -> str:
@@ -189,11 +201,14 @@ class SharedWorkspaces:
         member = email.strip().lower()
         with ws(workspace_id):
             async with workspace_tx() as connection:
-                await connection.execute(
-                    insert(tables.workspace)
-                    .values(id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now())
-                    .on_conflict_do_nothing(index_elements=[tables.workspace.c.id])
-                )
+                founded = (
+                    await connection.execute(
+                        insert(tables.workspace)
+                        .values(id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now())
+                        .on_conflict_do_nothing(index_elements=[tables.workspace.c.id])
+                        .returning(tables.workspace.c.id)
+                    )
+                ).one_or_none() is not None
                 await connection.execute(
                     sa.select(tables.workspace.c.id)
                     .where(tables.workspace.c.id == workspace_id)
@@ -231,6 +246,14 @@ class SharedWorkspaces:
                         index_elements=[tables.agent.c.workspace_id, tables.agent.c.name]
                     )
                 )
+                if founded and await credit(
+                    connection,
+                    workspace_id,
+                    SIGNUP_GRANT_MICRO_USD,
+                    0,
+                    f"signup/{workspace_id}",
+                ):
+                    await set_reserve(connection, workspace_id, SIGNUP_RESERVE_MICRO_USD)
                 admin = (
                     await connection.execute(
                         sa.select(tables.member.c.is_admin).where(tables.member.c.id == member_id)

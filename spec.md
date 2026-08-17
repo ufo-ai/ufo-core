@@ -748,6 +748,11 @@ A workspace with no balance row is unaffected, which is the self-host case. Ther
 turn that overshoots lands a negative balance the next credit absorbs, because failing the write
 instead would lose the record of money already spent.
 
+A new hosted workspace is granted a starting balance once, keyed on the workspace itself, so every
+later entry — a second address on the domain, the founder returning — finds the grant already
+delivered. A self-host workspace is granted nothing and is therefore never gated on a balance it was
+not meant to hold.
+
 A turn the workspace's own provider key will serve is admitted below the reserve, because its model
 rounds debit nothing: held at that line the balance could never rise to clear it and the refusal
 would be permanent, including against the documented way to keep working without buying credit. The

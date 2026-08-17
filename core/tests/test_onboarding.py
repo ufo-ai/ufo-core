@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
 from ufo import cli
+from ufo.balance import read_balance
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
@@ -291,3 +292,16 @@ def test_cold_start_mints_the_credential_key_for_onboarding(
         assert (tmp_path / ".ufoctl" / "token").read_text()
         second = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert second.exit_code != 0
+
+
+async def test_self_host_init_creates_no_balance(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grant is the hosted path's; `ufoctl init` gives a self-host workspace nothing, so its
+    turns are never gated on a balance it was never meant to hold."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
+    onboarded = await _onboarding(database_url, tmp_path).run()
+    with ws(onboarded.workspace_id):
+        async with workspace_tx() as connection:
+            current = await read_balance(connection, onboarded.workspace_id)
+    assert current is None

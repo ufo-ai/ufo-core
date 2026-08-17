@@ -13,6 +13,7 @@ import pytest
 import sqlalchemy as sa
 from click.testing import CliRunner
 from fake_workos import MAGIC_CODE, FakeVerifier
+from ufo.balance import read_balance
 from ufo.bearer import verify_token
 from ufo.config import DatabaseConfig
 from ufo.db import (
@@ -36,7 +37,11 @@ from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT
 from ufo_control.gateway_email import CONSOLE_EMAIL_MODE, EMAIL_MODE_ENV, WorkEmailPolicy
 from ufo_control.gateway_invite import InviteAccepted, InviteCodes
-from ufo_control.gateway_shared import SharedWorkspaces
+from ufo_control.gateway_shared import (
+    SIGNUP_GRANT_MICRO_USD,
+    SIGNUP_RESERVE_MICRO_USD,
+    SharedWorkspaces,
+)
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.main import main
 from ufo_control.rls import (
@@ -435,6 +440,80 @@ async def _default_agents_in(workspace_id: str) -> list[tuple[str, str, str]]:
                 )
             ).all()
     return [(row.name, row.prompt, row.model) for row in rows]
+
+
+async def _balance_in(workspace_id: str) -> tuple[int, int, int]:
+    with ws(UUID(workspace_id)):
+        async with workspace_tx() as connection:
+            current = await read_balance(connection, UUID(workspace_id))
+            purchases = (
+                await connection.execute(
+                    sa.select(sa.func.count()).select_from(tables.balance_purchase)
+                )
+            ).scalar_one()
+    assert current is not None
+    return current.balance_micro_usd, current.reserve_micro_usd, int(purchases)
+
+
+async def test_shared_create_grants_the_signup_balance(shared_role_env: SharedRoleEnv) -> None:
+    pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
+    try:
+        workspace_id = (
+            await shared.create("balancegrant.io", "founder@balancegrant.io")
+        ).workspace_id
+        assert await _balance_in(workspace_id) == (
+            SIGNUP_GRANT_MICRO_USD,
+            SIGNUP_RESERVE_MICRO_USD,
+            1,
+        )
+    finally:
+        await pool.close()
+
+
+async def test_a_second_join_never_re_grants(shared_role_env: SharedRoleEnv) -> None:
+    """The reference is derived from the workspace, so every later entry through `_ensure` — a
+    second address on the domain, or the founder returning — finds the grant already delivered."""
+    pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
+    try:
+        workspace_id = (await shared.create("topupgrant.io", "founder@topupgrant.io")).workspace_id
+        choice = (await shared.choices("topupgrant.io", "second@topupgrant.io"))[0]
+        await shared.join(choice, "topupgrant.io", "second@topupgrant.io")
+        await shared.create("topupgrant.io", "third@topupgrant.io")
+        assert await _balance_in(workspace_id) == (
+            SIGNUP_GRANT_MICRO_USD,
+            SIGNUP_RESERVE_MICRO_USD,
+            1,
+        )
+    finally:
+        await pool.close()
+
+
+async def test_a_workspace_that_predates_the_balance_is_never_funded_by_a_join(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    """A workspace created before this feature has no balance row, which means unrestricted. The
+    grant must not reach it: `join` routes a member who is not yet seated through `_ensure`, so the
+    next new colleague to sign in would otherwise hand a long-running workspace a starting balance
+    and, with it, a ceiling and a reserve it never had."""
+    pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
+    try:
+        workspace_id = uuid5(NAMESPACE_DNS, "predates.io")
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.workspace).values(
+                        id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                    )
+                )
+        await shared.create("predates.io", "founder@predates.io")
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                assert await read_balance(connection, workspace_id) is None
+    finally:
+        await pool.close()
 
 
 async def test_shared_create_seeds_the_default_agent(shared_role_env: SharedRoleEnv) -> None:

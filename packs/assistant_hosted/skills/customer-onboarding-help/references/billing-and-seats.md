@@ -52,5 +52,7 @@ nothing is gated on how many there are.
 - Do not name the billing providers' internal identifiers, the package alias, or any configuration
   value. See `internal-only.md`.
 - Do not tell a customer to log in to a payment provider's dashboard directly. Give them a link.
-- There is no automatic credit grant on signup. Never promise a customer free credit, and if one
-  believes they were promised some, do not confirm it — say you will check with the team.
+- A new hosted workspace starts with a balance. Never name the size it started with, quote a figure
+  for it, or promise more, and do not offer to read it back — no surface reports it yet. If a
+  customer believes they were promised a particular amount, do not confirm it — say you will check
+  with the team.
