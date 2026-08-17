@@ -60,7 +60,64 @@ class Balance:
     last_purchase_at: datetime | None
 
 
-BALANCE_REFUSAL_MESSAGE = "This workspace is out of credit. Contact the team to add more."
+BALANCE_REFUSAL_MESSAGE = "This workspace is out of credit. An admin can set up automatic refills."
+
+
+@dataclass(frozen=True, slots=True)
+class AutoTopup:
+    """What a workspace refills itself with, and the balance that triggers it. Both are set
+    together or not at all, so there is no half-configured state to reason about at charge time."""
+
+    amount_micro_usd: int
+    threshold_micro_usd: int
+
+
+async def read_auto_topup(connection: AsyncConnection, workspace_id: UUID) -> AutoTopup | None:
+    """This workspace's refill settings, or None where it has none or has not reached the line.
+
+    Answering None for a balance still above its threshold is what keeps the decision here rather
+    than in the extension that holds the card: core owns when a workspace is short, the extension
+    owns how it pays."""
+    row = (
+        await connection.execute(
+            sa.select(
+                tables.workspace_balance.c.balance_micro_usd,
+                tables.workspace_balance.c.auto_topup_micro_usd,
+                tables.workspace_balance.c.auto_topup_threshold_micro_usd,
+            ).where(tables.workspace_balance.c.workspace_id == workspace_id)
+        )
+    ).one_or_none()
+    if row is None or row.auto_topup_micro_usd is None:
+        return None
+    if row.balance_micro_usd > row.auto_topup_threshold_micro_usd:
+        return None
+    return AutoTopup(
+        amount_micro_usd=int(row.auto_topup_micro_usd),
+        threshold_micro_usd=int(row.auto_topup_threshold_micro_usd),
+    )
+
+
+async def set_auto_topup(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    amount_micro_usd: int | None,
+    threshold_micro_usd: int | None,
+) -> bool:
+    """Turn refilling on with both figures, or off with neither, and answer whether a balance row
+    took it. A workspace with no balance has nothing to refill, so it is set against a row that
+    already exists rather than creating one."""
+    if (amount_micro_usd is None) != (threshold_micro_usd is None):
+        raise ValueError("auto top-up needs both an amount and a threshold, or neither")
+    updated = await connection.execute(
+        sa.update(tables.workspace_balance)
+        .where(tables.workspace_balance.c.workspace_id == workspace_id)
+        .values(
+            auto_topup_micro_usd=amount_micro_usd,
+            auto_topup_threshold_micro_usd=threshold_micro_usd,
+            updated_at=sa.func.now(),
+        )
+    )
+    return updated.rowcount == 1
 
 
 @dataclass(frozen=True, slots=True)

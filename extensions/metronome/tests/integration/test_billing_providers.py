@@ -88,14 +88,15 @@ async def test_live_portal_and_payment_method(db: None) -> None:
     assert PORTAL_HOST in str(portal.content[0].text)
 
     with ws(workspace_id):
-        assert not await metronome._has_default_payment_method(
-            config, record.stripe_customer_id, None
-        )
+        assert (
+            await metronome._default_payment_method(config, record.stripe_customer_id, None)
+        ) is None
 
     await _save_a_card(record.stripe_customer_id)
 
     with ws(workspace_id):
-        assert await metronome._has_default_payment_method(config, record.stripe_customer_id, None)
+        saved = await metronome._default_payment_method(config, record.stripe_customer_id, None)
+        assert saved is not None and saved.startswith("pm_")
         assert (await metronome._billing_record(ctx)) == record
 
     token = os.environ[metronome.METRONOME_BEARER_TOKEN_ENV]

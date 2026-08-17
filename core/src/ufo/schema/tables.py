@@ -374,6 +374,8 @@ workspace_balance = sa.Table(
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
     sa.Column("balance_micro_usd", sa.BigInteger, nullable=False),
     sa.Column("reserve_micro_usd", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("auto_topup_micro_usd", sa.BigInteger, nullable=True),
+    sa.Column("auto_topup_threshold_micro_usd", sa.BigInteger, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )

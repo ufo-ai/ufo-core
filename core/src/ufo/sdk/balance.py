@@ -5,11 +5,20 @@ credits it when a payment settles — the rules stay core's, the extension decid
 surface lives in named modules like this one."""
 
 from ufo.balance import (
+    AutoTopup as AutoTopup,
+)
+from ufo.balance import (
     Balance as Balance,
 )
 from ufo.balance import (
     credit as credit,
 )
 from ufo.balance import (
+    read_auto_topup as read_auto_topup,
+)
+from ufo.balance import (
     read_balance as read_balance,
+)
+from ufo.balance import (
+    set_auto_topup as set_auto_topup,
 )

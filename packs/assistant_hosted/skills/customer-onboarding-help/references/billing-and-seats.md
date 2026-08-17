@@ -29,7 +29,12 @@ is the whole customer-facing action. There is no form to fill in inside UFO and 
 to change.
 
 - Saving or changing a card, invoices, billing details: return a fresh portal link.
-- Adding credit: saving a card does not add any. Say you will pass the request to the team.
+- Adding credit: an admin can arrange automatic refills from the card on file, naming how much to
+  add and the balance to refill below. Saving a card alone adds nothing — the refill has to be
+  arranged, and it can only be arranged once a card is saved, because it runs with nobody present.
+  A one-off top-up is not something they can do; say you will pass that to the team.
+- If refills stop after a card is refused, the card is the thing to fix — arranging the refill
+  again is what restarts it.
 - Checking state: read the status, which reports whether a card is on file and how much balance is
   left.
 

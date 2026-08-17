@@ -60,7 +60,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.accounting import UsageExport, metered_workspaces
-from ufo.sdk.balance import read_balance
+from ufo.sdk.balance import AutoTopup, credit, read_auto_topup, read_balance, set_auto_topup
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
@@ -74,6 +74,19 @@ JOB_NAME = "usage_shipper"
 JOB_SCHEDULE = "0 * * * * *"
 SEAT_JOB_NAME = "seat_shipper"
 SEAT_JOB_SCHEDULE = "0 0 * * * *"
+MICRO_USD_PER_USD = 1_000_000
+TOPUP_REFUSED_AT_KEY = "topup_refused_at"
+TOPUP_ATTEMPT_KEY = "topup_attempt"
+# An off-session decline is a standing answer — an expired card, a spent limit, a block — and none
+# of that changes because five minutes passed, so a second attempt on the tick buys nothing and
+# spends another authorization against a card the issuer is already refusing, which is what card
+# networks penalise. The refill waits a day and asks again. It never stops asking: a workspace
+# short enough to need a refill is one the balance gate is about to refuse every turn of, including
+# the turn that would arrange autopay again, so a stand-down only a member act could clear would
+# strand the workspace with no way back.
+TOPUP_RETRY_AFTER = timedelta(days=1)
+TOPUP_JOB_NAME = "balance_topup"
+TOPUP_JOB_SCHEDULE = "0 */5 * * * *"
 METRONOME_API = "https://api.metronome.com"
 INGEST_URL = f"{METRONOME_API}/v1/ingest"
 METRONOME_BEARER_TOKEN_ENV = "METRONOME_BEARER_TOKEN"
@@ -96,9 +109,11 @@ PAYMENT_METHOD_UPDATE_FLOW = "payment_method_update"
 MANAGE_BILLING_TOOL = "manage_billing"
 
 MANAGE_BILLING_DESCRIPTION = (
-    "Read the workspace's billing. Admin-only. 'status' reports whether a card is on file and how "
-    "much balance is left; 'portal' returns a short-lived Stripe link for saving a payment method "
-    "and for invoices and billing details."
+    "Read and arrange the workspace's billing. Admin-only. 'status' reports whether a card is on "
+    "file and how much balance is left; 'portal' returns a short-lived Stripe link for saving a "
+    "payment method and for invoices and billing details; 'autopay' sets automatic refills from "
+    "the card already on file, taking the amount to add and the balance to refill below, and "
+    "stops them when both are omitted."
 )
 
 BILLING_SECTION_NAME = "billing"
@@ -117,7 +132,10 @@ BILLING_SECTION_BODY = (
     "returned portal_url as a link to open. There is no plan to sell and none to activate, so "
     "never offer one or say one is pending. If an admin says they are already on a plan, do not "
     "contradict them — nothing here can see a billing arrangement made before this, so say you "
-    "will check with the team. If they ask to add credit, say you will pass that to the team."
+    "will check with the team. An admin can arrange automatic refills from the card on file: call "
+    "action 'autopay' with the amount to add and the balance to refill below, both in whole "
+    "dollars, and omit both to stop. A card has to be saved first, because the refill runs with "
+    "nobody present. If they ask to add credit as a one-off, say you will pass that to the team."
 )
 
 INGEST_TRANSPORT: httpx.AsyncBaseTransport | None = None
@@ -133,6 +151,10 @@ class MetronomeError(RuntimeError):
 class StripeError(RuntimeError):
     """Stripe answered a non-2xx status — surfaced with status and body. Nothing is recorded for a
     failed call, so the admin's next attempt or the next job tick starts from the same state."""
+
+    def __init__(self, message: str, status: int = 0) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -153,6 +175,12 @@ class UsageShipper:
     transport: httpx.AsyncBaseTransport | None = None
 
     async def run(self) -> None:
+        """The token is read before the export seam is touched, and that order is load-bearing:
+        `pending_usage_exports` mints and commits the delta intents it returns. Reading the seam
+        first would have an unkeyed deploy mint intents on every tick against a floor that rolls
+        forward with the clock, and a later key would then find months of them pending, since a
+        pending read filters on acknowledgement and never on the floor. So an unkeyed deploy that
+        meters usage fails this job loudly, which is what a missing setting deserves."""
         token = _require_env(METRONOME_BEARER_TOKEN_ENV)
         floor = await self._floor()
         reconciled = False
@@ -247,10 +275,13 @@ class SeatShipper:
     transport: httpx.AsyncBaseTransport | None = None
 
     async def run(self) -> None:
-        token = _require_env(METRONOME_BEARER_TOKEN_ENV)
+        """The token is read only once the day's snapshot is actually due, so a deploy that meters
+        usage without selling a plan fails one tick a day rather than one an hour. The usage job
+        cannot do the same: its work check is the export seam, and that seam mints."""
         today = datetime.now(UTC).date().isoformat()
         if await self.ctx.store.get(SEAT_SHIPPED_KEY) == today:
             return
+        token = _require_env(METRONOME_BEARER_TOKEN_ENV)
         workspace_id = self.ctx.store.workspace_id
         async with self.ctx.transaction() as connection:
             snapshot = await Seats(workspace_id).snapshot(connection)
@@ -329,11 +360,21 @@ async def _billing_record(ctx: ExtensionContext) -> BillingRecord | None:
 
 
 class ManageBillingInput(BaseModel):
-    action: Literal["status", "portal"] = Field(
+    action: Literal["status", "portal", "autopay"] = Field(
         description=(
             "status: report the card on file and the workspace's remaining balance. portal: return "
-            "a link for saving a payment method, and for invoices and billing details."
+            "a link for saving a payment method, and for invoices and billing details. autopay: "
+            "set or stop automatic refills from the card already on file."
         )
+    )
+    autopay_dollars: int | None = Field(
+        default=None,
+        description="For autopay: how much to add each time, in whole US dollars. Omit along with "
+        "autopay_below_dollars to stop refilling.",
+    )
+    autopay_below_dollars: int | None = Field(
+        default=None,
+        description="For autopay: refill once the balance falls to this many US dollars.",
     )
     user_description: str = Field(
         description="What you are doing with their billing, in plain language for the activity "
@@ -349,6 +390,42 @@ async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResu
             return await _billing_status(ext, config)
         case "portal":
             return await _billing_portal(ext, config)
+        case "autopay":
+            return await _billing_autopay(ext, config, args)
+
+
+async def _billing_autopay(
+    ext: ExtensionContext, config: BillingConfig, args: ManageBillingInput
+) -> ToolResult:
+    """Arrange or stop automatic refills. Both figures are given together or neither is, and a
+    workspace with no card cannot arrange one — the refill runs with nobody present, so the card
+    has to be there before it is promised rather than at the moment it is needed."""
+    if (args.autopay_dollars is None) != (args.autopay_below_dollars is None):
+        raise ValueError("autopay needs both an amount and a balance to refill below, or neither")
+    dollars, below_dollars = args.autopay_dollars, args.autopay_below_dollars
+    if dollars is None or below_dollars is None:
+        amount, below = None, None
+    else:
+        record = await _billing_record(ext)
+        if record is None or (
+            await _default_payment_method(config, record.stripe_customer_id, BILLING_TRANSPORT)
+            is None
+        ):
+            raise ValueError("save a payment method before arranging automatic refills")
+        amount, below = dollars * MICRO_USD_PER_USD, below_dollars * MICRO_USD_PER_USD
+    async with ext.transaction() as connection:
+        if not await set_auto_topup(connection, ext.store.workspace_id, amount, below):
+            raise ValueError("this workspace has no balance to refill")
+    marked = await ext.store.get(TOPUP_ATTEMPT_KEY)
+    await ext.store.delete(TOPUP_REFUSED_AT_KEY)
+    await ext.store.put(TOPUP_ATTEMPT_KEY, str((int(marked) if isinstance(marked, str) else 0) + 1))
+    log(
+        "metronome.autopay_set",
+        workspace_id=str(ext.store.workspace_id),
+        micro_usd=amount,
+        below_micro_usd=below,
+    )
+    return _text_result({"autopay_micro_usd": amount, "autopay_below_micro_usd": below})
 
 
 async def _admin_billing(ctx: ToolContext) -> ExtensionContext:
@@ -372,8 +449,9 @@ async def _billing_status(ext: ExtensionContext, config: BillingConfig) -> ToolR
     async with ext.transaction() as connection:
         balance = await read_balance(connection, ext.store.workspace_id)
     record = await _billing_record(ext)
-    paid = record is not None and await _has_default_payment_method(
-        config, record.stripe_customer_id, BILLING_TRANSPORT
+    paid = record is not None and (
+        await _default_payment_method(config, record.stripe_customer_id, BILLING_TRANSPORT)
+        is not None
     )
     return _text_result(
         {
@@ -464,17 +542,19 @@ async def _portal_session(
     return _as_str(session.get("url"), "stripe portal url")
 
 
-async def _has_default_payment_method(
+async def _default_payment_method(
     config: BillingConfig, customer_id: str, transport: httpx.AsyncBaseTransport | None
-) -> bool:
-    """Whether Stripe holds a default payment method for the customer — the one gate on activation.
-    The portal's payment-method-update flow sets exactly this field, so it is the provider's own
-    answer to 'has the workspace paid', never a flag of ours."""
+) -> str | None:
+    """The customer's default payment method, or None. The portal's payment-method-update flow sets
+    exactly this field, so it is the provider's own answer to 'has the workspace paid', never a flag
+    of ours — and a charge has to name it: a PaymentIntent confirm reads `payment_method` from the
+    request and never the customer's invoice default, so a charge that omits it has no card to
+    take."""
     customer = await _stripe(config, "GET", f"/customers/{customer_id}", transport)
     match customer.get("invoice_settings"):
-        case {"default_payment_method": str()}:
-            return True
-    return False
+        case {"default_payment_method": str() as method}:
+            return method
+    return None
 
 
 async def _stripe(
@@ -494,7 +574,10 @@ async def _stripe(
     async with httpx.AsyncClient(timeout=BILLING_TIMEOUT_SECONDS, transport=transport) as http:
         response = await http.request(method, f"{STRIPE_API}{path}", data=data, headers=headers)
     if not response.is_success:
-        raise StripeError(f"stripe {path} failed ({response.status_code}): {response.text}")
+        raise StripeError(
+            f"stripe {path} failed ({response.status_code}): {response.text}",
+            response.status_code,
+        )
     return response.json()
 
 
@@ -607,6 +690,151 @@ async def _customer_by_alias(
     return None
 
 
+@dataclass(frozen=True)
+class BalanceTopup:
+    """Refill one workspace's balance from the card it saved.
+
+    Core decides the workspace is short; this decides how it pays. The charge is off-session
+    because no member is present when a balance runs down, which is the whole point of arranging it
+    in advance.
+
+    The credit is keyed on the payment intent, so a redelivered tick that finds the charge already
+    made credits nothing a second time — the money moved once and the balance records it once. The
+    charge itself carries the same key as its idempotency header, so Stripe collapses a retry of a
+    request that never returned rather than taking the money twice."""
+
+    ctx: ExtensionContext
+    transport: httpx.AsyncBaseTransport | None = None
+
+    async def run(self) -> None:
+        """Refill once the balance is short, and slow down against a card that has said no.
+
+        The tick is every few minutes, so an issuer's refusal repeated on that schedule is an
+        unbounded retry against something that already answered — it earns nothing and costs
+        standing with the card network. A refusal holds the next attempt for a day, and arranging
+        autopay again releases it sooner. The wait always lapses: the balance gate refuses the very
+        turn that would re-arrange autopay, so a card that recovers on its own has to be enough."""
+        workspace_id = self.ctx.store.workspace_id
+        async with self.ctx.transaction() as connection:
+            wanted = await read_auto_topup(connection, workspace_id)
+        if wanted is None:
+            return
+        config = BillingConfig.from_env()
+        record = await _billing_record(self.ctx)
+        if record is None:
+            warn("metronome.topup_without_customer", workspace_id=str(workspace_id))
+            return
+        method = await _default_payment_method(config, record.stripe_customer_id, self.transport)
+        if method is None:
+            warn("metronome.topup_without_card", workspace_id=str(workspace_id))
+            return
+        async with self.ctx.transaction() as connection:
+            settled = await read_balance(connection, workspace_id)
+        charged_so_far = 0 if settled is None else settled.charged_micro_usd
+        refused = await self.ctx.store.get(TOPUP_REFUSED_AT_KEY)
+        marked = await self.ctx.store.get(TOPUP_ATTEMPT_KEY)
+        attempt = int(marked) if isinstance(marked, str) else 0
+        if (
+            isinstance(refused, str)
+            and datetime.now(UTC) - datetime.fromisoformat(refused) < TOPUP_RETRY_AFTER
+        ):
+            warn(
+                "metronome.topup_waiting",
+                workspace_id=str(workspace_id),
+                refused_at=refused,
+            )
+            return
+        intent = await self._charge(
+            config,
+            record.stripe_customer_id,
+            method,
+            wanted,
+            workspace_id,
+            f"{charged_so_far}:{attempt}",
+        )
+        if intent is None:
+            await self.ctx.store.put(TOPUP_REFUSED_AT_KEY, datetime.now(UTC).isoformat())
+            await self.ctx.store.put(TOPUP_ATTEMPT_KEY, str(attempt + 1))
+            return
+        await self.ctx.store.delete(TOPUP_REFUSED_AT_KEY)
+        async with self.ctx.transaction() as connection:
+            added = await credit(
+                connection,
+                workspace_id,
+                wanted.amount_micro_usd,
+                wanted.amount_micro_usd,
+                f"stripe/{intent}",
+            )
+        if added:
+            log(
+                "metronome.topped_up",
+                workspace_id=str(workspace_id),
+                micro_usd=wanted.amount_micro_usd,
+                payment_intent=intent,
+            )
+
+    async def _charge(
+        self,
+        config: BillingConfig,
+        customer_id: str,
+        payment_method: str,
+        wanted: AutoTopup,
+        workspace_id: UUID,
+        attempt: str,
+    ) -> str | None:
+        """The payment intent id once the money has actually moved, or None when the card refused.
+
+        A decline is the card's answer, not a fault of ours: it is reported and the balance is left
+        alone. The caller counts it and stands the refill down, so a refused card is asked once and
+        then left alone until an admin arranges the refill again — not re-authorized on every tick
+        for as long as the balance stays short.
+
+        The idempotency key names the attempt: what the workspace has been charged to date, and a
+        counter that only ever moves forward. Stripe holds a key for a day, so both halves are
+        needed. The charged total alone would make the second refill a workspace genuinely needed
+        replay the first intent and credit nothing. The counter advances on a refusal and on an
+        admin arranging the refill again, so the retry after a card is fixed is a new charge rather
+        than a replay of the refusal — while a request that never returned advances nothing, so
+        retrying it repeats rather than charging twice."""
+        cents = wanted.amount_micro_usd // 10_000
+        try:
+            intent = await _stripe(
+                config,
+                "POST",
+                "/payment_intents",
+                self.transport,
+                data={
+                    "amount": str(cents),
+                    "currency": "usd",
+                    "customer": customer_id,
+                    "payment_method": payment_method,
+                    "confirm": "true",
+                    "off_session": "true",
+                    "description": f"ufo balance top-up for workspace {workspace_id}",
+                    "metadata[workspace_id]": str(workspace_id),
+                },
+                idempotency_key=f"ufo-topup:{workspace_id}:{attempt}",
+            )
+        except StripeError as refused:
+            if refused.status != HTTPStatus.PAYMENT_REQUIRED:
+                raise
+            warn("metronome.topup_declined", workspace_id=str(workspace_id), status="402")
+            return None
+        match intent:
+            case {"id": str() as intent_id, "status": "succeeded"}:
+                return intent_id
+        warn(
+            "metronome.topup_declined",
+            workspace_id=str(workspace_id),
+            status=str(intent.get("status")),
+        )
+        return None
+
+
+async def _top_up(ctx: ExtensionContext) -> None:
+    await BalanceTopup(ctx=ctx, transport=BILLING_TRANSPORT).run()
+
+
 async def _ingest(
     token: str, events: list[dict[str, object]], transport: httpx.AsyncBaseTransport | None
 ) -> None:
@@ -634,6 +862,12 @@ def manifest() -> Manifest:
                 schedule=JOB_SCHEDULE,
                 handler=_ship,
                 candidates=metered_workspaces(),
+            ),
+            JobSpec(
+                name=TOPUP_JOB_NAME,
+                schedule=TOPUP_JOB_SCHEDULE,
+                handler=_top_up,
+                candidates=member_workspaces(),
             ),
             JobSpec(
                 name=SEAT_JOB_NAME,

@@ -29,7 +29,7 @@ from ufo.accounting import (
     record_turn_usage,
     record_workspace_usage,
 )
-from ufo.balance import credit
+from ufo.balance import credit, debit, read_balance
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialRequests, CredentialStore
@@ -47,6 +47,7 @@ from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import init_workspace_credentials, ws
 
+DOLLAR = 1_000_000
 TOOL_NARRATION = "checking their billing"
 
 TOKEN = "sandbox-bearer-0xdecafbad"
@@ -240,10 +241,13 @@ async def _acked() -> set[tuple[UUID, int]]:
 def test_manifest_declares_two_cron_jobs_one_tool_one_section() -> None:
     declared = metronome.manifest()
     assert declared.name == "metronome"
-    usage, seats = declared.jobs
+    usage, topup, seats = declared.jobs
     assert usage.name == "usage_shipper"
     assert usage.schedule == "0 * * * * *"
     assert usage.handler is metronome._ship
+    assert topup.name == "balance_topup"
+    assert topup.schedule == "0 */5 * * * *"
+    assert topup.handler is metronome._top_up
     assert seats.name == "seat_shipper"
     assert seats.schedule == "0 0 * * * *"
     assert seats.handler is metronome._ship_seats
@@ -903,6 +907,10 @@ class _Providers:
         self.stripe_customers: dict[str, str] = {}
         self.metronome_customers: dict[str, str] = {}
         self.hidden_aliases: set[str] = set()
+        self.intents: list[dict[str, str]] = []
+        self.charges: dict[str, str] = {}
+        self.replayed: dict[str, tuple[int, dict[str, object]]] = {}
+        self.decline = False
         self.failing: set[str] = set()
         self.sessions = 0
 
@@ -933,6 +941,38 @@ class _Providers:
                     "invoice_settings": {"default_payment_method": self.default_payment_method},
                 },
             )
+        if path == "/v1/payment_intents" and request.method == "POST":
+            form = _form(request)
+            self.intents.append(form)
+            # A confirm reads `payment_method` from the request; it never falls back to the
+            # customer's invoice default, so an omitted card has nothing to charge.
+            if form.get("confirm") == "true" and not form.get("payment_method"):
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": "no payment method provided", "type": "card_error"}},
+                )
+            # Stripe collapses a repeat only when the caller supplies the key; without one it
+            # takes the money again, which is what makes the key load-bearing here. A reused key
+            # replays whatever the first answer was, a decline included, so a retry under the same
+            # key can never come back a success.
+            key = request.headers.get("idempotency-key", f"none-{len(self.replayed)}")
+            if key in self.replayed:
+                status, answer = self.replayed[key]
+                return httpx.Response(status, json=answer)
+            if self.decline:
+                # A refused off-session charge is an HTTP 402 carrying card_declined, not a 2xx
+                # with a soft status, so the caller sees an error rather than a returned intent.
+                status, answer = 402, {"error": {"code": "card_declined", "type": "card_error"}}
+            else:
+                status, answer = (
+                    200,
+                    {
+                        "id": self.charges.setdefault(key, f"pi_{len(self.charges) + 1}"),
+                        "status": "succeeded",
+                    },
+                )
+            self.replayed[key] = (status, answer)
+            return httpx.Response(status, json=answer)
         if path == "/v1/billing_portal/sessions" and request.method == "POST":
             self.sessions += 1
             return httpx.Response(
@@ -1036,6 +1076,7 @@ async def _manage_billing(
     speaker: UUID | None,
     disclosure_member_id: UUID | None,
     action: str,
+    **extra: object,
 ) -> dict[str, object]:
     audience = conversation_audience(disclosure_member_id)
     tool, ext = _billing_tool(audience)
@@ -1061,7 +1102,9 @@ async def _manage_billing(
         )
         result = await tool.handler(
             ctx,
-            tool.input_model.model_validate({"user_description": TOOL_NARRATION, "action": action}),
+            tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "action": action} | extra
+            ),
         )
     return json.loads(result.content[0].text)
 
@@ -1425,3 +1468,385 @@ async def test_usage_held_past_the_backdating_window_is_reported(
         )
         await shipper.run()
     assert "metronome.usage_past_backdating_window" in warned
+
+
+async def _balance_of(workspace_id: UUID) -> int:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            current = await read_balance(connection, workspace_id)
+    assert current is not None
+    return current.balance_micro_usd
+
+
+async def _run_topup(workspace_id: UUID, providers: "_Providers") -> None:
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        await metronome.BalanceTopup(ctx=ctx, transport=providers.transport).run()
+
+
+async def test_autopay_refills_the_balance_from_the_card_on_file(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of arranging a refill is that it happens with nobody present, so the charge
+    is off-session against the card already saved. Core decides the workspace is short; this
+    pays."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    arranged = await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=50,
+        autopay_below_dollars=10,
+    )
+    assert arranged["autopay_micro_usd"] == 50 * DOLLAR
+
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 55 * DOLLAR
+    (charge,) = providers.intents
+    assert charge["amount"] == "5000"
+    assert charge["off_session"] == "true"
+    assert charge["customer"].startswith("cus_")
+
+
+async def test_autopay_leaves_a_balance_above_its_line_alone(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trigger is core's, and a workspace still above its line is not short. A tick that
+    charged anyway would bill a card on a schedule rather than on need."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 80 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=50,
+        autopay_below_dollars=10,
+    )
+
+    await _run_topup(workspace_id, providers)
+    assert providers.intents == []
+    assert await _balance_of(workspace_id) == 80 * DOLLAR
+
+
+async def test_a_second_tick_after_a_refill_charges_nothing(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The job ticks every few minutes. Once a refill lands the workspace is no longer short, so
+    the next tick asks core, is told nothing is needed, and never reaches the card — the schedule
+    bills on need, not on its own cadence.
+
+    A redelivery that repeats a charge is a different guard: the intent carries an idempotency key
+    so Stripe collapses it, and the credit is keyed on the intent so the balance records it once."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=50,
+        autopay_below_dollars=10,
+    )
+
+    await _run_topup(workspace_id, providers)
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 55 * DOLLAR
+    assert len(providers.charges) == 1
+
+
+async def test_a_declined_card_leaves_the_balance_alone(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decline is the issuer's answer, not our fault. Crediting anyway would hand out money the
+    workspace never paid, so the balance stays where it was and the workspace stays refused."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=50,
+        autopay_below_dollars=10,
+    )
+    providers.decline = True
+
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 5 * DOLLAR
+
+
+async def test_autopay_refuses_to_promise_a_refill_without_a_card(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refill runs with nobody present, so the card has to be there when it is arranged rather
+    than at the moment it is needed."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    with pytest.raises(ValueError, match="save a payment method"):
+        await _manage_billing(
+            workspace_id,
+            tmp_path,
+            owner_id,
+            None,
+            "autopay",
+            autopay_dollars=50,
+            autopay_below_dollars=10,
+        )
+
+
+async def test_the_seat_job_asks_for_the_token_only_when_a_snapshot_is_due(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deploy that meters usage without selling a plan has no bearer token. Reading it before the
+    day's mark would fail this job every hour instead of once a day, for a tick with nothing to do.
+    The usage job cannot defer the same way, because its work check mints."""
+    monkeypatch.delenv(metronome.METRONOME_BEARER_TOKEN_ENV, raising=False)
+    workspace_id, _agent_id, _conversation_id = await _seed()
+    recorder = _Recorder()
+    shipper = metronome.SeatShipper(
+        ctx=_shipper_context(), transport=httpx.MockTransport(recorder.handle)
+    )
+    with ws(workspace_id):
+        await shipper.ctx.store.put(
+            metronome.SEAT_SHIPPED_KEY, datetime.now(UTC).date().isoformat()
+        )
+        await shipper.run()
+    assert recorder.requests == []
+
+
+async def test_a_second_refill_the_workspace_needs_is_not_replayed(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stripe holds an idempotency key for a day. Keyed on the refill amount, the second refill a
+    workspace genuinely needed would replay the first intent, credit nothing against a reference
+    already spent, and leave it unable to refill again until the key aged out. The key carries what
+    the workspace has been charged to date, which moves with each settled refill."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 25 * DOLLAR
+
+    # spend it back under the line, so a second refill is genuinely due
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await debit(connection, workspace_id, 20 * DOLLAR)
+    await _run_topup(workspace_id, providers)
+
+    assert await _balance_of(workspace_id) == 25 * DOLLAR
+    assert len(providers.charges) == 2
+
+
+async def test_autopay_recovers_once_a_refused_card_is_fixed(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stripe holds a key for a day, so a retry after a decline must not replay it. Arranging the
+    refill again is what restarts a stood-down card, and it advances the key's counter, so the next
+    charge is a new one rather than a replay of the refusal."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+
+    providers.decline = True
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 5 * DOLLAR
+
+    providers.decline = False
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 25 * DOLLAR
+
+
+async def test_a_card_that_keeps_refusing_is_left_alone(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tick is every few minutes, so retrying an issuer's refusal on that schedule is an
+    unbounded run of authorizations against a card that already said no — it earns nothing and is
+    what card networks penalise. The job waits a day, and arranging autopay again releases it
+    sooner, which is also the act that follows fixing the card."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+
+    providers.decline = True
+    for _ in range(6):
+        await _run_topup(workspace_id, providers)
+    assert len(providers.intents) == 1
+
+    # the admin fixes the card and arranges the refill again
+    providers.decline = False
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 25 * DOLLAR
+
+
+async def _backdate_refusal(workspace_id: UUID, days: float) -> None:
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        stamped = await ctx.store.get(metronome.TOPUP_REFUSED_AT_KEY)
+        assert isinstance(stamped, str)
+        await ctx.store.put(
+            metronome.TOPUP_REFUSED_AT_KEY,
+            (datetime.fromisoformat(stamped) - timedelta(days=days)).isoformat(),
+        )
+
+
+async def test_a_refused_refill_asks_again_once_the_wait_is_up(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workspace short enough to need a refill is one the balance gate is about to refuse every
+    turn of, including the turn that would arrange autopay again. A stand-down that only a member
+    act could clear would strand the workspace with no way back, so the wait lapses on its own and
+    the next attempt carries a key Stripe has not already answered."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+
+    providers.decline = True
+    await _run_topup(workspace_id, providers)
+    await _run_topup(workspace_id, providers)
+    assert len(providers.intents) == 1
+
+    await _backdate_refusal(workspace_id, days=1)
+    providers.decline = False
+    await _run_topup(workspace_id, providers)
+
+    assert await _balance_of(workspace_id) == 25 * DOLLAR
+    keys = [r.headers["idempotency-key"] for r in _calls(providers, "POST", "/v1/payment_intents")]
+    assert len(keys) == len(set(keys)) == 2
+
+
+def test_the_billing_tool_names_every_action_it_accepts() -> None:
+    """The description is what the model reads before choosing the tool, and the prompt section is
+    what it reads on every turn. An action missing from either is an action the agent never calls,
+    however well the code behind it works — the admin is told the thing cannot be done."""
+    (tool,) = metronome.manifest().tools
+    for action in ("status", "portal", "autopay"):
+        assert action in tool.description, action
+        assert action in metronome.BILLING_SECTION_BODY, action
