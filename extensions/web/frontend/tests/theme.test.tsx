@@ -411,7 +411,7 @@ test("both notice tones keep the chrome type size", () => {
   }
 });
 
-test("the wordmark is the drawn ufo mark in the top bar", async () => {
+test("the wordmark is the drawn ufo mark in the sidebar", async () => {
   wire({});
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 

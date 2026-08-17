@@ -68,19 +68,6 @@ export function DropdownMenuContent({
   );
 }
 
-export function DropdownMenuItem({
-  className,
-  ...props
-}: ComponentProps<typeof DropdownMenuPrimitive.Item>) {
-  return (
-    <DropdownMenuPrimitive.Item
-      data-slot="dropdown-menu-item"
-      className={cn(ITEM, className)}
-      {...props}
-    />
-  );
-}
-
 export function DropdownMenuSubTrigger({
   className,
   children,

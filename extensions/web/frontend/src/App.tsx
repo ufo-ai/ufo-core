@@ -1,5 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconAdjustments, IconBrandSlack, IconEdit, IconTerminal2 } from "@tabler/icons-react";
+import {
+  IconAdjustments,
+  IconBrandSlack,
+  IconDeviceDesktop,
+  IconEdit,
+  IconFolder,
+  IconLayoutSidebarRight,
+  IconMoon,
+  IconRadar,
+  IconSettings,
+  IconSparkles,
+  IconSun,
+  IconTerminal2,
+  IconUsers,
+} from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
@@ -32,7 +46,6 @@ import { SCHEME_OPTIONS, heldScheme, holdScheme, type Scheme } from "@/lib/schem
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSub,
@@ -97,6 +110,11 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   const [reloads, setReloads] = useState(0);
   const [sought, setSought] = useState<Readonly<Record<string, Sought>>>({});
   const [linked, setLinked] = useState<Record<string, OwnedConversation>>({});
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebar") === "collapsed");
+  const setSidebarCollapsed = useCallback((next: boolean) => {
+    setCollapsed(next);
+    localStorage.setItem("sidebar", next ? "collapsed" : "expanded");
+  }, []);
   const [railSort, setRailSort] = useState<RailSort>(() =>
     localStorage.getItem("rail-sort") === "agent" ? "agent" : "recency",
   );
@@ -141,8 +159,6 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
     if (location.hash !== hash) location.hash = hash;
     setRoute(next);
   }, []);
-
-  const openHome = useCallback(() => go("#/", { kind: "home" }), [go]);
 
   const openChat = useCallback(
     (conversationId: string) => go(chatHash(conversationId), { kind: "chat", conversationId }),
@@ -294,255 +310,137 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   return (
     <Viewer.Provider value={member.email}>
       <MainAgentProvider agents={agents}>
-        <TooltipProvider>
-          <div className="grid h-dvh grid-rows-[auto_1fr]">
-            <TopBar
-              route={route}
-              member={member}
-              onHome={openHome}
-              onAgents={openAgents}
-              onSection={(section) => placeSection(section, {}, "push")}
-              onWorkspace={() => placeWorkspace("team", {}, "push")}
-              onAdmin={openAdmin}
-            />
-            <div
-              className={cn(
-                "grid min-h-0",
-                inChat(route.kind) &&
-                  "grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
-              )}
-            >
-              {inChat(route.kind) ? (
-                <ChatSidebar
-                  agents={agents}
-                  mainAgent={mainAgent}
-                  rail={rail}
-                  route={route}
-                  sort={railSort}
-                  onSort={setRailSortHeld}
-                  onNewChat={openNewChat}
-                  onOpen={openChat}
-                  onRetry={() => setReloads((count) => count + 1)}
+        <div className={cn("grid h-dvh max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]", collapsed ? "grid-cols-[var(--container-rail)_1fr]" : "grid-cols-[var(--container-sidebar)_1fr]")}>
+          <TooltipProvider>
+          <nav
+            aria-label="Workspace"
+            className="flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0">
+            <div className={cn("flex h-(--size-row) items-center justify-between pl-2xl pr-md max-narrow:h-auto max-narrow:px-lg max-narrow:py-md", collapsed && "justify-center px-sm max-narrow:justify-between max-narrow:px-lg")}>
+              <span
+                role="img"
+                aria-label="ufo"
+                className={cn(
+                  "h-(--size-wordmark) w-(--size-logo) bg-current",
+                  collapsed && "hidden max-narrow:block",
+                )}
+                style={{ mask: `url(${logo}) center / contain no-repeat` }}
+              />
+              <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
+                <SidebarToggle
+                  label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                  onClick={() => setSidebarCollapsed(!collapsed)}
                 />
-              ) : null}
-              <RoutedPane
-                route={route}
-                agents={agents}
-                subagents={subagents}
-                member={member}
-                newAgent={newAgent}
-                mainAgent={mainAgent}
+              </SidebarTooltip>
+            </div>
+            <ul className="m-0 flex list-none flex-col gap-px px-sm py-0 max-narrow:flex-row max-narrow:items-center max-narrow:overflow-x-auto max-narrow:p-0">
+              <li>
+                <NewChat agents={agents} mainAgent={mainAgent} collapsed={collapsed} onExpand={() => setSidebarCollapsed(false)} onNewChat={openNewChat} />
+              </li>
+              <li>
+                <NavRow
+                  icon={<AgentsGlyph />}
+                  current={route.kind === "agents" || route.kind === "agent"}
+                  collapsed={collapsed}
+                  label="Agents"
+                  onClick={openAgents}
+                >
+                  Agents
+                </NavRow>
+              </li>
+              {SECTIONS.map((section) => (
+                <li key={section}>
+                  <NavRow
+                    icon={SECTION_GLYPHS[section]}
+                    current={route.kind === "section" && route.section === section}
+                    collapsed={collapsed}
+                    label={SECTION_VIEWS[section].label}
+                    onClick={() => placeSection(section, {}, "push")}
+                  >
+                    {SECTION_VIEWS[section].label}
+                  </NavRow>
+                </li>
+              ))}
+            </ul>
+            <div className={cn("flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0", collapsed && "hidden max-narrow:flex")}>
+              <RailList
                 rail={rail}
-                onAgents={onAgents}
-                onCreated={created}
-                onActivity={activity}
-                onOpenAgent={openAgent}
-                onOpenSlot={openSlot}
-                onAgentsIndex={openAgents}
-                onPlaceWorkspace={placeWorkspace}
-                onPlaceSection={placeSection}
-                onPlaceAgent={placeAgent}
-                sought={sought}
-                linked={linked}
+                route={route}
+                mainAgent={mainAgent}
+                sort={railSort}
+                onSort={setRailSortHeld}
+                onOpen={openChat}
+                onRetry={() => setReloads((count) => count + 1)}
               />
             </div>
-            <Toast state={toast} onDone={() => setToast(SILENT)} />
-          </div>
-        </TooltipProvider>
+            <ul className="m-0 mt-auto flex list-none flex-col gap-px px-sm py-0 max-narrow:mt-0 max-narrow:ml-auto max-narrow:flex-row max-narrow:items-center max-narrow:p-0">
+              <li>
+                <NavRow
+                  icon={<WorkspaceGlyph />}
+                  current={route.kind === "workspace"}
+                  collapsed={collapsed}
+                  label="Workspace"
+                  onClick={() => placeWorkspace("team", {}, "push")}
+                >
+                  Workspace
+                </NavRow>
+              </li>
+            </ul>
+            <footer className={cn("flex items-center gap-sm px-2xl max-narrow:px-lg max-narrow:py-md", collapsed && "justify-center px-sm max-narrow:px-lg")}>
+              <SidebarTooltip collapsed={collapsed} label={member.email}>
+                <span
+                  aria-hidden="true"
+                  className="flex size-(--size-avatar) shrink-0 items-center justify-center rounded-full bg-fill text-small max-narrow:hidden"
+                >
+                  {member.email.slice(0, 1).toUpperCase()}
+                </span>
+              </SidebarTooltip>
+              <span className={cn("flex min-w-0 flex-1 flex-col max-narrow:hidden", collapsed && "hidden")}>
+                <span className="truncate text-label">{member.email}</span>
+                <span className="text-small text-ink-soft">
+                  {member.admin ? "Admin" : "Member"}
+                </span>
+              </span>
+              <SchemePick collapsed={collapsed} />
+              {member.admin ? (
+                <button
+                  type="button"
+                  aria-label="Administration"
+                  onClick={openAdmin}
+                  className={cn(
+                    "rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
+                    collapsed && "hidden max-narrow:block",
+                  )}
+                >
+                  <SettingsGlyph />
+                </button>
+              ) : null}
+            </footer>
+          </nav>
+          </TooltipProvider>
+          <RoutedPane
+            route={route}
+            agents={agents}
+            subagents={subagents}
+            member={member}
+            newAgent={newAgent}
+            mainAgent={mainAgent}
+            rail={rail}
+            onAgents={onAgents}
+            onCreated={created}
+            onActivity={activity}
+            onOpenAgent={openAgent}
+            onOpenSlot={openSlot}
+            onAgentsIndex={openAgents}
+            onPlaceWorkspace={placeWorkspace}
+            onPlaceSection={placeSection}
+            onPlaceAgent={placeAgent}
+            sought={sought}
+            linked={linked}
+          />
+          <Toast state={toast} onDone={() => setToast(SILENT)} />
+        </div>
       </MainAgentProvider>
     </Viewer.Provider>
-  );
-}
-
-/** The conversation-slot route lives on an agent hash, but what it reads is a conversation, so the
- *  rail stands beside it and marks its row the way an open chat's is marked. */
-function inChat(kind: Route["kind"]): boolean {
-  return kind === "home" || kind === "chat" || kind === "new-chat" || kind === "conversation-slot";
-}
-
-function TopBar({
-  route,
-  member,
-  onHome,
-  onAgents,
-  onSection,
-  onWorkspace,
-  onAdmin,
-}: {
-  route: Route;
-  member: Member;
-  onHome: () => void;
-  onAgents: () => void;
-  onSection: (section: Section) => void;
-  onWorkspace: () => void;
-  onAdmin: () => void;
-}) {
-  return (
-    <header className="flex items-center gap-lg border-b border-edge bg-sidebar px-2xl py-md max-narrow:gap-md max-narrow:px-lg">
-      <span
-        role="img"
-        aria-label="ufo"
-        className="h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current"
-        style={{ mask: `url(${logo}) center / contain no-repeat` }}
-      />
-      <nav aria-label="Primary" className="flex min-w-0 flex-1 items-center">
-        <ul className="m-0 flex min-w-0 flex-1 list-none items-center gap-xs overflow-x-auto p-0">
-          <li>
-            <BarButton current={inChat(route.kind)} onClick={onHome}>
-              Chat
-            </BarButton>
-          </li>
-          <li>
-            <BarButton
-              current={route.kind === "agents" || route.kind === "agent"}
-              onClick={onAgents}
-            >
-              Apps
-            </BarButton>
-          </li>
-          {SECTIONS.map((section) => (
-            <li key={section}>
-              <BarButton
-                current={route.kind === "section" && route.section === section}
-                onClick={() => onSection(section)}
-              >
-                {SECTION_VIEWS[section].label}
-              </BarButton>
-            </li>
-          ))}
-          <li className="ml-auto">
-            <BarButton current={route.kind === "workspace"} onClick={onWorkspace}>
-              Workspace
-            </BarButton>
-          </li>
-        </ul>
-      </nav>
-      <AccountMenu member={member} onAdmin={onAdmin} />
-    </header>
-  );
-}
-
-const BAR_BUTTON =
-  "flex h-(--size-row) items-center whitespace-nowrap rounded-full border-0 bg-transparent px-lg text-label text-inherit hover:bg-fill";
-
-function BarButton({
-  current,
-  onClick,
-  children,
-}: {
-  current: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      aria-current={current}
-      onClick={onClick}
-      className={cn(BAR_BUTTON, current && "bg-fill")}
-    >
-      {children}
-    </button>
-  );
-}
-
-/** The submenu trigger states the palette the member picked, not the one the browser resolved:
- *  `System` is a choice they can read back, and a value that flipped itself at dusk would say they
- *  had picked light. */
-function AccountMenu({ member, onAdmin }: { member: Member; onAdmin: () => void }) {
-  const [scheme, setScheme] = useState<Scheme>(heldScheme);
-  const pick = (next: Scheme) => {
-    holdScheme(next);
-    setScheme(next);
-  };
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label={member.email}
-          className="flex size-(--size-avatar) shrink-0 items-center justify-center rounded-full border-0 bg-fill p-0 text-small text-inherit data-[state=open]:outline data-[state=open]:outline-edge"
-        >
-          {member.email.slice(0, 1).toUpperCase()}
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <div className="flex flex-col p-sm">
-          <span className="truncate text-label">{member.email}</span>
-          <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
-        </div>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger
-            value={SCHEME_OPTIONS.find((option) => option.scheme === scheme)?.label}
-          >
-            Theme
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <DropdownMenuRadioGroup
-              value={scheme}
-              onValueChange={(value) =>
-                pick(value === "light" || value === "dark" ? value : "system")
-              }
-            >
-              {SCHEME_OPTIONS.map((option) => (
-                <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
-                  {option.label}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        {member.admin ? (
-          <DropdownMenuItem onSelect={onAdmin}>Administration</DropdownMenuItem>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-function ChatSidebar({
-  agents,
-  mainAgent,
-  rail,
-  route,
-  sort,
-  onSort,
-  onNewChat,
-  onOpen,
-  onRetry,
-}: {
-  agents: Agent[];
-  mainAgent: Agent | null;
-  rail: Rail;
-  route: Route;
-  sort: RailSort;
-  onSort: (sort: RailSort) => void;
-  onNewChat: (agentId: string) => void;
-  onOpen: (conversationId: string) => void;
-  onRetry: () => void;
-}) {
-  return (
-    <nav
-      aria-label="Conversations"
-      className="flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0"
-    >
-      <ul className="m-0 flex list-none flex-col gap-px px-sm py-0 max-narrow:flex-row max-narrow:items-center max-narrow:overflow-x-auto max-narrow:p-0">
-        <li>
-          <NewChat agents={agents} mainAgent={mainAgent} onNewChat={onNewChat} />
-        </li>
-      </ul>
-      <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0">
-        <RailList
-          rail={rail}
-          route={route}
-          mainAgent={mainAgent}
-          sort={sort}
-          onSort={onSort}
-          onOpen={onOpen}
-          onRetry={onRetry}
-        />
-      </div>
-    </nav>
   );
 }
 
@@ -816,10 +714,14 @@ function PaneNote({ children }: { children: React.ReactNode }) {
 function NewChat({
   agents,
   mainAgent,
+  collapsed,
+  onExpand,
   onNewChat,
 }: {
   agents: Agent[];
   mainAgent: Agent | null;
+  collapsed: boolean;
+  onExpand: () => void;
   onNewChat: (agentId: string) => void;
 }) {
   const [picking, setPicking] = useState(false);
@@ -843,10 +745,9 @@ function NewChat({
   if (!mainAgent) return null;
   if (agents.length === 1) {
     return (
-      <button type="button" onClick={() => onNewChat(mainAgent.id)} className={NAV_ROW}>
-        <NewChatGlyph />
-        <span className="min-w-0 flex-1 truncate">New chat</span>
-      </button>
+      <NavRow icon={<NewChatGlyph />} current={false} collapsed={collapsed} label="New conversation" onClick={() => onNewChat(mainAgent.id)}>
+        New conversation
+      </NavRow>
     );
   }
   return (
@@ -854,16 +755,22 @@ function NewChat({
       ref={held}
       className="flex flex-col gap-hair max-narrow:flex-row max-narrow:items-center"
     >
-      <button
-        type="button"
-        aria-expanded={picking}
-        aria-controls={PICKER_ID}
-        onClick={() => setPicking((open) => !open)}
-        className={cn(NAV_ROW, picking && "bg-fill")}
-      >
-        <NewChatGlyph />
-        <span className="min-w-0 flex-1 truncate">New chat</span>
-      </button>
+      <SidebarTooltip collapsed={collapsed} label="New conversation">
+        <button
+          type="button"
+          aria-expanded={picking}
+          aria-controls={PICKER_ID}
+          onClick={() => {
+            if (collapsed) onExpand();
+            setPicking((open) => (collapsed ? true : !open));
+          }}
+          aria-label="New conversation"
+          className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0 max-narrow:justify-start max-narrow:gap-sm max-narrow:px-sm", picking && "bg-fill")}
+        >
+          <NewChatGlyph />
+          <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden max-narrow:inline")}>New conversation</span>
+        </button>
+      </SidebarTooltip>
       {picking ? (
         <ul id={PICKER_ID} className="m-0 flex list-none flex-col gap-hair p-0 max-narrow:flex-row">
           {agents.map((agent) => (
@@ -989,6 +896,97 @@ function RailList({
 const NAV_ROW =
   "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill max-narrow:w-auto max-narrow:whitespace-nowrap";
 
+function SidebarTooltip({ collapsed, label, children }: { collapsed: boolean; label: string; children: React.ReactElement }) {
+  if (!collapsed) return children;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function SidebarToggle({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button type="button" aria-label={label} onClick={onClick} className="rounded-control border-0 bg-transparent p-xs text-ink-soft hover:bg-fill max-narrow:hidden">
+      <IconLayoutSidebarRight className="size-(--size-glyph)" aria-hidden />
+    </button>
+  );
+}
+
+/** The glyph states the palette the member picked, not the one the browser resolved: `System` is a
+ *  choice they can read back, and a sun that flips itself at dusk would say they had picked light. */
+function SchemeGlyph({ scheme }: { scheme: Scheme }) {
+  if (scheme === "light") return <IconSun className="size-(--size-glyph)" aria-hidden />;
+  if (scheme === "dark") return <IconMoon className="size-(--size-glyph)" aria-hidden />;
+  return <IconDeviceDesktop className="size-(--size-glyph)" aria-hidden />;
+}
+
+function SchemePick({ collapsed }: { collapsed: boolean }) {
+  const [scheme, setScheme] = useState<Scheme>(heldScheme);
+  const pick = (next: Scheme) => {
+    holdScheme(next);
+    setScheme(next);
+  };
+  return (
+    <DropdownMenu>
+      <SidebarTooltip collapsed={collapsed} label="Theme">
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Theme"
+            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill data-[state=open]:bg-fill"
+          >
+            <SchemeGlyph scheme={scheme} />
+          </button>
+        </DropdownMenuTrigger>
+      </SidebarTooltip>
+      <DropdownMenuContent align="end">
+        <DropdownMenuRadioGroup
+          value={scheme}
+          onValueChange={(value) => pick(value === "light" || value === "dark" ? value : "system")}
+        >
+          {SCHEME_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function NavRow({
+  icon,
+  current,
+  collapsed = false,
+  label,
+  onClick,
+  children,
+}: {
+  icon: React.ReactNode;
+  current: boolean;
+  collapsed?: boolean;
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  const button = (
+    <button
+      type="button"
+      aria-label={collapsed ? label : undefined}
+      aria-current={current}
+      onClick={onClick}
+      className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0 max-narrow:justify-start max-narrow:gap-sm max-narrow:px-sm", current && "bg-fill")}
+    >
+      {icon}
+      <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden max-narrow:inline")}>{children}</span>
+    </button>
+  );
+  return <SidebarTooltip collapsed={collapsed} label={label}>{button}</SidebarTooltip>;
+}
+
 /** A fact the group above cannot state — the agent holding the conversation, the surface it came
  *  in on, whoever else spoke — is read on the way to a decision, not scanned. As a second line it
  *  doubles every row in the rail to serve the few that carry one, so it is held at the pointer and
@@ -1090,3 +1088,13 @@ function SurfaceMark({ conversation }: { conversation: OwnedConversation }) {
 }
 
 const NewChatGlyph = () => <IconEdit className="size-(--size-glyph) shrink-0" aria-hidden />;
+const AgentsGlyph = () => <IconSparkles className="size-(--size-glyph) shrink-0" aria-hidden />;
+const RadarGlyph = () => <IconRadar className="size-(--size-glyph) shrink-0" aria-hidden />;
+const ArtifactsGlyph = () => <IconFolder className="size-(--size-glyph) shrink-0" aria-hidden />;
+const WorkspaceGlyph = () => <IconUsers className="size-(--size-glyph) shrink-0" aria-hidden />;
+const SettingsGlyph = () => <IconSettings className="size-(--size-glyph) shrink-0" aria-hidden />;
+
+const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
+  radar: <RadarGlyph />,
+  artifacts: <ArtifactsGlyph />,
+};
