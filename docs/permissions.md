@@ -244,7 +244,11 @@ flowchart LR
 executes server-side, so brokered auth is auth **by proxy** and derives no injection rule.
 `connect_account` requires a speaking member, and reconnecting an account another member owns is
 refused, never reassigned. The `connector_grant` edge attaches the connection to one agent and
-cascades away with it.
+cascades away with it. A held connection reaches another agent without a new OAuth handoff: the
+**main agent** applies the `connector_grant` kind with an `agent:` target — only on a live
+member-requested call, and only when that speaker owns the connection or it is shared — creating
+just the edge. The portal's Attach connection control is the same act on the target agent's own
+intent lane.
 
 At use time, account resolution admits the **acting member's private attachments plus shared
 connections, preferring private wholesale**; two candidates inside the winning tier is a hard

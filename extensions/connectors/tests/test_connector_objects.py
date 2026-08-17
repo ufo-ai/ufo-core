@@ -24,6 +24,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_tools
 from ufo.grants import (
+    ConnectionPermissionDenied,
     GrantStore,
     account_object_name,
     connection_summaries,
@@ -148,7 +149,10 @@ async def _grant(
 
 
 def _tool_context(
-    workspace_id: UUID, agent_id: UUID, speaker_member_id: UUID | None = None
+    workspace_id: UUID,
+    agent_id: UUID,
+    speaker_member_id: UUID | None = None,
+    conversation_id: UUID | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -159,7 +163,7 @@ def _tool_context(
         turn=Turn(
             id=uuid4(),
             workspace_id=workspace_id,
-            conversation_id=uuid4(),
+            conversation_id=conversation_id or uuid4(),
             agent_id=agent_id,
             seq=1,
             status="running",
@@ -476,6 +480,8 @@ async def test_explain_limits_admins_to_narrowing_or_revoking(db: None) -> None:
     assert "owner or a workspace admin may delete" in connection["guidance"]
     assert "owner may share or make it private" in grant["guidance"]
     assert "admin may only make it private" in grant["guidance"]
+    assert connection["agent_target_verbs"] == []
+    assert grant["agent_target_verbs"] == ["create", "update"]
 
 
 async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None:
@@ -549,6 +555,144 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
         survivors = await workspace_grant_summaries(workspace_id)
         assert [grant.agent for grant in survivors] == ["exec"]
         assert survivors[0].shared is True
+
+
+async def _second_agent(workspace_id: UUID, name: str) -> UUID:
+    second = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second,
+                workspace_id=workspace_id,
+                name=name,
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return second
+
+
+async def _mark_main(agent_id: UUID) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).values(is_main=True).where(tables.agent.c.id == agent_id)
+        )
+
+
+async def test_main_agent_attaches_an_existing_connection_to_another_agent(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _mark_main(agent_id)
+        await _second_agent(workspace_id, "pr-babysitter")
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        result = json.loads(
+            await _text(
+                _object_tool("object_apply"),
+                _tool_context(workspace_id, agent_id, grantor_id, conversation_id),
+                manifest=_share_manifest("alice@example.com", False),
+                agent="pr-babysitter",
+            )
+        )
+        (summary,) = await connection_summaries()
+    assert result == {
+        "kind": CONNECTOR_GRANT_KIND,
+        "name": GMAIL_ALICE_NAME,
+        "result": "created",
+        "agent": "pr-babysitter",
+    }
+    assert summary.agents == ("assistant", "pr-babysitter")
+
+
+async def test_cross_agent_attach_admits_the_owner_or_a_shared_connection_only(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, other_id = await _seed()
+    apply_tool = _object_tool("object_apply")
+    with ws(workspace_id), agent(agent_id):
+        await _mark_main(agent_id)
+        await _second_agent(workspace_id, "pr-babysitter")
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        args = apply_tool.input_model.model_validate(
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _share_manifest("alice@example.com", False),
+                "agent": "pr-babysitter",
+            }
+        )
+        with pytest.raises(ConnectionPermissionDenied, match="cannot attach"):
+            await apply_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
+    edges = await workspace_grant_summaries(workspace_id)
+    assert [edge.agent for edge in edges] == ["assistant"]
+
+
+async def test_main_agent_flips_sharing_through_another_agents_edge(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    with ws(workspace_id):
+        await _mark_main(agent_id)
+        target = await _second_agent(workspace_id, "pr-babysitter")
+        await _grant(
+            workspace_id, target, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+    with ws(workspace_id), agent(agent_id):
+        result = json.loads(
+            await _text(
+                _object_tool("object_apply"),
+                _tool_context(workspace_id, agent_id, grantor_id),
+                manifest=_share_manifest("alice@example.com", True),
+                agent="pr-babysitter",
+            )
+        )
+    assert result["result"] == "updated"
+    assert result["agent"] == "pr-babysitter"
+    (edge,) = await workspace_grant_summaries(workspace_id)
+    assert edge.agent == "pr-babysitter"
+    assert edge.shared is True
+
+
+async def test_cross_agent_reattach_updates_the_one_existing_edge(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _mark_main(agent_id)
+        await _second_agent(workspace_id, "pr-babysitter")
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        ctx = _tool_context(workspace_id, agent_id, grantor_id, conversation_id)
+        for expected in ("created", "updated"):
+            result = json.loads(
+                await _text(
+                    _object_tool("object_apply"),
+                    ctx,
+                    manifest=_share_manifest("alice@example.com", False),
+                    agent="pr-babysitter",
+                )
+            )
+            assert result["result"] == expected
+    edges = await workspace_grant_summaries(workspace_id)
+    assert sorted(edge.agent for edge in edges) == ["assistant", "pr-babysitter"]
+
+
+async def test_only_the_main_agent_attaches_for_another_agent(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    apply_tool = _object_tool("object_apply")
+    with ws(workspace_id), agent(agent_id):
+        await _second_agent(workspace_id, "pr-babysitter")
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        args = apply_tool.input_model.model_validate(
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _share_manifest("alice@example.com", False),
+                "agent": "pr-babysitter",
+            }
+        )
+        with pytest.raises(ValueError, match="only the workspace main agent"):
+            await apply_tool.handler(_tool_context(workspace_id, agent_id, grantor_id), args)
 
 
 async def test_apply_compares_with_the_current_grant_generation(

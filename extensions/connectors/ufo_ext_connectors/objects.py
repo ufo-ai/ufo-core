@@ -314,15 +314,18 @@ CONNECTOR_GRANT_OBJECT = ObjectKind(
         "connection or flips `shared`; delete revokes only this agent's access."
     ),
     guidance=(
-        "Use this kind to manage the current agent's connection access. Apply with a new name "
-        "attaches a connection the workspace already holds; connect_account is the only way to "
-        "create one. Its connection owner may share or make it private; a workspace admin may "
-        "only make it private. Its owner or an admin may delete it, revoking only this agent's "
-        "edge while leaving the connection and other agents' edges intact. Its `scoped_to` link "
-        "names the agent holding the edge; while it is private its `access_to` link names the "
+        "Use this kind to manage an agent's connection access. Apply with a new name attaches a "
+        "connection the workspace already holds; connect_account is the only way to create one. "
+        "The workspace main agent may apply with `agent:` to attach a held connection to another "
+        "agent with no new authorization — the speaker must own the connection or it must be "
+        "shared. Its connection owner may share or make it private; a workspace admin may only "
+        "make it private. Its owner or an admin may delete it, revoking only this agent's edge "
+        "while leaving the connection and other agents' edges intact. Its `scoped_to` link names "
+        "the agent holding the edge; while it is private its `access_to` link names the "
         "connection the edge opens — object_get that for the account's owner and every agent "
         "holding it."
     ),
     spec_model=ConnectorGrantSpec,
     store=ConnectorGrantObjects(),
+    agent_target_verbs=frozenset({"create", "update"}),
 )

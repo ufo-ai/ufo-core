@@ -25,9 +25,10 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 
-from ufo.agent_scope import agent, agent_current
+from ufo.agent_scope import agent
 from ufo.db import workspace_tx
 from ufo.object_name import OBJECT_NAME_MAX_LENGTH
+from ufo.object_scope import object_agent_id
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.workspace import ws, ws_current
@@ -216,7 +217,8 @@ class ConnectState(BaseModel):
 
 @dataclass(frozen=True)
 class GrantStore:
-    """Persists member-owned connections and their per-agent grant edges."""
+    """Persists member-owned connections and their per-agent grant edges. Edges bind to the
+    object-dispatch target agent when a verb names one, else the bound agent."""
 
     @property
     def workspace_id(self) -> UUID:
@@ -224,7 +226,7 @@ class GrantStore:
 
     @property
     def agent_id(self) -> UUID:
-        return agent_current().agent_id
+        return object_agent_id()
 
     async def record(
         self,
@@ -857,11 +859,12 @@ def _slug(raw: str) -> str:
 
 
 async def grant_summaries() -> tuple[GrantSummary, ...]:
-    """The bound agent's connector grants as provider-ordered audit rows."""
+    """One agent's connector grants as provider-ordered audit rows — the object-dispatch target
+    agent when a verb names one, else the bound agent."""
     return await _grant_summaries(
         sa.and_(
             tables.connector_grant.c.workspace_id == ws_current().workspace_id,
-            tables.connector_grant.c.agent_id == agent_current().agent_id,
+            tables.connector_grant.c.agent_id == object_agent_id(),
         )
     )
 
