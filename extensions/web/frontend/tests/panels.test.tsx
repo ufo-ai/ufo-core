@@ -260,20 +260,18 @@ test("the agents index states what a row is, and leaves the address list to its 
     />,
   );
 
-  expect(
-    await screen.findByText("The agent this workspace answers with by default."),
-  ).toBeTruthy();
+  expect(await screen.findByRole("button", { name: MAIN_MARK })).toBeTruthy();
   expect(within(screen.getByRole("main")).queryByText("member@example.com")).toBeNull();
   expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });
 
-test("non-admin agent cards keep their existing copy", () => {
+test("non-admin agent rows keep their marks and no address list", () => {
   location.hash = "#/agents";
   render(
     <App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
 
-  expect(screen.getByText("The agent this workspace answers with by default.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: MAIN_MARK })).toBeTruthy();
   expect(screen.queryByText("Every member")).toBeNull();
   expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });
@@ -537,6 +535,7 @@ test("a private grant is shared with the agent from the connectors tab", async (
             connected_at: "2026-07-01T00:00:00",
             own: true,
             grant: "g1",
+            agents: [],
           },
         ],
       }),
@@ -569,6 +568,7 @@ test("the agent's own tab lists what is shared with it and not what is held priv
             connected_at: "2026-07-01T00:00:00",
             own: true,
             grant: "g1",
+            agents: [],
           },
           {
             provider: "notion",
@@ -578,6 +578,7 @@ test("the agent's own tab lists what is shared with it and not what is held priv
             connected_at: "2026-07-01T00:00:00",
             own: true,
             grant: "g2",
+            agents: [],
           },
         ],
       }),
@@ -1142,9 +1143,14 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
 
 /** The mark a subagent's name carries in the list, which stands in the cell beside the name. */
 const SUBAGENT_MARK = "Subagent";
+/** The same mark on the one agent this workspace answers with by default. */
+const MAIN_MARK = "Main";
 
 test("the agents view lists the deploy's subagents under the agents in one table", async () => {
-  wire({ "/transcript": () => json({ messages: [] }) });
+  wire({
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
   render(
     <App
       agents={[AGENT]}
@@ -1163,16 +1169,13 @@ test("the agents view lists the deploy's subagents under the agents in one table
     ...screen.getByRole("table").querySelectorAll<HTMLTableRowElement>("tbody tr"),
   ];
   expect(rows.map((row) => row.cells[0].textContent)).toEqual([
-    "assistant",
+    "assistant" + MAIN_MARK,
     "deep_research" + SUBAGENT_MARK,
     "general_purpose" + SUBAGENT_MARK,
   ]);
-  expect(rows[0].cells[1].textContent).toBe("The agent this workspace answers with by default.");
-  expect(rows[1].cells[1].textContent).toBe(
-    "Spawned by an agent for one task. A member does not address it.",
-  );
-  expect(rows[2].cells[1].textContent).toBe(
-    "Spawned by an agent for one task, on that agent's model.",
+  expect(screen.queryByText(/Spawned by an agent for one task/)).toBeNull();
+  await waitFor(() =>
+    expect(rows.map((row) => row.cells[1].textContent)).toEqual(["—", "—", "—"]),
   );
   expect(rows.map((row) => row.cells[2].textContent)).toEqual(["opus", "claude-opus-4-8", "—"]);
   expect(rows.every((row) => row.getAttribute("tabindex") === "0")).toBe(true);
@@ -1255,6 +1258,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
             connected_at: "2026-07-01T00:00:00",
             own: true,
             grant: "g1",
+            agents: [],
           },
         ],
       }),
@@ -1336,6 +1340,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
             connected_at: "2026-07-01T00:00:00",
             own: true,
             grant: "g1",
+            agents: [],
           },
         ],
       }),

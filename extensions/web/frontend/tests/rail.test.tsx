@@ -692,7 +692,7 @@ test("the agents index opens the agent's page, and the sidebar starts the conver
   ).toBeNull();
 
   location.hash = "#/agents";
-  await screen.findByText("The agent this workspace answers with by default.");
+  await screen.findByRole("button", { name: "Main" });
   await pressRow("assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 

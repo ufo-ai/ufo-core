@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -51,12 +51,36 @@ const SPEC_SCHEMA = {
 };
 
 const NEW_AGENT = { spec_schema: SPEC_SCHEMA, models: ["claude-opus-4-8", "claude-sonnet-5"] };
+/** One connected account as the pool read carries it, minus the agents it is granted to — which is
+ *  the whole of what the table draws a mark from. */
+const CONNECTION = {
+  account_id: "acct",
+  account_label: "Acme",
+  owner_email: "member@example.com",
+  own: true,
+  shared: true,
+  connected_at: "2026-08-01T09:00:00.000Z",
+};
 const ADMIN = { ...MEMBER, admin: true };
 const RESEARCH = { id: SECOND_ID, name: "research", model: "claude-opus-4-8", main: false };
 const PROMPT = "Answer with sources.";
 
 function boot(agents: unknown[], member: unknown, newAgent: unknown) {
   return json({ member, agents, subagents: [], new_agent: newAgent });
+}
+
+function row(name: string): HTMLElement {
+  const found = screen.getAllByText(name).map((node) => node.closest("tr")).find(Boolean);
+  if (!found) throw new Error("no row named " + name);
+  return found;
+}
+
+/** What one row says it reaches, in the order the marks stand in. Each mark names its provider, so
+ *  the assertion reads the column the way a screen reader does. */
+function marks(name: string): (string | null)[] {
+  return within(row(name))
+    .getAllByRole("img")
+    .map((mark) => mark.getAttribute("aria-label"));
 }
 
 async function openCreate() {
@@ -234,4 +258,55 @@ test("Refresh re-reads the one answer to what agents this member holds", async (
   await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
   expect(await screen.findByText("research")).toBeTruthy();
+});
+
+test("a row draws the connectors that agent reaches, and no prose about agents", async () => {
+  const granted = (id: string, name: string) => [{ id, name }];
+  wire({
+    "/api/agents": () => boot([AGENT, RESEARCH], ADMIN, NEW_AGENT),
+    "/connections": () =>
+      json({
+        connections: [
+          { ...CONNECTION, grant: "g1", provider: "notion", agents: granted(AGENT_ID, "assistant") },
+          { ...CONNECTION, grant: "g2", provider: "github", agents: granted(AGENT_ID, "assistant") },
+          {
+            ...CONNECTION,
+            grant: "g3",
+            provider: "github",
+            account_id: "second",
+            agents: granted(AGENT_ID, "assistant"),
+          },
+          { ...CONNECTION, grant: "g4", provider: "zendesk", agents: granted(SECOND_ID, "research") },
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<Portal />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Agents" }));
+
+  await waitFor(() => expect(marks("assistant")).toEqual(["github", "notion"]));
+  expect(marks("research")).toEqual(["zendesk"]);
+  expect(screen.queryByText(/answers with by default/)).toBeNull();
+  expect(screen.queryByText(/Spawned by an agent for one task/)).toBeNull();
+});
+
+test("the mark a member reads the default agent by stands on its name", async () => {
+  wire({
+    "/api/agents": () => boot([AGENT, RESEARCH], ADMIN, NEW_AGENT),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<Portal />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Agents" }));
+  const mark = within(row("assistant")).getByRole("button", { name: "Main" });
+  expect(within(row("research")).queryByRole("button", { name: "Main" })).toBeNull();
+
+  await userEvent.click(mark);
+
+  expect((await screen.findByRole("tooltip")).textContent).toBe(
+    "The agent this workspace answers with by default.",
+  );
+  expect(location.hash).toBe("#/agents");
 });

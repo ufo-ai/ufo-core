@@ -34,6 +34,7 @@ function grant(provider: string, shared: boolean, name: string) {
     shared,
     connected_at: "2026-07-01T00:00:00",
     grant: name,
+    agents: [],
   };
 }
 

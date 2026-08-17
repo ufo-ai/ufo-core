@@ -1,5 +1,25 @@
 import { useState } from "react";
-import { IconRefresh } from "@tabler/icons-react";
+import {
+  IconBrandAirtable,
+  IconBrandAsana,
+  IconBrandFacebook,
+  IconBrandGithub,
+  IconBrandGmail,
+  IconBrandGoogle,
+  IconBrandGoogleDrive,
+  IconBrandInstagram,
+  IconBrandIntercom,
+  IconBrandJira,
+  IconBrandMonday,
+  IconBrandNotion,
+  IconBrandSentry,
+  IconBrandSlack,
+  IconBrandStripe,
+  IconBrandTeams,
+  IconPlug,
+  IconRefresh,
+  type Icon,
+} from "@tabler/icons-react";
 
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
@@ -11,11 +31,12 @@ import { SpecPanel, type ObjectValue, type SpecEnvelope } from "@/kernel/objects
 import { useBeside } from "@/kernel/beside";
 import { Page, PageHeader, PageToolbar } from "@/kernel/pane";
 import { DataTable } from "@/kernel/table";
-import { outcomeNotice, type NoticeState } from "@/kernel/panel";
+import { outcomeNotice, usePanelRead, type NoticeState } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { AgentGraph } from "@/views/AgentGraph";
+import type { PoolPayload } from "@/views/Connectors";
 import type { Agent, NewAgentForm, Subagent } from "@/lib/types";
 
 export type AgentsProps = {
@@ -29,10 +50,7 @@ export type AgentsProps = {
 
 const AGENT_KIND = "agent";
 const MODEL_FIELD = "model";
-const MAIN = "The agent this workspace answers with by default.";
-const SPAWNED = "Spawned by an agent for one task. A member does not address it.";
-const INHERITS = "Spawned by an agent for one task, on that agent's model.";
-const COLUMNS = ["Name", "Details", { label: "Model", fact: true }];
+const COLUMNS = ["Name", { label: "Connectors", fact: true }, { label: "Model", fact: true }];
 const MANAGE = "Manage";
 /** A subagent with no model of its own runs on the model of the agent that spawned it, so the
  *  column has no id to name and says so rather than standing empty. */
@@ -47,6 +65,43 @@ const FAMILIES = [
 ];
 const SUBAGENT_PILL = "Subagent";
 const SUBAGENT_HINT = "An agent starts one to do a single task and report back.";
+const MAIN_PILL = "Main";
+const MAIN_HINT = "The agent this workspace answers with by default.";
+/** What the column draws while the connections read is in flight, and what it keeps if that read
+ *  is refused: the marks are a second answer beside the rows, so the table states the agents it
+ *  was opened for either way rather than waiting on them. */
+const NO_CONNECTIONS: PoolPayload = { connections: [] };
+/** The mark a provider is drawn as. The connector catalog is open — a provider this deploy connects
+ *  tomorrow stands in no map written today — so an unmapped one takes the plug and is still named
+ *  on the mark. */
+const PROVIDER_MARKS: Record<string, Icon> = {
+  airtable: IconBrandAirtable,
+  asana: IconBrandAsana,
+  facebook_ads: IconBrandFacebook,
+  github: IconBrandGithub,
+  gmail: IconBrandGmail,
+  googleads: IconBrandGoogle,
+  googlecalendar: IconBrandGoogle,
+  googledocs: IconBrandGoogle,
+  googledrive: IconBrandGoogleDrive,
+  googlemeet: IconBrandGoogle,
+  googlesheets: IconBrandGoogle,
+  instagram: IconBrandInstagram,
+  intercom: IconBrandIntercom,
+  jira: IconBrandJira,
+  microsoft_teams: IconBrandTeams,
+  monday: IconBrandMonday,
+  notion: IconBrandNotion,
+  sentry: IconBrandSentry,
+  slack: IconBrandSlack,
+  stripe: IconBrandStripe,
+};
+/** The column is one fact wide, so the marks past this many are counted rather than drawn over the
+ *  cell's own edge. */
+const MARK_LIMIT = 4;
+/** What a row with no connector states, so an empty cell is read as an answer rather than as a
+ *  column that failed to draw. */
+const NO_MARKS = "—";
 /** The held answer to how this member reads the page: rows to compare, or the topology the rows
  *  sit in. The graph is a read of more than this payload, so it earns its reads only when picked. */
 const VIEW_KEY = "agents-view";
@@ -62,18 +117,52 @@ const PILL = cn(
 );
 
 /** One row per thing this workspace runs, whichever family it comes from: an agent a member
- *  addresses, and a subagent an agent spawns. A row says which one it is, what it is for, and the
- *  model it runs on — the one fact a member compares straight down this list, and the reason they
- *  open a record when it is not stated here. Who reaches it, what it may touch and the rest of its
- *  spec stand on the record's own page: a column for each would be a table read sideways. */
+ *  addresses, and a subagent an agent spawns. A row says which one it is, the providers it holds a
+ *  connected account on, and the model it runs on — facts of this one agent, which a member reads
+ *  straight down the list. What an agent is for is a paragraph, and it stands on the record's own
+ *  page: a column of clipped paragraphs repeats one sentence down every row and can be finished on
+ *  none of them. */
 type AgentRow = {
   key: string;
   family: string;
   name: string;
-  details: string;
+  main: boolean;
+  providers: string[];
   model: string;
   open: () => void;
 };
+
+/** Which providers each agent holds a connected account on, from the same pool read the connectors
+ *  screen draws — one entry per provider however many accounts are attached, ordered so the marks
+ *  land the same way in every row. The read is this member's, so a row states the connections that
+ *  member may see and never another member's private ones. */
+function attachedProviders(payload: PoolPayload): Map<string, string[]> {
+  const held = new Map<string, Set<string>>();
+  for (const entry of payload.connections)
+    for (const agent of entry.agents)
+      held.set(agent.id, (held.get(agent.id) ?? new Set()).add(entry.provider));
+  return new Map([...held].map(([id, providers]) => [id, [...providers].sort()]));
+}
+
+/** The connectors an agent reaches, drawn as the marks a member already knows those services by.
+ *  Each mark names its provider, so the column is read by a screen reader and under the pointer as
+ *  well as by the logo. */
+function Providers({ providers }: { providers: string[] }) {
+  if (providers.length === 0) return NO_MARKS;
+  const drawn = providers.slice(0, MARK_LIMIT);
+  const counted = providers.length - drawn.length;
+  return (
+    <span className="flex items-center gap-xs">
+      {drawn.map((provider) => {
+        const Mark = PROVIDER_MARKS[provider] ?? IconPlug;
+        return (
+          <Mark key={provider} role="img" aria-label={provider} className="size-icon shrink-0" />
+        );
+      })}
+      {counted ? <span>{"+" + counted}</span> : null}
+    </span>
+  );
+}
 
 /** The values a create form opens on: one for every field whose choices are closed — the deploy's
  *  model ids, and the enums the spec declares. A picker the member never opened would otherwise
@@ -88,13 +177,13 @@ function initialSpec(form: NewAgentForm): Record<string, ObjectValue> {
   );
 }
 
-/** What family a name belongs to, said on the name rather than left to the column beside it, and
- *  the one sentence a member who has never seen a subagent needs. Hover is not the only way to that
+/** What a name is, said on the name rather than in a column of prose beside it, and the one
+ *  sentence a member who has never seen this kind of row needs. Hover is not the only way to that
  *  sentence: the pill is a button, so focus opens the tooltip from the keyboard and a tap opens it
  *  on a touch screen, where a pointer never rests on anything. The press closes on Escape or on the
  *  next press outside it, and it never reaches the row — `rowControl` hands a press landing on a
  *  nested control to that control, so reading the pill does not open the record. */
-function SubagentPill() {
+function HintPill({ label, hint }: { label: string; hint: string }) {
   const [open, setOpen] = useState(false);
   return (
     <TooltipProvider>
@@ -107,9 +196,9 @@ function SubagentPill() {
             setOpen(true);
           }}
         >
-          {SUBAGENT_PILL}
+          {label}
         </TooltipTrigger>
-        <TooltipContent side="top">{SUBAGENT_HINT}</TooltipContent>
+        <TooltipContent side="top">{hint}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   );
@@ -136,12 +225,15 @@ export function Agents({
     localStorage.setItem(VIEW_KEY, next);
   }
 
+  const pool = usePanelRead<PoolPayload>(view === LIST ? "/connections" : null, reloads);
+  const attached = attachedProviders(pool.phase === "ready" ? pool.payload : NO_CONNECTIONS);
   const rows: AgentRow[] = [
     ...agents.map((agent) => ({
       key: "agent/" + agent.id,
       family: AGENT_FAMILY,
       name: agent.name,
-      details: agent.main ? MAIN : "",
+      main: agent.main,
+      providers: attached.get(agent.id) ?? [],
       model: agent.model,
       open: () => onOpen(agent.id),
     })),
@@ -149,7 +241,10 @@ export function Agents({
       key: "subagent/" + subagent.name,
       family: SUBAGENT_FAMILY,
       name: subagent.name,
-      details: subagent.model ? SPAWNED : INHERITS,
+      main: false,
+      /** A connector is granted to an agent, so a subagent holds none of its own: a child reaches
+       *  what the agent that spawned it reaches. */
+      providers: [],
       model: subagent.model ?? INHERITED,
       open: () => onOpenSubagent(subagent.name),
     })),
@@ -251,9 +346,14 @@ export function Agents({
             <>
               <Td>
                 {row.name}
-                {row.family === SUBAGENT_FAMILY ? <SubagentPill /> : null}
+                {row.family === SUBAGENT_FAMILY ? (
+                  <HintPill label={SUBAGENT_PILL} hint={SUBAGENT_HINT} />
+                ) : null}
+                {row.main ? <HintPill label={MAIN_PILL} hint={MAIN_HINT} /> : null}
               </Td>
-              <Td>{row.details}</Td>
+              <TdFact>
+                <Providers providers={row.providers} />
+              </TdFact>
               <TdFact>{row.model}</TdFact>
             </>
           )}
