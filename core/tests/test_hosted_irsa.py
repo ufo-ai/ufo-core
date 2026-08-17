@@ -229,10 +229,10 @@ def test_hosted_serve_receives_the_bedrock_mantle_api_key() -> None:
     )
 
 
-def test_hosted_serve_receives_the_exa_api_key() -> None:
+def test_hosted_serve_receives_the_perplexity_api_key() -> None:
     assert (
-        "{secretKey: EXA_API_KEY, "
-        "remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}"
+        "{secretKey: PERPLEXITY_API_KEY, "
+        "remoteRef: {key: ${secret_api_keys}, property: perplexity-api-key}}"
         in CLUSTER_SERVICES_TEMPLATE.read_text()
     )
 

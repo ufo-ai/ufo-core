@@ -71,7 +71,7 @@ spec:
     # mint and release that run's session, never injected at the proxy.
     - {secretKey: BROWSERBASE_API_KEY, remoteRef: {key: ${secret_api_keys}, property: browserbase-api-key}}
     - {secretKey: TURBOPUFFER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: turbopuffer-api-key}}
-    - {secretKey: EXA_API_KEY, remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}
+    - {secretKey: PERPLEXITY_API_KEY, remoteRef: {key: ${secret_api_keys}, property: perplexity-api-key}}
     - {secretKey: METRONOME_BEARER_TOKEN, remoteRef: {key: ${secret_api_keys}, property: metronome-bearer-token}}
     # Billing: the Stripe key mints the customer and the portal sessions, and the portal
     # configuration is what keeps subscription mutation out of the member's hands.

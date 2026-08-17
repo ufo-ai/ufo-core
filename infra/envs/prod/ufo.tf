@@ -98,7 +98,7 @@ locals {
     index_backend = "turbopuffer"
 
     [research]
-    search_provider = "exa"
+    search_provider = "perplexity"
 
     [browser]
     cdp_provider = "browserbase"

@@ -35,7 +35,7 @@ def _environment(deployment_id: str = "run-1") -> dict[str, str]:
         "BROWSERBASE_API_KEY": "browserbase-value",
         "DD_API_KEY": "datadog-value",
         "E2B_API_KEY": "e2b-value",
-        "EXA_API_KEY": "exa-value",
+        "PERPLEXITY_API_KEY": "perplexity-value",
         "OPENAI_API_KEY": "openai-value",
         "OPENROUTER_API_KEY": "openrouter-value",
         "TURBOPUFFER_API_KEY": "turbopuffer-value",
@@ -177,7 +177,7 @@ def test_production_secret_writes_preserve_owned_values() -> None:
     assert api_keys["browserbase-api-key"] == "browserbase-value"
     assert api_keys["datadog-api-key"] == "datadog-value"
     assert api_keys["e2b-api-key"] == "e2b-value"
-    assert api_keys["exa-api-key"] == "exa-value"
+    assert api_keys["perplexity-api-key"] == "perplexity-value"
     assert api_keys["openai-api-key"] == "openai-value"
     assert api_keys["openrouter-api-key"] == "openrouter-value"
     assert api_keys["turbopuffer-api-key"] == "turbopuffer-value"
@@ -197,12 +197,25 @@ def test_production_secret_writes_preserve_owned_values() -> None:
         "browserbase-value",
         "datadog-value",
         "e2b-value",
-        "exa-value",
+        "perplexity-value",
         "openai-value",
         "openrouter-value",
         "turbopuffer-value",
     ]
     assert all(value not in part for write in writes for value in values for part in write.command)
+
+
+def test_production_secret_writes_add_a_configured_property() -> None:
+    existing = json.dumps(
+        {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES - {"perplexity-api-key"})}
+        | {"exa-api-key": "exa-value"}
+    ).encode()
+    (api_keys, _gateway) = production_secret_writes(
+        _environment(), existing, _payload(GATEWAY_PROPERTIES)
+    )
+    written = json.loads(api_keys.payload)
+    assert written["perplexity-api-key"] == "perplexity-value"
+    assert written["exa-api-key"] == "exa-value"
 
 
 def test_main_rejects_unknown_arguments() -> None:
@@ -353,7 +366,7 @@ def test_main_initializes_missing_production_values(
             "browserbase-api-key": "browserbase-value",
             "datadog-api-key": "datadog-value",
             "e2b-api-key": "e2b-value",
-            "exa-api-key": "exa-value",
+            "perplexity-api-key": "perplexity-value",
             "openai-api-key": "openai-value",
             "openrouter-api-key": "openrouter-value",
             "turbopuffer-api-key": "turbopuffer-value",

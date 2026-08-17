@@ -45,7 +45,7 @@ jobs:
         id: select
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
-          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy(-production)?\.yml|scripts/(deploy_change_gate\.py|terraform_plan_guard\.py|production_prerequisites\.sh))$|infra/production_secrets\.py$|infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
+          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy(-production)?\.yml|scripts/(deploy_change_gate\.py|terraform_plan_guard\.py|production_prerequisites\.sh))$|infra/(production_secrets|testing_secrets)\.py$|infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
@@ -252,6 +252,14 @@ jobs:
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -input=false
+
+      - name: Write testing runtime secrets
+        if: github.event_name != 'pull_request'
+        env:
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          TESTING_API_KEYS_SECRET_ID: ufo/ufo-testing/api-keys
+          TESTING_DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: uv run python infra/testing_secrets.py
 
       - name: Terraform plan
         working-directory: ${{ env.TF_DIR }}

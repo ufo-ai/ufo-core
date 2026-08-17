@@ -565,7 +565,7 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
         r"^(\.github/(workflows/deploy(-production)?\.yml|"
         r"scripts/(deploy_change_gate\.py|terraform_plan_guard\.py|"
         r"production_prerequisites\.sh))$|"
-        r"infra/production_secrets\.py$|"
+        r"infra/(production_secrets|testing_secrets)\.py$|"
         r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
     )
     script = selector["run"]
@@ -581,6 +581,30 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     )
     assert 'if [ "$GITHUB_EVENT_NAME" != "pull_request" ]' in script
     assert "exit 0" not in script
+
+
+def test_testing_deploy_writes_the_search_credential_before_apply() -> None:
+    workflow = _workflow(WORKFLOWS / "deploy.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    rollout = jobs["rollout"]
+    assert isinstance(rollout, dict)
+    steps = rollout["steps"]
+    assert isinstance(steps, list)
+    names = [step.get("name") for step in steps if isinstance(step, dict)]
+    write = _step("rollout", "Write testing runtime secrets")
+    assert write == {
+        "name": "Write testing runtime secrets",
+        "if": "github.event_name != 'pull_request'",
+        "env": {
+            "PERPLEXITY_API_KEY": "${{ secrets.PERPLEXITY_API_KEY }}",
+            "TESTING_API_KEYS_SECRET_ID": "ufo/ufo-testing/api-keys",
+            "TESTING_DEPLOYMENT_ID": "${{ github.run_id }}-${{ github.run_attempt }}",
+        },
+        "run": "uv run python infra/testing_secrets.py",
+    }
+    assert names.index("Terraform init") < names.index("Write testing runtime secrets")
+    assert names.index("Write testing runtime secrets") < names.index("Terraform apply")
 
 
 _ADDITIVE_AUTH_DIFF = (
@@ -973,7 +997,6 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     for secret in (
         "ANTHROPIC_API_KEY",
         "BROWSERBASE_API_KEY",
-        "EXA_API_KEY",
         "TURBOPUFFER_API_KEY",
     ):
         assert secret not in source
@@ -2350,7 +2373,7 @@ def test_production_secrets_fail_before_aws_changes() -> None:
         "DD_API_KEY",
         "DD_APP_KEY",
         "E2B_API_KEY",
-        "EXA_API_KEY",
+        "PERPLEXITY_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "TURBOPUFFER_API_KEY",
@@ -2804,7 +2827,7 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
             "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
             "BROWSERBASE_API_KEY": "${{ secrets.BROWSERBASE_API_KEY }}",
             "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
-            "EXA_API_KEY": "${{ secrets.EXA_API_KEY }}",
+            "PERPLEXITY_API_KEY": "${{ secrets.PERPLEXITY_API_KEY }}",
             "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
             "OPENROUTER_API_KEY": "${{ secrets.OPENROUTER_API_KEY }}",
             "TURBOPUFFER_API_KEY": "${{ secrets.TURBOPUFFER_API_KEY }}",

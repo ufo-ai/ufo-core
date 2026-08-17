@@ -1,8 +1,8 @@
 """The hosted assistant pack: the same assistant config backed by managed infrastructure.
 
 Activating it (config `[pack] name = "assistant_hosted"`) brings up the assistant capabilities —
-memory and recall, Exa research, brokered connectors (Composio's open namespace plus the Pipedream
-allowlist), keyed connectors (a workspace API key injected at the egress proxy) and MCP,
+memory and recall, Perplexity research, brokered connectors (Composio's open namespace plus the
+Pipedream allowlist), keyed connectors (a workspace API key injected at the egress proxy) and MCP,
 the browser/computer-use tools,
 website building and the code REPL, document generation, todos, durable objectives, scheduled
 tasks, member-authored skills, the ufo terminal
@@ -28,7 +28,7 @@ NAME = "assistant_hosted"
 VERSION = "0.1.0"
 EXTENSIONS = (
     "turbopuffer",
-    "exa",
+    "perplexity",
     "todos",
     "objectives",
     "ufo",

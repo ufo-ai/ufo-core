@@ -17,7 +17,7 @@ API_KEY_INPUTS = {
     "browserbase-api-key": "BROWSERBASE_API_KEY",
     "datadog-api-key": "DD_API_KEY",
     "e2b-api-key": "E2B_API_KEY",
-    "exa-api-key": "EXA_API_KEY",
+    "perplexity-api-key": "PERPLEXITY_API_KEY",
     "openai-api-key": "OPENAI_API_KEY",
     "openrouter-api-key": "OPENROUTER_API_KEY",
     "turbopuffer-api-key": "TURBOPUFFER_API_KEY",
@@ -31,7 +31,7 @@ API_KEYS_PROPERTIES = frozenset(
         "composio-api-key",
         "datadog-api-key",
         "e2b-api-key",
-        "exa-api-key",
+        "perplexity-api-key",
         "github-app-client-id",
         "github-app-client-secret",
         "github-app-id",
@@ -107,7 +107,7 @@ def _payload(raw: bytes, properties: frozenset[str], secret_id: str) -> dict[str
         raise RuntimeError(f"{secret_id} must contain valid JSON") from error
     if not isinstance(value, dict) or not properties <= set(value):
         raise RuntimeError(f"{secret_id} must contain every declared secret property")
-    if any(not isinstance(value[name], str) for name in properties):
+    if any(not isinstance(item, str) for item in value.values()):
         raise RuntimeError(f"{secret_id} properties must be strings")
     return value
 
@@ -142,7 +142,11 @@ def production_secret_writes(
     deployment_id = _required(environment, DEPLOYMENT_ID_ENV)
     api_keys_secret_id = _required(environment, API_KEYS_SECRET_ID_ENV)
     gateway_secret_id = _required(environment, GATEWAY_SECRET_ID_ENV)
-    api_keys = _payload(api_keys_payload, API_KEYS_PROPERTIES, api_keys_secret_id)
+    api_keys = _payload(
+        api_keys_payload,
+        API_KEYS_PROPERTIES - API_KEY_INPUTS.keys(),
+        api_keys_secret_id,
+    )
     api_keys.update(
         {name: _required(environment, input_name) for name, input_name in API_KEY_INPUTS.items()}
     )
