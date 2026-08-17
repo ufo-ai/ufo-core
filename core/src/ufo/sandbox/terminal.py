@@ -102,34 +102,44 @@ walked="$UFO_OP_WORKDIR/glob-walk"
 /usr/bin/find "$UFO_WALK_ROOT" -type f -print0 > "$walked"
 { /bin/cat "$walked"; printf '\000'; measure < "$walked"; } > "$UFO_OP_WORKDIR/glob-enum"
 """,
-    "changes": rf"""r='{_REPOSITORY_COMMANDS}'
-walk() {{
-if [ -e "$1/.git" ]; then printf '%s\000' "$1/.git"; return; fi
-for entry in "$1"/* "$1"/.*; do
-case "${{entry##*/}}" in .|..|{"|".join(WALK_SKIP_NAMES)}) continue;; esac
-if [ -d "$entry" ] && [ ! -L "$entry" ]; then walk "$entry"; fi
-done
-}}
-walk "$UFO_WALK_ROOT" | /usr/bin/xargs -0 -n1 /bin/sh -c "$r" sh > "$UFO_OP_WORKDIR/changes-enum"
-""",
 }
 """The one command each tree walk needs run first, reading `$UFO_WALK_ROOT` and leaving its
 listing in the client's op workdir, where the walk's `enum` param names it. The walks read the
 listing rather than the tree because the client must not re-decide what a walk visits — `find`
 meets entries in the `readdir` order `os.walk` does, which is what keeps a truncated result
-identical to `sbxfs`'s. `grep` and `changes` prune `WALK_SKIP_NAMES` because the `sbxfs` walks they
-mirror do; `glob` mirrors `Path.glob`, which prunes nothing, so pruning here would hide files the
+identical to `sbxfs`'s. `grep` prunes `WALK_SKIP_NAMES` because the `sbxfs` walk it mirrors does;
+`glob` mirrors `Path.glob`, which prunes nothing, so pruning here would hide files the
 container's own glob returns. Only glob measures with `stat` — over the listing it just wrote, never
 a second walk, because the client pairs the two sections by position — and its flags split by OS:
 `stat --version` succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD
 (macOS), which takes `-f '%z %.9Fm'` — both print `<size> <sec>.<9-digit-nanos>`, so the client
-parses one shape and the double it reconstructs is the one `os.stat` reports on either. `changes`
-descends directories and stops at the outermost checkout on each path — `sbxfs`'s own
-`_repositories` rule, under which a bound directory that is itself a checkout costs one stat, and
-a repository nested inside another (a vendored clone, a worktree) is not a second answer — and it
-answers a checkout whose one cheap status probe reports nothing with empty sections and no diff,
-so the probe, not the patch, is the steady-state cost per repository. `find`, `git`, `cat`,
-`head -c`, and `xargs` behave alike across both."""
+parses one shape and the double it reconstructs is the one `os.stat` reports on either. `find`,
+`git`, `cat`, `head -c`, and `xargs` behave alike across both."""
+
+CHANGES_ENUMERATION = rf"""r='{_REPOSITORY_COMMANDS}'
+resolve() {{
+case "$1" in .) d="$UFO_WALK_ROOT";; *) d="$UFO_WALK_ROOT/$1";; esac
+found=
+while :; do
+if [ -e "$d/.git" ]; then found="$d"; fi
+if [ "$d" = "$UFO_WALK_ROOT" ]; then break; fi
+d="${{d%/*}}"
+case "$d" in "$UFO_WALK_ROOT"|"$UFO_WALK_ROOT"/*) ;; *) break;; esac
+done
+if [ -n "$found" ]; then printf '%s/.git\000' "$found"; fi
+}}
+for target in "$@"; do resolve "$target"; done | /usr/bin/sort -z -u \
+| /usr/bin/xargs -0 -n1 /bin/sh -c "$r" sh > "$UFO_OP_WORKDIR/changes-enum"
+"""
+"""The `changes` scan's enumeration: argv carries the workspace-relative directories the
+conversation's file tools touched (`.` names the root itself) and each resolves *upward* to its
+outermost enclosing checkout — never a walk down the tree, whose cost on a bound directory is the
+member's whole disk rather than the agent's work. Ascending to the root keeps `sbxfs`'s own
+`_repositories` rule (a repository nested inside another is what the checkout above already
+reports), a target that lost its directory still resolves through the ancestors that remain, and
+one under no checkout emits nothing. Roots dedupe through `sort -z -u` — GNU, BSD, and uutils
+alike — since many targets share one checkout, and each root then answers
+`_REPOSITORY_COMMANDS`: one cheap status probe, a diff only when it reports something."""
 ARRIVAL_GRACE_SECONDS = 30.0
 """How long an op or an open waits for the terminal to reconnect. The client's stream ends at every
 hold and reconnects on a ~1s poll, so work landing in that gap is the normal case — a different
@@ -694,7 +704,8 @@ class TerminalCarrier:
         its native implementation, so only the params and the result cross. A tree walk is two
         ops: the enumeration `find` first, through the same exec primitive, then the op reading
         its listing — what a walk visits is decided by a command this process composed, never by
-        the client."""
+        the client. `changes` enumerates from its target directories instead of walking, and with
+        no targets there is nothing to ask: no op travels and the scan is empty."""
         root = _root(handle)
         rewritten = {
             key: _under_root(root, value)
@@ -702,26 +713,21 @@ class TerminalCarrier:
             else value
             for key, value in params.items()
         }
-        enumeration = WALK_ENUMERATION.get(op)
-        if enumeration is not None:
+        if op == "changes":
+            targets = rewritten.pop("paths", None)
+            if not isinstance(targets, list) or any(
+                not isinstance(entry, str) for entry in targets
+            ):
+                raise ValueError("a changes scan names its target directories")
+            if not targets:
+                return {"changes": [], "truncated": False}
+            rewritten["enum"] = "changes-enum"
+            await self._enumerate(handle, op, root, CHANGES_ENUMERATION, tuple(targets))
+        elif op in WALK_ENUMERATION:
             rewritten["enum"] = f"{op}-enum"
-        if enumeration is not None:
             walk_root = rewritten.get("path") if op == "grep" else None
             walk_root = walk_root or rewritten.get("workspace") or root
-            listing = await self._exec(
-                handle,
-                (
-                    "sh",
-                    "-c",
-                    f"UFO_WALK_ROOT={shlex.quote(str(walk_root))}\n"
-                    f"export UFO_WALK_ROOT\n{enumeration}",
-                ),
-                DEFAULT_EXEC_TIMEOUT_SECONDS,
-            )
-            if listing.exit_code not in (0, 1):
-                raise ValueError(
-                    listing.stderr.strip() or f"the {op} walk could not list the workspace"
-                )
+            await self._enumerate(handle, op, str(walk_root), WALK_ENUMERATION[op])
         try:
             reply = await self.terminals.send(
                 handle.conversation_id,
@@ -737,6 +743,29 @@ class TerminalCarrier:
         if isinstance(failure, str):
             raise ValueError(failure)
         return result
+
+    async def _enumerate(
+        self,
+        handle: SandboxHandle,
+        op: str,
+        walk_root: str,
+        program: str,
+        arguments: tuple[str, ...] = (),
+    ) -> None:
+        listing = await self._exec(
+            handle,
+            (
+                "sh",
+                "-c",
+                f"UFO_WALK_ROOT={shlex.quote(walk_root)}\nexport UFO_WALK_ROOT\n{program}",
+                *(("sh", *arguments) if arguments else ()),
+            ),
+            DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+        if listing.exit_code not in (0, 1):
+            raise ValueError(
+                listing.stderr.strip() or f"the {op} walk could not list the workspace"
+            )
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         raise SandboxUnreachable(

@@ -151,7 +151,7 @@ from ufo.tools.context import (
 from ufo.tools.registry import REQUESTED_BY, ToolRegistry
 from ufo.transcript import Conversation
 from ufo.untrusted import wall
-from ufo.workspace_changes import WorkspaceChangeRecorder
+from ufo.workspace_changes import WorkspaceChangeRecorder, change_targets
 
 MAX_OUTPUT_TOKENS = 32_768
 FIND_MAX_TOKENS = 8_192
@@ -1025,7 +1025,7 @@ class TurnEngine:
                     await self._persist_transcript(
                         await self._load_messages(), inbound.denied, system, inbound.injected
                     )
-                    await self._record_workspace_changes()
+                    await self._record_workspace_changes(())
                     return denial
                 founding_denial = DENIED_INBOUND_NOTICE.format(reason=escape(inbound.denied))
                 messages = (
@@ -1045,6 +1045,7 @@ class TurnEngine:
                 if inbound.injected:
                     rendered = INJECTED_CONTEXT.format(content=founding, injected=inbound.injected)
                     messages = (*messages[:-1], Message(role="user", content=rendered))
+            change_paths: dict[str, None] = {}
             while True:
                 (
                     final_messages,
@@ -1061,6 +1062,7 @@ class TurnEngine:
                     absorbed_ids,
                     requesters,
                     meter,
+                    change_paths,
                 )
                 await self.hooks.fire(
                     "stop",
@@ -1093,7 +1095,7 @@ class TurnEngine:
                     await self._persist_transcript(final_messages, answer, system, inbound.injected)
                 else:
                     await self._persist_inbound(tuple(arrival_log), founding_denial)
-                await self._record_workspace_changes()
+                await self._record_workspace_changes(tuple(change_paths))
                 return frame
         except TurnParked as parked:
             meter.exited(PARKED)
@@ -1292,6 +1294,7 @@ class TurnEngine:
         absorbed_ids: list[UUID],
         requesters: dict[UUID, ActiveMessage],
         meter: _TurnMeter,
+        change_paths: dict[str, None],
     ) -> tuple[
         tuple[Message, ...],
         str,
@@ -1423,6 +1426,7 @@ class TurnEngine:
                         finish_error = FINISH_SCHEMA_ERROR.format(error=error)
                     else:
                         return messages, output.model_dump_json(), None, None, None
+            change_paths.update(dict.fromkeys(change_targets(tool_calls)))
             assistant_blocks = (
                 *round_result.reasoning,
                 *((TextBlock(text=text),) if text else ()),
@@ -2602,16 +2606,19 @@ class TurnEngine:
         )
         return frame
 
-    async def _record_workspace_changes(self) -> None:
+    async def _record_workspace_changes(self, targets: tuple[str, ...]) -> None:
         """Refresh what the portal's Changes reads, once the turn has nothing left the member is
         waiting on — the terminal frame is published and the transcript is durable, so a scan of the
         sandbox delays neither. It answers for the conversation that owns the sandbox rather than
         this turn's, since a subagent shares its parent's workspace and a member asks the parent
-        what changed."""
+        what changed. The targets accumulated round by round from the memoized model outputs, so a
+        recovered turn replays them and a mid-turn compaction of the message window cannot lose
+        them."""
         await WorkspaceChangeRecorder(
             sandbox=self.sandbox,
             workspace_id=self.turn.workspace_id,
             conversation_id=self.turn.sandbox_conversation_id or self.turn.conversation_id,
+            targets=targets,
         ).record()
 
     async def _commit_once(

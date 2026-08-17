@@ -637,59 +637,95 @@ def _repository(root: Path, name: str) -> Path:
     return repo
 
 
-def test_the_changes_walk_diffs_only_repositories_that_report_changes(tmp_path: Path) -> None:
+def _changes_enum(root: Path, workdir: Path, targets: list[str]) -> bytes:
+    workdir.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        ["/bin/sh", "-c", terminal.CHANGES_ENUMERATION, "sh", *targets],
+        env={"UFO_WALK_ROOT": str(root), "UFO_OP_WORKDIR": str(workdir), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return (workdir / "changes-enum").read_bytes()
+
+
+def test_the_changes_scan_diffs_only_repositories_that_report_changes(tmp_path: Path) -> None:
     """A clean checkout answers its marker with empty sections off one status probe — no diff run —
     and a changed one still carries its porcelain entries and its patch."""
     root = tmp_path / "workspace"
     clean = _repository(root, "clean")
     dirty = _repository(root, "dirty")
     (dirty / "mod.py").write_text("x = 2\n")
-    workdir = tmp_path / "workdir"
-    workdir.mkdir()
 
-    completed = subprocess.run(
-        ["/bin/sh", "-c", terminal.WALK_ENUMERATION["changes"]],
-        env={"UFO_WALK_ROOT": str(root), "UFO_OP_WORKDIR": str(workdir), "PATH": "/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    enum = _changes_enum(root, tmp_path / "workdir", ["clean", "dirty"])
 
-    assert completed.returncode == 0, completed.stderr
-    enum = (workdir / "changes-enum").read_bytes()
     assert b"R\x00" + str(clean).encode() + b"\x00D\x00\x00" in enum
     assert b"R\x00" + str(dirty).encode() + b"\x00 M mod.py\x00" in enum
     assert b"-x = 1\n+x = 2" in enum
 
 
-def test_the_changes_walk_stops_at_the_outermost_checkout(tmp_path: Path) -> None:
-    """`sbxfs`'s `_repositories` rule: a bound directory that is itself a checkout is the one
-    answer — a repository nested inside it (a vendored clone, a worktree) is what the checkout
-    above already reports — and a checkout under a hidden parent is still found."""
+def test_a_target_resolves_to_the_outermost_checkout_once(tmp_path: Path) -> None:
+    """`sbxfs`'s `_repositories` rule, ascending instead of walking: a target inside a vendored
+    clone answers as the checkout above it, targets sharing one checkout enumerate it once, and a
+    target whose directory is gone still resolves through the ancestors that remain."""
     root = _repository(tmp_path, "workspace")
     _repository(root, "vendored")
-    hidden = _repository(tmp_path / "elsewhere", ".hidden")
-    workdir = tmp_path / "workdir"
-    workdir.mkdir()
 
-    for walk_root in (root, hidden.parent):
-        completed = subprocess.run(
-            ["/bin/sh", "-c", terminal.WALK_ENUMERATION["changes"]],
-            env={
-                "UFO_WALK_ROOT": str(walk_root),
-                "UFO_OP_WORKDIR": str(workdir),
-                "PATH": "/usr/bin:/bin",
-            },
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert completed.returncode == 0, completed.stderr
+    enum = _changes_enum(root, tmp_path / "workdir", ["vendored", ".", "gone/away"])
 
-        enum = (workdir / "changes-enum").read_bytes()
-        assert enum.count(b"R\x00") == 1
-        expected = root if walk_root == root else hidden
-        assert enum.startswith(b"R\x00" + str(expected).encode() + b"\x00")
+    assert enum.count(b"R\x00") == 1
+    assert enum.startswith(b"R\x00" + str(root).encode() + b"\x00")
+
+
+def test_a_target_outside_any_checkout_enumerates_nothing(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    (root / "notes").mkdir(parents=True)
+
+    enum = _changes_enum(root, tmp_path / "workdir", ["notes"])
+
+    assert enum == b""
+
+
+async def test_changes_without_targets_sends_no_op() -> None:
+    """The empty scan is answered by the carrier itself: nothing travels, so a turn that wrote
+    nothing costs the member's machine nothing."""
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+
+    result = await carrier.file_op(handle, "changes", {"workspace": WORKSPACE_DIR, "paths": []})
+
+    assert result == {"changes": [], "truncated": False}
+    assert terminals.in_flight(conversation_id) is None
+
+    with pytest.raises(ValueError, match="target"):
+        await carrier.file_op(handle, "changes", {"workspace": WORKSPACE_DIR})
+
+
+async def test_changes_targets_ride_the_enumeration_argv() -> None:
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+
+    running = asyncio.ensure_future(
+        carrier.file_op(handle, "changes", {"workspace": WORKSPACE_DIR, "paths": ["src", "."]})
+    )
+    await asyncio.sleep(0)
+    exec_ok = json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode()
+    listing = await _answer(terminals, conversation_id, exec_ok)
+    argv = _op_params(listing)["argv"]
+    assert argv[2].startswith("UFO_WALK_ROOT=/p\n")
+    assert "changes-enum" in argv[2]
+    assert argv[3:] == ["sh", "src", "."]
+    op = await _answer(terminals, conversation_id, b'{"changes": [], "truncated": false}')
+    assert op.kind == "fileop" and op.name == "changes"
+    assert _op_params(op) == {"workspace": "/p", "enum": "changes-enum"}
+    assert await running == {"changes": [], "truncated": False}
 
 
 async def test_dial_is_unreachable() -> None:

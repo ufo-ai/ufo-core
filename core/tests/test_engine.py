@@ -128,7 +128,14 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.objects import ObjectRef
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    SandboxHandle,
+    SandboxSession,
+    SandboxSpec,
+)
+from ufo.sandbox.terminal import TerminalCarrier, Terminals
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
@@ -175,6 +182,7 @@ from ufo.untrusted import (
     UNTRUSTED_OPEN,
 )
 from ufo.workspace import init_workspace_credentials, ws
+from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges, recorded_workspace_changes
 
 HISTORY_PAD = "y" * 600
 
@@ -350,6 +358,34 @@ class ToolCallingModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(
             id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
+        )
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+class WriteThenAnswerModel:
+    """Writes one file in its first round, answers with text once the result comes back — the
+    round shape whose write a mid-turn compaction folds out of the message window."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="w1", name="write")
+        yield ToolCallDelta(
+            id="w1",
+            partial_json=json.dumps(
+                {
+                    "file_path": "/workspace/proj/a.py",
+                    "content": "x = 1\n",
+                    "user_description": "writing a module",
+                }
+            ),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
@@ -949,7 +985,7 @@ def _engine(
     turn: Turn,
     model: object,
     tmp_path: Path,
-    carrier: RecordingCarrier | None = None,
+    carrier: RecordingCarrier | TerminalCarrier | None = None,
     compaction: Compaction | None = None,
     member_id: UUID | None = None,
     requestable_credentials: CredentialRequests | None = None,
@@ -957,10 +993,11 @@ def _engine(
     skills: SkillRegistry = CORE_SKILL_REGISTRY,
     provider: str = "anthropic",
     model_id: str = "claude-opus-4-8",
+    handle: SandboxHandle | None = None,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
-    handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
+    handle = handle or SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
     turn = turn.model_copy(update={"speaker_member_id": member_id})
     return TurnEngine(
         turn=turn,
@@ -3280,6 +3317,132 @@ async def test_a_load_after_a_mid_round_compaction_costs_no_workflow(
     assert instructions in first
     assert instructions not in second
     assert second.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
+
+
+async def _serve_terminal_ops(
+    terminals: Terminals, conversation_id: UUID, scan: bytes, argvs: list[list[str]]
+) -> None:
+    exec_ok = json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode()
+    answered: str | None = None
+    while True:
+        op = await terminals.next_op(conversation_id, exclude_op_id=answered)
+        if op.kind == "exec":
+            argvs.append(json.loads(op.params)["argv"])
+            reply = exec_ok
+        elif op.kind == "write":
+            reply = b"{}"
+        elif op.name == "changes":
+            reply = scan
+        else:
+            reply = b'{"message": "wrote"}'
+        terminals.resolve(conversation_id, op.op_id, reply)
+        answered = op.op_id
+
+
+async def test_a_write_survives_mid_turn_compaction_into_the_changes_scan(
+    db: None, tmp_path: Path
+) -> None:
+    """Round one writes, compaction folds that round out of the window before round two, and the
+    turn-end scan still asks the write's directory: the targets ride the rounds' own tool calls,
+    not the messages compaction rewrites."""
+    turn = await _seed_turn("queued", None)
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    terminals.connect(turn.conversation_id, "/p", None)
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=turn.conversation_id,
+            image_ref="unused",
+            workspace_host_path="/p",
+            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=None),
+            run_token="run-token",
+            env={"UFO_CONVERSATION_ID": str(turn.conversation_id)},
+        )
+    )
+    compaction = Compaction(
+        client=EchoModel(),
+        model="claude-opus-4-8",
+        blob=FilesystemBlobStore(root=tmp_path),
+        conversation_id=turn.conversation_id,
+        trigger_tokens=1,
+        keep_messages=2,
+    )
+    scan = json.dumps(
+        {
+            "changes": [{"path": "proj/a.py", "patch": "+x = 1", "truncated": False}],
+            "truncated": False,
+        }
+    ).encode()
+    argvs: list[list[str]] = []
+    serving = asyncio.ensure_future(
+        _serve_terminal_ops(terminals, turn.conversation_id, scan, argvs)
+    )
+
+    try:
+        frame = await _engine(
+            turn,
+            WriteThenAnswerModel(),
+            tmp_path,
+            carrier=carrier,
+            compaction=compaction,
+            handle=handle,
+        ).run()
+    finally:
+        serving.cancel()
+
+    assert frame is not None and frame.status == "done"
+    assert await compaction.read_record(1) is not None
+    enumeration = next(argv for argv in argvs if "changes-enum" in argv[2])
+    assert enumeration[3:] == ["sh", "proj"]
+    assert await recorded_workspace_changes(turn.conversation_id) == WorkspaceChanges(
+        changes=(WorkspaceChange(path="proj/a.py", patch="+x = 1", truncated=False),),
+        truncated=False,
+    )
+
+
+async def test_a_shell_turn_scans_the_workspace_root(db: None, tmp_path: Path) -> None:
+    """A `bash` command can change the outermost checkout without naming any path — `sed -i`, a
+    formatter, `git apply` — so a turn that ran one asks the workspace root even though no `write`
+    or `edit` named a target."""
+    turn = await _seed_turn("queued", None)
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    terminals.connect(turn.conversation_id, "/p", None)
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=turn.conversation_id,
+            image_ref="unused",
+            workspace_host_path="/p",
+            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=None),
+            run_token="run-token",
+            env={"UFO_CONVERSATION_ID": str(turn.conversation_id)},
+        )
+    )
+    scan = json.dumps(
+        {
+            "changes": [{"path": "mod.py", "patch": "+y = 2", "truncated": False}],
+            "truncated": False,
+        }
+    ).encode()
+    argvs: list[list[str]] = []
+    serving = asyncio.ensure_future(
+        _serve_terminal_ops(terminals, turn.conversation_id, scan, argvs)
+    )
+
+    try:
+        frame = await _engine(
+            turn, ToolCallingModel(), tmp_path, carrier=carrier, handle=handle
+        ).run()
+    finally:
+        serving.cancel()
+
+    assert frame is not None and frame.status == "done"
+    enumeration = next(argv for argv in argvs if "changes-enum" in argv[2])
+    assert enumeration[3:] == ["sh", "."]
+    assert await recorded_workspace_changes(turn.conversation_id) == WorkspaceChanges(
+        changes=(WorkspaceChange(path="mod.py", patch="+y = 2", truncated=False),),
+        truncated=False,
+    )
 
 
 async def test_a_load_whose_result_was_offloaded_injects_the_workflow_again(

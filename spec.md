@@ -682,10 +682,14 @@ HTML in a reply renders as visible text, never as elements; links open in a new 
 `noopener noreferrer`; and an image renders only from the portal's own origin, so a reply can
 never direct the member's browser to fetch an attacker-chosen host. A reply the parser cannot
 handle renders as its raw text rather than failing the page. A conversation's Changes view renders
-what git reports uncommitted in the checkouts under its workspace, scanned in the sandbox when a
-turn commits and recorded against the conversation that owns that sandbox — so a subagent's edits,
-a shell command's, and a script's all answer on the parent's screen, and a file outside a checkout
-is not a change. `surface_identity` and `conversation.surface`
+what git reports uncommitted, scanned when a turn commits and recorded against the conversation
+that owns the sandbox — a subagent's work answers on the parent's screen, and a file outside a
+checkout is not a change. A deploy sandbox walks its own disk and answers for every checkout under
+it, whoever changed it. A terminal-bound workspace is the member's real directory, arbitrarily
+large, so it is asked only where the turn's tools worked: the checkouts the turn's `write` and
+`edit` calls named, the outermost checkout at the workspace root when the turn ran `bash`, and
+every checkout the last scan reported dirty — a turn that ran no such tool asks nothing, and a
+checkout nested below a non-checkout root answers only when a file tool names a path inside it. `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
 Slack renders links to the exact web conversation and its agent configuration as the reply's final
 context block for every workspace when the deploy has a public base URL. In the operator's own
