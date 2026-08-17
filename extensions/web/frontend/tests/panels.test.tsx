@@ -628,6 +628,7 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
   const row = await screen.findByRole("button", { name: /Slack · 3 turns/ });
   expect(row.querySelector("[data-part='primary']")!.textContent).toBe("Workspace");
   expect(row.querySelector("[data-part='meta']")!.textContent).toBe("Slack · 3 turns");
+  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Created Jul 30 2026");
   expect(row.textContent).not.toContain("slack");
   expect(row.textContent).not.toContain(shared.slice(0, 8));
 
@@ -673,7 +674,7 @@ test("a conversation row names what it is about and whose it is, and the keyboar
   expect(row.querySelector("[data-part='meta']")!.textContent).toBe(
     "mel@example.com · Slack · Mel Okafor, pat · 4 turns · Workspace",
   );
-  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Aug 7 2026");
+  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Last turn Aug 7 2026");
 
   row.focus();
   expect(document.activeElement).toBe(row);

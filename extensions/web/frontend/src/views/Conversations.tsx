@@ -186,6 +186,16 @@ function turns(count: number): string {
   return count === 1 ? "1 turn" : count + " turns";
 }
 
+/** The moment a row carries, named by what it is: the last turn where the conversation holds one,
+ *  else the day it was opened. The list stands in last-activity order, so a bare date beside a row
+ *  the member is scanning for what moved most recently has to say which of the two it shows — a
+ *  conversation nobody has spoken in yet is the one row showing a creation date, and it reads as
+ *  one rather than as activity that stopped there. */
+function moment(entry: Conversation): string {
+  const active = day(entry.last_turn_at);
+  return active ? "Last turn " + active : "Created " + day(entry.created_at);
+}
+
 /** The way out of a conversation Slack holds, drawn the same wherever it appears: the channel it is
  *  in, named the way Slack names it, on the permalink of the message it opened with. The channel
  *  name is the whole label — a member reading `#ops-warehouse` knows both that the link leaves for
@@ -266,7 +276,7 @@ export function ConversationList({
           rowKey={(entry) => entry.id}
           primary={(entry) => subject(entry, viewer)}
           meta={(entry) => metaParts(entry, viewer)}
-          when={(entry) => day(entry.last_turn_at) || day(entry.created_at)}
+          when={moment}
           open={(entry) =>
             entry.readable
               ? () => onOpen(entry)

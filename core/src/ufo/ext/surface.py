@@ -2832,6 +2832,11 @@ class SurfaceContext:
         listed nested under the turn that spawned them, never beside it. `conversation_id` selects
         one exact row before the bound for a durable permalink.
 
+        Newest activity is the last turn, and creation only where no turn has landed yet, so the
+        top of the page is what moved most recently rather than what was opened most recently.
+        Creation breaks a tie under it, which is what two conversations opened together and never
+        spoken in are.
+
         The opening words and the speakers are two further reads over the page's ids, never one
         per row: what a conversation is about and who is in it are facts of its turns, and only a
         turn read can answer them. Both reads are narrowed to the rows this viewer may read, so an
@@ -2870,7 +2875,8 @@ class SurfaceContext:
                 tables.conversation.c.surface != SUBAGENT_SURFACE,
             )
             .order_by(
-                sa.func.coalesce(activity.c.last_turn_at, tables.conversation.c.created_at).desc()
+                sa.func.coalesce(activity.c.last_turn_at, tables.conversation.c.created_at).desc(),
+                tables.conversation.c.created_at.desc(),
             )
             .limit(limit)
         )

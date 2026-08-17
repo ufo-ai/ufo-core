@@ -2890,40 +2890,84 @@ async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path)
     assert {entry.summary.id for entry in other_agent} == {walled}
 
 
-async def test_agent_conversations_order_and_bound_by_activity(db: None, tmp_path) -> None:
-    """Newest activity first, with the caller's limit as the bound."""
+async def test_agent_conversations_order_by_last_activity_then_creation(db: None, tmp_path) -> None:
+    """Last activity first, with the caller's limit as the bound: a conversation answered a minute
+    ago stands above one opened after it and left alone, and a conversation nobody has spoken in
+    yet is placed by the day it was opened. Creation orders two conversations whose last turn
+    landed at the same moment, and nothing else does."""
     workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
     assert member_id is not None
-    older = await _seed_conversation(
-        workspace_id, agent_id, queue_key="older", audience=str(SHARED_AUDIENCE), member_id=None
+    now = datetime.now(UTC)
+    answered = await _seed_conversation(
+        workspace_id, agent_id, queue_key="answered", audience=str(SHARED_AUDIENCE), member_id=None
     )
-    newer = await _seed_conversation(
-        workspace_id, agent_id, queue_key="newer", audience=str(SHARED_AUDIENCE), member_id=None
+    stale = await _seed_conversation(
+        workspace_id, agent_id, queue_key="stale", audience=str(SHARED_AUDIENCE), member_id=None
     )
-    await _seed_conversation_turn(workspace_id, older, agent_id, seq=1, inbound="first")
-    await _seed_conversation_turn(workspace_id, newer, agent_id, seq=1, inbound="second")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
-            .where(tables.turn.c.conversation_id == older)
+    tie_early = await _seed_conversation(
+        workspace_id, agent_id, queue_key="tie-early", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    tie_late = await _seed_conversation(
+        workspace_id, agent_id, queue_key="tie-late", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    quiet = await _seed_conversation(
+        workspace_id, agent_id, queue_key="quiet", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    for conversation_id, inbound in (
+        (answered, "first"),
+        (stale, "second"),
+        (tie_early, "third"),
+        (tie_late, "fourth"),
+    ):
+        await _seed_conversation_turn(
+            workspace_id, conversation_id, agent_id, seq=1, inbound=inbound
         )
+    async with workspace_tx() as connection:
+        for conversation_id, opened in (
+            (answered, now - timedelta(days=3)),
+            (stale, now),
+            (tie_early, now - timedelta(days=2)),
+            (tie_late, now - timedelta(days=1)),
+            (quiet, now - timedelta(hours=3)),
+        ):
+            await connection.execute(
+                sa.update(tables.conversation)
+                .values(created_at=opened)
+                .where(tables.conversation.c.id == conversation_id)
+            )
+        for conversation_id, active in (
+            (answered, now - timedelta(minutes=1)),
+            (stale, now - timedelta(days=2)),
+            (tie_early, now - timedelta(minutes=5)),
+            (tie_late, now - timedelta(minutes=5)),
+        ):
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(updated_at=active)
+                .where(tables.turn.c.conversation_id == conversation_id)
+            )
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
 
     listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
-    assert [entry.summary.id for entry in listed] == [newer, older]
-    assert [entry.summary.turn_count for entry in listed] == [1, 1]
-    assert all(entry.summary.last_turn_at is not None for entry in listed)
+    assert [entry.summary.id for entry in listed] == [answered, tie_late, tie_early, quiet, stale]
+    assert [entry.summary.turn_count for entry in listed] == [1, 1, 1, 0, 1]
+    assert [entry.summary.last_turn_at is None for entry in listed] == [
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
     bounded = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=1)
-    assert [entry.summary.id for entry in bounded] == [newer]
+    assert [entry.summary.id for entry in bounded] == [answered]
     linked = await context.list_agent_conversations(
         agent_id,
         member_id,
         admin=False,
         limit=1,
-        conversation_id=older,
+        conversation_id=stale,
     )
-    assert [entry.summary.id for entry in linked] == [older]
+    assert [entry.summary.id for entry in linked] == [stale]
 
 
 async def test_agent_conversations_narrow_to_the_side_of_the_member(db: None, tmp_path) -> None:

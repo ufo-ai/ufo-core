@@ -202,7 +202,7 @@ test("the conversations tab lists this subagent's runs as rows that name the age
   const row = await panel.findByRole("button", { name: /Find the filing deadline/ });
   expect(row.querySelector("[data-part='primary']")!.textContent).toBe("Find the filing deadline");
   expect(row.querySelector("[data-part='meta']")!.textContent).toBe("You · assistant · 1 turn");
-  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Aug 2 2026");
+  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Last turn Aug 2 2026");
 
   const walled = panel
     .getByText("Private channel", { selector: "[data-part='primary']" })
