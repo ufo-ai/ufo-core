@@ -4,6 +4,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Filter, Segmented } from "@/components/ui/filter";
 import { Sheet } from "@/components/ui/sheet";
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
+import { useBeside } from "@/kernel/beside";
 import { CardGrid } from "@/kernel/cards";
 import {
   OWNER_FIELD,
@@ -40,22 +41,20 @@ const SITE_FAMILY = "Sites";
 const MEDIA: Record<string, string> = {
   Images: "image",
   Documents: "document",
-  Data: "data",
   Other: "other",
 };
 const FAMILIES = [SITE_FAMILY, ...Object.keys(MEDIA)];
 
-type Scope = "created" | "shared" | "all";
+type Scope = "created" | "all";
 
 const SCOPE_KEY = "artifacts-scope";
 const SCOPE_SEGMENTS = [
   { label: "All", value: "all" },
   { label: "Created by me", value: "created" },
-  { label: "Shared with me", value: "shared" },
 ];
 
 function asScope(value: string | null): Scope {
-  return value === "created" || value === "shared" ? value : "all";
+  return value === "created" ? value : "all";
 }
 
 type Artifact = {
@@ -296,8 +295,8 @@ export function Artifacts({
   );
 
   const at = objectAt(place.open);
-  if (at !== null && at.name !== null && mainAgent)
-    return (
+  const detail = useBeside(
+    at !== null && at.name !== null && mainAgent ? (
       <ObjectDetail
         key={at.kind + "/" + at.name}
         agentId={mainAgent.id}
@@ -306,7 +305,9 @@ export function Artifacts({
         onOpen={(next) => onPlace({ open: OBJECT_PREFIX + next.kind + "/" + (next.name ?? "") })}
         onBack={() => onPlace({ open: undefined })}
       />
-    );
+    ) : null,
+    () => onPlace({ open: undefined }),
+  );
 
   const unknown = Boolean(picked) && !FAMILIES.includes(picked);
   const absent = held.phase === "failed" && held.status === NOT_FOUND;
@@ -378,6 +379,7 @@ export function Artifacts({
         }}
       </Panel>
       </Section>
+      {detail}
     </>
   );
 }
@@ -426,12 +428,12 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
       open
       onClose={onClose}
       title={entry.filename}
-      footer={
+      actions={
         entry.url ? (
           <a
             href={entry.url}
             download={entry.filename}
-            className={cn(buttonVariants({ variant: "send" }), "inline-block no-underline")}
+            className={cn(buttonVariants({ variant: "send" }), "shrink-0 no-underline")}
           >
             Download
           </a>
@@ -454,7 +456,12 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
       {isImage(entry) || entry.preview_url ? (
         <FullImage entry={entry} />
       ) : isTextMedia(entry.media_type) ? (
-        <ArtifactText url={entry.url} name={entry.filename} mediaType={entry.media_type} />
+        <ArtifactText
+          url={entry.url}
+          name={entry.filename}
+          mediaType={entry.media_type}
+          display="inline"
+        />
       ) : (
         <div className="font-mono text-small text-ink-soft">
           No preview for this file type. Download it to open it.

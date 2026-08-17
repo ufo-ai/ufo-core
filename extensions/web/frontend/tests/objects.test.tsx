@@ -105,6 +105,14 @@ const RUN = {
   ],
 };
 
+const OLDER_RUN = {
+  ...RUN,
+  turn_id: "1c8f3e54-6b97-4a20-8d4e-9f75b13c8d26",
+  task: "weekly-roll",
+  fired_at: "2026-08-13T09:00:00+00:00",
+  artifacts: [],
+};
+
 const TASK_DETAIL = {
   ...TASK_KIND,
   name: "daily-brief",
@@ -244,8 +252,9 @@ test("an index carries the name and the two facts a prose-less kind leads with",
   expect(rowCells[3].querySelector("span")?.className).toContain("block truncate");
 });
 
-/** Paused stood only as a filter above the table, so "what is up with this one" took a press into
- *  every row. It reads on the row now, and it still costs no column. */
+/** Paused once stood as a filter above the table, so "what is up with this one" took a press into
+ *  every row. It reads on the row now — a chip beside the name — and no column or filter tab
+ *  repeats it. */
 test("whether a task is stopped reads beside its own name", async () => {
   wire({
     "/objects/scheduled_task": () =>
@@ -261,7 +270,7 @@ test("whether a task is stopped reads beside its own name", async () => {
     (span) => span.textContent === "Paused",
   );
   expect(chip?.className).toContain("rounded-control");
-  expect(screen.getByRole("tab", { name: "Paused" })).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Paused" })).toBeNull();
 });
 
 /** The tracks are fixed pixels, so a table whose tracks outrun the page it is read on holds its
@@ -438,11 +447,11 @@ test("ordering and a boolean filter ride the read, so the kind applies them", as
   await userEvent.click(screen.getByRole("button", { name: "Next Run At" }));
   await waitFor(() => expect(reads.at(-1)).toContain("order=desc"));
 
-  await userEvent.click(screen.getByRole("tab", { name: "Paused" }));
-  await waitFor(() => expect(reads.at(-1)).toContain("paused=true"));
+  await userEvent.click(screen.getByRole("tab", { name: "Created by me" }));
+  await waitFor(() => expect(reads.at(-1)).toContain("mine=true"));
 });
 
-test("Mine narrows the scheduled-task read and names its empty scope", async () => {
+test("Created by me narrows the read, names its empty scope, and All clears it", async () => {
   const reads: string[] = [];
   wire({
     "/objects/scheduled_task": (url) => {
@@ -453,26 +462,15 @@ test("Mine narrows the scheduled-task read and names its empty scope", async () 
   mount();
 
   await screen.findByText("daily-brief");
-  await userEvent.click(screen.getByRole("tab", { name: "Mine" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Created by me" }));
 
   expect(reads.at(-1)).toContain("mine=true");
   expect(await screen.findByText("You have not created a scheduled task.")).toBeTruthy();
-});
-
-test("a filter that narrows to nothing keeps the control that clears it", async () => {
-  wire({
-    "/objects/scheduled_task": (url) =>
-      objectIndex(TASK_KIND, url.includes("paused=true") ? [] : [TASK_ROW]),
-  });
-  mount();
-
-  await screen.findByText("daily-brief");
-  await userEvent.click(screen.getByRole("tab", { name: "Paused" }));
-
-  expect(await screen.findByText("No scheduled task matches this search.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
   expect(headings()).toEqual(["Name", "Agent", "Last Run At", "Next Run At", ""]);
-  expect(screen.getByRole("tab", { name: "Paused" }).getAttribute("aria-selected")).toBe("true");
+  expect(
+    screen.getByRole("tab", { name: "Created by me" }).getAttribute("aria-selected"),
+  ).toBe("true");
 
   await userEvent.click(screen.getByRole("tab", { name: "All" }));
   expect(await screen.findByText("daily-brief")).toBeTruthy();
@@ -705,7 +703,7 @@ test("a task detail's reports_to link lands on that conversation's detail page",
   expect(closed.tagName).toBe("SPAN");
   expect(screen.queryByRole("button", { name: "scoped_to agent assistant" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(await screen.findByText("daily-brief")).toBeTruthy();
 });
 
@@ -799,7 +797,7 @@ test("the radar section is reached by its own hash and leads with the feed", asy
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
   expect(await screen.findByText("roll-up.pdf")).toBeTruthy();
   expect(reads[0]).not.toContain("agent=");
-  expect(screen.getByRole("tab", { name: "Runs" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Reports" }).getAttribute("aria-selected")).toBe("true");
 
   await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
   expect(await screen.findByText("weekly-roll")).toBeTruthy();
@@ -863,7 +861,7 @@ test("landing on another agent's radar tab leaves the first agent's detail behin
   expect(screen.queryByRole("heading", { name: "daily-brief" })).toBeNull();
 });
 
-test("a row opens under the agent that owns it, and Back returns to the whole index", async () => {
+test("a row opens under the agent that owns it, and closing returns to the whole index", async () => {
   const reads: string[] = [];
   wire({
     "/objects/scheduled_task/weekly-roll": (url) => {
@@ -882,8 +880,45 @@ test("a row opens under the agent that owns it, and Back returns to the whole in
   expect(await screen.findByRole("heading", { name: "weekly-roll" })).toBeTruthy();
   expect(reads[0]).toContain("agent=" + SECOND_ID);
 
-  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(await screen.findByText("daily-brief")).toBeTruthy();
+});
+
+/** The pane holds one column, so a panel opened on the index takes it from the record the feed put
+ *  there. The record is the route's and has to be cleared out of it — but nobody pressed a way out,
+ *  and the entry that opened the record is the one the member is standing on, so a step back off it
+ *  leaves the screen and takes the panel they just opened with it. */
+test("a panel taking the column clears the displaced record without leaving the page", async () => {
+  wire({
+    "/workspace/radar": (url) =>
+      url.includes("after=")
+        ? json({ runs: [OLDER_RUN], older: null, newer: "newer|x" })
+        : json({ runs: [RUN], older: "older|x", newer: null }),
+    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
+    "/objects/scheduled_task/weekly-roll": () =>
+      json({ ...TASK_DETAIL, name: "weekly-roll", summary: "0 9 * * 1 — weekly roll-up" }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/radar";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
+  expect(await screen.findByRole("heading", { level: 2, name: "daily-brief" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Older" }));
+  await userEvent.click(await screen.findByRole("button", { name: "weekly-roll" }));
+  expect(await screen.findByRole("heading", { level: 2, name: "weekly-roll" })).toBeTruthy();
+  expect(location.hash).toContain("open=object%2Fscheduled_task%2Fweekly-roll");
+
+  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
+  await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
+
+  expect(await screen.findByRole("complementary", { name: "New scheduled task" })).toBeTruthy();
+  await waitFor(() => expect(location.hash).not.toContain("open="));
+  expect(location.hash).toContain("chip=scheduled_task");
+  expect(screen.queryByRole("heading", { level: 2, name: "weekly-roll" })).toBeNull();
 });
 
 test("the artifacts section reads the site index on the main agent", async () => {

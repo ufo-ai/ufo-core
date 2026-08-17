@@ -168,11 +168,12 @@ test("a story's task opens the task record where the prompt is read", async () =
 
   await userEvent.click(await screen.findByRole("button", { name: "morning-digest" }));
 
-  expect(await screen.findByRole("heading", { name: "morning-digest" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 2, name: "morning-digest" })).toBeTruthy();
   expect(await screen.findByText("check the queue")).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT.id);
 
-  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("heading", { level: 2, name: "morning-digest" })).toBeNull();
   expect(await screen.findByRole("button", { name: "morning-digest" })).toBeTruthy();
 });
 

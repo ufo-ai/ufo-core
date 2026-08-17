@@ -350,12 +350,6 @@ WRITEBACK_WORKSPACE_CONCURRENCY = 4
 WRITEBACK_WORKSPACE_IN_FLIGHT = WRITEBACK_WORKSPACE_BATCH * 2
 MEDIA_CLAIMS: dict[str, tuple[tuple[str, str], ...]] = {
     "image": (("like", "image/%"),),
-    "data": (
-        ("eq", "application/json"),
-        ("eq", "text/csv"),
-        ("eq", "application/vnd.ms-excel"),
-        ("like", "application/vnd.openxmlformats-officedocument.spreadsheetml%"),
-    ),
     "document": (
         ("like", "text/%"),
         ("eq", "application/pdf"),
@@ -2271,10 +2265,8 @@ class SurfaceContext:
         them: a member sees their own conversations' artifacts, an admin the workspace's — newest
         first, bounded, `shared_artifact.id` breaking a `created_at` tie so two files one turn
         shared in the same instant page without repeating or skipping either. `scope` narrows to
-        the conversations the member owns (`created`) or to readable conversations they do not
-        (`shared`) — the latter for admins too, since shared-with-me is about the reader's own
-        audiences, never the admin widening. Each entry carries the `SharedArtifact` the link
-        minter signs, so the view links exactly what the writeback delivery would."""
+        the conversations the member owns (`created`). Each entry carries the `SharedArtifact`
+        the link minter signs, so the view links exactly what the writeback delivery would."""
         query = (
             sa.select(
                 tables.shared_artifact.c.id,
@@ -2312,11 +2304,6 @@ class SurfaceContext:
                 pass
             case "created":
                 query = query.where(tables.conversation.c.member_id == member_id)
-            case "shared":
-                query = query.where(
-                    tables.conversation.c.member_id.is_distinct_from(member_id),
-                    tables.conversation.c.audience.in_(readable_audiences(member_id)),
-                )
             case _:
                 raise ValueError(f"unknown artifact scope filter: {scope}")
         if q:

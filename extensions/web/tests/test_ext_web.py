@@ -2768,16 +2768,18 @@ async def test_artifacts_view_searches_media_and_shared_conversations(
     assert _names((await client.get(f"{ARTIFACTS_PATH}?media=image", headers=headers)).json()) == [
         "shared.png"
     ]
+    assert _names(
+        (await client.get(f"{ARTIFACTS_PATH}?media=document", headers=headers)).json()
+    ) == ["data.csv", "report.pdf"]
     assert _names((await client.get(f"{ARTIFACTS_PATH}?media=other", headers=headers)).json()) == [
         "archive.zip"
     ]
+    assert (await client.get(f"{ARTIFACTS_PATH}?media=data", headers=headers)).status_code == 400
     assert (await client.get(f"{ARTIFACTS_PATH}?media=bad", headers=headers)).status_code == 400
     assert _names(
         (await client.get(f"{ARTIFACTS_PATH}?scope=created", headers=headers)).json()
     ) == ["archive.zip", "data.csv", "report.pdf"]
-    assert _names((await client.get(f"{ARTIFACTS_PATH}?scope=shared", headers=headers)).json()) == [
-        "shared.png"
-    ]
+    assert (await client.get(f"{ARTIFACTS_PATH}?scope=shared", headers=headers)).status_code == 400
     assert (await client.get(f"{ARTIFACTS_PATH}?scope=bad", headers=headers)).status_code == 400
 
 

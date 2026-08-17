@@ -1,5 +1,6 @@
 import { Filter } from "@/components/ui/filter";
 import { ArtifactText } from "@/kernel/artifact";
+import { useBeside } from "@/kernel/beside";
 import { ObjectDetail, ObjectPane, type ObjectAddress } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
 import { PageHeader, PageToolbar } from "@/kernel/pane";
@@ -15,7 +16,7 @@ import { formatSize } from "@/lib/size";
  *  One destination because a member asking what happens here without anyone typing asks one
  *  question; the feed answers what it did, the kinds answer what is armed. */
 const FAMILIES = [
-  { label: "Runs", value: "" },
+  { label: "Reports", value: "" },
   { label: "Scheduled", value: "scheduled_task" },
   { label: "Triggers", value: "source_trigger" },
 ];
@@ -62,8 +63,10 @@ function objectAt(open: string | undefined): ObjectAddress | null {
 
 /** Every agent's radar, or one agent's. The section names no agent, so its feed answers across the
  *  viewer's whole audience; the agent tab is already headed and named, so it passes no title. A
- *  story's task name opens that task's record here in the pane — `place.agent` remembers whose
- *  namespace the record lives in, since the section's feed crosses agents. */
+ *  story's task name opens that task's record beside the feed — `place.agent` remembers whose
+ *  namespace the record lives in, since the section's feed crosses agents. Another panel taking the
+ *  pane's one column clears the record out of the place as displaced, so the route stays on the
+ *  screen the member is standing on rather than stepping back off the panel they just opened. */
 export function Radar({
   agentId,
   title,
@@ -77,8 +80,8 @@ export function Radar({
 }) {
   const at = objectAt(place.open);
   const owner = agentId ?? place.agent ?? null;
-  if (at !== null && at.name !== null && owner !== null) {
-    return (
+  const detail = useBeside(
+    at !== null && at.name !== null && owner !== null ? (
       <ObjectDetail
         key={owner + "/" + at.kind + "/" + at.name}
         agentId={owner}
@@ -87,18 +90,22 @@ export function Radar({
         onOpen={(next) => onPlace({ open: OBJECT_PREFIX + next.kind + "/" + (next.name ?? "") })}
         onBack={() => onPlace({ open: undefined, agent: undefined })}
       />
-    );
-  }
+    ) : null,
+    () => onPlace({ open: undefined, agent: undefined, displaced: true }),
+  );
   const family = place.chip ?? "";
   if (family) {
     return (
-      <ObjectPane
-        key={family}
-        agentId={agentId}
-        kind={family}
-        title={title}
-        lead={<Lead value={family} onPlace={onPlace} />}
-      />
+      <>
+        <ObjectPane
+          key={family}
+          agentId={agentId}
+          kind={family}
+          title={title}
+          lead={<Lead value={family} onPlace={onPlace} />}
+        />
+        {detail}
+      </>
     );
   }
   return (
@@ -110,6 +117,7 @@ export function Radar({
       <Section>
         <Feed agentId={agentId} place={place} onPlace={onPlace} />
       </Section>
+      {detail}
     </>
   );
 }

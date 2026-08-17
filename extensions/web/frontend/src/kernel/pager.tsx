@@ -1,7 +1,11 @@
 import { Button } from "@/components/ui/button";
 import type { WorkspacePlace } from "@/lib/route";
 
-export type Placement = WorkspacePlace & { notice?: string };
+/** Where a pane stands, and what the change to it was: the outcome a mutation left, and whether the
+ *  record the place named was taken by another panel instead of shut by the member. A place clearing
+ *  a taken record states it, because the way out the member pressed is the only close that steps the
+ *  route back off the entry the record was opened on. */
+export type Placement = WorkspacePlace & { notice?: string; displaced?: boolean };
 
 export function Pager({
   payload,

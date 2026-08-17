@@ -59,9 +59,14 @@ const FACT_LED_FIELDS = 2;
 const PROMPT_FIELD = "prompt";
 
 /** Whether a row is stopped. It is the first thing asked of a task and the last thing a column
- *  should cost: it reads as a chip beside the name, where the member is already looking, and the
- *  filter above the table still narrows by it. */
+ *  should cost: it reads as a chip beside the name, where the member is already looking, and
+ *  nowhere else — a filter for it would narrow to the rows the chip already marks. */
 const STATE_FIELD = "paused";
+
+/** The flag that narrows an index to the viewer's own rows, worded the way the artifacts scope
+ *  says the same thing — the wire's `mine` is nobody's label. */
+const MINE_FIELD = "mine";
+const MINE_LABEL = "Created by me";
 
 /** The run a member reads together with how it went, and the field that says how. An ending in a
  *  column of its own — `done`, beside no run — names nothing, so it reads inside the cell of the
@@ -181,9 +186,10 @@ export type ObjectAddress = { kind: string; name: string | null };
  *  agent that owns it, and so does every link the detail follows out of it. */
 type At = ObjectAddress & { agentId: string };
 
-/** One kind's pages: its index, and one row's detail once a row or a link is opened. `agentId`
- *  names the one agent namespace to read, or null to read across the viewer's whole audience —
- *  the same choice the index route itself offers. */
+/** One kind's pages: its index, and one row's record opened beside it once a row or a link is
+ *  pressed. `agentId` names the one agent namespace to read, or null to read across the viewer's
+ *  whole audience — the same choice the index route itself offers. Closing the record remounts
+ *  the index, so a row the record deleted or changed is read again rather than shown stale. */
 export function ObjectPane({
   agentId,
   kind,
@@ -200,19 +206,37 @@ export function ObjectPane({
   title?: string;
 }) {
   const [at, setAt] = useState<At | null>(null);
-  if (at !== null && at.name !== null) {
-    return (
+  const [generation, setGeneration] = useState(0);
+  const close = () => {
+    setAt(null);
+    setGeneration((count) => count + 1);
+  };
+  const detail = useBeside(
+    at !== null && at.name !== null ? (
       <ObjectDetail
         key={at.agentId + "/" + at.kind + "/" + at.name}
         agentId={at.agentId}
         kind={at.kind}
         name={at.name}
         onOpen={(next) => setAt({ ...next, agentId: at.agentId })}
-        onBack={() => setAt(null)}
+        onBack={close}
       />
-    );
-  }
-  return <ObjectIndex agentId={agentId} kind={kind} title={title} lead={lead} onOpen={setAt} />;
+    ) : null,
+    () => setAt(null),
+  );
+  return (
+    <>
+      <ObjectIndex
+        key={generation}
+        agentId={agentId}
+        kind={kind}
+        title={title}
+        lead={lead}
+        onOpen={setAt}
+      />
+      {detail}
+    </>
+  );
 }
 
 function ObjectIndex({
@@ -284,7 +308,7 @@ function ObjectIndex({
             field !== ID_FIELD &&
             field !== STATE_FIELD &&
             field !== ENDING_FIELD &&
-            field !== "mine",
+            field !== MINE_FIELD,
         );
         const led = shown.slice(0, prose === null ? FACT_LED_FIELDS : LEADING_FIELDS);
         const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
@@ -300,6 +324,7 @@ function ObjectIndex({
           (field) =>
             field !== CONVERSATION_FIELD &&
             field !== OWNER_FIELD &&
+            field !== STATE_FIELD &&
             (narrowed === field || payload.objects.some((row) => typeof row[field] === "boolean")),
         );
         return (
@@ -343,7 +368,7 @@ function ObjectIndex({
               {flags.length ? (
                 <Filter
                   options={flags.map((field) => ({
-                    label: heading(field, payload.spec_schema),
+                    label: field === MINE_FIELD ? MINE_LABEL : heading(field, payload.spec_schema),
                     value: field,
                   }))}
                   value={narrowed}
@@ -491,7 +516,31 @@ function NewObject({
   );
 }
 
+/** One object's record, beside the screen that opened it: the record-panel heading and way out
+ *  every opened record wears, over the record's own groups. */
 export function ObjectDetail({
+  agentId,
+  kind,
+  name,
+  onOpen,
+  onBack,
+}: {
+  agentId: string;
+  kind: string;
+  name: string;
+  onOpen: (at: ObjectAddress) => void;
+  onBack: () => void;
+}) {
+  return (
+    <RecordPanel title={name} onClose={onBack}>
+      <ObjectRecord agentId={agentId} kind={kind} name={name} onOpen={onOpen} onBack={onBack} />
+    </RecordPanel>
+  );
+}
+
+/** The record's body, inside the panel so the edit form it raises opens over this record rather
+ *  than displacing it from the pane's one column. */
+function ObjectRecord({
   agentId,
   kind,
   name,
@@ -545,13 +594,7 @@ export function ObjectDetail({
 
   return (
     <>
-      <div className="mb-lg flex items-baseline gap-md">
-        <Button variant="row" onClick={onBack}>
-          Back
-        </Button>
-        <h2 className="m-0 font-sans text-title font-strong">{name}</h2>
-        <span className="text-ink-soft">{noun(kind)}</span>
-      </div>
+      <div className="text-ink-soft">{noun(kind)}</div>
       <Panel state={state} shape="form">
         {(payload) => (
           <>

@@ -1728,7 +1728,7 @@ async def test_artifact_listing_carries_the_conversations_surface_and_thread_sou
     ]
 
 
-async def test_artifact_listing_narrows_to_created_and_shared_scopes(db: None, tmp_path) -> None:
+async def test_artifact_listing_narrows_to_the_created_scope(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     member_id = await _seed_member_row(workspace_id, "m@example.com")
     other_id = await _seed_member_row(workspace_id, "n@example.com")
@@ -1760,16 +1760,12 @@ async def test_artifact_listing_narrows_to_created_and_shared_scopes(db: None, t
 
     created = await context.list_artifacts(member_id, admin=False, limit=10, scope="created")
     assert names(created) == {"mine.pdf"}
-    shared = await context.list_artifacts(member_id, admin=False, limit=10, scope="shared")
-    assert names(shared) == {"workspace.pdf"}
     admin_created = await context.list_artifacts(member_id, admin=True, limit=10, scope="created")
     assert names(admin_created) == {"mine.pdf"}
-    admin_shared = await context.list_artifacts(member_id, admin=True, limit=10, scope="shared")
-    assert names(admin_shared) == {"workspace.pdf"}
     unscoped = await context.list_artifacts(member_id, admin=True, limit=10)
     assert names(unscoped) == {"mine.pdf", "private.pdf", "workspace.pdf"}
     with pytest.raises(ValueError, match="unknown artifact scope filter"):
-        await context.list_artifacts(member_id, admin=False, limit=10, scope="everyone")
+        await context.list_artifacts(member_id, admin=False, limit=10, scope="shared")
 
 
 def _shared_page(name: str) -> SharedArtifact:

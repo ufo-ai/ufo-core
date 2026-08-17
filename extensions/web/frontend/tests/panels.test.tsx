@@ -1126,7 +1126,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/radar");
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
   expect(screen.getAllByRole("tablist")).toHaveLength(1);
-  expect(screen.getByRole("tab", { name: "Runs" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Reports" }).getAttribute("aria-selected")).toBe("true");
 
   await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
   expect(location.hash).toBe("#/artifacts");

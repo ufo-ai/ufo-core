@@ -98,8 +98,8 @@ test("the artifact listing sends search and media filters to its read", async ()
 
   expect(await screen.findByRole("tab", { name: "Images" })).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Documents" })).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Data" })).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Other" })).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Data" })).toBeNull();
   await userEvent.click(screen.getByRole("tab", { name: "Images" }));
   await waitFor(() => expect(calls.some((url) => url.includes("media=image"))).toBe(true));
 
@@ -914,19 +914,35 @@ test("a picked scope reads from the first page and is remembered across mounts",
   await userEvent.click(await screen.findByRole("button", { name: "Older" }));
   await waitFor(() => expect(calls.some((url) => url.includes("after=page-2"))).toBe(true));
 
-  await userEvent.click(screen.getByRole("tab", { name: "Shared with me" }));
-  await waitFor(() => expect(calls.some((url) => url.includes("scope=shared"))).toBe(true));
+  await userEvent.click(screen.getByRole("tab", { name: "Created by me" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("scope=created"))).toBe(true));
   expect(
-    calls.filter((url) => url.includes("scope=shared")).some((url) => url.includes("after=")),
+    calls.filter((url) => url.includes("scope=created")).some((url) => url.includes("after=")),
   ).toBe(false);
 
   view.unmount();
   calls.length = 0;
   open();
 
-  const held = await screen.findByRole("tab", { name: "Shared with me" });
+  const held = await screen.findByRole("tab", { name: "Created by me" });
   expect(held.getAttribute("aria-selected")).toBe("true");
-  await waitFor(() => expect(calls.some((url) => url.includes("scope=shared"))).toBe(true));
+  await waitFor(() => expect(calls.some((url) => url.includes("scope=created"))).toBe(true));
+});
+
+test("a held scope the toggle no longer offers reads as All", async () => {
+  localStorage.setItem("artifacts-scope", "shared");
+  const { calls } = wire({
+    "/objects/site": () => objectIndex(SITE_KIND, []),
+    "/workspace/artifacts": () => json({ artifacts: [artifact()] }),
+  });
+  open();
+
+  await screen.findByText("notes.txt");
+  const scopes = screen.getByRole("tablist", { name: "Scope" });
+  expect(within(scopes).getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
+  expect(calls.some((url) => url.includes("scope="))).toBe(false);
 });
 
 test("the scope toggle judges sites by their owner", async () => {
@@ -950,7 +966,8 @@ test("the scope toggle judges sites by their owner", async () => {
   await waitFor(() => expect(screen.queryByText("docs-abc")).toBeNull());
   expect(screen.getByText("mine-site")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("tab", { name: "Shared with me" }));
+  const scopes = screen.getByRole("tablist", { name: "Scope" });
+  await userEvent.click(within(scopes).getByRole("tab", { name: "All" }));
   expect(await screen.findByText("docs-abc")).toBeTruthy();
-  expect(screen.queryByText("mine-site")).toBeNull();
+  expect(screen.getByText("mine-site")).toBeTruthy();
 });
