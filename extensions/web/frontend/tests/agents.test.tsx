@@ -61,7 +61,7 @@ function boot(agents: unknown[], member: unknown, newAgent: unknown) {
 }
 
 async function openCreate() {
-  await userEvent.click(await screen.findByRole("button", { name: "Agents" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Apps" }));
   await userEvent.click(await screen.findByRole("button", { name: "New agent" }));
   return screen.findByLabelText("Name");
 }
@@ -189,7 +189,7 @@ test("a member the kind admits no create from is offered no act", async () => {
     <App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
 
   expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "New agent" })).toBeNull();
@@ -207,7 +207,7 @@ test("the search narrows the rows, and says so when it matches none of them", as
     />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   const index = within(await agentIndex());
   await userEvent.type(screen.getByLabelText("Search agents"), "res");
 
@@ -230,7 +230,7 @@ test("Refresh re-reads the one answer to what agents this member holds", async (
   });
   render(<Portal />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Agents" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Apps" }));
   const index = within(await agentIndex());
   expect(index.queryByText("research")).toBeNull();
 

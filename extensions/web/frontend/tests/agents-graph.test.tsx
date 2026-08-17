@@ -81,7 +81,7 @@ function renderAgents() {
 }
 
 async function openGraph(): Promise<HTMLElement> {
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   await userEvent.click(await screen.findByRole("tab", { name: "Graph" }));
   return screen.findByRole("group", { name: "Agent topology" });
 }
@@ -121,7 +121,7 @@ beforeEach(() => {
 test("the toggle turns the wide pane into the topology graph and holds the choice", async () => {
   const { calls } = wireGraph();
   const first = renderAgents();
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   expect(await screen.findByRole("region", { name: "assistant" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("tab", { name: "Graph" }));
@@ -138,7 +138,7 @@ test("the toggle turns the wide pane into the topology graph and holds the choic
 
   first.unmount();
   renderAgents();
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
 
   expect(await screen.findByRole("group", { name: "Agent topology" })).toBeTruthy();
   expect(screen.queryByRole("region", { name: "assistant" })).toBeNull();

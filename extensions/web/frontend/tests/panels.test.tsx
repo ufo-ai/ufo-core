@@ -1098,7 +1098,7 @@ test("a member with no rollup sees only their own figure and no workspace sectio
   expect(screen.queryByText("Members")).toBeNull();
 });
 
-test("the sidebar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
+test("the top bar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
   wire({
     "/transcript": () => json({ messages: [] }),
     "/settings": () => json(SETTINGS),
@@ -1114,13 +1114,13 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   expect(location.hash).toBe("#/agents");
-  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
+  expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-current")).toBe("true");
 
   await openAgentRow("second");
   expect(location.hash).toBe("#/agents/" + SECOND.id);
-  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
+  expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-current")).toBe("true");
 
   await userEvent.click(screen.getByRole("button", { name: "Radar" }));
   expect(location.hash).toBe("#/radar");
@@ -1161,7 +1161,7 @@ test("the agents index lists agents only, whatever subagent profiles the deploy 
     />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   const index = within(await screen.findByRole("navigation", { name: "Agents" }));
   expect(index.getByText("assistant")).toBeTruthy();
   expect(index.queryByText("deep_research")).toBeNull();
@@ -1170,10 +1170,12 @@ test("the agents index lists agents only, whatever subagent profiles the deploy 
   expect(screen.queryByText("general_purpose")).toBeNull();
 });
 
-test("a member who is not an admin is offered no administration control", () => {
+test("a member who is not an admin is offered no administration control", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
+  expect(await screen.findByRole("menuitem", { name: /Theme/ })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Administration" })).toBeNull();
 });
 
 test("the agent tab strip opens the tab named in the hash, and Home takes the bare hash", async () => {

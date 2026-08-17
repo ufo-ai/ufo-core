@@ -72,7 +72,7 @@ test("the artifact viewer is torn down when the member returns to a conversation
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chat" }));
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
