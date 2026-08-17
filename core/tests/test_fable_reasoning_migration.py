@@ -11,7 +11,7 @@ from ufo.db import MIGRATIONS_DIR
 
 def _update_statement() -> sa.TextClause:
     spec = importlib.util.spec_from_file_location(
-        "migration_0102", MIGRATIONS_DIR / "versions" / "0102_fable_reasoning.py"
+        "migration_0103", MIGRATIONS_DIR / "versions" / "0103_fable_reasoning.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -28,7 +28,7 @@ def _config(database_path: Path) -> Config:
     return config
 
 
-def test_0102_updates_fable_reasoning_and_preserves_auto_model(tmp_path: Path) -> None:
+def test_0103_updates_fable_reasoning_and_preserves_auto_model(tmp_path: Path) -> None:
     database_path = tmp_path / "fable-reasoning.db"
     config = _config(database_path)
     command.upgrade(config, "0099")
@@ -52,7 +52,7 @@ def test_0102_updates_fable_reasoning_and_preserves_auto_model(tmp_path: Path) -
             )
         )
         connection.commit()
-    command.upgrade(config, "0102")
+    command.upgrade(config, "0103")
     with engine.connect() as connection:
         rows = connection.execute(sa.text("select model, reasoning from agent order by id")).all()
     engine.dispose()
@@ -63,7 +63,7 @@ def test_0102_updates_fable_reasoning_and_preserves_auto_model(tmp_path: Path) -
     ]
 
 
-def test_0102_update_runs_on_postgres(database_url: str) -> None:
+def test_0103_update_runs_on_postgres(database_url: str) -> None:
     if not database_url.startswith("postgresql"):
         pytest.skip("Postgres migration proof runs on the Postgres database parameter")
     engine = sa.create_engine(database_url.replace("+asyncpg", "+psycopg"))

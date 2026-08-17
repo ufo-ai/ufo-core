@@ -3,8 +3,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0102"
-down_revision: str | None = "0101"
+revision: str = "0103"
+down_revision: str | None = "0102"
 branch_labels: str | None = None
 depends_on: str | None = None
 FABLE_MODELS = ("claude-fable-5", "anthropic.claude-fable-5")
