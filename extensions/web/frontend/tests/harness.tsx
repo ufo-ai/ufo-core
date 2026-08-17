@@ -187,9 +187,22 @@ export const NO_TASKS = "No scheduled task is visible to you.";
 export const NO_TRIGGERS = "No source trigger is visible to you.";
 export const NO_ARTIFACTS = "A file or site an agent makes in a conversation is listed here.";
 
+/** The kind as the surface states it: the fields sorted, because that is the order `PortalKind`
+ *  carries them in, and the index leads with the first of them it draws a column for. */
 export const TASK_KIND = {
   kind: "scheduled_task",
-  fields: ["conversation", "id", "mine", "next_run_at", "origin", "paused", "owner_email", "prompt"],
+  fields: [
+    "conversation",
+    "id",
+    "last_run_at",
+    "last_run_status",
+    "mine",
+    "next_run_at",
+    "origin",
+    "owner_email",
+    "paused",
+    "prompt",
+  ],
   spec_schema: {
     properties: {
       schedule: { type: "string" },

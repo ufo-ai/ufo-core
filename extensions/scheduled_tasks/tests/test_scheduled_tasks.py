@@ -463,11 +463,86 @@ async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None)
     )
 
 
+async def test_a_listed_task_carries_its_latest_fire_and_how_it_ended(db: None) -> None:
+    """A listing row states the fire behind the task as well as the one ahead of it: `last_run_at`,
+    and the status the turn that fire ran closed with. So "what is up with this one" is answered off
+    the row, by an agent reading a page and by the portal drawing one. A task that has never fired
+    states neither."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    fired_at = datetime(2026, 8, 15, 9, tzinfo=UTC)
+    fired_turn = uuid4()
+    with ws(workspace_id), agent(agent_id):
+        store = _store()
+        ran = await store.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "summarize what merged",
+            "daily digest",
+            datetime(2026, 8, 16, 9, tzinfo=UTC),
+            created_by_member_id=creator,
+        )
+        await store.create(
+            conversation_id,
+            "sweep",
+            DAILY_9AM,
+            "sweep the queue",
+            "nightly sweep",
+            datetime(2026, 8, 16, 9, tzinfo=UTC),
+            created_by_member_id=creator,
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=fired_turn,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="done",
+                    inbound="summarize what merged",
+                    admission_source="scheduled",
+                    on_behalf_of_member_id=creator,
+                    terminal=TerminalFrame(status="done", text="posted it").model_dump(mode="json"),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.update(schedule_table)
+                .where(schedule_table.c.id == ran.id)
+                .values(last_run_at=fired_at, last_turn_id=fired_turn)
+            )
+        listed = json.loads(
+            await _dispatch(_object_tool("object_list"), ctx, kind=SCHEDULED_TASK_KIND)
+        )
+        page = await ScheduledTaskObjects().member_page(
+            context_for(NAME, frozenset()),
+            member_id=creator,
+            admin=False,
+            query=ObjectListQuery(supported_fields=SCHEDULED_TASK_OBJECT.list_fields),
+        )
+
+    assert {"last_run_at", "last_run_status"} <= SCHEDULED_TASK_OBJECT.list_fields
+    rows = {row["name"]: row for row in listed["objects"]}
+    assert rows["digest"]["last_run_at"] == fired_at.isoformat()
+    assert rows["digest"]["last_run_status"] == "done"
+    assert rows["sweep"]["last_run_at"] is None
+    assert rows["sweep"]["last_run_status"] is None
+    member_rows = {row.name: row for row in page.rows}
+    assert member_rows["digest"].fields["last_run_at"] == fired_at.isoformat()
+    assert member_rows["digest"].fields["last_run_status"] == "done"
+    assert member_rows["sweep"].fields["last_run_status"] is None
+
+
 async def test_a_turn_reads_a_prompt_excerpt_the_member_reads_whole(db: None) -> None:
     """`object_list` answers a whole page — 50 rows — into the model's context, and the spec bounds
     no prompt, so the rows a turn reads carry an excerpt. The member's own read carries the prompt
-    whole: the portal titles that column Prompt, and a cut made in the projection reaches the
-    reader indistinguishable from a prompt that ended."""
+    whole: the record's own page states it, and a cut made in the projection reaches the reader
+    indistinguishable from a prompt that ended. No index reads the prompt down a column — every row
+    cut it mid-word — so the portal states it where it has the room."""
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)

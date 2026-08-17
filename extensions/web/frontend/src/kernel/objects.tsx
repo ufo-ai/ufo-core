@@ -41,16 +41,33 @@ const CONVERSATION_FIELD = "conversation";
  *  the name is already the member's word for the record, so it is never a column either. */
 const ID_FIELD = "id";
 
-/** How many of the kind's own declared fields the index carries beside the name and the summary.
- *  The kind states its fields in the order it leads with, so the first is the one a member came to
- *  read — a scheduled task's next run — and the rest stand on the record's own page. A column for
- *  every declared field is a table read sideways to answer a question nobody asked. */
+/** How many of the kind's own declared fields the index carries beside the name and the prose. The
+ *  kind states its fields in the order it leads with, so the first is the one a member came to read
+ *  — a scheduled task's last run — and the rest stand on the record's own page. A column for every
+ *  declared field is a table read sideways to answer a question nobody asked. */
 const LEADING_FIELDS = 1;
 
-/** The prose a row is read by. A kind that states what its record asks for carries it as its own
- *  field, and that is what the index reads down; every other kind falls to the one-line summary
- *  the projection composes. */
-const PROSE_FIELD = "prompt";
+/** How many a kind carrying no prose leads with instead. The width the prose column would have
+ *  taken goes to one more of the kind's own facts, rather than to a column of blank. */
+const FACT_LED_FIELDS = 2;
+
+/** The one field no index reads down. A scheduled task's prompt is a whole instruction: every row
+ *  cut it mid-word, and a cut arrives at the reader indistinguishable from a prompt that ended. So
+ *  a kind declaring it carries no prose column at all and reads by its facts, and its summary is no
+ *  way around that — the projection composes the summary out of the same prompt. Every other kind
+ *  reads down the one-line summary. */
+const PROMPT_FIELD = "prompt";
+
+/** Whether a row is stopped. It is the first thing asked of a task and the last thing a column
+ *  should cost: it reads as a chip beside the name, where the member is already looking, and the
+ *  filter above the table still narrows by it. */
+const STATE_FIELD = "paused";
+
+/** The run a member reads together with how it went, and the field that says how. An ending in a
+ *  column of its own — `done`, beside no run — names nothing, so it reads inside the cell of the
+ *  run it belongs to and takes no column. */
+const RUN_FIELD = "last_run_at";
+const ENDING_FIELD = "last_run_status";
 
 /** How many characters of a spec value still read beside their label. A schedule, a day, a name fit
  *  the value column; a prompt does not, and neither does a url nobody can break a line in, so past
@@ -119,7 +136,7 @@ function enumerated(schema: SpecSchema | null, field: string): boolean {
  *  rather than set in the mono a wire identifier takes. */
 function Chip({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded-control border border-edge px-sm py-hair text-small">
+    <span className="shrink-0 rounded-control border border-edge px-sm py-hair text-small">
       {children}
     </span>
   );
@@ -141,6 +158,15 @@ function cell(field: string, value: ObjectValue, schema: SpecSchema | null, now:
       : (day(value) ?? value);
   if (enumerated(schema, field)) return <Chip>{value}</Chip>;
   return value;
+}
+
+/** How the run in a cell went, after the moment it ran at — the same `Last · status` line the
+ *  conversation's own automations panel reads. A record with no run behind it states no ending, and
+ *  a run whose turn the workspace no longer holds states the moment alone. */
+function ending(row: ObjectRow): string {
+  const said = row[ENDING_FIELD];
+  if (row[RUN_FIELD] === null || row[RUN_FIELD] === undefined) return "";
+  return typeof said === "string" && said ? " · " + said : "";
 }
 
 export const OWNER_FIELD = "owner_email";
@@ -254,20 +280,24 @@ function ObjectIndex({
         const narrowing = Boolean(query || narrowed);
         const acts = payload.applies && payload.spec_schema !== null && owner !== null;
         const owned = agentId !== null && payload.fields.includes(OWNER_FIELD);
-        const prose = payload.fields.includes(PROSE_FIELD) ? PROSE_FIELD : "summary";
+        const prose = payload.fields.includes(PROMPT_FIELD) ? null : "summary";
         const shown = payload.fields.filter(
           (field) =>
             field !== CONVERSATION_FIELD &&
             field !== OWNER_FIELD &&
-            field !== PROSE_FIELD &&
+            field !== PROMPT_FIELD &&
             field !== ID_FIELD &&
+            field !== STATE_FIELD &&
+            field !== ENDING_FIELD &&
             field !== "mine",
         );
-        const led = shown.slice(0, LEADING_FIELDS);
+        const led = shown.slice(0, prose === null ? FACT_LED_FIELDS : LEADING_FIELDS);
         const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
         if (agentId === null) columns.push({ label: "Agent", fact: true });
         if (owned) columns.push({ label: OWNER_HEADING, sort: OWNER_FIELD, fact: true });
-        columns.push({ label: heading(prose, payload.spec_schema), sort: prose });
+        if (prose !== null) {
+          columns.push({ label: heading(prose, payload.spec_schema), sort: prose });
+        }
         for (const field of led) {
           columns.push({ label: heading(field, payload.spec_schema), sort: field, fact: true });
         }
@@ -366,21 +396,27 @@ function ObjectIndex({
                 {(row) => (
                   <>
                     <Td>
-                      <span data-part="primary" className="block max-w-full truncate">
-                        {row.name}
+                      <span className="flex min-w-0 max-w-full items-center gap-xs">
+                        <span data-part="primary" className="truncate">
+                          {row.name}
+                        </span>
+                        {typeof row[STATE_FIELD] === "boolean" ? (
+                          <Chip>{row[STATE_FIELD] ? "Paused" : "Active"}</Chip>
+                        ) : null}
                       </span>
                     </Td>
                     {agentId === null ? <TdFact>{row.agent_name}</TdFact> : null}
                     {owned ? <TdFact>{creator(row[OWNER_FIELD], viewer)}</TdFact> : null}
-                    <Td>
-                      <span className="block truncate">
-                        {(prose === "summary" ? row.summary : row[prose]) || "—"}
-                      </span>
-                    </Td>
+                    {prose === null ? null : (
+                      <Td>
+                        <span className="block truncate">{row.summary || "—"}</span>
+                      </Td>
+                    )}
                     {led.map((field) => (
                       <TdFact key={field}>
                         <span className="block truncate">
                           {cell(field, row[field] ?? null, payload.spec_schema, now)}
+                          {field === RUN_FIELD ? ending(row) : null}
                         </span>
                       </TdFact>
                     ))}

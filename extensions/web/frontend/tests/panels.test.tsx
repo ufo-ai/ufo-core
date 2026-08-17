@@ -289,7 +289,7 @@ test("an overview that fails to read states the error and offers no form", async
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
 
-test("the scheduled index leads with the next run, and its detail pauses through the intent lane", async () => {
+test("the scheduled index leads with both runs, and its detail pauses through the intent lane", async () => {
   const posted: unknown[] = [];
   wire({
     "/objects/scheduled_task/digest": () =>
@@ -311,6 +311,8 @@ test("the scheduled index leads with the next run, and its detail pauses through
           summary: "0 9 * * * — summarize",
           mine: true,
           next_run_at: IN_THREE_HOURS,
+          last_run_at: "2026-07-31T09:00:00Z",
+          last_run_status: "done",
           origin: "#general",
           prompt: "summarize",
           owner_email: "member@example.com",
@@ -328,9 +330,11 @@ test("the scheduled index leads with the next run, and its detail pauses through
 
   const listed = (await screen.findByText("digest")).closest("tr");
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
+  expect(said[0]).toBe("digestActive");
   expect(said[1]).toBe("You");
-  expect(said[2]).toBe("summarize");
+  expect(said[2]).toBe("Jul 31 2026 · done");
   expect(said[3]).toContain("in ");
+  expect(screen.queryByText("summarize")).toBeNull();
   expect(screen.queryByText("#general")).toBeNull();
 
   await userEvent.click(screen.getByText("digest"));

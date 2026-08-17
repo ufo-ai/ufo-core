@@ -240,8 +240,13 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         prompt_max: int | None,
         conversation_id: UUID | None = None,
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
-        listed_rows = await _require_scheduler(ext).list_reported(conversation_id=conversation_id)
+        scheduler = _require_scheduler(ext)
+        listed_rows = await scheduler.list_reported(conversation_id=conversation_id)
         emails = await owner_emails(row.task.created_by_member_id for row in listed_rows)
+        inspections = await scheduler.inspect_many(tuple(listed.task for listed in listed_rows))
+        # A task that has never fired, or whose turn is compacted away, states no ending rather
+        # than one it cannot know.
+        endings = {task_id: found.last_turn_status for task_id, found in inspections.items()}
         return tuple(
             OwnedRow(
                 name=listed.task.name,
@@ -255,6 +260,12 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     "id": str(listed.task.id),
                     "conversation": str(listed.task.conversation_id),
                     "next_run_at": listed.task.next_run_at.isoformat(),
+                    "last_run_at": (
+                        None
+                        if listed.task.last_run_at is None
+                        else listed.task.last_run_at.isoformat()
+                    ),
+                    "last_run_status": endings.get(listed.task.id),
                     "paused": listed.task.paused,
                     "owner_email": emails.get(listed.task.created_by_member_id),
                     "origin": listed.surface_label or "Portal",
@@ -435,8 +446,9 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "
         "Listing returns each task's name, schedule, description, creator (`owner_email`), and "
         "`origin` — the surface label of the conversation it reports into, else `Portal` — "
-        "and filters and orders on "
-        "`next_run_at`, `paused`, and `mine` — order by `next_run_at` asc for what fires next, "
+        "plus the latest fire as `last_run_at` and `last_run_status`, and filters and orders on "
+        "`next_run_at`, `last_run_at`, `paused`, and `mine` — order by `next_run_at` asc for "
+        "what fires next, "
         "filter `paused: true` for what is stopped, or `mine: true` for the caller's own; get "
         "shows the latest run's response and a "
         "`reports_to` link naming the conversation it posts into. A run's per-run output is not "
@@ -447,7 +459,18 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
     list_fields=frozenset(
-        {"id", "conversation", "next_run_at", "paused", "owner_email", "origin", "mine", "prompt"}
+        {
+            "id",
+            "conversation",
+            "next_run_at",
+            "last_run_at",
+            "last_run_status",
+            "paused",
+            "owner_email",
+            "origin",
+            "mine",
+            "prompt",
+        }
     ),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
 )

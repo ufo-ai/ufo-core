@@ -41,12 +41,16 @@ import {
 const NOW = new Date("2026-08-01T12:00:00Z");
 const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
 
+const LAST_RUN = "2026-07-31T09:00:00Z";
+
 const TASK_ROW = owned({
   name: "daily-brief",
   summary: "0 9 * * * — daily brief",
   conversation: CONVO_ID,
   mine: true,
   next_run_at: IN_THREE_HOURS,
+  last_run_at: LAST_RUN,
+  last_run_status: "done",
   origin: "#general",
   prompt: "write the daily brief",
   paused: false,
@@ -72,6 +76,8 @@ const SECOND_TASK_ROW = owned(
     summary: "0 9 * * 1 — weekly roll-up",
     conversation: SECOND_CONVO_ID,
     next_run_at: IN_THREE_HOURS,
+    last_run_at: null,
+    last_run_status: null,
     paused: false,
   },
   SECOND,
@@ -202,25 +208,51 @@ test("a moment reads as elapsed behind now and as remaining ahead of it", () => 
   expect(relativeMoment("not a moment", NOW)).toBe("not a moment");
 });
 
-test("an index carries the name, the kind's own prose and the one field it leads with", async () => {
+/** The prompt is not a column: every row cut it mid-word, so the kind carries no prose at all and
+ *  the width goes to the two runs instead — the one behind the task with how it ended, and the one
+ *  ahead of it. */
+test("an index carries the name and the two facts a prose-less kind leads with", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
   mount();
 
   const name = await screen.findByText("daily-brief");
   const row = name.closest("tr");
   expect(row).not.toBeNull();
-  expect(headings()).toEqual(["Name", "Agent", "Prompt", "Next Run At", ""]);
+  expect(headings()).toEqual(["Name", "Agent", "Last Run At", "Next Run At", ""]);
   const said = cells("daily-brief");
-  expect(said[0]).toBe("daily-brief");
+  expect(said[0]).toBe("daily-briefActive");
   expect(said[1]).toBe("assistant");
-  expect(said[2]).toBe("write the daily brief");
+  expect(said[2]).toBe("Jul 31 2026 · done");
   expect(said[3]).toContain("in ");
+  expect(screen.queryByText("write the daily brief")).toBeNull();
+  expect(screen.queryByText("0 9 * * * — daily brief")).toBeNull();
   expect(screen.queryByText("#general")).toBeNull();
   const rowCells = [...(row?.querySelectorAll("td") ?? [])];
   expect(rowCells[1].className).toContain("w-(--size-fact-column)");
+  expect(rowCells[2].className).toContain("w-(--size-fact-column)");
   expect(rowCells[2].querySelector("span")?.className).toContain("block truncate");
   expect(rowCells[3].className).toContain("w-(--size-fact-column)");
   expect(rowCells[3].querySelector("span")?.className).toContain("block truncate");
+});
+
+/** Paused stood only as a filter above the table, so "what is up with this one" took a press into
+ *  every row. It reads on the row now, and it still costs no column. */
+test("whether a task is stopped reads beside its own name", async () => {
+  wire({
+    "/objects/scheduled_task": () =>
+      objectIndex(TASK_KIND, [TASK_ROW, owned({ ...TASK_ROW, name: "held", paused: true })]),
+  });
+  mount();
+
+  await screen.findByText("daily-brief");
+  expect(headings()).not.toContain("Paused");
+  expect(cells("daily-brief")[0]).toBe("daily-briefActive");
+  expect(cells("held")[0]).toBe("heldPaused");
+  const chip = [...(screen.getByText("held").closest("tr")?.querySelectorAll("span") ?? [])].find(
+    (span) => span.textContent === "Paused",
+  );
+  expect(chip?.className).toContain("rounded-control");
+  expect(screen.getByRole("tab", { name: "Paused" })).toBeTruthy();
 });
 
 /** The tracks are fixed pixels, so a table whose tracks outrun the page it is read on holds its
@@ -237,7 +269,7 @@ test("an index fits the desktop it is read on, so the row's act never scrolls of
   const across = screen.getByRole("table").style.minWidth;
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
-    "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 1 * var(--size-act))",
+    "calc(3 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
   );
   expect(
     pageFits("calc(1 * var(--size-fact-column) + 4 * var(--size-prose-column) + 1 * var(--size-act))"),
@@ -252,7 +284,7 @@ test("one agent's index fits that same desktop", async () => {
   const across = screen.getByRole("table").style.minWidth;
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
-    "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 1 * var(--size-act))",
+    "calc(3 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
   );
 });
 
@@ -279,14 +311,19 @@ test("the record's own page stays one press away once its name leads elsewhere",
   expect(await screen.findByText("write the daily brief")).toBeTruthy();
 });
 
+/** The row keeps `last_run_status`, so the ending is proven to read only with the run it belongs
+ *  to: alone in the cell, `done` names a run the task has never had. */
 test("a field the record lacks takes a dash rather than an empty cell", async () => {
   wire({
     "/objects/scheduled_task": () =>
-      objectIndex(TASK_KIND, [{ ...TASK_ROW, paused: true, next_run_at: null }]),
+      objectIndex(TASK_KIND, [
+        { ...TASK_ROW, paused: true, next_run_at: null, last_run_at: null },
+      ]),
   });
   mount();
 
   await screen.findByText("daily-brief");
+  expect(cells("daily-brief")[2]).toBe("—");
   expect(cells("daily-brief")[3]).toBe("—");
 });
 
@@ -413,7 +450,7 @@ test("a filter that narrows to nothing keeps the control that clears it", async 
 
   expect(await screen.findByText("No scheduled task matches this search.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
-  expect(headings()).toEqual(["Name", "Agent", "Prompt", "Next Run At", ""]);
+  expect(headings()).toEqual(["Name", "Agent", "Last Run At", "Next Run At", ""]);
   expect(screen.getByRole("tab", { name: "Paused" }).getAttribute("aria-selected")).toBe("true");
 
   await userEvent.click(screen.getByRole("tab", { name: "All" }));
@@ -452,7 +489,7 @@ test("the order sits on the head of the column it orders, and only there", async
   expect(heads.map((head) => head.querySelector("button")?.textContent ?? null)).toEqual([
     "Name",
     null,
-    "Prompt",
+    "Last Run At",
     "Next Run At",
     null,
   ]);
@@ -492,7 +529,7 @@ test("one agent's index names that agent, so it neither reads nor draws the owne
 
   await screen.findByText("daily-brief");
   expect(reads[0]).toContain("agent=" + AGENT_ID);
-  expect(headings()).toEqual(["Name", "Created By", "Prompt", "Next Run At", ""]);
+  expect(headings()).toEqual(["Name", "Created By", "Last Run At", "Next Run At", ""]);
   expect(screen.queryByRole("link", { name: "assistant" })).toBeNull();
 });
 
@@ -608,7 +645,7 @@ test("a creator reads as You to its own member, the address to another, Workspac
   );
 
   await screen.findByText("daily-brief");
-  expect(headings()).toEqual(["Name", "Created By", "Prompt", "Next Run At", ""]);
+  expect(headings()).toEqual(["Name", "Created By", "Last Run At", "Next Run At", ""]);
   expect(cells("daily-brief")[1]).toBe("mel@example.com");
   expect(cells("mine")[1]).toBe("You");
   expect(cells("standing")[1]).toBe("Workspace");
