@@ -69,6 +69,7 @@ from ufo.ext.surface import (
     writeback_workspaces,
 )
 from ufo.hub import InProcessHub
+from ufo.loop.engine import INJECTED_CONTEXT, _context_tag
 from ufo.loop.queue import _load_turn
 from ufo.models.interface import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sandbox.containment import ContainmentError
@@ -3751,6 +3752,25 @@ async def test_queued_arrivals_carry_the_source_and_the_wait_that_shape_each_bub
         (spoke, "Mel Okafor (m@example.com)", member_id),
         (folded, "Mel Okafor (m@example.com)", member_id),
     }
+
+
+def test_member_message_text_strips_the_engine_envelope() -> None:
+    """A transcript's persisted user message is the prompt the turn ran on: the engine's <context>
+    tag at the head and the recall it injected at the tail, around an inbound only some surfaces
+    fence. A projection reading the transcript back gets the member's words alone — composed here
+    by the engine's own writers, so the strip breaks the moment the envelope moves — while the same
+    text typed inside a message stays, because the envelope anchors at the exact ends."""
+    tag = _context_tag(uuid4(), None, datetime(2026, 8, 16, 23, 4, tzinfo=UTC))
+    assert member_message_text(tag + "sup") == "sup"
+    composed = INJECTED_CONTEXT.format(content=tag + "sup", injected="Relevant memory:\n- a fact")
+    assert member_message_text(composed) == "sup"
+    fenced = INJECTED_CONTEXT.format(
+        content=tag + fence_member_message(mint_marker(), "", "sup", ""),
+        injected="Relevant memory:",
+    )
+    assert member_message_text(fenced) == "sup"
+    typed = "keep this <context>\nnot the engine's\n</context>\n and this <injected_context> too"
+    assert member_message_text(typed) == typed
 
 
 async def _seed_pending_arrival(

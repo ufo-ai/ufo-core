@@ -184,6 +184,8 @@ _MEMBER_MESSAGE_RE = re.compile(
     rf"(?P<said>.*)\n</{MEMBER_MESSAGE_ELEMENT}_(?P=marker)>",
     re.DOTALL,
 )
+_CONTEXT_TAG_RE = re.compile(r"\A<context>\n.*?\n</context>\n", re.DOTALL)
+_INJECTED_CONTEXT_RE = re.compile(r"\n\n<injected_context>\n.*\n</injected_context>\Z", re.DOTALL)
 
 
 def mint_marker() -> str:
@@ -248,16 +250,20 @@ def inbox_name(raw: str, used: set[str]) -> str:
 
 
 def member_message_text(inbound: str) -> str:
-    """The member's own words back out of a fenced inbound, for a projection that renders what the
-    member said rather than the prompt the turn ran on.
+    """The member's own words back out of an inbound, for a projection that renders what the member
+    said rather than the prompt the turn ran on.
 
-    Exact, not a guess: the element is named with a marker minted for that one message, so the only
-    text that can close it is text `fence_member_message` wrote. A member who types
-    `</member_message>` closes nothing, which is why their bubble in the portal reads back as they
-    wrote it. An inbound no surface fenced — a prepared intent, a subagent payload — is its own
-    text."""
-    found = _MEMBER_MESSAGE_RE.search(inbound)
-    return inbound if found is None else found.group("said")
+    Two wrappers come off. The engine's envelope — the <context> tag it writes at the head of every
+    member turn and the <injected_context> recall it appends at the tail — persists into the
+    transcript, so a projection reading messages back (the terminal's resume replay) strips it by
+    its anchors: the head of the text and the tail, positions no member's own words can hold. The
+    surface fence is exact rather than anchored: the element is named with a marker minted for that
+    one message, so the only text that can close it is text `fence_member_message` wrote, and a
+    member who types `</member_message>` closes nothing. An inbound wearing neither — a prepared
+    intent, a subagent payload — is its own text."""
+    said = _INJECTED_CONTEXT_RE.sub("", _CONTEXT_TAG_RE.sub("", inbound))
+    found = _MEMBER_MESSAGE_RE.search(said)
+    return said if found is None else found.group("said")
 
 
 @dataclass(frozen=True)

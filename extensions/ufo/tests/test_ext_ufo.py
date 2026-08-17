@@ -1921,6 +1921,37 @@ def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> 
     )
 
 
+def test_history_strips_the_prompt_envelope_from_member_lines() -> None:
+    from ufo.models.interface import Message, TextBlock
+    from ufo.transcript import Conversation
+
+    composed = (
+        "<context>\n"
+        "message_ref: 142f1dd4-8c24-5faa-9c20-b760d238ecb1\n"
+        "time: Sunday 2026-08-16 23:04 EDT\n"
+        "sender: alex@metalcraft.ai\n"
+        "source: ufo cli (alex@metalcraft.ai)\n"
+        "</context>\n"
+        "sup\n"
+        "\n<injected_context>\nRelevant memory:\n- a fact worth recalling\n</injected_context>"
+    )
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content=composed),
+            Message(role="assistant", content=(TextBlock(text="not much"),)),
+            Message(role="user", content=(TextBlock(text="tell me more"),)),
+            Message(role="assistant", content=(TextBlock(text="the latest reply"),)),
+        ),
+    )
+    lines = history_directives(conversation)
+    assert lines == (
+        b"you\tsup\n",
+        b"say\tnot much\n",
+        b"you\ttell me more\n",
+    )
+
+
 def test_history_states_a_turns_steps_over_the_reply_they_produced() -> None:
     from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
     from ufo.transcript import Conversation
