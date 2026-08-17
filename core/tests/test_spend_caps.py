@@ -178,6 +178,8 @@ async def _bill(
             turn_id=turn_id,
             dimension="tokens",
             amount=10,
+            prompt_tokens=10,
+            input_tokens=10,
             priced_micro_usd=priced_micro_usd,
             model="claude-opus-4-8",
             created_at=stamp,

@@ -886,6 +886,8 @@ async def _ledger_rows(connection, workspace_id, turn_id, tokens: int, cost_micr
             turn_id=turn_id,
             dimension="tokens",
             amount=max(tokens, 1),
+            prompt_tokens=max(tokens, 1),
+            input_tokens=max(tokens, 1),
             priced_micro_usd=cost_micro_usd,
             model=MODEL,
             created_at=sa.func.now(),

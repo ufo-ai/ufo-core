@@ -2644,6 +2644,8 @@ async def test_turn_detail_includes_ledger_and_subagent_children(db: None, tmp_p
                 turn_id=parent,
                 dimension="tokens",
                 amount=1234,
+                prompt_tokens=1234,
+                input_tokens=1234,
                 priced_micro_usd=42,
                 model="claude-opus-4-8",
                 created_at=sa.func.now(),

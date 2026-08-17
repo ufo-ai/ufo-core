@@ -29,6 +29,7 @@ MICRO_USD_PER_USD = 1_000_000
 TOKENS_DIMENSION = "tokens"
 EGRESS_DIMENSION = "egress"
 SANDBOX_TOKENS_DIMENSION = "sandbox_tokens"
+SANDBOX_TOKENS_ATTEMPT = "sandbox"
 IMAGES_DIMENSION = "images"
 VIDEOS_DIMENSION = "videos"
 
@@ -161,7 +162,14 @@ async def record_turn_usage(
             dimension=TOKENS_DIMENSION,
             amount=total,
             prompt_tokens=_prompt_tokens(usage),
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
+            cache_write_5m_tokens=usage.cache_write_5m_tokens,
+            cache_write_30m_tokens=usage.cache_write_30m_tokens,
+            cache_write_1h_tokens=usage.cache_write_1h_tokens,
+            byok=byok,
+            token_classes_complete=True,
             priced_micro_usd=priced,
             debited_micro_usd=taken,
             model=model,
@@ -250,7 +258,14 @@ async def record_workspace_usage(
             dimension=TOKENS_DIMENSION,
             amount=total,
             prompt_tokens=_prompt_tokens(usage),
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
+            cache_write_5m_tokens=usage.cache_write_5m_tokens,
+            cache_write_30m_tokens=usage.cache_write_30m_tokens,
+            cache_write_1h_tokens=usage.cache_write_1h_tokens,
+            byok=byok,
+            token_classes_complete=True,
             priced_micro_usd=priced,
             debited_micro_usd=taken,
             model=model,
@@ -350,7 +365,9 @@ async def record_sandbox_tokens(
         return
     priced = pricing.micro_usd(model, usage)
     prompt = _prompt_tokens(usage)
-    ledger_id = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION)
+    ledger_id = ledger_id_for(
+        workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION, SANDBOX_TOKENS_ATTEMPT
+    )
     taken = await debit(connection, workspace_id, priced)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     await connection.execute(
@@ -362,7 +379,13 @@ async def record_sandbox_tokens(
             dimension=SANDBOX_TOKENS_DIMENSION,
             amount=total,
             prompt_tokens=prompt,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
+            cache_write_5m_tokens=usage.cache_write_5m_tokens,
+            cache_write_30m_tokens=usage.cache_write_30m_tokens,
+            cache_write_1h_tokens=usage.cache_write_1h_tokens,
+            token_classes_complete=True,
             priced_micro_usd=priced,
             debited_micro_usd=taken,
             model=model,
@@ -375,7 +398,16 @@ async def record_sandbox_tokens(
             set_={
                 "amount": tables.ledger.c.amount + total,
                 "prompt_tokens": tables.ledger.c.prompt_tokens + prompt,
+                "input_tokens": tables.ledger.c.input_tokens + usage.input_tokens,
+                "output_tokens": tables.ledger.c.output_tokens + usage.output_tokens,
                 "cache_read_tokens": tables.ledger.c.cache_read_tokens + usage.cache_read_tokens,
+                "cache_write_5m_tokens": tables.ledger.c.cache_write_5m_tokens
+                + usage.cache_write_5m_tokens,
+                "cache_write_30m_tokens": tables.ledger.c.cache_write_30m_tokens
+                + usage.cache_write_30m_tokens,
+                "cache_write_1h_tokens": tables.ledger.c.cache_write_1h_tokens
+                + usage.cache_write_1h_tokens,
+                "token_classes_complete": tables.ledger.c.token_classes_complete,
                 "priced_micro_usd": tables.ledger.c.priced_micro_usd + priced,
                 "debited_micro_usd": tables.ledger.c.debited_micro_usd + taken,
                 "updated_at": sa.func.now(),
@@ -507,13 +539,8 @@ async def mint_usage_exports(
     mints — the consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id,
     from_amount)` key makes concurrent or replayed mints collapse onto one frozen row.
 
-    Each intent freezes its `byok` label too: host-side `tokens` usage whose model's provider
-    key slot (`key_slot_for` — the same resolution `client_for` applies) is stored by the
-    workspace is the workspace's spend; everything else — providers keyed from platform env,
-    `sandbox_tokens`, whose egress proxy injects the platform key, and `images` and `videos`, whose
-    models are not in the registry for a slot to be resolved from — is the platform's. Frozen at
-    mint, a re-send carries the label of the key state that served the usage, never the drain-time
-    state."""
+    Each intent copies the `byok` value the ledger writer froze when the provider attempt began.
+    Credential changes after that attempt cannot change who paid for it."""
     now = datetime.now(UTC)
     settle_cutoff = now - timedelta(seconds=EXPORT_SETTLE_MARGIN_SECONDS)
     stored_slots = {
@@ -545,6 +572,9 @@ async def mint_usage_exports(
                 tables.ledger.c.priced_micro_usd,
                 tables.ledger.c.dimension,
                 tables.ledger.c.model,
+                tables.ledger.c.byok,
+                tables.ledger.c.token_classes_complete,
+                tables.turn.c.byok.label("turn_byok"),
                 tables.ledger.c.updated_at,
                 sa.func.coalesce(latest.c.to_amount, 0).label("from_amount"),
                 sa.func.coalesce(latest.c.to_micro_usd, 0).label("from_micro_usd"),
@@ -583,9 +613,17 @@ async def mint_usage_exports(
                 from_micro_usd=row.from_micro_usd,
                 to_micro_usd=row.priced_micro_usd,
                 byok=(
-                    row.dimension == TOKENS_DIMENSION
-                    and (slot := key_slot_for(row.model)) is not None
-                    and slot in stored_slots
+                    False
+                    if row.dimension != TOKENS_DIMENSION
+                    else (
+                        row.byok
+                        if row.token_classes_complete and row.byok is not None
+                        else (
+                            row.turn_byok
+                            if row.turn_byok is not None
+                            else (key_slot_for(row.model) in stored_slots)
+                        )
+                    )
                 ),
                 occurred_at=row.updated_at,
                 created_at=sa.func.now(),

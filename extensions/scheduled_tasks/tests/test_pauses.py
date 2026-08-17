@@ -671,6 +671,8 @@ async def test_a_spend_breach_cancels_the_resume_and_ends_the_wait(db: None) -> 
                 turn_id=spent_turn_id,
                 dimension="tokens",
                 amount=10,
+                prompt_tokens=10,
+                input_tokens=10,
                 priced_micro_usd=100,
                 model="claude-opus-4-8",
                 created_at=sa.func.now(),

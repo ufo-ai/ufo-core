@@ -2699,6 +2699,8 @@ async def test_a_reply_onto_a_turn_whose_cap_broke_faces_the_decision(
                     turn_id=None,
                     dimension="tokens",
                     amount=5_000,
+                    prompt_tokens=5_000,
+                    input_tokens=5_000,
                     priced_micro_usd=5_000,
                     model="claude-opus-4-8",
                     created_at=sa.func.now(),

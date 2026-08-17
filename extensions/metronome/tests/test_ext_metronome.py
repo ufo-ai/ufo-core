@@ -654,6 +654,7 @@ async def test_byok_label_flips_with_the_stored_key_and_stays_per_workspace(
     init_workspace_credentials(store)
     workspace_id, agent_id, conversation_id = await _seed()
     other_workspace, other_agent, other_conversation = await _seed()
+    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-workspace-own")
     for ws_id, conv_id, ag_id in (
         (workspace_id, conversation_id, agent_id),
         (other_workspace, other_conversation, other_agent),
@@ -667,8 +668,8 @@ async def test_byok_label_flips_with_the_stored_key_and_stays_per_workspace(
                 turn_id,
                 MODEL,
                 Usage(input_tokens=1000, output_tokens=500),
+                byok=ws_id == workspace_id,
             )
-    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-workspace-own")
     recorder = _Recorder()
     with ws(workspace_id):
         await _shipper(recorder).run()
@@ -699,7 +700,7 @@ async def test_byok_label_reflects_a_key_added_between_ticks(
     await _settle(second_turn, age_seconds=0)
     async with workspace_tx() as connection:
         await record_turn_usage(
-            connection, workspace_id, second_turn, MODEL, Usage(input_tokens=50)
+            connection, workspace_id, second_turn, MODEL, Usage(input_tokens=50), byok=True
         )
     with ws(workspace_id):
         await _shipper(recorder).run()
@@ -750,6 +751,7 @@ async def test_byok_labels_only_anthropic_served_host_tokens(
             turn_id,
             MODEL,
             Usage(input_tokens=1000, output_tokens=500),
+            byok=True,
         )
         await record_sandbox_tokens(
             connection, workspace_id, turn_id, MODEL, Usage(input_tokens=200)
@@ -835,6 +837,7 @@ async def test_byok_follows_the_serving_providers_stored_key(
             second_turn,
             "anthropic.claude-opus-4-8",
             Usage(input_tokens=10),
+            byok=True,
         )
     with ws(workspace_id):
         await _shipper(recorder).run()

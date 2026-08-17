@@ -324,6 +324,8 @@ async def test_turns_and_detail_read_terminal_ledger_and_children(debug) -> None
                 turn_id=parent,
                 dimension="tokens",
                 amount=1234,
+                prompt_tokens=1234,
+                input_tokens=1234,
                 priced_micro_usd=77,
                 model="claude-opus-4-8",
                 created_at=sa.func.now(),

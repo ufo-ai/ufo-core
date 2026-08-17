@@ -363,6 +363,8 @@ async def test_a_run_a_member_spoke_in_survives_a_reseed(seeded: Seeded) -> None
                     turn_id=answered_turn,
                     dimension="tokens",
                     amount=512,
+                    prompt_tokens=512,
+                    input_tokens=512,
                     priced_micro_usd=900,
                     model="claude-opus-4-8",
                     created_at=sa.func.now(),

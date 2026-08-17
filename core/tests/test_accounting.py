@@ -1,7 +1,5 @@
 import time
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -12,6 +10,7 @@ from ufo import accounting
 from ufo.accounting import (
     IMAGES_DIMENSION,
     MEMBER_SCOPE,
+    SANDBOX_TOKENS_ATTEMPT,
     SANDBOX_TOKENS_DIMENSION,
     TOKENS_DIMENSION,
     VIDEOS_DIMENSION,
@@ -27,7 +26,6 @@ from ufo.accounting import (
     record_workspace_usage,
 )
 from ufo.balance import credit
-from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.loop import queue as loop_queue
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICES, CORE_PRICING, PRICE_DIGEST
@@ -39,7 +37,6 @@ from ufo.models.pricing import (
     pricing_from,
     usage_priced_micro_usd,
 )
-from ufo.models.registry import model_registry
 from ufo.schema import tables
 from ufo.schema.records import Usage, ledger_id_for
 
@@ -244,9 +241,41 @@ async def test_record_then_read_back(db: None) -> None:
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
     async with workspace_tx() as connection:
         cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+        ledger = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.input_tokens,
+                    tables.ledger.c.output_tokens,
+                    tables.ledger.c.cache_read_tokens,
+                    tables.ledger.c.cache_write_5m_tokens,
+                    tables.ledger.c.cache_write_30m_tokens,
+                    tables.ledger.c.cache_write_1h_tokens,
+                    tables.ledger.c.byok,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
     assert cost == TurnCost(
         tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
     )
+    assert tuple(ledger) == (1000, 2000, 3000, 0, 0, 4000, False)
+
+
+async def test_ledger_freezes_the_serving_byok_decision(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=100),
+            byok=True,
+        )
+        assert (
+            await connection.execute(
+                sa.select(tables.ledger.c.byok).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).scalar_one()
 
 
 async def test_ledger_prices_five_minute_and_one_hour_cache_writes_separately(db: None) -> None:
@@ -527,6 +556,109 @@ async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
     )
 
 
+async def test_sandbox_tokens_upsert_preserves_incomplete_token_classes(db: None) -> None:
+    usage = Usage(input_tokens=1000, output_tokens=2000)
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_sandbox_tokens(connection, workspace_id, turn_id, "claude-opus-4-8", usage)
+        await connection.execute(
+            sa.update(tables.ledger)
+            .where(
+                tables.ledger.c.workspace_id == workspace_id,
+                tables.ledger.c.turn_id == turn_id,
+                tables.ledger.c.dimension == SANDBOX_TOKENS_DIMENSION,
+            )
+            .values(token_classes_complete=False)
+        )
+        await record_sandbox_tokens(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=25),
+        )
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.amount,
+                    tables.ledger.c.token_classes_complete,
+                ).where(
+                    tables.ledger.c.workspace_id == workspace_id,
+                    tables.ledger.c.turn_id == turn_id,
+                    tables.ledger.c.dimension == SANDBOX_TOKENS_DIMENSION,
+                )
+            )
+        ).one()
+    assert int(row.amount) == 3025
+    assert row.token_classes_complete is False
+
+
+async def test_sandbox_rows_from_both_proxy_shapes_roll_up_and_export_once(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_sandbox_tokens(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=100),
+        )
+        old_id = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION)
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=old_id,
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension=SANDBOX_TOKENS_DIMENSION,
+                amount=50,
+                prompt_tokens=50,
+                priced_micro_usd=0,
+                debited_micro_usd=0,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.ledger)
+            .where(tables.ledger.c.id == old_id)
+            .values(
+                amount=tables.ledger.c.amount + 25,
+                prompt_tokens=tables.ledger.c.prompt_tokens + 25,
+            )
+        )
+        rows = (
+            await connection.execute(
+                sa.select(tables.ledger.c.id, tables.ledger.c.amount).where(
+                    tables.ledger.c.turn_id == turn_id,
+                    tables.ledger.c.dimension == SANDBOX_TOKENS_DIMENSION,
+                )
+            )
+        ).all()
+        report = await SpendRollup(workspace_id).read(connection, None)
+        await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
+        await accounting.mint_usage_exports(
+            connection,
+            workspace_id,
+            CONSUMER,
+            datetime.now(UTC) - timedelta(days=7),
+            lambda model: None,
+        )
+        exports = await accounting.read_pending_usage_exports(
+            connection, workspace_id, CONSUMER, 100
+        )
+    assert {row.id for row in rows} == {
+        ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION, SANDBOX_TOKENS_ATTEMPT),
+        old_id,
+    }
+    assert sum(int(row.amount) for row in rows) == 175
+    sandbox_total = next(
+        total for total in report.by_dimension if total.dimension == SANDBOX_TOKENS_DIMENSION
+    )
+    assert sandbox_total.amount == 175
+    assert sorted(export.amount for export in exports) == [75, 100]
+
+
 async def test_sandbox_tokens_priced_and_stamped_by_the_merged_pricing(db: None) -> None:
     """An in-sandbox call on a contributed slug is priced against the deploy's merged table and
     stamped with its digest — never the core rate (which lacks the slug → $0) or the core digest —
@@ -584,6 +716,9 @@ async def test_generated_images_accumulate_into_one_unstamped_row(db: None) -> N
     image model), and a second generation on the same turn accumulates into the same row."""
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(byok=True)
+        )
         await record_image_usage(
             connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 2, 80_000
         )
@@ -826,6 +961,8 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
                 turn_id=turn_id,
                 dimension="tokens",
                 amount=7,
+                prompt_tokens=7,
+                input_tokens=7,
                 priced_micro_usd=100,
                 model="claude-opus-4-8",
                 created_at=datetime.now(UTC) - timedelta(minutes=90),
@@ -909,6 +1046,8 @@ async def test_spend_rollup_excludes_ledger_outside_the_window(db: None) -> None
                 turn_id=turn_id,
                 dimension="tokens",
                 amount=10,
+                prompt_tokens=10,
+                input_tokens=10,
                 priced_micro_usd=100,
                 model="claude-opus-4-8",
                 created_at=old,
@@ -1040,6 +1179,8 @@ async def test_member_spend_excludes_ledger_outside_the_window(db: None) -> None
                 turn_id=turn_id,
                 dimension="tokens",
                 amount=10,
+                prompt_tokens=10,
+                input_tokens=10,
                 priced_micro_usd=100,
                 model="claude-opus-4-8",
                 created_at=old,
@@ -1068,21 +1209,13 @@ async def _settle_turn(connection: AsyncConnection, turn_id: UUID, age_seconds: 
     )
 
 
-def _key_slot_for() -> Callable[[str], str | None]:
-    config = Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite://"),
-        blob=BlobConfig(backend="filesystem", root=Path()),
-    )
-    return model_registry(config, ()).key_slot_for
-
-
 async def _pending(
     workspace_id: UUID, consumer: str = CONSUMER
 ) -> tuple[accounting.UsageExport, ...]:
     floor = datetime.now(UTC) - timedelta(days=7)
     async with workspace_tx() as connection:
         await accounting.mint_usage_exports(
-            connection, workspace_id, consumer, floor, _key_slot_for()
+            connection, workspace_id, consumer, floor, lambda model: None
         )
         return await accounting.read_pending_usage_exports(connection, workspace_id, consumer, 100)
 
@@ -1090,6 +1223,9 @@ async def _pending(
 async def test_usage_export_settlement_rules(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(byok=True)
+        )
         await record_turn_usage(
             connection,
             workspace_id,
@@ -1120,6 +1256,7 @@ async def test_usage_export_settlement_rules(db: None) -> None:
     assert {export.dimension for export in settled} == {"tokens", "sandbox_tokens"}
     sandbox = next(e for e in settled if e.dimension == "sandbox_tokens")
     assert (sandbox.amount, sandbox.from_amount, sandbox.turn_id) == (175, 0, turn_id)
+    assert sandbox.byok is False
     assert not any(export.dimension == "egress" for export in settled)
 
 
@@ -1129,6 +1266,9 @@ async def test_images_export_with_their_settled_turn_as_platform_served(db: None
     `byok` label resolves a key slot through the model registry and an image model is not in it."""
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(byok=True)
+        )
         await record_image_usage(
             connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 2, 80_000
         )
@@ -1147,12 +1287,87 @@ async def test_images_export_with_their_settled_turn_as_platform_served(db: None
     assert export.price_digest is None
 
 
+async def test_usage_export_uses_turn_byok_when_ledger_byok_is_null(
+    db: None,
+) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(byok=True)
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension=TOKENS_DIMENSION,
+                amount=100,
+                prompt_tokens=100,
+                priced_micro_usd=500,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    exports = await _pending(workspace_id)
+    assert len(exports) == 1
+    assert exports[0].byok is True
+
+
+async def test_usage_export_classifies_background_byok_from_the_stored_key(
+    db: None,
+) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, _ = await _seed_turn(connection)
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="anthropic_api_key",
+                ciphertext=b"secret",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=None,
+                dimension=TOKENS_DIMENSION,
+                amount=100,
+                prompt_tokens=100,
+                priced_micro_usd=500,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await accounting.mint_usage_exports(
+            connection,
+            workspace_id,
+            CONSUMER,
+            datetime.now(UTC) - timedelta(days=7),
+            lambda model: "anthropic_api_key" if model == "claude-opus-4-8" else None,
+        )
+        exported = (
+            await connection.execute(
+                sa.select(tables.ledger_export.c.byok).where(
+                    tables.ledger_export.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+    assert exported is True
+
+
 async def test_videos_export_with_their_settled_turn_as_platform_served(db: None) -> None:
     """A `videos` row accumulates while its turn runs and settles like an `images` row: nothing
     mints until the turn is terminal and past the margin, and it exports as platform-served because
     no video model is in the registry for a key slot to be resolved from."""
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(byok=True)
+        )
         await record_video_usage(connection, workspace_id, turn_id, "minimax/hailuo-3", 1, 650_000)
     assert await _pending(workspace_id) == ()
 

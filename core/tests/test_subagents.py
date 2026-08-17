@@ -1910,6 +1910,8 @@ async def test_a_capped_workspace_holds_the_result_rather_than_discarding_it(db:
                 turn_id=parent.id,
                 dimension="tokens",
                 amount=10,
+                prompt_tokens=10,
+                input_tokens=10,
                 priced_micro_usd=100,
                 model="claude-opus-4-8",
                 created_at=sa.func.now(),

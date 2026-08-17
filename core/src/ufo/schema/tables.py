@@ -287,7 +287,14 @@ ledger = sa.Table(
     sa.Column("dimension", sa.Text, nullable=False),
     sa.Column("amount", sa.BigInteger, nullable=False),
     sa.Column("prompt_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("input_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("output_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
     sa.Column("cache_read_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("cache_write_5m_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("cache_write_30m_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("cache_write_1h_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("byok", sa.Boolean, nullable=True),
+    sa.Column("token_classes_complete", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("priced_micro_usd", sa.BigInteger, nullable=False),
     sa.Column("debited_micro_usd", sa.BigInteger, nullable=False, server_default=sa.text("0")),
     sa.Column("model", sa.Text, nullable=False),
@@ -300,6 +307,25 @@ ledger = sa.Table(
     ),
     sa.CheckConstraint("amount > 0", name="ledger_amount"),
     sa.CheckConstraint("priced_micro_usd >= 0", name="ledger_priced"),
+    sa.CheckConstraint(
+        "input_tokens >= 0 and output_tokens >= 0 and cache_read_tokens >= 0 "
+        "and cache_write_5m_tokens >= 0 and cache_write_30m_tokens >= 0 "
+        "and cache_write_1h_tokens >= 0",
+        name="ledger_token_classes_nonnegative",
+    ),
+    sa.CheckConstraint(
+        "dimension not in ('tokens', 'sandbox_tokens') or amount = input_tokens + output_tokens "
+        "+ cache_read_tokens + cache_write_5m_tokens + cache_write_30m_tokens "
+        "+ cache_write_1h_tokens",
+        name="ledger_token_classes_total",
+    ),
+    sa.CheckConstraint(
+        "dimension not in ('tokens', 'sandbox_tokens') or prompt_tokens = input_tokens "
+        "+ cache_read_tokens + cache_write_5m_tokens + cache_write_30m_tokens "
+        "+ cache_write_1h_tokens",
+        name="ledger_prompt_classes_total",
+    ),
+    sa.CheckConstraint("not byok or dimension = 'tokens'", name="ledger_byok_dimension"),
     sa.Index("ledger_turn", "turn_id"),
     sa.Index("ledger_workspace_created", "workspace_id", "created_at"),
 )

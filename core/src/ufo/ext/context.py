@@ -1640,12 +1640,9 @@ class ExtensionContext:
         name, so two exporters never touch each other's marks; usage settling before `floor`
         never exports (the extension's backfill bound). Core owns the mint because settlement and
         delta-freezing are writer knowledge no extension can express through the SDK without
-        re-declaring the ledger's private schema — as is the `byok` label, resolved per model
-        through the deploy's provider registry."""
+        re-declaring the ledger's private schema."""
         if self.key_slot_for is None:
-            raise RuntimeError(
-                "usage export needs the model registry to label byok; serve wires it"
-            )
+            raise RuntimeError("model key-slot resolver is required for usage exports")
         async with workspace_tx() as connection:
             await mint_usage_exports(
                 connection,
