@@ -16,6 +16,13 @@ own, which no transcript holds. A first-time DM speaker resolves by Slack-confir
 existing member links, and a same-domain teammate joins as a new member — only the initial member
 onboards through the CLI.
 
+Everything the agent says lands as a threaded reply to the member message it answers, in a DM as in
+a channel: a channel conversation is its thread and its key carries the root, while a DM
+conversation is the channel and each member message founds a thread of its own, so admission records
+which Slack message a message ref names (`_anchor_dm_thread`) and every delivery reads its parent
+back from there (`_reply_thread`). A reply that answers no member message this surface anchored — a
+scheduled run, an alert-woken turn — posts at the DM top level.
+
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", each tool call's
 slug, "Generating…" while text streams, pinned through `loading_messages` so Slack's agent UI
@@ -127,6 +134,7 @@ from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
     WORKSPACE_WRITE_MAX_BYTES,
+    Admitted,
     AmbientMessage,
     AskUserInput,
     BlobStore,
@@ -492,6 +500,7 @@ SLACK_CONVERSATIONS_PAGE_SIZE = 200
 SLACK_CONVERSATIONS_MAX_PAGES = 5
 SLACK_REPLY_PROGRESS_PREFIX = "reply_progress/"
 SLACK_THREAD_PREFIX = "thread/"
+SLACK_DM_ANCHOR_PREFIX = "dm_anchor/"
 SLACK_REPLY_METADATA_EVENT = "ufo_reply_part"
 SLACK_REPLY_RECONCILE_WINDOW_SECONDS = 7_200
 SLACK_MPIM_MEMBERS_LIMIT = 50
@@ -830,12 +839,15 @@ class Inbound:
     thread's pre-mention traffic to the replies since the last turn that founded no turn of their
     own. `addressed` is whether the message names the agent at all: an addressed message is the
     member's own request and is admitted as it stands, while an un-addressed one is ambient traffic
-    the reply decision reads before any turn exists."""
+    the reply decision reads before any turn exists. `reply_root` is the message an answer to this
+    one threads under — the root of the thread it arrived in, else its own `ts`, because Slack takes
+    a thread's parent and not a reply's own timestamp."""
 
     slack_user_id: str
     queue_key: str
     message_id: str
     ts: str
+    reply_root: str
     is_dm: bool
     addressed: bool
     audience: Audience | None
@@ -1466,7 +1478,8 @@ async def _admit_inbound(
 ) -> None:
     """Everything an admitted message costs beyond the event ack: the sender, permalink and ambient
     context reads, the member and conversation resolution, the thread mirror the turn's own
-    execution follows from, and the admission itself.
+    execution follows from, the admission itself, and the DM anchor the replies answering this
+    message thread under.
 
     A channel thread is named for its channel as it opens, ahead of the admission that would name it
     the words the message arrived with. Those words are one message of a channel's traffic, spelled
@@ -1489,7 +1502,7 @@ async def _admit_inbound(
     )
     if inbound.conversation_id is None and not inbound.is_dm and inbound.surface_label is not None:
         await ctx.retitle_conversation(conversation_id, inbound.surface_label)
-    thread = MirroredThread(queue_key=inbound.queue_key, message_ts=inbound.ts)
+    thread = MirroredThread(queue_key=inbound.queue_key, message_ts=inbound.reply_root)
     await _mirror_thread(conversation_id, thread)
     attachments = (
         files_note(await _download_files(ctx, conversation_id, bot_token, inbound.files))
@@ -1505,6 +1518,8 @@ async def _admit_inbound(
         context=_turn_context(sender, source),
         speaker_member_id=member_id,
     )
+    if inbound.is_dm:
+        await _anchor_dm_thread(admitted, inbound.reply_root)
     if admitted.opened_run:
         _arm_followers(
             ctx, FollowedTurn(id=admitted.turn_id, conversation_id=conversation_id), thread
@@ -1664,6 +1679,7 @@ async def _to_inbound(
         queue_key=queue_key,
         message_id=f"{channel}:{ts}",
         ts=ts,
+        reply_root=root_ts or ts,
         is_dm=is_dm,
         addressed=addressed,
         audience=resolved.audience,
@@ -2312,9 +2328,9 @@ def files_note(downloaded: DownloadedFiles) -> str:
 
 
 class MirroredThread(BaseModel):
-    """The Slack thread one conversation is: the queue key a progress post lands in, and the message
-    a DM's status anchors to. A channel thread anchors to the root its key already carries, so the
-    anchoring message is the one part of a DM's thread the key cannot say."""
+    """The Slack thread one conversation is: the queue key its messages land in, and the member
+    message a DM's thread hangs under. A channel thread anchors to the root its key already carries,
+    so the anchoring message is the one part of a DM's thread the key cannot say."""
 
     queue_key: str
     message_ts: str = ""
@@ -2326,6 +2342,12 @@ class MirroredThread(BaseModel):
         channel turns anchor a status to the root that key carries and its DM turns run reported and
         without a status line rather than unfollowed."""
         return cls(queue_key=row) if isinstance(row, str) else cls.model_validate(row)
+
+    def anchor(self) -> str | None:
+        """The message this conversation's status and progress posts hang under: the root the queue
+        key carries in a channel, the member's own message in a DM, None for a row that names
+        neither."""
+        return self.queue_key.partition(":")[2] or self.message_ts or None
 
 
 def _thread_mirror_key(conversation_id: UUID) -> str:
@@ -2341,6 +2363,43 @@ async def _mirror_thread(conversation_id: UUID, thread: MirroredThread) -> None:
     await ScopedStore(SLACK_EXTENSION).put(
         _thread_mirror_key(conversation_id), thread.model_dump(mode="json")
     )
+
+
+def _dm_anchor_key(turn_id: UUID, message_ref: UUID | None = None) -> str:
+    """The DM message one of a turn's replies threads under: the turn's founding message under the
+    turn alone — the ref core gives a founding message is the turn's own id — and a message the turn
+    absorbed under that message's ref beneath it, so `attach` drops every anchor a turn used by
+    reading its one prefix."""
+    absorbed = "" if message_ref is None or message_ref == turn_id else f"/{message_ref}"
+    return f"{SLACK_DM_ANCHOR_PREFIX}{turn_id}{absorbed}"
+
+
+async def _anchor_dm_thread(admitted: Admitted, message_ts: str) -> None:
+    """Record which DM message a member message is, so the replies answering it thread under it. A
+    channel says this in its queue key; a DM's key names the channel alone, and the delivery paths
+    hold a message ref rather than a Slack timestamp, so the two are joined here: under the turn for
+    a message that founded one, under the arrival row for one an already running turn took up."""
+    await ScopedStore(SLACK_EXTENSION).put(
+        _dm_anchor_key(admitted.turn_id, admitted.arrival_id), message_ts
+    )
+
+
+async def _reply_thread(
+    queue_key: str, turn_id: UUID, message_ref: UUID | None = None
+) -> str | None:
+    """The message a reply posts under, in a channel and in a DM alike: the root the queue key
+    carries, else the anchored DM message the reply answers. A span whose ref names no anchored
+    message falls back to the turn's founding message, so one turn's words stay in one thread; a
+    turn with no anchor at all — a scheduled run, an alert-woken turn — posts at the DM top level
+    and founds a thread of its own."""
+    root_ts = queue_key.partition(":")[2]
+    if root_ts:
+        return root_ts
+    store = ScopedStore(SLACK_EXTENSION)
+    anchor = await store.get(_dm_anchor_key(turn_id, message_ref))
+    if anchor is None and message_ref is not None:
+        anchor = await store.get(_dm_anchor_key(turn_id))
+    return anchor if isinstance(anchor, str) and anchor else None
 
 
 class FollowerContext(Protocol):
@@ -2392,11 +2451,14 @@ class ThreadStatus:
     is refused, so every line the follower builds is bounded before the send, not only the model's
     prose. A reply inside the status's own thread ends the status, so a progress post into it blanks
     the line it duplicates: `blanked` wakes the follower to re-stamp on the spot, rather than
-    leaving the thread with no liveness signal until the next frame. A DM's reply posts top-level,
-    outside the status thread, and ends nothing.
+    leaving the thread with no liveness signal until the next frame. A DM's replies thread under the
+    member's own message, which is the very message its status anchors to, so they blank it as a
+    channel's do.
     The clear at turn end is ours — Terminal, Parked, and a dead stream clear alike, a cancelled
     follower does not — and it waits for the thread to go idle: the status belongs to the thread, so
-    a turn ending while a sibling still runs there leaves that sibling's line standing.
+    a turn ending while a sibling still runs there leaves that sibling's line standing. It is what
+    takes the line down for a turn whose reply lands elsewhere — a DM turn with nothing to thread
+    under posts at the top level, where Slack ends no status.
     The status is state on the thread, not a message, and the thread has one writer — the newest
     turn (`_THREAD_WRITERS`) — so an outrun sibling's writes are skipped rather than blanking the
     status the member is watching. The claim comes back on the writer's end, so an outrun turn
@@ -2587,9 +2649,9 @@ def _track_status(ctx: FollowerContext, turn_id: UUID, thread: MirroredThread) -
     terminal state."""
     if turn_id in _STATUS_TASKS:
         return
-    channel, separator, root_ts = thread.queue_key.partition(":")
-    thread_ts = root_ts if separator else thread.message_ts
-    if not thread_ts:
+    channel = thread.queue_key.partition(":")[0]
+    thread_ts = thread.anchor()
+    if thread_ts is None:
         log("slack.thread_status.unanchored", turn=str(turn_id), queue_key=thread.queue_key)
         return
     status = ThreadStatus(ctx=ctx, turn_id=turn_id, channel=channel, thread_ts=thread_ts)
@@ -2718,9 +2780,9 @@ class TurnActivity:
 @dataclass(frozen=True)
 class ThreadProgress:
     """Interim progress for one long-running turn, posted where the turn's own reply will land — the
-    member's thread in a channel, the DM top level. A side-channel write driven by the turn's live
-    tail: the turn is never told, so a post can neither end it nor stall it, and the terminal reply
-    stays the poller's alone.
+    thread the member is talking in, whether that thread lives in a channel or in a DM. A
+    side-channel write driven by the turn's live tail: the turn is never told, so a post can neither
+    end it nor stall it, and the terminal reply stays the poller's alone.
 
     Posts land each time the elapsed time doubles, measured from `started_at` — the turn's own
     durable start, not this reporter's, since the two differ by every restart the turn survived — so
@@ -2744,7 +2806,7 @@ class ThreadProgress:
     ctx: FollowerContext
     turn_id: UUID
     conversation_id: UUID
-    queue_key: str
+    thread: MirroredThread
     cadence: ProgressCadence
     started_at: datetime
 
@@ -2832,15 +2894,14 @@ class ThreadProgress:
                 elapsed_seconds=int(elapsed_seconds),
             )
             return False
-        channel, separator, thread_ts = self.queue_key.partition(":")
+        channel = self.thread.queue_key.partition(":")[0]
+        thread_ts = self.thread.anchor()
         metadata = await self._footer(bot_token, channel, spend) if first else None
         try:
             await _slack_ok(
                 client.post(
                     SLACK_CHAT_POST_MESSAGE_URL,
-                    content=slack_reply_body(
-                        channel, thread_ts if separator else None, text, metadata
-                    ),
+                    content=slack_reply_body(channel, thread_ts, text, metadata),
                     headers={
                         "Authorization": f"Bearer {bot_token}",
                         "Content-Type": "application/json; charset=utf-8",
@@ -2862,7 +2923,7 @@ class ThreadProgress:
             characters=len(text),
             footer=metadata is not None,
         )
-        if separator:
+        if thread_ts is not None:
             _restamp_thread_status(self.ctx.workspace_id, channel, thread_ts)
         return True
 
@@ -2897,7 +2958,7 @@ def _track_progress(
     ctx: FollowerContext,
     turn_id: UUID,
     conversation_id: UUID,
-    queue_key: str,
+    thread: MirroredThread,
     started_at: datetime,
 ) -> None:
     """Spawn one ThreadProgress task per execution of a turn. The caller is the turn's own
@@ -2912,7 +2973,7 @@ def _track_progress(
         ctx=ctx,
         turn_id=turn_id,
         conversation_id=conversation_id,
-        queue_key=queue_key,
+        thread=thread,
         cadence=ProgressCadence(
             base_seconds=PROGRESS_BASE_SECONDS, cap_seconds=PROGRESS_CAP_SECONDS
         ),
@@ -2933,7 +2994,7 @@ async def _run_progress(progress: ThreadProgress) -> None:
         log(
             "slack.thread_progress.abandoned",
             turn=str(progress.turn_id),
-            queue_key=progress.queue_key,
+            queue_key=progress.thread.queue_key,
             error=repr(error),
         )
     finally:
@@ -2965,7 +3026,7 @@ def _arm_followers(ctx: FollowerContext, turn: FollowedTurn, thread: MirroredThr
     one write gives them."""
     _track_status(ctx, turn.id, thread)
     if turn.started_at is not None:
-        _track_progress(ctx, turn.id, turn.conversation_id, thread.queue_key, turn.started_at)
+        _track_progress(ctx, turn.id, turn.conversation_id, thread, turn.started_at)
 
 
 @dataclass(frozen=True)
@@ -3054,13 +3115,17 @@ class AnswerClick:
     question it answers — absent from a value that carries the label alone; the question's index
     (from the `action_id`) keys admission per question, so each question's row takes its own first
     answer. The message's delivered `blocks` and the clicked block's id let the rewrite swap
-    exactly the answered row while echoing everything else back unchanged."""
+    exactly the answered row while echoing everything else back unchanged. `reply_root` is the
+    message the answer's own replies thread under: the question message's thread root, since the
+    question message is itself a reply and Slack takes a thread's parent rather than a reply's
+    timestamp."""
 
     slack_user_id: str
     channel: str
     queue_key: str
     is_dm: bool
     message_ts: str
+    reply_root: str
     message_text: str
     question_index: int
     label: str
@@ -3143,7 +3208,7 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                     click.queue_key, conversation_audience(member_id)
                 )
             body = fence_member_message(mint_marker(), "", click.label, "")
-            thread = MirroredThread(queue_key=click.queue_key, message_ts=click.message_ts)
+            thread = MirroredThread(queue_key=click.queue_key, message_ts=click.reply_root)
             await _mirror_thread(conversation_id, thread)
             answer_key = f"{click.queue_key}:{click.message_ts}:answer:{click.question_index}"
             admitted = await ctx.admit(
@@ -3153,6 +3218,8 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 context=_turn_context(sender, answered_at, click.question),
                 speaker_member_id=member_id,
             )
+            if click.is_dm:
+                await _anchor_dm_thread(admitted, click.reply_root)
             if admitted.opened_run:
                 _arm_followers(
                     ctx, FollowedTurn(id=admitted.turn_id, conversation_id=conversation_id), thread
@@ -3253,12 +3320,15 @@ def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick
     block_id = action.get("block_id")
     raw_blocks = message.get("blocks")
     label, _, asked = value.partition("\n")
+    message_ts = _string_field(message, "ts")
+    is_dm = channel_id.startswith("D")
     return AnswerClick(
         slack_user_id=user_id,
         channel=channel_id,
-        queue_key=f"{channel_id}:{thread_ts}" if thread_ts else channel_id,
-        is_dm=channel_id.startswith("D"),
-        message_ts=_string_field(message, "ts"),
+        queue_key=slack_thread_key(channel_id, thread_ts or message_ts, is_dm),
+        is_dm=is_dm,
+        message_ts=message_ts,
+        reply_root=thread_ts or message_ts,
         message_text=str(message.get("text") or ""),
         question_index=int(question_index),
         label=label,
@@ -3664,8 +3734,8 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     reads that marker back before deciding whether to post, covering a response lost after Slack
     accepted the message. The completed checkpoint survives until `attach`, after core has durably
     recorded the first message as the delivery ref."""
-    channel, separator, thread_ts = writeback.queue_key.partition(":")
-    thread = thread_ts if separator else None
+    channel = writeback.queue_key.partition(":")[0]
+    thread = await _reply_thread(writeback.queue_key, writeback.turn_id)
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     store = ScopedStore(SLACK_EXTENSION)
     progress_key = _slack_reply_progress_key(writeback.turn_id)
@@ -3813,7 +3883,9 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
 
 async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
     """Post one reply the turn produced before it ended and return its message ref
-    (`channel:ts`) — a plain thread message, split at markdown boundaries when it is long.
+    (`channel:ts`) — a plain thread message, split at markdown boundaries when it is long. It
+    threads under the message the span answers (`message_ref`), so a turn that speaks to two members
+    answers each in their own thread rather than stacking both under whichever message came first.
 
     It carries no footer, no ask or connect buttons and no files: this is not the turn's outcome, so
     it has no settled accounting to state and nothing to attach, and the terminal reply that follows
@@ -3826,8 +3898,8 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
     Every record of a turn's replies is dropped in `attach`, once core has recorded the ref of the
     terminal reply that ends the turn. It does carry mentions: these are the model's own words to
     the member, like the terminal reply's, so a name it writes notifies the same person here."""
-    channel, separator, thread_ts = reply.queue_key.partition(":")
-    thread = thread_ts if separator else None
+    channel = reply.queue_key.partition(":")[0]
+    thread = await _reply_thread(reply.queue_key, reply.turn_id, reply.message_ref)
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     store = ScopedStore(SLACK_EXTENSION)
     progress_key = _slack_reply_progress_key(reply.turn_id, reply.id)
@@ -3952,23 +4024,27 @@ def _posted_message_ts(payload: Mapping[str, object]) -> str:
 
 async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None:
     """Stream each shared file that fits the upload cap into the conversation, all at once on the
-    event loop; an over-cap file is delivered as a link in `post`, not here. The upload targets the
-    queue key — the member's thread in a channel, the channel itself in a DM — because Slack forbids
-    threading on a reply's ts, and the bot reply is itself a thread reply in a channel. Best effort:
-    a rejected file is logged and the rest still deliver, so an upload never re-posts the reply or
-    blocks its siblings.
+    event loop; an over-cap file is delivered as a link in `post`, not here. The upload lands in the
+    same thread the reply did — the member's own message, never the bot reply's ts, which Slack
+    forbids as a parent. Best effort: a rejected file is logged and the rest still deliver, so an
+    upload never re-posts the reply or blocks its siblings.
 
-    Every delivery record the turn made is dropped first — the terminal reply's and one per reply it
-    spoke mid-flight — because core has now durably recorded the terminal ref and every span row
-    carries the ref of the message it posted, so no attempt can arrive that needs them."""
+    Every record the turn made is dropped first — the terminal reply's delivery record, one per span
+    it spoke mid-flight, and the DM anchors those replies threaded under — because core has now
+    durably recorded the terminal ref and every span row carries the ref of the message it posted,
+    so no attempt can arrive that needs them."""
     store = ScopedStore(SLACK_EXTENSION)
-    for key, _value in await store.list(_slack_reply_progress_key(writeback.turn_id)):
-        await store.delete(key)
+    thread = await _reply_thread(writeback.queue_key, writeback.turn_id)
+    for prefix in (
+        _slack_reply_progress_key(writeback.turn_id),
+        _dm_anchor_key(writeback.turn_id),
+    ):
+        for key, _value in await store.list(prefix):
+            await store.delete(key)
     inline = tuple(a for a in writeback.artifacts if a.size_bytes <= SLACK_UPLOAD_MAX_BYTES)
     if not inline:
         return
-    channel, separator, thread_ts = writeback.queue_key.partition(":")
-    thread = thread_ts if separator else None
+    channel = writeback.queue_key.partition(":")[0]
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     results = await asyncio.gather(
         *(_upload_artifact(ctx, bot_token, channel, thread, artifact) for artifact in inline),

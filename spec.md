@@ -454,7 +454,12 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   holding the claim is the one narrating and a resumed run gets its narration back: the status Slack
   drops two minutes after its last write is stamped again by the instance that took the turn over.
   Live feedback is never delivery, which stays the poller's: a `speak` post per marked span while
-  the turn runs, then the terminal reply.
+  the turn runs, then the terminal reply. Every post the surface makes — span, progress, terminal
+  reply, shared file — is a reply to the member message it answers: the thread root a channel's
+  queue key carries, and in a DM the member message the surface recorded at admission, since a DM
+  conversation is the channel and each member message founds a thread of its own. A turn that
+  answers no member message (a scheduled run) has nothing to thread under and posts at the DM top
+  level.
 - **Live** (web; the terminal surface is its directive-stream twin) — the member's connection is held open, so
   admission registers nothing and the surface delivers by `tail`-ing the turn's frames off the hub
   over SSE in its own route. The poller only processes turns that registered a writeback, so it is a

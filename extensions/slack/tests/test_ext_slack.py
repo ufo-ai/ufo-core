@@ -2814,6 +2814,59 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
     }
 
 
+async def test_a_dm_reply_in_a_thread_keeps_the_dm_conversation_and_anchors_to_the_root(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Once the agent answers in a thread the member answers there too. That message keys to the DM
+    conversation exactly as a top-level one does, and everything the new turn says anchors to the
+    thread's root: Slack takes a thread's parent as `thread_ts` and not a reply's own timestamp."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"UBEE": "bee@example.com"}
+    )
+    reply = _event_body(
+        type="message",
+        channel_type="im",
+        user="UBEE",
+        channel="D9",
+        ts="9.0",
+        thread_ts="7.0",
+        text="and the second one too",
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=reply, headers=_sign(reply, int(time.time()))
+        )
+    assert response.status_code == 200
+    deadline = time.monotonic() + 5
+    while not _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL):
+        assert time.monotonic() < deadline, "status never reached Slack"
+        await asyncio.sleep(0.01)
+    async with workspace_tx() as connection:
+        conversation = (
+            await connection.execute(
+                sa.select(tables.conversation.c.queue_key).where(
+                    tables.conversation.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    status = json.loads(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[0].content)
+    assert conversation == "D9"
+    assert (status["channel_id"], status["thread_ts"]) == ("D9", "7.0")
+    with ws(workspace_id):
+        assert await slack._reply_thread("D9", turn_id) == "7.0"
+    dying = slack._STATUS_TASKS[turn_id]
+    dying.cancel()
+    await asyncio.gather(dying, return_exceptions=True)
+
+
 async def test_channel_persists_the_speaker_without_claiming_the_conversation(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -4223,6 +4276,7 @@ async def _seed_spoken_reply(
     text: str,
     round_index: int = 1,
     span_index: int = 0,
+    message_ref: UUID | None = None,
 ) -> UUID:
     reply_id = mid_turn_reply_id_for(turn_id, round_index, span_index)
     async with workspace_tx() as connection:
@@ -4233,7 +4287,7 @@ async def _seed_spoken_reply(
                 turn_id=turn_id,
                 round_index=round_index,
                 span_index=span_index,
-                message_ref=uuid4(),
+                message_ref=uuid4() if message_ref is None else message_ref,
                 text=text,
                 status=WRITEBACK_PENDING,
                 created_at=sa.func.now(),
@@ -4241,6 +4295,30 @@ async def _seed_spoken_reply(
             )
         )
     return reply_id
+
+
+async def _anchor_dm(
+    workspace_id: UUID, turn_id: UUID, message_ts: str, message_ref: UUID | None = None
+) -> None:
+    """The DM anchor a member message's admission leaves behind, for a turn seeded without one."""
+    with ws(workspace_id):
+        await slack.ScopedStore(slack.SLACK_EXTENSION).put(
+            slack._dm_anchor_key(turn_id, message_ref), message_ts
+        )
+
+
+async def _dm_anchors(workspace_id: UUID) -> list[str]:
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.ext_store.c.key).where(
+                    tables.ext_store.c.workspace_id == workspace_id,
+                    tables.ext_store.c.extension == slack.SLACK_EXTENSION,
+                    tables.ext_store.c.key.startswith(slack.SLACK_DM_ANCHOR_PREFIX),
+                )
+            )
+        ).all()
+    return [row.key for row in rows]
 
 
 async def test_a_reply_the_turn_spoke_posts_in_the_thread_without_the_terminal_footer(
@@ -4349,6 +4427,39 @@ async def test_the_terminal_delivery_drops_every_record_the_turns_replies_made(
             )
         ).all()
     assert left == []
+
+
+async def test_dm_spans_thread_under_the_messages_they_answer(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A DM conversation is keyed by its channel, so each span carries its own thread: the one
+    holding the message its ref names — the turn's founding message, or a message the running turn
+    absorbed. A ref no anchor answers falls back to the founding message, so a turn's words never
+    scatter across the DM's top level."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "D5", "closing", blob, artifact=False)
+    arrival_id = uuid4()
+    await _anchor_dm(workspace_id, turn_id, "100.5")
+    await _anchor_dm(workspace_id, turn_id, "300.5", message_ref=arrival_id)
+    await _seed_spoken_reply(workspace_id, turn_id, "Filed it.", span_index=0, message_ref=turn_id)
+    await _seed_spoken_reply(
+        workspace_id, turn_id, "On yours too.", span_index=1, message_ref=arrival_id
+    )
+    await _seed_spoken_reply(workspace_id, turn_id, "And this.", span_index=2)
+
+    await app.state.mid_turn_reply_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    ]
+    assert [(post["channel"], post["thread_ts"], post["text"]) for post in posts] == [
+        ("D5", "100.5", "Filed it."),
+        ("D5", "300.5", "On yours too."),
+        ("D5", "100.5", "And this."),
+    ]
 
 
 GUEST_TEAM_ID = "T0000009"
@@ -5076,15 +5187,47 @@ async def test_writeback_ignores_an_oversize_slack_retry_after(
     assert writeback.last_error == "chat.postMessage HTTP 429: ratelimited"
 
 
-async def test_writeback_streams_dm_attachment_without_threading_under_the_bot_reply(
+async def test_writeback_streams_a_dm_attachment_into_the_threaded_reply(
     db: None, tmp_path, monkeypatch
 ) -> None:
+    """The file belongs to the reply, so it lands in the reply's own thread — the member's message,
+    never the bot reply's ts, which Slack refuses as a parent. The anchor that joined them is of no
+    further use once core has recorded the reply, so the delivery drops it."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     with ws(workspace_id):
         await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
-    await _seed_done_turn(workspace_id, "D5", "here", blob, artifact=True)
+    turn_id = await _seed_done_turn(workspace_id, "D5", "here", blob, artifact=True)
+    await _anchor_dm(workspace_id, turn_id, "100.5")
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    reply = json.loads(posts[0].content)
+    assert (reply["channel"], reply["thread_ts"]) == ("D5", "100.5")
+
+    completes = [r for r in recorder if str(r.url) == slack.SLACK_FILES_COMPLETE_UPLOAD]
+    assert len(completes) == 1
+    complete_body = json.loads(completes[0].content)
+    assert (complete_body["channel_id"], complete_body["thread_ts"]) == ("D5", "100.5")
+    assert complete_body["files"] == [{"id": "F1", "title": "report.pdf"}]
+    assert await _dm_anchors(workspace_id) == []
+
+
+async def test_a_dm_turn_answering_no_member_message_replies_at_the_top_level(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A scheduled run and an alert-woken turn answer no message of the member's, so they have
+    nothing to thread under: the reply founds its own thread at the DM top level and its file lands
+    there too, rather than hanging under whatever the member last asked."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    with ws(workspace_id):
+        await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
+    await _seed_done_turn(workspace_id, "D5", "the nightly digest", blob, artifact=True)
 
     await app.state.writeback_poller.drain()
 
@@ -5096,10 +5239,105 @@ async def test_writeback_streams_dm_attachment_without_threading_under_the_bot_r
 
     completes = [r for r in recorder if str(r.url) == slack.SLACK_FILES_COMPLETE_UPLOAD]
     assert len(completes) == 1
-    complete_body = json.loads(completes[0].content)
-    assert complete_body["channel_id"] == "D5"
-    assert "thread_ts" not in complete_body
-    assert complete_body["files"] == [{"id": "F1", "title": "report.pdf"}]
+    assert "thread_ts" not in json.loads(completes[0].content)
+
+
+async def test_a_dm_message_is_answered_in_a_thread_of_its_own(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The whole chain in a DM, from the member's message to the words they read: admission records
+    which Slack message the turn answers, and both what the turn says mid-flight and the reply that
+    ends it post into that message's thread instead of arriving as a flat run in the channel."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    app, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"U1": "bee@example.com"}
+    )
+    dm = _event_body(
+        type="message", user="U1", channel="D1", channel_type="im", ts="100.5", text="migrate"
+    )
+    async with client:
+        response = await client.post(EVENTS_PATH, content=dm, headers=_sign(dm, int(time.time())))
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    status = slack._STATUS_TASKS[turn_id]
+    await _seed_spoken_reply(workspace_id, turn_id, "Working on it.", message_ref=turn_id)
+    del recorder[:]
+
+    await app.state.mid_turn_reply_poller.drain()
+    await _finish_turn(turn_id, "Migrated.")
+    await app.state.writeback_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    ]
+    assert [(post["channel"], post["thread_ts"]) for post in posts] == [("D1", "100.5")] * 2
+    assert posts[0]["text"] == "Working on it."
+    assert posts[1]["text"].startswith("Migrated.")
+    await asyncio.wait_for(status, timeout=10)
+
+
+async def test_a_dm_span_answers_the_message_the_running_turn_took_up(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The case flat DM replies read worst: a member fires a second message while the turn runs, the
+    turn folds it in, and its answer to that message posts under it rather than under the first ask.
+    The anchor rides the arrival row admission returns, which is the ref the span names."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    app, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"U1": "bee@example.com"}
+    )
+    asked = _event_body(
+        type="message", user="U1", channel="D1", channel_type="im", ts="100.5", text="migrate"
+    )
+    also = _event_body(
+        type="message", user="U1", channel="D1", channel_type="im", ts="200.5", text="and rename it"
+    )
+    async with client:
+        for body in (asked, also):
+            response = await client.post(
+                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        arrival_id = (
+            await connection.execute(
+                sa.select(tables.inbound_message.c.id).where(
+                    tables.inbound_message.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+    status = slack._STATUS_TASKS[turn_id]
+    await _seed_spoken_reply(
+        workspace_id, turn_id, "Renamed it.", message_ref=arrival_id, span_index=0
+    )
+    del recorder[:]
+
+    await app.state.mid_turn_reply_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    ]
+    assert [(post["channel"], post["thread_ts"], post["text"]) for post in posts] == [
+        ("D1", "200.5", "Renamed it.")
+    ]
+    await _finish_turn(turn_id, "Migrated.")
+    await asyncio.wait_for(status, timeout=10)
 
 
 async def test_large_media_within_the_upload_cap_is_streamed_not_linked(
@@ -7018,7 +7256,7 @@ async def test_a_finished_reporter_releases_the_turn_before_its_next_run(monkeyp
                 progress.ctx,
                 progress.turn_id,
                 progress.conversation_id,
-                progress.queue_key,
+                progress.thread,
                 progress.started_at,
             )
             return
@@ -7027,7 +7265,9 @@ async def test_a_finished_reporter_releases_the_turn_before_its_next_run(monkeyp
     monkeypatch.setattr(slack.ThreadProgress, "run", run)
     ctx = slack.SurfaceContext.__new__(slack.SurfaceContext)
     turn_id = uuid4()
-    slack._track_progress(ctx, turn_id, uuid4(), "C1:100.5", datetime.now(UTC))
+    slack._track_progress(
+        ctx, turn_id, uuid4(), slack.MirroredThread(queue_key="C1:100.5"), datetime.now(UTC)
+    )
     first = slack._PROGRESS_TASKS[turn_id]
 
     await first
@@ -8285,9 +8525,12 @@ async def test_a_reporter_armed_after_the_turn_committed_posts_nothing(
     assert not _progress_posts(recorder)
 
 
-async def test_a_dm_reporter_posts_at_the_dm_top_level(db: None, tmp_path, monkeypatch) -> None:
-    """A DM conversation is keyed by its channel alone, so the reply lands top-level and so must the
-    progress: the mirror carries whichever shape the conversation's thread has."""
+async def test_a_dm_reporter_posts_in_the_thread_the_reply_will_land_in(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A DM conversation is keyed by its channel alone, so the thread the reply lands in is the
+    member's own message, which the mirror carries. The progress post follows the reply there, into
+    the very thread the status is stamped on, so it re-stamps the line it blanked."""
     workspace_id, member_id = await _seed(member_email="bee@example.com")
     assert member_id is not None
     monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
@@ -8319,8 +8562,7 @@ async def test_a_dm_reporter_posts_at_the_dm_top_level(db: None, tmp_path, monke
         await asyncio.sleep(0.01)
 
     posted = _progress_posts(recorder)[0]
-    assert posted["channel"] == "D1"
-    assert "thread_ts" not in posted
+    assert (posted["channel"], posted["thread_ts"]) == ("D1", "100.5")
 
     await _finish_turn(turn_id, "migrated")
     await asyncio.wait_for(task, timeout=10)
@@ -8867,6 +9109,35 @@ async def test_dm_answer_click_claims_the_conversation_for_its_resolved_member(
     assert conversation_member == member_id
     assert turn_speaker == member_id
     assert len(_fetches(recorder, slack.SLACK_USERS_INFO_URL)) == 1
+
+
+async def test_a_click_on_a_threaded_dm_question_answers_the_dm_conversation(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A DM's question message is itself a threaded reply, so the click arrives carrying a thread.
+    A DM is keyed by its channel however deep the thread runs, so the answer lands on that one
+    conversation — and the turn it founds answers in the thread the question was asked in."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    conversation_id = await _seed_answer_conversation(workspace_id, "D5")
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
+    )
+    click = _click_body(channel="D5", thread="100.5")
+
+    async with client:
+        response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
+
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.conversation_id == conversation_id)
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        assert await slack._reply_thread("D5", turn_id) == "100.5"
 
 
 async def test_shared_interactive_routes_by_registered_team(
