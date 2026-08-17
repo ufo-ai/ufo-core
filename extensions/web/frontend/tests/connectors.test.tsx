@@ -11,6 +11,7 @@ import {
   MEMBER,
   SECOND,
   SECOND_ID,
+  SETTINGS,
   fact,
   json,
   pageFits,
@@ -48,6 +49,7 @@ function connectors() {
       }),
     "/github/coverage": () =>
       json({ api: true, git_push: false, sources: true }),
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
 }
@@ -100,7 +102,7 @@ test("the pool fits the desktop it is read on, so the row's act never scrolls of
 });
 
 test("the agent's own edges fit that same desktop", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   connectors();
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -111,8 +113,8 @@ test("the agent's own edges fit that same desktop", async () => {
   );
 });
 
-test("the agent tab reads attached connections", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+test("the agent's settings read its attached connections", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   const { calls } = connectors();
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -176,11 +178,12 @@ test("the pool's record shares and revokes into the lane of the agent already ho
   expect(posted[1]).toContain("/agents/" + SECOND_ID + "/intents");
 });
 
-test("a grant change is admitted into the lane of the agent whose tab holds it", async () => {
+test("a grant change is admitted into the lane of the agent whose settings hold it", async () => {
   const posted: string[] = [];
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
+    "/settings": () => json(SETTINGS),
     "/intents": (url) => {
       posted.push(url);
       return json({ applied: true, message: "Shared." });
@@ -202,9 +205,10 @@ test("a grant change is admitted into the lane of the agent whose tab holds it",
 
 test("the agent's record revokes the grant it stands on", async () => {
   const posted: string[] = [];
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   wire({
     "/connections": () => json({ connections: [grant("github", true, "g1")] }),
+    "/settings": () => json(SETTINGS),
     "/intents": (url) => {
       posted.push(url);
       return json({ applied: true, message: "Revoked." });
@@ -223,7 +227,7 @@ test("the agent's record revokes the grant it stands on", async () => {
 
 test("a revoked connection stays shut when the grant comes back on a later read", async () => {
   let served = 0;
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   wire({
     "/connections": (url) => {
       if (!url.includes("/agents/"))
@@ -232,6 +236,7 @@ test("a revoked connection stays shut when the grant comes back on a later read"
       return json({ connections: served === 2 ? [] : [grant("github", true, "g1")] });
     },
     "/intents": () => json({ applied: true, message: "Applied." }),
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
@@ -252,7 +257,7 @@ test("a revoked connection stays shut when the grant comes back on a later read"
 });
 
 test("the attach picker names the provider and the account, not the broker id", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   wire({
     "/connections": (url) =>
       json({
@@ -260,6 +265,7 @@ test("the attach picker names the provider and the account, not the broker id", 
           ? []
           : [{ ...grant("github", true, "g1"), account_label: "Work GitHub", agents: [] }],
       }),
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
@@ -300,7 +306,7 @@ test("an empty pool states that no connector is connected yet", async () => {
 
 test("the bar is drawn while the first read is still in flight", async () => {
   const pending = new Map<string, (value: Response) => void>();
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -309,6 +315,7 @@ test("the bar is drawn while the first read is still in flight", async () => {
           pending.set(url, resolve);
         });
       }
+      if (url.includes("/settings")) return json(SETTINGS);
       return json({ chats: [] });
     }),
   );
@@ -319,14 +326,34 @@ test("the bar is drawn while the first read is still in flight", async () => {
   expect(pending.size).toBe(2);
 });
 
-test("the agent's own tab states what is shared with that agent", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+test("the agent's own section states what is shared with that agent", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   wire({
     "/connections": () => json({ connections: [grant("github", true, "g1")] }),
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
+});
+
+test("the agent's connectors are a section of its settings and no tab of their own", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  connectors();
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const settings = within(await screen.findByRole("tabpanel"));
+  expect(settings.getByText("Connectors")).toBeTruthy();
+  expect(await settings.findByRole("cell", { name: "github" })).toBeTruthy();
+  expect(settings.getByRole("button", { name: "Add connector" })).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
+
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Home" }).getAttribute("aria-selected")).toBe("true"),
+  );
 });

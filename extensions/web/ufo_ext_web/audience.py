@@ -62,26 +62,19 @@ async def _granted_agent_ids(store: ScopedStore, email: str) -> frozenset[UUID]:
 @dataclass(frozen=True)
 class WebAudience:
     """One member's view of the portal: whether they administer the workspace (and so see every
-    agent), the agents their web audience holds — the main agent by construction, an explicit
-    grant, or a row they own, since the member who created an agent must be able to open it — and
-    the subset an explicit grant put there (empty for an admin, who reaches every agent
-    regardless); a member-private extension conversation grants only its agent chat,
-    so a read only an admin's explicit choice may open (the usage panel) gates on `granted`, never
-    on `allows`."""
+    agent), and the agents their web audience holds — the main agent by construction, an explicit
+    grant, or a row they own, since the member who created an agent must be able to open it; a
+    member-private extension conversation grants only its agent chat."""
 
     admin: bool
     agents: tuple[AgentSummary, ...]
     conversation_agents: tuple[AgentSummary, ...]
-    granted_ids: frozenset[UUID]
 
     def allows(self, agent_id: UUID) -> bool:
         return any(agent.id == agent_id for agent in self.agents)
 
     def allows_chat(self, agent_id: UUID) -> bool:
         return any(agent.id == agent_id for agent in self.chat_agents)
-
-    def granted(self, agent_id: UUID) -> bool:
-        return self.admin or agent_id in self.granted_ids
 
     @property
     def chat_agents(self) -> tuple[AgentSummary, ...]:
@@ -102,12 +95,7 @@ async def web_audience(
     )
     agents = await surface.list_agents()
     if admin:
-        return WebAudience(
-            admin=True,
-            agents=agents,
-            conversation_agents=(),
-            granted_ids=frozenset(),
-        )
+        return WebAudience(admin=True, agents=agents, conversation_agents=())
     granted = await _granted_agent_ids(extension.store, lowered)
     extension_agents = (
         frozenset() if member is None else await surface.member_extension_agent_ids(member.id)
@@ -125,7 +113,6 @@ async def web_audience(
         conversation_agents=tuple(
             a for a in agents if a.id in extension_agents and a.id not in granted
         ),
-        granted_ids=granted,
     )
 
 

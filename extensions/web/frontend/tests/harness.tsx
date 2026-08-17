@@ -168,6 +168,30 @@ export const SECOND = {
 
 export const MEMBER = { id: "m1", email: "member@example.com", admin: false };
 
+/** The agent's settings as the surface states them. The tab holds the agent's connectors too, so
+ *  every suite that opens it wires this beside the connection reads. */
+export const SETTINGS = {
+  agent: {
+    name: "assistant",
+    main: true,
+    surfaces: ["web", "ufo"],
+    updated_at: "2026-07-30T12:00:00",
+    prompt: "be useful",
+    prompt_digest: "abc123",
+  },
+  spec: { model: "opus", reasoning: "high", internet_access_allowed: true },
+  spec_schema: {
+    properties: {
+      model: { type: "string" },
+      reasoning: { type: "string", enum: ["low", "high"] },
+      internet_access_allowed: { type: "boolean" },
+    },
+  },
+  models: ["opus", "sonnet"],
+  deploy: { sandbox_internet: true },
+  audience: [],
+};
+
 export const CHAT_ROW = {
   conversation_id: CONVO_ID,
   agent_id: AGENT_ID,

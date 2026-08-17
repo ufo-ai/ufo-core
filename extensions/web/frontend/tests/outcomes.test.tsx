@@ -8,6 +8,7 @@ import {
   refusedNotice,
   AGENT,
   MEMBER,
+  SETTINGS,
   StreamFake,
   TASK_KIND,
   TRIGGER_KIND,
@@ -41,9 +42,10 @@ beforeEach(() => {
 });
 
 test("a connect intent opens the stream for the turn it reports and shows the consent link", async () => {
-  location.hash = "#/agents/" + AGENT.id + "/connectors";
+  location.hash = "#/agents/" + AGENT.id + "/settings";
   wire({
     "/connections": () => json({ connections: [] }),
+    "/settings": () => json(SETTINGS),
     "/intents": () => json({ applied: true, message: "Requested.", turn_id: TURN_ID }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
@@ -384,23 +386,6 @@ test("a refused store states the reason the server gave and keeps the field", as
 });
 
 test("the scheduled, settings, and skills refusals tone their notices", async () => {
-  const SETTINGS = {
-    agent: {
-      name: "assistant",
-      main: true,
-      surfaces: ["web"],
-      updated_at: "2026-07-30T12:00:00",
-      prompt: "be useful",
-      prompt_digest: "abc123",
-    },
-    spec: { model: "opus", reasoning: "high" },
-    spec_schema: {
-      properties: { model: { type: "string" }, reasoning: { type: "string", enum: ["low", "high"] } },
-    },
-    models: ["opus"],
-    deploy: { sandbox_internet: true },
-    audience: [],
-  };
   const refuse = () => json({ applied: false, message: "The workspace refuses it." });
 
   location.hash = "#/agents/" + AGENT.id + "/radar?chip=scheduled_task";
@@ -418,7 +403,12 @@ test("the scheduled, settings, and skills refusals tone their notices", async ()
   first.unmount();
 
   location.hash = "#/agents/" + AGENT.id + "/settings";
-  wire({ "/settings": () => json(SETTINGS), "/transcript": () => json({ messages: [] }), "/intents": refuse });
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/intents": refuse,
+  });
   const second = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "Save" }));
   await refusedNotice("The workspace refuses it.");

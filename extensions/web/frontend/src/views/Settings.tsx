@@ -7,10 +7,11 @@ import { Reveal } from "@/components/ui/reveal";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { type NoticeState, OutcomeNotice, Panel, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
-import { newChatHash } from "@/lib/route";
+import { newChatHash, workspaceHash } from "@/lib/route";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { Moment } from "@/lib/moments";
+import { AgentConnectors } from "@/views/Connectors";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
 
@@ -184,8 +185,23 @@ export function Settings({ agent }: { agent: Agent }) {
                         },
                       ]
                     : []),
+                  {
+                    label: "Usage",
+                    value: (
+                      <a
+                        href={workspaceHash("usage")}
+                        className="text-inherit no-underline hover:underline focus-visible:underline"
+                      >
+                        Workspace usage
+                      </a>
+                    ),
+                  },
                 ]}
               />
+            </Group>
+
+            <Group title="Connectors">
+              <AgentConnectors agent={agent} />
             </Group>
 
             <Group title="Settings">

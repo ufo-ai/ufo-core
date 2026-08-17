@@ -10,6 +10,7 @@ import {
   AGENT,
   MEMBER,
   NO_RUNS,
+  SETTINGS,
   TASK_KIND,
   TRIGGER_KIND,
   json,
@@ -40,6 +41,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
           releaseConnectors = resolve;
         });
       }
+      if (url.includes("/settings")) return json(SETTINGS);
       if (url.includes("/workspace/radar")) return json({ runs: [] });
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
       if (url.includes("/objects/source_trigger")) return objectIndex(TRIGGER_KIND, []);
@@ -48,7 +50,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
     }),
   );
 
-  location.hash = "#/agents/" + AGENT.id + "/connectors";
+  location.hash = "#/agents/" + AGENT.id + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await waitFor(() => expect(releaseConnectors).not.toBeNull());

@@ -16,6 +16,7 @@ import {
   SECOND_ID,
   NO_ARTIFACTS,
   NO_RUNS,
+  SETTINGS,
   SITE_KIND,
   StreamFake,
   TASK_KIND,
@@ -39,28 +40,6 @@ beforeEach(() => {
 });
 
 const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
-
-const SETTINGS = {
-  agent: {
-    name: "assistant",
-    main: true,
-    surfaces: ["web", "ufo"],
-    updated_at: "2026-07-30T12:00:00",
-    prompt: "be useful",
-    prompt_digest: "abc123",
-  },
-  spec: { model: "opus", reasoning: "high", internet_access_allowed: true },
-  spec_schema: {
-    properties: {
-      model: { type: "string" },
-      reasoning: { type: "string", enum: ["low", "high"] },
-      internet_access_allowed: { type: "boolean" },
-    },
-  },
-  models: ["opus", "sonnet"],
-  deploy: { sandbox_internet: true },
-  audience: [],
-};
 
 function usageDetails(totalMicroUsd: number, tokens: number = 1_200) {
   return {
@@ -93,6 +72,7 @@ test("the settings page states the agent's facts, renders its schema, and submit
   const posted: unknown[] = [];
   wire({
     "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Applied." });
@@ -106,6 +86,9 @@ test("the settings page states the agent's facts, renders its schema, and submit
   expect(fact("Updated")).toBe("Jul 30 2026");
   expect(fact("Prompt digest")).toBe("abc123");
   expect(fact("Web audience")).toBe("Every member");
+  expect(fact("Usage")).toBe("Workspace usage");
+  expect(screen.queryByRole("tab", { name: "Usage" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
   expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("be useful");
 
   await pick("reasoning", "low");
@@ -136,6 +119,31 @@ test("the settings page states the agent's facts, renders its schema, and submit
   );
 });
 
+test("the settings usage fact opens the workspace usage tab", async () => {
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/workspace/usage": () =>
+      json({
+        window_seconds: 86400,
+        total_micro_usd: 0,
+        by_dimension: [],
+        caps: [],
+        usage: usageDetails(0, 0),
+        workspace: null,
+      }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("link", { name: "Workspace usage" }));
+
+  await waitFor(() => expect(location.hash).toBe("#/workspace/usage"));
+  expect(screen.getByRole("tab", { name: "Usage" }).getAttribute("aria-selected")).toBe("true");
+  expect(await screen.findByText("No spend cap is set on you.")).toBeTruthy();
+});
+
 test("switching agents discards unsaved settings edits", async () => {
   wire({
     "/settings": (url) =>
@@ -147,6 +155,7 @@ test("switching agents discards unsaved settings edits", async () => {
             }
           : SETTINGS,
       ),
+    "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/settings";
@@ -183,6 +192,7 @@ test("settings polling preserves dirty edits", async () => {
             },
       );
     },
+    "/connections": () => json({ connections: [] }),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: false, message: "Agent changed." });
@@ -237,6 +247,7 @@ test("settings polling preserves dirty edits", async () => {
 test("a non-admin reads an agent prompt but cannot edit it", async () => {
   wire({
     "/settings": () => json({ ...SETTINGS, audience: null }),
+    "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/settings";
@@ -526,7 +537,7 @@ test("a directory read the member cannot correct is stated as a toast", async ()
   expect(screen.queryByRole("dialog", { name: "release-notes" })).toBeNull();
 });
 
-test("a private grant is shared with the agent from the connectors tab", async () => {
+test("a private grant is shared with the agent from the settings connectors section", async () => {
   const posted: unknown[] = [];
   wire({
     "/connections": () =>
@@ -548,10 +559,10 @@ test("a private grant is shared with the agent from the connectors tab", async (
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Shared." });
     },
-    "/usage": () => new Response("no", { status: 404 }),
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Only you")).toBeTruthy();
   await pressRow("github");
@@ -560,7 +571,7 @@ test("a private grant is shared with the agent from the connectors tab", async (
   expect(posted[0]).toMatchObject({ verb: "apply", kind: "connector_grant", name: "g1" });
 });
 
-test("the agent's own tab lists what is shared with it and not what is held privately", async () => {
+test("the agent's own section lists what is shared with it and not what is held privately", async () => {
   wire({
     "/connections": () =>
       json({
@@ -587,24 +598,14 @@ test("the agent's own tab lists what is shared with it and not what is held priv
           },
         ],
       }),
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.queryByText("notion")).toBeTruthy();
-});
-
-test("a 404 usage read says it is not shared", async () => {
-  wire({
-    "/usage": () => new Response("no", { status: 404 }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents/" + AGENT_ID + "/usage";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-
-  expect(await screen.findByText("Usage for this agent is not shared with you.")).toBeTruthy();
 });
 
 test("a workspace-shared conversation reads as shared, in its row and its detail heading", async () => {
@@ -1071,7 +1072,6 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   await userEvent.click(screen.getByRole("button", { name: "90 days" }));
   await waitFor(() => expect(usageWire.calls.some((url) => url.includes("range=90d"))).toBe(true));
   expect(location.hash).toBe("#/workspace/usage?range=90d");
-  expect(screen.getByRole("link", { name: "View" }).getAttribute("href")).toContain("range=90d");
 });
 
 test("a member with no rollup sees only their own figure and no workspace section", async () => {
@@ -1177,15 +1177,16 @@ test("a member who is not an admin is offered no administration control", () => 
 });
 
 test("the agent tab strip opens the tab named in the hash, and Home takes the bare hash", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   wire({
+    "/settings": () => json(SETTINGS),
     "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No account is connected to assistant yet.")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
+  expect(screen.getByRole("tab", { name: "Settings" }).getAttribute("aria-selected")).toBe(
     "true",
   );
 
@@ -1199,6 +1200,7 @@ test("the agent tab strip opens the tab named in the hash, and Home takes the ba
 test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
   wire({
     "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/settings";
@@ -1263,9 +1265,10 @@ test("a refusal after a consent link supersedes the link with the toned message"
         ? json({ applied: true, message: "Queued.", turn_id: TURN_ID })
         : json({ applied: false, message: "The provider refuses it." });
     },
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
@@ -1285,7 +1288,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
   expect(screen.queryByRole("link", { name: "Open the provider consent page" })).toBeNull();
 });
 
-test("empty caps say so on both the workspace and the agent views", async () => {
+test("empty caps say so on the workspace view", async () => {
   wire({
     "/workspace/usage": () =>
       json({
@@ -1297,28 +1300,12 @@ test("empty caps say so on both the workspace and the agent views", async () => 
         workspace: null,
       }),
   });
-  const workspace = render(
+  render(
     <MainAgentProvider agents={[AGENT]}>
       <PlacedWorkspace view="usage" />
     </MainAgentProvider>,
   );
   expect(await screen.findByText("No spend cap is set on you.")).toBeTruthy();
-  workspace.unmount();
-
-  location.hash = "#/agents/" + AGENT.id + "/usage";
-  wire({
-    "/transcript": () => json({ messages: [] }),
-    "/usage": () =>
-      json({
-        window_seconds: 86400,
-        total_micro_usd: 0,
-        by_dimension: [],
-        caps: [],
-        usage: usageDetails(0, 0),
-      }),
-  });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  expect(await screen.findByText("No spend cap is set on this agent.")).toBeTruthy();
 });
 
 test("an applied grant change keeps a live consent link on screen", async () => {
@@ -1345,9 +1332,10 @@ test("an applied grant change keeps a live consent link on screen", async () => 
         ? json({ applied: true, message: "Queued.", turn_id: TURN_ID })
         : json({ applied: true, message: "Shared." });
     },
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(

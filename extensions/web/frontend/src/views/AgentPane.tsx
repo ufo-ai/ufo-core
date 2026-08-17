@@ -3,12 +3,10 @@ import { usePlaceRecorder } from "@/kernel/place";
 import { TabPanel, TabRow } from "@/kernel/tabs";
 import { cn } from "@/lib/cn";
 import { Radar } from "@/views/Radar";
-import { AgentConnectors } from "@/views/Connectors";
 import { Conversations } from "@/views/Conversations";
 import { AgentSkills } from "@/views/AgentSkills";
 import { Homepage } from "@/views/Homepage";
 import { Settings } from "@/views/Settings";
-import { AgentUsage } from "@/views/Usage";
 import type { AgentTab, PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
@@ -17,9 +15,7 @@ const TAB_LABELS: Record<AgentTab, string> = {
   settings: "Settings",
   conversations: "Conversations",
   radar: "Radar",
-  connectors: "Connectors",
   skills: "Skills",
-  usage: "Usage",
 };
 
 export type AgentPaneProps = {
@@ -79,9 +75,7 @@ export function AgentPane({ agent, tab, tabs, selected, onTab, place, onPlace }:
         {tab === "conversations" ? (
           <Conversations key={key} agent={agent} place={merged} onPlace={record} />
         ) : null}
-        {tab === "connectors" ? <AgentConnectors agent={agent} /> : null}
         {tab === "skills" ? <AgentSkills agent={agent} /> : null}
-        {tab === "usage" ? <AgentUsage agent={agent} /> : null}
       </TabPanel>
     </section>
   );

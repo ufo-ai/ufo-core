@@ -1,6 +1,6 @@
 """The portal's per-agent read projections: scheduled tasks shaped by viewer, the agent's skills,
-memory search under the viewer's own subjects, and per-agent spend — every route gated by the web
-audience exactly like the chat routes, so an out-of-audience agent is not-found everywhere.
+and memory search under the viewer's own subjects — every route gated by the web audience exactly
+like the chat routes, so an out-of-audience agent is not-found everywhere.
 
 The panels run no turns, so the app mounts without the loop runtime: real DB, real extension
 stores (ScheduleStore, UserSkillStore, the memory extension's provider over the default index) —
@@ -34,10 +34,9 @@ from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
-from ufo_ext_web.surface import MAX_USAGE_WINDOW_SECONDS, MEMORY_RECENT_LIMIT
+from ufo_ext_web.surface import MEMORY_RECENT_LIMIT
 from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY
 
-from ufo.accounting import record_egress_request, record_sandbox_tokens, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
 from ufo.audience import conversation_audience
 from ufo.bearer import mint_token
@@ -55,12 +54,10 @@ from ufo.hub import InProcessHub
 from ufo.indexing import TextChunker
 from ufo.loop.prompts.render import SKILL_INDEX_SLOT
 from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_PRICING
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, Usage
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
 from ufo.sdk.manifest import Manifest, SubagentProfile
 from ufo.serve import _mount_shared_surfaces
@@ -719,204 +716,6 @@ async def test_a_memoryless_deploy_never_claims_availability(
         assert blank.json() == {"available": False, "matches": []}
         queried = await client.get("/surface/web/workspace/memory?q=anything", headers=headers)
         assert queried.json() == {"available": False, "matches": []}
-
-
-async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
-    """The granted agent's whole ledger, windowed, beside its agent-scoped caps — and the wall:
-    the main agent answers the member's chat but not its ledger, because no grant holds it."""
-    client, workspace_id, agent_a, agent_b = portal
-    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
-    _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
-    await _grant(workspace_id, agent_b, CREATOR_EMAIL)
-    async with workspace_tx() as connection:
-        rich_conversation: UUID | None = None
-        for agent_id, tokens in ((agent_b, 1000), (agent_a, 7777)):
-            conversation_id, turn_id = uuid4(), uuid4()
-            await connection.execute(
-                sa.insert(tables.conversation).values(
-                    id=conversation_id,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    surface="web",
-                    queue_key=uuid4().hex,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-            await connection.execute(
-                sa.insert(tables.turn).values(
-                    id=turn_id,
-                    workspace_id=workspace_id,
-                    conversation_id=conversation_id,
-                    agent_id=agent_id,
-                    seq=1,
-                    status="done",
-                    inbound="x",
-                    terminal=TerminalFrame(status="done").model_dump(mode="json"),
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-            await record_turn_usage(
-                connection,
-                workspace_id,
-                turn_id,
-                "claude-opus-4-8",
-                Usage(input_tokens=tokens, output_tokens=2000),
-            )
-            if agent_id == agent_b:
-                rich_conversation = conversation_id
-                await record_egress_request(connection, workspace_id, turn_id)
-                await record_sandbox_tokens(
-                    connection,
-                    workspace_id,
-                    turn_id,
-                    "claude-opus-4-8",
-                    Usage(input_tokens=100, output_tokens=100),
-                )
-        assert rich_conversation is not None
-        second_turn, mid_turn, stale_turn = uuid4(), uuid4(), uuid4()
-        for seq, turn_id, usage in (
-            (2, second_turn, Usage(input_tokens=500, output_tokens=1500)),
-            (3, mid_turn, Usage(input_tokens=22, output_tokens=44)),
-            (4, stale_turn, Usage(input_tokens=11, output_tokens=22)),
-        ):
-            await connection.execute(
-                sa.insert(tables.turn).values(
-                    id=turn_id,
-                    workspace_id=workspace_id,
-                    conversation_id=rich_conversation,
-                    agent_id=agent_b,
-                    seq=seq,
-                    status="done",
-                    inbound="x",
-                    terminal=TerminalFrame(status="done").model_dump(mode="json"),
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-            await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", usage)
-        for turn_id, age in ((mid_turn, timedelta(hours=2)), (stale_turn, timedelta(days=2))):
-            await connection.execute(
-                sa.update(tables.ledger)
-                .values(created_at=datetime.now(UTC) - age)
-                .where(tables.ledger.c.turn_id == turn_id)
-            )
-        for scope, subject, window in (
-            ("agent", agent_b, 86_400),
-            ("agent", agent_b, 3_600),
-            ("agent", agent_a, 86_400),
-            ("member", agent_b, 86_400),
-            ("member", _member_id, 86_400),
-            ("workspace", None, 86_400),
-        ):
-            await connection.execute(
-                sa.insert(tables.spend_cap).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    scope=scope,
-                    subject_id=subject,
-                    window_seconds=window,
-                    limit_micro_usd=5_000_000,
-                    on_breach="park",
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-    priced = {
-        tokens: CORE_PRICING.micro_usd("claude-opus-4-8", usage)
-        for tokens, usage in (
-            (3000, Usage(input_tokens=1000, output_tokens=2000)),
-            (2000, Usage(input_tokens=500, output_tokens=1500)),
-            (66, Usage(input_tokens=22, output_tokens=44)),
-        )
-    }
-    mine = await client.get(f"/surface/web/agents/{agent_b}/usage", headers=headers)
-    report = mine.json()
-    lines = {line["dimension"]: line for line in report["by_dimension"]}
-    assert report["window_seconds"] == 86_400
-    assert set(lines) == {"egress", "sandbox_tokens", "tokens"}
-    assert lines["tokens"]["amount"] == 3000 + 2000 + 66
-    assert lines["tokens"]["priced_micro_usd"] == priced[3000] + priced[2000] + priced[66]
-    assert lines["egress"]["amount"] == 1
-    assert lines["sandbox_tokens"]["amount"] == 200
-    assert lines["sandbox_tokens"]["priced_micro_usd"] > 0
-    assert report["total_micro_usd"] == sum(line["priced_micro_usd"] for line in lines.values())
-    assert report["usage"]["selected"]["tokens"] == 3000 + 2000 + 66 + 200
-    assert report["usage"]["all_time"]["tokens"] == 3000 + 2000 + 66 + 33 + 200
-    assert report["usage"]["first_used_at"] is not None
-    assert report["usage"]["daily"]
-    assert report["usage"]["by_execution"] == [
-        {
-            "label": "",
-            "tokens": 3000 + 2000 + 66 + 200,
-            "priced_micro_usd": report["usage"]["selected"]["token_micro_usd"],
-        }
-    ]
-    assert {row["label"] for row in report["usage"]["by_model"]} == {"claude-opus-4-8"}
-    hour = (
-        await client.get(
-            f"/surface/web/agents/{agent_b}/usage?window_seconds=3600", headers=headers
-        )
-    ).json()
-    hour_lines = {line["dimension"]: line for line in hour["by_dimension"]}
-    assert hour["window_seconds"] == 3_600
-    assert hour_lines["tokens"]["amount"] == 3000 + 2000
-    assert hour_lines["tokens"]["priced_micro_usd"] == priced[3000] + priced[2000]
-    assert hour["total_micro_usd"] < report["total_micro_usd"]
-    ninety_days = (
-        await client.get(f"/surface/web/agents/{agent_b}/usage?range=90d", headers=headers)
-    ).json()
-    assert ninety_days["window_seconds"] == 90 * 86_400
-    all_time = (
-        await client.get(f"/surface/web/agents/{agent_b}/usage?range=all", headers=headers)
-    ).json()
-    assert all_time["window_seconds"] is None
-    assert all_time["usage"]["selected"] == all_time["usage"]["all_time"]
-    assert report["caps"] == [
-        {"window_seconds": 3_600, "limit_micro_usd": 5_000_000, "on_breach": "park"},
-        {"window_seconds": 86_400, "limit_micro_usd": 5_000_000, "on_breach": "park"},
-    ]
-    admin_report = await client.get(f"/surface/web/agents/{agent_b}/usage", headers=admin_headers)
-    assert admin_report.status_code == 200
-    assert admin_report.json()["total_micro_usd"] == report["total_micro_usd"]
-    async with workspace_tx() as connection:
-        workspace_tokens = (
-            await connection.execute(
-                sa.select(sa.func.sum(tables.ledger.c.amount)).where(
-                    tables.ledger.c.workspace_id == workspace_id,
-                    tables.ledger.c.dimension == "tokens",
-                )
-            )
-        ).scalar_one()
-    assert int(workspace_tokens) == 3000 + 2000 + 66 + 33 + 9777
-    walled = await client.get(f"/surface/web/agents/{agent_a}/usage", headers=headers)
-    assert walled.status_code == 404
-    for bad_window in ("abc", "-5", "0", str(MAX_USAGE_WINDOW_SECONDS + 1), "9" * 30):
-        refused = await client.get(
-            f"/surface/web/agents/{agent_b}/usage?window_seconds={bad_window}", headers=headers
-        )
-        assert refused.status_code == 400
-        rollup_refused = await client.get(
-            f"/surface/web/workspace/usage?window_seconds={bad_window}", headers=admin_headers
-        )
-        assert rollup_refused.status_code == 400
-    bad_range = await client.get(
-        f"/surface/web/agents/{agent_b}/usage?range=month", headers=headers
-    )
-    assert bad_range.status_code == 400
-
-
-async def test_usage_answers_empty_for_a_spend_free_agent(portal) -> None:
-    """Both empty halves of the agent view: an agent with no ledger rows and no caps reports a
-    zero window and two empty lists rather than erroring or borrowing workspace rows."""
-    client, workspace_id, _agent_a, agent_b = portal
-    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
-    await _grant(workspace_id, agent_b, CREATOR_EMAIL)
-    report = (await client.get(f"/surface/web/agents/{agent_b}/usage", headers=headers)).json()
-    assert report["total_micro_usd"] == 0
-    assert report["by_dimension"] == []
-    assert report["caps"] == []
 
 
 async def _seed_notes(

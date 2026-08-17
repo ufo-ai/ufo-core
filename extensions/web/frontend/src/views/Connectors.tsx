@@ -127,9 +127,9 @@ function matches(entry: Connection | PoolConnection, query: string): boolean {
   return said.toLowerCase().includes(query.toLowerCase());
 }
 
-/** Every connector the member holds on one agent, the agent chosen in the bar. The agent's own tab
- *  states the same records narrowed to what that agent can actually reach; both read the one
- *  grant list, so nothing here needs a second endpoint. */
+/** Every connector the member holds on one agent, the agent chosen in the bar. The agent's own
+ *  settings state the same records narrowed to what that agent can actually reach; both read the
+ *  one grant list, so nothing here needs a second endpoint. */
 export function WorkspaceConnectors({ place }: { place: Placement }) {
   const query = place.q ?? "";
   const [reloads, setReloads] = useState(0);
@@ -313,8 +313,8 @@ function PoolRecord({
   );
 }
 
-/** What this agent can reach: a grant the member kept private is theirs, not the agent's, so the
- *  agent's own tab does not list it. */
+/** What this agent can reach, read as a section of the agent's settings: a grant the member kept
+ *  private is theirs, not the agent's, so the agent's own section does not list it. */
 export function AgentConnectors({ agent }: { agent: Agent }) {
   return <ConnectorList agent={agent} picker={null} sharedOnly={false} />;
 }

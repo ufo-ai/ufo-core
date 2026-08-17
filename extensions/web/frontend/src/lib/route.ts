@@ -3,9 +3,7 @@ export const AGENT_TABS = [
   "settings",
   "conversations",
   "radar",
-  "connectors",
   "skills",
-  "usage",
 ] as const;
 
 export const WORKSPACE_TABS = [

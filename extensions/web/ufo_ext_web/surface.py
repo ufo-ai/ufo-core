@@ -37,7 +37,7 @@ from uuid import UUID, uuid4
 import httpx
 from pydantic import BaseModel, JsonValue, ValidationError
 
-from ufo.sdk.accounting import AgentSpendReport, MemberSpendReport, SpendReport
+from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
@@ -1669,7 +1669,7 @@ def _window_param(request: Request) -> int | None | Response:
     return window
 
 
-def _usage_payload(report: AgentSpendReport | MemberSpendReport | SpendReport) -> dict[str, object]:
+def _usage_payload(report: MemberSpendReport | SpendReport) -> dict[str, object]:
     details = report.usage
     return {
         "selected": {
@@ -1871,46 +1871,6 @@ def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]:
         }
         for match in found
     ]
-
-
-async def usage(ctx: SurfaceContext, request: Request) -> Response:
-    """The selected agent's range and all-time usage and its agent-scoped caps — the agent's whole
-    ledger across every member's turns, so it answers an admin or a member whose explicit grant
-    put the agent in front of them, and the main-agent default alone opens nothing here (chat
-    projects no spend to a member); the workspace-wide rollup stays the workspace usage view."""
-    gated = await _panel_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    _member_id, _email, audience, agent_id = gated
-    if not audience.granted(agent_id):
-        return Response("no such agent", status_code=404)
-    window = _window_param(request)
-    if isinstance(window, Response):
-        return window
-    report = await ctx.agent_spend(agent_id, window)
-    return JSONResponse(
-        {
-            "window_seconds": report.window_seconds,
-            "total_micro_usd": report.total_micro_usd,
-            "by_dimension": [
-                {
-                    "dimension": line.dimension,
-                    "amount": line.amount,
-                    "priced_micro_usd": line.priced_micro_usd,
-                }
-                for line in report.by_dimension
-            ],
-            "caps": [
-                {
-                    "window_seconds": cap.window_seconds,
-                    "limit_micro_usd": cap.limit_micro_usd,
-                    "on_breach": cap.on_breach,
-                }
-                for cap in report.caps
-            ],
-            "usage": _usage_payload(report),
-        }
-    )
 
 
 async def connections(ctx: SurfaceContext, request: Request) -> Response:
@@ -3171,7 +3131,6 @@ ROUTES = (
         path="agents/{agent_id}/skills/community/{owner}/{repo}/{skill}",
         handler=community_skill,
     ),
-    SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
     SurfaceRoute(method="GET", path="agents/{agent_id}/conversations", handler=conversations),
     SurfaceRoute(
         method="GET",

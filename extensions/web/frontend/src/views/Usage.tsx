@@ -1,11 +1,10 @@
 import { useState } from "react";
 
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
+import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { money } from "@/lib/money";
-import { agentHash, workspaceHash } from "@/lib/route";
-import type { Agent } from "@/lib/types";
+import { workspaceHash } from "@/lib/route";
 
 const HOUR_SECONDS = 3600;
 const RANGES = ["7d", "30d", "90d", "all"] as const;
@@ -245,14 +244,10 @@ function Breakdown({
   heading,
   rows,
   empty,
-  links,
-  range,
 }: {
   heading: string;
   rows: BreakdownLine[];
   empty: string;
-  links?: boolean;
-  range?: Range;
 }) {
   if (!rows.length) return <PanelBlank body={empty} />;
   const tokens = rows.reduce((sum, row) => sum + row.tokens, 0);
@@ -261,9 +256,9 @@ function Breakdown({
     <Table>
       <thead>
         <tr>
-          {[heading, "Tokens", "Token Share", "Cost", "$/Mtok", ...(links ? [""] : [])].map(
-            (column, index) => <Th key={column || index}>{column}</Th>,
-          )}
+          {[heading, "Tokens", "Token Share", "Cost", "$/Mtok"].map((column) => (
+            <Th key={column}>{column}</Th>
+          ))}
         </tr>
       </thead>
       <tbody>
@@ -274,18 +269,6 @@ function Breakdown({
             <Td className="whitespace-nowrap">{percent(row.tokens, tokens)}</Td>
             <Td className="whitespace-nowrap">{money(row.priced_micro_usd)}</Td>
             <Td className="whitespace-nowrap">{blended(row.tokens, row.priced_micro_usd)}</Td>
-            {links ? (
-              <Td>
-                {row.id ? (
-                  <a
-                    className={buttonVariants({ variant: "row" })}
-                    href={agentHash(row.id, "usage", { range })}
-                  >
-                    View
-                  </a>
-                ) : null}
-              </Td>
-            ) : null}
           </tr>
         ))}
         <tr>
@@ -294,7 +277,6 @@ function Breakdown({
           <Td className="whitespace-nowrap">{percent(tokens, tokens)}</Td>
           <Td className="whitespace-nowrap font-strong">{money(cost)}</Td>
           <Td className="whitespace-nowrap">{blended(tokens, cost)}</Td>
-          {links ? <Td /> : null}
         </tr>
       </tbody>
     </Table>
@@ -321,43 +303,6 @@ function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
   );
 }
 
-export function AgentUsage({ agent }: { agent: Agent }) {
-  const [range, setRange] = useState<Range>(rangeFromHash);
-  const state = usePanelRead<UsageReport>("/agents/" + agent.id + "/usage?range=" + range);
-  function pickRange(next: Range) {
-    setRange(next);
-    history.replaceState(null, "", agentHash(agent.id, "usage", { range: next }));
-  }
-  return (
-    <Panel
-      state={state}
-      failed={(message) => (
-        <PanelEmpty>{message.startsWith("Error 404") ? "Usage for this agent is not shared with you." : message}</PanelEmpty>
-      )}
-    >
-      {(report) => (
-        <>
-          <Section title="Usage">
-            <RangeControl range={range} onRange={pickRange} />
-            <Figures details={report.usage} range={range} />
-          </Section>
-          <Section title="Daily usage"><DailyHistory rows={report.usage.daily} /></Section>
-          <Section title="Execution">
-            <Breakdown heading="Execution" rows={report.usage.by_execution} empty="No model tokens were used in this range." />
-          </Section>
-          <Section title="Models">
-            <Breakdown heading="Model" rows={report.usage.by_model} empty="No models were used in this range." />
-          </Section>
-          <Section title="Other usage">
-            <Dimensions lines={otherDimensions(report.by_dimension)} empty={"Nothing else " + agent.name + " ran in this range carried a price."} />
-          </Section>
-          <Section title="Caps"><Caps caps={report.caps} empty="No spend cap is set on this agent." /></Section>
-        </>
-      )}
-    </Panel>
-  );
-}
-
 export function WorkspaceUsage() {
   const [range, setRange] = useState<Range>(rangeFromHash);
   const state = usePanelRead<WorkspaceUsageReport>("/workspace/usage?range=" + range);
@@ -379,7 +324,7 @@ export function WorkspaceUsage() {
             {payload.workspace ? (
               <>
                 <Section title="Agents">
-                  <Breakdown heading="Agent" rows={payload.workspace.by_agent} empty="No agent used model tokens in this range." links range={range} />
+                  <Breakdown heading="Agent" rows={payload.workspace.by_agent} empty="No agent used model tokens in this range." />
                 </Section>
                 <Section title="Delegation">
                   <Breakdown heading="Execution" rows={delegation(report.by_execution)} empty="No model tokens were used in this range." />

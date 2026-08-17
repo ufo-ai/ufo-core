@@ -19,6 +19,7 @@ import {
   NO_ARTIFACTS,
   SECOND,
   SECOND_ID,
+  SETTINGS,
   TURN_ID,
   SITE_KIND,
   TASK_KIND,
@@ -739,8 +740,8 @@ test("the new-conversation control targets the main agent, or picks among severa
 });
 
 test("the agents index opens the agent's page, and the sidebar starts the conversation", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
-  wire({ "/connections": () => json({ connections: [] }) });
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  wire({ "/settings": () => json(SETTINGS), "/connections": () => json({ connections: [] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await screen.findByRole("main");
   expect(
@@ -823,12 +824,12 @@ test("a linked conversation past the rail's bound resolves by id", async () => {
 });
 
 test("a hash naming an agent this member cannot reach reports it", async () => {
-  location.hash = "#/agents/99999999-9999-4999-8999-999999999999/connectors";
+  location.hash = "#/agents/99999999-9999-4999-8999-999999999999/settings";
   wire({});
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No such agent.")).toBeTruthy();
-  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Settings" })).toBeNull();
 });
 
 test("the sidebar marks the section the member is in and leaves the others off", async () => {

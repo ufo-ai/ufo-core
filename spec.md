@@ -521,11 +521,11 @@ background job seeds one homepage-build turn per agent, ever, in the acting memb
 a homepage is born its creator's and widens only by a member's act — the main agent's excepted:
 binding it makes the creator's site readable by the workspace main already answers), its
 loadable skills (the
-composition a turn loads), its connector accounts, its conversations, its settings
+composition a turn loads), its conversations, and its settings
 (prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,
-with the grant list inside it the admin's), and its rolling-window spend beside its agent-scoped
-caps — the ledger spans every member's turns, so spend answers an admin or a member whose
-explicit grant holds the agent, never the main-agent default alone. Beside the per-agent reads,
+with the grant list inside it the admin's), which hold its connector accounts as a section of their
+own and whose facts link to the workspace usage view: spend is read there and nowhere else, per
+agent inside the admin's rollup. Beside the per-agent reads,
 `api/chats` lists the conversations this member is in across their audience agents — bound to them
 or holding a turn they spoke — and, under a bound of its own, the readable ones a colleague is in
 and they are not: the rail's projection, each row titled the way the title job named it, flagged
