@@ -247,7 +247,7 @@ test("a revoked connection stays shut when the grant comes back on a later read"
   await userEvent.click(await screen.findByRole("option", { name: /github/ }));
   await userEvent.click(screen.getByRole("button", { name: "Attach" }));
 
-  expect(await screen.findByText("github")).toBeTruthy();
+  expect(await screen.findByRole("cell", { name: "github" })).toBeTruthy();
   expect(screen.queryByRole("complementary", { name: "acct" })).toBeNull();
 });
 
