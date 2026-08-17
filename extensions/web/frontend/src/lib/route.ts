@@ -1,5 +1,5 @@
 export const AGENT_TABS = [
-  "overview",
+  "settings",
   "conversations",
   "radar",
   "connectors",
@@ -153,7 +153,7 @@ export function parseHash(hash: string): Route {
     return {
       kind: "agent",
       agentId: agent[1],
-      tab: isAgentTab(agent[2]) ? agent[2] : "overview",
+      tab: isAgentTab(agent[2]) ? agent[2] : "settings",
       place: parsePlace(agent[3]),
     };
   }
@@ -199,7 +199,7 @@ export function newChatHash(agentId: string): string {
 }
 
 export function agentHash(agentId: string, tab: AgentTab, place: WorkspacePlace = {}): string {
-  return "#/agents/" + agentId + (tab === "overview" ? "" : "/" + tab) + serializePlace(place);
+  return "#/agents/" + agentId + (tab === "settings" ? "" : "/" + tab) + serializePlace(place);
 }
 
 export function subagentHash(name: string, tab: SubagentTab): string {

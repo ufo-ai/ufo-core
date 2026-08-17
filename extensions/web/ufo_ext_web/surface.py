@@ -2,7 +2,7 @@
 member's agents — the page and the one POST that opens its session, per-agent chat with
 cookie-authenticated turn admission (each member holds any number of conversations per agent,
 opened by the first message and listed for the rail) and an SSE tail of each turn's live frames,
-read projections (the agent index, conversation transcripts, overviews, skills, per-agent usage,
+read projections (the agent index, conversation transcripts, settings, skills, per-agent usage,
 and connections) beside the workspace-level views every member holds — sources, credential slots,
 memory (latest first, searched across every reachable agent), shared artifacts, and usage (their
 own window, plus the workspace rollup for an admin) — the two generic object reads every kind's
@@ -114,7 +114,7 @@ from ufo.sdk.surfaces import (
 from ufo.sdk.tools import REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
-from ufo_ext_web.panels import ApplyIntent, agent_create_schema, agent_overview, submit_intent
+from ufo_ext_web.panels import ApplyIntent, agent_create_schema, agent_settings, submit_intent
 
 SURFACE_WEB = "web"
 SOURCE = "ufo web"
@@ -3130,15 +3130,15 @@ async def intents(ctx: SurfaceContext, request: Request) -> Response:
     return await submit_intent(ctx, request, agent_id, member_id, email)
 
 
-async def overview(ctx: SurfaceContext, request: Request) -> Response:
+async def settings(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's configuration read — its prompt, spec, bound surfaces, and the
     deploy's ceilings — answering the agent's whole web audience, so every member reads the main
-    agent's overview; the web-audience grant list inside it stays the admin's."""
+    agent's settings; the web-audience grant list inside it stays the admin's."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     _member_id, _email, audience, agent_id = gated
-    return await agent_overview(ctx, agent_id, admin=audience.admin)
+    return await agent_settings(ctx, agent_id, admin=audience.admin)
 
 
 ROUTES = (
@@ -3150,7 +3150,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
-    SurfaceRoute(method="GET", path="agents/{agent_id}/overview", handler=overview),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/settings", handler=settings),
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="connections", handler=connection_pool),

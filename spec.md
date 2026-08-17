@@ -515,7 +515,7 @@ the shell is served to a stranger. The plan,
 invoices, and payment methods stay chat acts (`manage_billing`), and caps have no object kind
 yet, so the billing view is a read. Beside chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its loadable skills (the
-composition a turn loads), its connector accounts, its conversations, its configuration overview
+composition a turn loads), its connector accounts, its conversations, its settings
 (prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,
 with the grant list inside it the admin's), and its rolling-window spend beside its agent-scoped
 caps — the ledger spans every member's turns, so spend answers an admin or a member whose

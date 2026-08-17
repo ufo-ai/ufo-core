@@ -177,7 +177,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   const openAgents = useCallback(() => go("#/agents", { kind: "agents" }), [go]);
 
   const openAgent = useCallback(
-    (agentId: string, tab: AgentTab = "overview") =>
+    (agentId: string, tab: AgentTab = "settings") =>
       go(agentHash(agentId, tab), { kind: "agent", agentId, tab, place: {} }),
     [go],
   );

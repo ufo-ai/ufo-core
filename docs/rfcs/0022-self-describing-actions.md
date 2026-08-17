@@ -208,15 +208,15 @@ declaration:
   transcript or an intent response" (`ApplyIntent`'s docstring, `panels.py:38-41`). The generator
   must not render a handoff from the POST body.
 
-What the generator inherits from today's Overview form:
+What the generator inherits from today's Settings form:
 `specField` (`portal.html:1440-1467`) builds a `<select>` only when its *caller* passes an options
 list — the caller passes `data.models` for the `model` key (`:1742-1746`), a separate payload field
-`agent_overview` supplies, because `AgentSpec.model` is a bare `str`. It never reads `prop.enum`,
+`agent_settings` supplies, because `AgentSpec.model` is a bare `str`. It never reads `prop.enum`,
 never reads `prop.description`, and renders the raw key as the label. So the generator inherits the
 boolean→checkbox and fallback→text branches and must **build**: enum→select (needing a declared
 source for runtime-valued enums like the model list), description→hint, and a humane label.
 
-It must also express a per-verb field exclusion. The Overview form derives from `_update_schema()`
+It must also express a per-verb field exclusion. The Settings form derives from `_update_schema()`
 (`panels.py:259-267`), which strips create-only `prompt` because "a field the update verb refuses
 must not render on the update form" (`AgentObjects.apply` raises on any prompt, `agents.py:162`).
 Under this design that exclusion is free — the update action's `submit_model` simply omits
@@ -309,7 +309,7 @@ not a member's submit.
    bare `str` (`agents.py:61`) and an unservable value wedges later turns. Validating it in the
    callee — or typing the field against the registry — would delete a surface precheck and improve
    chat too, but it widens the RFC into the model-spec work of `0018`.
-3. **Does the generated form need a declared enum source?** The model list reaches the Overview
+3. **Does the generated form need a declared enum source?** The model list reaches the Settings
    form as a separate payload field, not through any schema. Either declarations carry an options
    source, or runtime-valued selects stay hand-written. Unit 3 answers this against a real view.
 4. **Label translation.** If a second surface ever renders these actions, `label` and `confirm`

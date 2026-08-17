@@ -22,7 +22,7 @@ type AgentSetupNeeded = { connectors: string[]; instructions: string };
  *  agent reads its own outstanding grants at that moment instead of trusting a stale button. */
 const SETUP_ASK = "Load the agent-setup skill and follow its instructions.";
 
-type OverviewPayload = {
+type SettingsPayload = {
   agent: {
     name: string;
     main: boolean;
@@ -39,9 +39,9 @@ type OverviewPayload = {
   audience?: string[] | null;
 };
 
-export function Overview({ agent }: { agent: Agent }) {
+export function Settings({ agent }: { agent: Agent }) {
   const [reloads, setReloads] = useState(0);
-  const state = usePanelRead<OverviewPayload>("/agents/" + agent.id + "/overview", reloads);
+  const state = usePanelRead<SettingsPayload>("/agents/" + agent.id + "/settings", reloads);
   const [values, setValues] = useState<Record<string, SpecValue>>({});
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState<Record<string, SpecValue> | null>(null);

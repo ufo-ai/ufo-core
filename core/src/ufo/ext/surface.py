@@ -539,8 +539,9 @@ class InstallationSummary(BaseModel):
 
 
 class AgentDetail(BaseModel):
-    """One agent as a portal overview reads it: the row's configuration beside its prompt digest,
-    the chat surfaces whose installations bind to it, and what it still needs from a member."""
+    """One agent as a portal settings read states it: the row's configuration beside its prompt
+    digest, the chat surfaces whose installations bind to it, and what it still needs from a
+    member."""
 
     name: str
     main: bool
@@ -1922,8 +1923,8 @@ class SurfaceContext:
         return frozenset(rows)
 
     async def agent_detail(self, agent_id: UUID) -> AgentDetail | None:
-        """One agent's configuration for a portal overview — the row beside its prompt digest and
-        bound surfaces, or None when no such agent exists in this workspace. The surface's own
+        """One agent's configuration for a portal settings read — the row beside its prompt digest
+        and bound surfaces, or None when no such agent exists in this workspace. The surface's own
         audience authority gates who may read it, exactly as `list_agents`."""
         async with workspace_tx() as connection:
             row = (

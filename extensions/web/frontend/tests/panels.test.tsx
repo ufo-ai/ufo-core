@@ -39,7 +39,7 @@ beforeEach(() => {
 
 const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
 
-const OVERVIEW = {
+const SETTINGS = {
   agent: {
     name: "assistant",
     main: true,
@@ -88,10 +88,10 @@ function usageDetails(totalMicroUsd: number, tokens: number = 1_200) {
   };
 }
 
-test("the overview states the agent's facts, renders its schema, and submits a settings intent", async () => {
+test("the settings page states the agent's facts, renders its schema, and submits a settings intent", async () => {
   const posted: unknown[] = [];
   wire({
-    "/overview": () => json(OVERVIEW),
+    "/settings": () => json(SETTINGS),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Applied." });
@@ -135,16 +135,16 @@ test("the overview states the agent's facts, renders its schema, and submits a s
   );
 });
 
-test("switching agents discards unsaved overview edits", async () => {
+test("switching agents discards unsaved settings edits", async () => {
   wire({
-    "/overview": (url) =>
+    "/settings": (url) =>
       json(
         url.includes(SECOND_ID)
           ? {
-              ...OVERVIEW,
-              agent: { ...OVERVIEW.agent, name: "second", prompt: "be second" },
+              ...SETTINGS,
+              agent: { ...SETTINGS.agent, name: "second", prompt: "be second" },
             }
-          : OVERVIEW,
+          : SETTINGS,
       ),
     "/transcript": () => json({ messages: [] }),
   });
@@ -163,22 +163,22 @@ test("switching agents discards unsaved overview edits", async () => {
   );
 });
 
-test("overview polling preserves dirty edits", async () => {
+test("settings polling preserves dirty edits", async () => {
   const posted: unknown[] = [];
   let reads = 0;
   wire({
-    "/overview": () => {
+    "/settings": () => {
       reads += 1;
       return json(
         reads === 1
-          ? OVERVIEW
+          ? SETTINGS
           : {
-              ...OVERVIEW,
+              ...SETTINGS,
               agent: {
-                ...OVERVIEW.agent,
+                ...SETTINGS.agent,
                 prompt: "changed elsewhere",
               },
-              spec: { ...OVERVIEW.spec, reasoning: "medium" },
+              spec: { ...SETTINGS.spec, reasoning: "medium" },
             },
       );
     },
@@ -235,7 +235,7 @@ test("overview polling preserves dirty edits", async () => {
 
 test("a non-admin reads an agent prompt but cannot edit it", async () => {
   wire({
-    "/overview": () => json({ ...OVERVIEW, audience: null }),
+    "/settings": () => json({ ...SETTINGS, audience: null }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
@@ -276,9 +276,9 @@ test("non-admin agent rows keep their marks and no address list", () => {
   expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });
 
-test("an overview that fails to read states the error and offers no form", async () => {
+test("a settings read that fails states the error and offers no form", async () => {
   wire({
-    "/overview": () => new Response("nope", { status: 503 }),
+    "/settings": () => new Response("nope", { status: 503 }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
@@ -1096,7 +1096,7 @@ test("a member with no rollup sees only their own figure and no workspace sectio
 test("the sidebar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
   wire({
     "/transcript": () => json({ messages: [] }),
-    "/overview": () => json(OVERVIEW),
+    "/settings": () => json(SETTINGS),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/workspace/radar": () => json({ runs: [] }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
@@ -1203,7 +1203,7 @@ test("the agent tab strip opens the tab named in the hash", async () => {
 
 test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
   wire({
-    "/overview": () => json(OVERVIEW),
+    "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;

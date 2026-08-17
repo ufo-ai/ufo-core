@@ -383,8 +383,8 @@ test("a refused store states the reason the server gave and keeps the field", as
   expect(screen.getByLabelText("the key")).toBeTruthy();
 });
 
-test("the scheduled, overview, and skills refusals tone their notices", async () => {
-  const OVERVIEW = {
+test("the scheduled, settings, and skills refusals tone their notices", async () => {
+  const SETTINGS = {
     agent: {
       name: "assistant",
       main: true,
@@ -417,8 +417,8 @@ test("the scheduled, overview, and skills refusals tone their notices", async ()
   await refusedNotice("The workspace refuses it.");
   first.unmount();
 
-  location.hash = "#/agents/" + AGENT.id + "/overview";
-  wire({ "/overview": () => json(OVERVIEW), "/transcript": () => json({ messages: [] }), "/intents": refuse });
+  location.hash = "#/agents/" + AGENT.id + "/settings";
+  wire({ "/settings": () => json(SETTINGS), "/transcript": () => json({ messages: [] }), "/intents": refuse });
   const second = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "Save" }));
   await refusedNotice("The workspace refuses it.");

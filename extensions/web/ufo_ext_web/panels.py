@@ -1,4 +1,4 @@
-"""The portal's panel contract: prepared intents and the overview projection.
+"""The portal's panel contract: prepared intents and the settings projection.
 
 A panel form submits a structured intent; the surface admits it as a turn on the member's one
 durable intent conversation with the selected agent, the engine dispatches the named object verb
@@ -7,7 +7,7 @@ a paraphrase), and the handler waits for the terminal frame so the submit answer
 with the typed outcome. Intent admission never folds into a live turn, so concurrent submits queue
 as whole turns and the per-conversation partition runs a member's intents one at a time in order.
 The turn is the audit record: speaker, envelope, and result all live on it. No bespoke mutation
-endpoint exists — the chat transport carries every write, and the overview is a read projection
+endpoint exists — the chat transport carries every write, and the settings read is a projection
 like every other portal read."""
 
 import asyncio
@@ -429,7 +429,7 @@ def agent_create_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
 
 def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
     """The settings form's field source: the writable spec schema minus `prompt`, which the
-    overview renders in its own multiline control."""
+    settings page renders in its own multiline control."""
     schema = AgentSpec.model_json_schema()
     hidden = {"input_schema", "output_schema", "prompt"} | (
         set() if sandbox_sizes else {"sandbox_size"}
@@ -440,8 +440,8 @@ def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
     return schema
 
 
-async def agent_overview(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) -> Response:
-    """The overview projection: the agent's configuration and prompt digest, the deploy's public
+async def agent_settings(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) -> Response:
+    """The settings projection: the agent's configuration and prompt digest, the deploy's public
     internet capability as the ceiling the agent setting narrows, the deploy's model ids for the
     model choice, the writable spec's own schema (the form renders its fields from it, never a
     parallel description), what an extension-shipped agent still needs granted, and — for an admin —

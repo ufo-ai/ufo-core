@@ -705,7 +705,7 @@ test("the chat header names the agent and leads back to the agents index", async
   wire({
     "/api/chats": () => json({ chats: [CHAT_ROW] }),
     "/transcript": () => json({ messages: [] }),
-    "/overview": () => new Response("nope", { status: 503 }),
+    "/settings": () => new Response("nope", { status: 503 }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -786,7 +786,7 @@ test("the sidebar marks the section the member is in and leaves the others off",
     "/skills": () => json({ skills: [] }),
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/workspace/artifacts": () => json({ artifacts: [] }),
-    "/overview": () => new Response("nope", { status: 503 }),
+    "/settings": () => new Response("nope", { status: 503 }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 

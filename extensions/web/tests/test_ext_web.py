@@ -4158,8 +4158,8 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
     assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(conversation_id)]
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert str(daily_agent) not in {agent["id"] for agent in index.json()["agents"]}
-    overview = await client.get(f"/surface/web/agents/{daily_agent}/overview", headers=cookie)
-    assert overview.status_code == 404
+    settings = await client.get(f"/surface/web/agents/{daily_agent}/settings", headers=cookie)
+    assert settings.status_code == 404
     new_chat = await client.post(
         f"/surface/web/agents/{daily_agent}/chat?conversation=new",
         content=b"Open another chat.",
@@ -7447,7 +7447,7 @@ async def test_a_malformed_intent_answers_400_before_any_turn(
     assert turns == 0
 
 
-async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
+async def test_settings_projects_spec_schema_ceiling_and_admin_audience(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The settings panel's read: the agent row beside its prompt digest and bound surfaces, the
@@ -7484,7 +7484,7 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
             )
         )
     seen = await client.get(
-        f"/surface/web/agents/{agent_id}/overview",
+        f"/surface/web/agents/{agent_id}/settings",
         headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert seen.status_code == 200
@@ -7511,25 +7511,25 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
     }
     assert data["audience"] == []
     granted_view = await client.get(
-        f"/surface/web/agents/{second_agent}/overview",
+        f"/surface/web/agents/{second_agent}/settings",
         headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert granted_view.json()["audience"] == ["member@example.com"]
     member_view = await client.get(
-        f"/surface/web/agents/{second_agent}/overview",
+        f"/surface/web/agents/{second_agent}/settings",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert member_view.status_code == 200
     assert member_view.json()["audience"] is None
     ungranted_main = await client.get(
-        f"/surface/web/agents/{agent_id}/overview",
+        f"/surface/web/agents/{agent_id}/settings",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert ungranted_main.status_code == 200
     assert ungranted_main.json()["agent"]["name"] == "assistant"
     assert ungranted_main.json()["audience"] is None
     stranger = await client.get(
-        f"/surface/web/agents/{uuid4()}/overview",
+        f"/surface/web/agents/{uuid4()}/settings",
         headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert stranger.status_code == 404
@@ -7773,16 +7773,16 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
         sandbox_sizes=("small", "medium", "large"),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
-        overview = await client.get(
-            f"/surface/web/agents/{agent_id}/overview",
+        settings = await client.get(
+            f"/surface/web/agents/{agent_id}/settings",
             headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
         boot = await client.get(
             "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"}
         )
     dbos_client.destroy()
-    assert overview.status_code == 200
-    data = overview.json()
+    assert settings.status_code == 200
+    data = settings.json()
     assert data["spec"]["sandbox_size"] == "small"
     assert data["spec_schema"]["properties"]["sandbox_size"]["enum"] == [
         "small",
@@ -7843,13 +7843,13 @@ async def test_an_expanded_intent_answers_413_before_admission(
     assert turns == 0
 
 
-async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
+async def test_settings_reports_the_deploy_internet_ceiling_when_granted(
     db: None,
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The True direction of the deploy ceiling: a manifest declaring sandbox_internet makes the
-    overview report the capability the agent setting narrows."""
+    settings read report the capability the agent setting narrows."""
     config, hub, blob, sandboxes = dbos_runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     dbos_client = replay_safe_client(config.database.system_url)
@@ -7875,7 +7875,7 @@ async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         seen = await client.get(
-            f"/surface/web/agents/{agent_id}/overview",
+            f"/surface/web/agents/{agent_id}/settings",
             headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
     dbos_client.destroy()
@@ -10603,7 +10603,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     }
 
 
-async def test_the_overview_offers_the_setup_a_shipped_agent_still_needs(
+async def test_the_settings_read_offers_the_setup_a_shipped_agent_still_needs(
     db: None, web: tuple[AsyncClient, UUID, UUID]
 ) -> None:
     """The portal is where a member finishes an install, so the agent read carries what is still
@@ -10629,7 +10629,7 @@ async def test_the_overview_offers_the_setup_a_shipped_agent_still_needs(
         )
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    offered = await client.get(f"/surface/web/agents/{shipped}/overview", headers=cookie)
+    offered = await client.get(f"/surface/web/agents/{shipped}/settings", headers=cookie)
     assert offered.status_code == 200
     assert offered.json()["agent"]["setup"] == {
         "connectors": ["acme"],
@@ -10674,5 +10674,5 @@ async def test_the_overview_offers_the_setup_a_shipped_agent_still_needs(
                 updated_at=sa.func.now(),
             )
         )
-    settled = await client.get(f"/surface/web/agents/{shipped}/overview", headers=cookie)
+    settled = await client.get(f"/surface/web/agents/{shipped}/settings", headers=cookie)
     assert settled.json()["agent"]["setup"] is None

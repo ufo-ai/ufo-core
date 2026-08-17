@@ -6,13 +6,13 @@ import { Radar } from "@/views/Radar";
 import { AgentConnectors } from "@/views/Connectors";
 import { Conversations } from "@/views/Conversations";
 import { AgentSkills } from "@/views/AgentSkills";
-import { Overview } from "@/views/Overview";
+import { Settings } from "@/views/Settings";
 import { AgentUsage } from "@/views/Usage";
 import type { AgentTab, PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
 const TAB_LABELS: Record<AgentTab, string> = {
-  overview: "Overview",
+  settings: "Settings",
   conversations: "Conversations",
   radar: "Radar",
   connectors: "Connectors",
@@ -50,7 +50,7 @@ export function AgentPane({ agent, tab, tabs, onTab, onClose, place, onPlace }: 
         onPick={onTab}
       />
       <TabPanel group="agent" current={tab} className={BANDS} data-testid="panel">
-        {tab === "overview" ? <Overview key={agent.id} agent={agent} /> : null}
+        {tab === "settings" ? <Settings key={agent.id} agent={agent} /> : null}
         {tab === "radar" ? (
           <Radar key={agent.id} agentId={agent.id} place={merged} onPlace={record} />
         ) : null}
