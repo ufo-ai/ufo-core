@@ -248,7 +248,10 @@ async def test_dead_provider_completion_reroutes_excluding_that_provider() -> No
     assert [event for event in events if isinstance(event, TextDelta)] == [
         TextDelta(text="recovered")
     ]
-    assert events[-1] == Usage(input_tokens=2, output_tokens=3)
+    assert [event for event in events if isinstance(event, Usage)] == [
+        Usage(input_tokens=1, output_tokens=0),
+        Usage(input_tokens=2, output_tokens=3),
+    ]
     assert create.calls[1]["extra_body"]["provider"] == {"ignore": ["deadco"]}
 
 
@@ -256,8 +259,11 @@ async def test_length_finish_raises_truncated() -> None:
     create = ScriptedCreate(
         [_chunk(content="cut"), _chunk(finish="length"), _chunk(usage=_usage(1, 9))]
     )
+    events = []
     with pytest.raises(ModelResponseTruncated):
-        [event async for event in _client(create).complete(REQUEST)]
+        async for event in _client(create).complete(REQUEST):
+            events.append(event)
+    assert events[-1] == Usage(input_tokens=1, output_tokens=9)
 
 
 def test_manifest_registers_slug_pinned_specs() -> None:

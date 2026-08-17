@@ -800,6 +800,7 @@ class ModelAccess:
                             reasoning.append(event)
                         case Usage():
                             usages.append(event)
+                            bill.usage(model, event, self._resolver.pricing, byok)
                 if not usages:
                     raise RuntimeError("model stream produced no usage")
                 tool_calls = tuple(
@@ -818,7 +819,6 @@ class ModelAccess:
                     cache_write_30m_tokens=sum(u.cache_write_30m_tokens for u in usages),
                     cache_write_1h_tokens=sum(u.cache_write_1h_tokens for u in usages),
                 )
-                bill.usage(model, usage, self._resolver.pricing, byok)
         except BaseException as error:
             failure = {"error_class": type(error).__name__}
             raise

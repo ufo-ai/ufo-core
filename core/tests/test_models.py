@@ -636,6 +636,7 @@ class ProviderHarness:
     max_retries: int
     ok_events: Callable[[], list[object]]
     partial_events: Callable[[], list[object]]
+    partial_usage: Usage | None
 
 
 PROVIDERS = [
@@ -654,6 +655,7 @@ PROVIDERS = [
                 anthropic_message_start(input_tokens=1),
                 anthropic_text("partial"),
             ],
+            partial_usage=Usage(input_tokens=1),
         ),
         id="anthropic",
     ),
@@ -665,6 +667,7 @@ PROVIDERS = [
             max_retries=OPENAI_MAX_RETRIES,
             ok_events=lambda: [openai_text("ok"), openai_usage(prompt=1, completion=1)],
             partial_events=lambda: [openai_text("partial")],
+            partial_usage=None,
         ),
         id="openai",
     ),
@@ -840,7 +843,10 @@ async def test_no_retry_after_first_yield(harness: ProviderHarness) -> None:
     with pytest.raises(harness.error_type):
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
-    assert received == [ModelStreamStart(), TextDelta(text="partial")]
+    expected: list[ModelEvent] = [ModelStreamStart(), TextDelta(text="partial")]
+    if harness.partial_usage is not None:
+        expected.append(harness.partial_usage)
+    assert received == expected
     assert create.calls == 1
 
 
@@ -898,7 +904,10 @@ async def test_timeout_after_first_yield_does_not_retry(harness: ProviderHarness
     with pytest.raises(harness.timeout_type):
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
-    assert received == [ModelStreamStart(), TextDelta(text="partial")]
+    expected: list[ModelEvent] = [ModelStreamStart(), TextDelta(text="partial")]
+    if harness.partial_usage is not None:
+        expected.append(harness.partial_usage)
+    assert received == expected
     assert create.calls == 1
 
 
@@ -943,7 +952,10 @@ async def test_remote_protocol_error_after_first_yield_does_not_retry(
     with pytest.raises(httpx.RemoteProtocolError):
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
-    assert received == [ModelStreamStart(), TextDelta(text="partial")]
+    expected: list[ModelEvent] = [ModelStreamStart(), TextDelta(text="partial")]
+    if harness.partial_usage is not None:
+        expected.append(harness.partial_usage)
+    assert received == expected
     assert create.calls == 1
 
 
@@ -966,8 +978,10 @@ async def test_anthropic_iteration_remote_protocol_error_before_first_event_retr
     )
     events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
-    assert events[0] == TextDelta(text="ok")
-    assert isinstance(events[-1], Usage)
+    assert events == [
+        TextDelta(text="ok"),
+        Usage(input_tokens=1, output_tokens=1),
+    ]
 
 
 def stream_read_timeout() -> httpx.ReadTimeout:
@@ -993,8 +1007,10 @@ async def test_anthropic_iteration_timeout_before_first_event_retries(
     )
     events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
-    assert events[0] == TextDelta(text="ok")
-    assert isinstance(events[-1], Usage)
+    assert events == [
+        TextDelta(text="ok"),
+        Usage(input_tokens=1, output_tokens=1),
+    ]
 
 
 async def test_openai_iteration_timeout_before_first_event_retries(
@@ -1040,8 +1056,11 @@ async def test_anthropic_mid_stream_server_error_retries_then_succeeds(
     )
     events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
-    assert events[0] == TextDelta(text="ok")
-    assert isinstance(events[-1], Usage)
+    assert events == [
+        Usage(input_tokens=1),
+        TextDelta(text="ok"),
+        Usage(input_tokens=1, output_tokens=1),
+    ]
 
 
 async def test_anthropic_iteration_timeout_after_first_event_raises() -> None:
@@ -1065,7 +1084,11 @@ async def test_anthropic_iteration_timeout_after_first_event_raises() -> None:
             client=anthropic_sdk(create), spec=ANTHROPIC_SPEC
         ).complete(REQUEST):
             received.append(event)
-    assert received == [ModelStreamStart(), TextDelta(text="partial")]
+    assert received == [
+        ModelStreamStart(),
+        TextDelta(text="partial"),
+        Usage(input_tokens=1),
+    ]
     assert create.calls == 1
 
 
@@ -1080,8 +1103,13 @@ async def test_anthropic_truncation_raises() -> None:
             None,
         )
     )
+    events = []
     with pytest.raises(ModelResponseTruncated):
-        await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
+        async for event in AnthropicClient(
+            client=anthropic_sdk(create), spec=ANTHROPIC_SPEC
+        ).complete(REQUEST):
+            events.append(event)
+    assert events[-1] == Usage(input_tokens=1, output_tokens=9)
 
 
 async def test_anthropic_refusal_raises() -> None:
@@ -1094,8 +1122,13 @@ async def test_anthropic_refusal_raises() -> None:
             None,
         )
     )
+    events = []
     with pytest.raises(ModelRefusal):
-        await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
+        async for event in AnthropicClient(
+            client=anthropic_sdk(create), spec=ANTHROPIC_SPEC
+        ).complete(REQUEST):
+            events.append(event)
+    assert events == [ModelStreamStart(), Usage(input_tokens=1, output_tokens=1)]
     assert create.calls == 1
 
 
@@ -1106,8 +1139,13 @@ async def test_openai_truncation_raises() -> None:
             None,
         )
     )
+    events = []
     with pytest.raises(ModelResponseTruncated):
-        await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
+        async for event in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(
+            REQUEST
+        ):
+            events.append(event)
+    assert events[-1] == Usage(input_tokens=1, output_tokens=9)
 
 
 async def test_anthropic_empty_completion_retries_then_succeeds() -> None:
@@ -1128,6 +1166,7 @@ async def test_anthropic_empty_completion_retries_then_succeeds() -> None:
     events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
     assert events == [
+        Usage(input_tokens=1, output_tokens=0),
         TextDelta(text="recovered"),
         Usage(input_tokens=2, output_tokens=3),
     ]
@@ -1156,6 +1195,7 @@ async def test_anthropic_reasoning_without_an_answer_is_an_empty_completion() ->
     events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
     assert events == [
+        Usage(input_tokens=1, output_tokens=0),
         TextDelta(text="recovered"),
         ThinkingBlock(thinking="thought again", signature="sig-kept"),
         Usage(input_tokens=2, output_tokens=3),
@@ -1187,6 +1227,7 @@ async def test_anthropic_stream_dying_after_the_thinking_block_retries_once(
     events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == 2
     assert events == [
+        Usage(input_tokens=1, output_tokens=0),
         TextDelta(text="recovered"),
         ThinkingBlock(thinking="kept", signature="sig-kept"),
         Usage(input_tokens=2, output_tokens=3),
@@ -1204,6 +1245,7 @@ async def test_openai_empty_completion_retries_then_succeeds() -> None:
     events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
     assert create.calls == 2
     assert events == [
+        Usage(input_tokens=1, output_tokens=0),
         TextDelta(text="recovered"),
         Usage(input_tokens=2, output_tokens=3),
     ]
@@ -1217,7 +1259,7 @@ async def test_anthropic_persistent_empty_degrades_to_empty() -> None:
     create = ScriptedCreate(*([empty] * (ANTHROPIC_MAX_EMPTY_RETRIES + 1)))
     events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
     assert create.calls == ANTHROPIC_MAX_EMPTY_RETRIES + 1
-    assert events == [Usage(input_tokens=1, output_tokens=0)]
+    assert events == [Usage(input_tokens=1, output_tokens=0)] * (ANTHROPIC_MAX_EMPTY_RETRIES + 1)
 
 
 async def test_openai_persistent_empty_degrades_to_empty() -> None:
@@ -1225,7 +1267,7 @@ async def test_openai_persistent_empty_degrades_to_empty() -> None:
     create = ScriptedCreate(*([empty] * (OPENAI_MAX_EMPTY_RETRIES + 1)))
     events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
     assert create.calls == OPENAI_MAX_EMPTY_RETRIES + 1
-    assert events == [Usage(input_tokens=1, output_tokens=0)]
+    assert events == [Usage(input_tokens=1, output_tokens=0)] * (OPENAI_MAX_EMPTY_RETRIES + 1)
 
 
 def test_sdk_client_factories_disable_sdk_retries() -> None:

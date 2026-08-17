@@ -45,7 +45,7 @@ from openai.types.responses.response_input_param import FunctionCallOutput, Resp
 from openai.types.responses.response_input_text_content_param import ResponseInputTextContentParam
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
 from openai.types.responses.response_reasoning_item_param import Summary as ReasoningSummaryParam
-from openai.types.responses.response_usage import InputTokensDetails
+from openai.types.responses.response_usage import InputTokensDetails, ResponseUsage
 from openai.types.shared.reasoning_effort import ReasoningEffort as OpenAIEffort
 
 from ufo.models.interface import (
@@ -97,6 +97,23 @@ def _cache_write_tokens(details: PromptTokensDetails | InputTokensDetails | None
     if not isinstance(value, int) or isinstance(value, bool):
         raise RuntimeError("OpenAI cache_write_tokens is not an integer")
     return value
+
+
+def _responses_usage(raw: ResponseUsage, cache_write_30m_priced: bool) -> Usage:
+    details = raw.input_tokens_details
+    cached_tokens = details.cached_tokens
+    reported_cache_write_tokens = _cache_write_tokens(details)
+    cache_write_tokens = reported_cache_write_tokens if cache_write_30m_priced else 0
+    if cached_tokens > raw.input_tokens:
+        raise RuntimeError("cached prompt tokens exceed total prompt tokens")
+    if cached_tokens + reported_cache_write_tokens > raw.input_tokens:
+        raise RuntimeError("cached and cache-write prompt tokens exceed total prompt tokens")
+    return Usage(
+        input_tokens=raw.input_tokens - cached_tokens - cache_write_tokens,
+        output_tokens=raw.output_tokens,
+        cache_read_tokens=cached_tokens,
+        cache_write_30m_tokens=cache_write_tokens,
+    )
 
 
 def openai_sdk_client(api_key: str, base_url: str | None = None) -> openai.AsyncOpenAI:
@@ -464,6 +481,8 @@ class OpenAIClient:
                                 partial_json=call.function.arguments,
                             )
             except STREAM_TRANSPORT_ERRORS as error:
+                if usage is not None:
+                    yield usage
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
@@ -492,6 +511,8 @@ class OpenAIClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
+                if usage is not None:
+                    yield usage
                 if error.status_code == KEY_REJECTED_STATUS:
                     log(
                         "model.provider_status_error",
@@ -535,6 +556,8 @@ class OpenAIClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             if finish_reason == "length":
+                if usage is not None:
+                    yield usage
                 raise ModelResponseTruncated(
                     "OpenAI completion truncated at the max_tokens budget (finish_reason=length)"
                 )
@@ -552,6 +575,7 @@ class OpenAIClient:
                     model=request.model,
                     kind="empty",
                 )
+                yield usage
                 continue
             yield usage
             return
@@ -581,6 +605,7 @@ class OpenAIClient:
             tool_call_arguments: set[str] = set()
             reasoning: list[ReasoningItemBlock] = []
             usage: Usage | None = None
+            terminal_error: Exception | None = None
             try:
                 stream = await self.client.responses.create(
                     **responses_request(request, effort, self.spec.retention_none)
@@ -630,51 +655,44 @@ class OpenAIClient:
                                 )
                             )
                         case ResponseRefusalDeltaEvent(delta=refusal):
-                            raise ModelRefusal(f"OpenAI declined the completion: {refusal}")
+                            terminal_error = ModelRefusal(
+                                f"OpenAI declined the completion: {refusal}"
+                            )
                         case ResponseCompletedEvent(response=response):
                             raw = response.usage
                             if raw is None:
                                 raise RuntimeError("model stream produced no usage")
-                            details = raw.input_tokens_details
-                            cached_tokens = details.cached_tokens
-                            reported_cache_write_tokens = _cache_write_tokens(details)
-                            cache_write_tokens = (
-                                reported_cache_write_tokens
-                                if self.spec.price.cache_write_30m
-                                else 0
-                            )
-                            if cached_tokens > raw.input_tokens:
-                                raise RuntimeError(
-                                    "cached prompt tokens exceed total prompt tokens"
-                                )
-                            if cached_tokens + reported_cache_write_tokens > raw.input_tokens:
-                                raise RuntimeError(
-                                    "cached and cache-write prompt tokens exceed total "
-                                    "prompt tokens"
-                                )
-                            usage = Usage(
-                                input_tokens=raw.input_tokens - cached_tokens - cache_write_tokens,
-                                output_tokens=raw.output_tokens,
-                                cache_read_tokens=cached_tokens,
-                                cache_write_30m_tokens=cache_write_tokens,
-                            )
+                            usage = _responses_usage(raw, bool(self.spec.price.cache_write_30m))
                         case ResponseIncompleteEvent(response=response):
+                            if response.usage is not None:
+                                usage = _responses_usage(
+                                    response.usage, bool(self.spec.price.cache_write_30m)
+                                )
                             reason = response.incomplete_details
                             if reason is not None and reason.reason == "max_output_tokens":
-                                raise ModelResponseTruncated(
+                                terminal_error = ModelResponseTruncated(
                                     "OpenAI response truncated at the max_output_tokens budget"
                                 )
-                            if reason is not None and reason.reason == "content_filter":
-                                raise ModelRefusal(
+                            elif reason is not None and reason.reason == "content_filter":
+                                terminal_error = ModelRefusal(
                                     "OpenAI declined the completion (content_filter)"
                                 )
-                            raise RuntimeError("OpenAI returned an incomplete response")
+                            else:
+                                terminal_error = RuntimeError(
+                                    "OpenAI returned an incomplete response"
+                                )
                         case ResponseFailedEvent(response=response):
+                            if response.usage is not None:
+                                usage = _responses_usage(
+                                    response.usage, bool(self.spec.price.cache_write_30m)
+                                )
                             message = response.error.message if response.error else "unknown error"
-                            raise RuntimeError(f"OpenAI response failed: {message}")
+                            terminal_error = RuntimeError(f"OpenAI response failed: {message}")
                         case ResponseErrorEvent(message=message):
-                            raise RuntimeError(f"OpenAI response failed: {message}")
+                            terminal_error = RuntimeError(f"OpenAI response failed: {message}")
             except STREAM_TRANSPORT_ERRORS as error:
+                if usage is not None:
+                    yield usage
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
@@ -703,6 +721,8 @@ class OpenAIClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
+                if usage is not None:
+                    yield usage
                 if error.status_code == KEY_REJECTED_STATUS:
                     log(
                         "model.provider_status_error",
@@ -745,6 +765,10 @@ class OpenAIClient:
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
+            if terminal_error is not None:
+                if usage is not None:
+                    yield usage
+                raise terminal_error
             if usage is None:
                 raise RuntimeError("model stream produced no usage")
             if not yielded and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
@@ -755,6 +779,7 @@ class OpenAIClient:
                     model=request.model,
                     kind="empty",
                 )
+                yield usage
                 continue
             for block in reasoning:
                 yield block

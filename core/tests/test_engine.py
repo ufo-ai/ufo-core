@@ -1828,6 +1828,18 @@ async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_s
     with pytest.raises(ModelStreamError):
         await _engine(turn, model, tmp_path).run()
     assert model.calls == 1
+    async with workspace_tx() as connection:
+        ledger = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.input_tokens,
+                    tables.ledger.c.output_tokens,
+                    tables.ledger.c.cache_read_tokens,
+                    tables.ledger.c.cache_write_5m_tokens,
+                ).where(tables.ledger.c.turn_id == turn.id)
+            )
+        ).one()
+    assert tuple(ledger) == (9, 2, 6, 4)
     points = _exported_metrics(reader)
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
         {

@@ -269,6 +269,19 @@ class AnthropicClient:
                             output_tokens = usage.output_tokens
                             stop_reason = delta.stop_reason
             except STREAM_TRANSPORT_ERRORS as error:
+                if (
+                    input_tokens
+                    or cache_read_tokens
+                    or cache_write_5m_tokens
+                    or cache_write_1h_tokens
+                ):
+                    yield Usage(
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens or 0,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_write_5m_tokens=cache_write_5m_tokens,
+                        cache_write_1h_tokens=cache_write_1h_tokens,
+                    )
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
@@ -297,6 +310,19 @@ class AnthropicClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
+                if (
+                    input_tokens
+                    or cache_read_tokens
+                    or cache_write_5m_tokens
+                    or cache_write_1h_tokens
+                ):
+                    yield Usage(
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens or 0,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_write_5m_tokens=cache_write_5m_tokens,
+                        cache_write_1h_tokens=cache_write_1h_tokens,
+                    )
                 if error.status_code == KEY_REJECTED_STATUS:
                     log(
                         "model.provider_status_error",
@@ -342,13 +368,40 @@ class AnthropicClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             if stop_reason == "max_tokens":
+                yield Usage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens or 0,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_write_5m_tokens=cache_write_5m_tokens,
+                    cache_write_1h_tokens=cache_write_1h_tokens,
+                )
                 raise ModelResponseTruncated(
                     "Anthropic completion truncated at the max_tokens budget "
                     "(stop_reason=max_tokens)"
                 )
             if stop_reason == "refusal":
+                yield Usage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens or 0,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_write_5m_tokens=cache_write_5m_tokens,
+                    cache_write_1h_tokens=cache_write_1h_tokens,
+                )
                 raise ModelRefusal("Anthropic declined the completion (stop_reason=refusal)")
             if output_tokens is None:
+                if (
+                    input_tokens
+                    or cache_read_tokens
+                    or cache_write_5m_tokens
+                    or cache_write_1h_tokens
+                ):
+                    yield Usage(
+                        input_tokens=input_tokens,
+                        output_tokens=0,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_write_5m_tokens=cache_write_5m_tokens,
+                        cache_write_1h_tokens=cache_write_1h_tokens,
+                    )
                 raise RuntimeError("model stream produced no usage")
             if (
                 not yielded
@@ -361,6 +414,13 @@ class AnthropicClient:
                     provider=self.spec.provider,
                     model=request.model,
                     kind="empty",
+                )
+                yield Usage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_write_5m_tokens=cache_write_5m_tokens,
+                    cache_write_1h_tokens=cache_write_1h_tokens,
                 )
                 continue
             for block in reasoning:

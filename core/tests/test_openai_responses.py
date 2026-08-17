@@ -342,6 +342,7 @@ async def test_responses_reasoning_without_an_answer_is_an_empty_completion() ->
     assert scripted.calls == 2
     assert events == [
         ModelStreamStart(),
+        Usage(input_tokens=1, output_tokens=0),
         ModelStreamStart(),
         TextDelta(text="recovered"),
         ReasoningItemBlock(
@@ -490,20 +491,33 @@ def test_responses_request_preserves_input_controls_and_disables_storage() -> No
 
 
 async def test_responses_path_fails_loud_on_truncation_and_refusal() -> None:
+    usage = ResponseUsage(
+        input_tokens=3,
+        output_tokens=7,
+        total_tokens=10,
+        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+    )
     truncated = ScriptedResponses(
         (
             [
                 ResponseIncompleteEvent(
                     type="response.incomplete",
                     sequence_number=0,
-                    response=_response(incomplete=IncompleteDetails(reason="max_output_tokens")),
+                    response=_response(
+                        usage=usage,
+                        incomplete=IncompleteDetails(reason="max_output_tokens"),
+                    ),
                 )
             ],
             None,
         )
     )
+    truncated_events = []
     with pytest.raises(ModelResponseTruncated):
-        [event async for event in _responses_client(truncated).complete(_request())]
+        async for event in _responses_client(truncated).complete(_request()):
+            truncated_events.append(event)
+    assert truncated_events == [ModelStreamStart(), Usage(input_tokens=3, output_tokens=7)]
 
     refused = ScriptedResponses(
         (
@@ -515,13 +529,17 @@ async def test_responses_path_fails_loud_on_truncation_and_refusal() -> None:
                     content_index=0,
                     sequence_number=0,
                     delta="no",
-                )
+                ),
+                *_completed_events(text="", input_tokens=3, output_tokens=7),
             ],
             None,
         )
     )
+    refused_events = []
     with pytest.raises(ModelRefusal):
-        [event async for event in _responses_client(refused).complete(_request())]
+        async for event in _responses_client(refused).complete(_request()):
+            refused_events.append(event)
+    assert refused_events == [ModelStreamStart(), Usage(input_tokens=3, output_tokens=7)]
 
 
 @pytest.mark.parametrize("status", [429, 500])
@@ -645,8 +663,9 @@ async def test_responses_path_persistent_empty_degrades_to_usage() -> None:
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == MAX_EMPTY_PROVIDER_RETRIES + 1
     assert events == [
-        *[ModelStreamStart()] * (MAX_EMPTY_PROVIDER_RETRIES + 1),
-        Usage(input_tokens=1, output_tokens=0),
+        event
+        for _ in range(MAX_EMPTY_PROVIDER_RETRIES + 1)
+        for event in (ModelStreamStart(), Usage(input_tokens=1, output_tokens=0))
     ]
 
 

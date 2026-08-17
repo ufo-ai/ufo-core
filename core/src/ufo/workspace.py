@@ -6,7 +6,7 @@ goes through — identical whether it runs in a turn or a job.
 the workspace's stored BYOK value, else the platform default from env — so a key is never fetched
 without naming the workspace that holds it, and never leaks across one. Spend is booked only through
 `with ws_current().billable_event() as bill: bill.usage(...)`, written to that same workspace when
-the block succeeds and dropped if it raises. The workspace is never an argument: binding it once at
+the block exits. The workspace is never an argument: binding it once at
 the turn or job boundary scopes credentials, billing, and RLS within — so a job bills the same
 workspace the same way a turn does, by construction."""
 
@@ -41,8 +41,8 @@ class WorkspaceUnbound(RuntimeError):
 
 @dataclass
 class BillableEvent:
-    """Spend accrued inside one `billable_event()` block. Add model usage as the calls happen;
-    nothing is written until the block exits cleanly, so a call that raises is never billed."""
+    """Spend accrued inside one `billable_event()` block. Add provider usage as it arrives; the
+    block exit writes every reported attempt, including an attempt whose output cannot be used."""
 
     _usages: list[tuple[str, Usage, Pricing, bool]] = field(default_factory=list)
 
@@ -53,7 +53,7 @@ class BillableEvent:
         pricing: Pricing = CORE_PRICING,
         byok: bool = False,
     ) -> None:
-        """Accrue one metered model call to book when the block succeeds. `byok` is decided by the
+        """Accrue one metered model attempt to book when the block exits. `byok` is decided by the
         caller, against the key that served this call, so a call the workspace's own key paid for is
         billed nothing and the answer cannot drift before the bill is written."""
         self._usages.append((model, usage, pricing, byok))
@@ -108,18 +108,18 @@ class WorkspaceScope:
 
     @asynccontextmanager
     async def billable_event(self) -> AsyncIterator[BillableEvent]:
-        """Book spend to this workspace when the block succeeds. Accrue model usage inside; on clean
-        exit it is written to the workspace ledger (turn_id NULL, workspace-anchored), and an
-        exception drops it unwritten — so a failed call is never billed."""
+        """Book reported provider usage to this workspace when the block exits. A model-output
+        error cannot remove a charge the provider already reported."""
         event = BillableEvent()
-        yield event
-        if not event._usages:
-            return
-        async with workspace_tx() as connection:
-            for model, usage, pricing, byok in event._usages:
-                await record_workspace_usage(
-                    connection, self.workspace_id, model, usage, pricing, byok
-                )
+        try:
+            yield event
+        finally:
+            if event._usages:
+                async with workspace_tx() as connection:
+                    for model, usage, pricing, byok in event._usages:
+                        await record_workspace_usage(
+                            connection, self.workspace_id, model, usage, pricing, byok
+                        )
 
 
 @contextmanager

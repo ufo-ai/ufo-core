@@ -131,6 +131,14 @@ class FailingModel:
 
 
 @dataclass(frozen=True)
+class InvalidToolModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json="{")
+        yield Usage(input_tokens=5, output_tokens=2)
+
+
+@dataclass(frozen=True)
 class CachingModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         yield TextDelta(text="summarized")
@@ -299,6 +307,36 @@ async def test_a_failed_background_call_meters_its_latency_with_the_error_class(
         }
     ]
     assert "ufo.model_round_tokens_total" not in points
+
+
+async def test_invalid_background_output_keeps_reported_provider_usage(db: None) -> None:
+    workspace_id = await _workspace()
+    context = context_for(
+        "core",
+        frozenset(),
+        model_resolver=StubResolver(InvalidToolModel()),
+        model_job=JOB,
+    )
+    assert context.model is not None
+    with ws(workspace_id), pytest.raises(ValueError):
+        await context.model.turn(
+            ModelRequest(
+                model="auto",
+                system="be terse",
+                messages=(Message(role="user", content="hi"),),
+                max_tokens=64,
+                conversation_cache_ttl="5m",
+            )
+        )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.ledger.c.amount, tables.ledger.c.input_tokens).where(
+                    tables.ledger.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    assert tuple(row) == (7, 5)
 
 
 async def test_a_stream_with_no_usage_meters_the_failure_it_raises(

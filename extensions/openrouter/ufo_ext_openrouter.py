@@ -355,6 +355,8 @@ class OpenRouterModelClient:
                                 partial_json=call.function.arguments,
                             )
             except openai.APIStatusError as error:
+                if usage is not None:
+                    yield usage
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
                 if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
@@ -389,6 +391,8 @@ class OpenRouterModelClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             if finish_reason == "length":
+                if usage is not None:
+                    yield usage
                 raise ModelResponseTruncated(
                     "OpenRouter completion truncated at the max_tokens budget "
                     "(finish_reason=length)"
@@ -405,6 +409,7 @@ class OpenRouterModelClient:
                     model=request.model,
                     kind="empty",
                 )
+                yield usage
                 continue
             yield usage
             return
