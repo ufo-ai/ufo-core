@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 
 import { brailleOf } from "@/lib/braille";
-import { Markdown, StreamingBody } from "@/lib/markdown";
+import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
 
 test("raw html in agent prose renders as text instead of vanishing", () => {
   render(<Markdown text={"use <username> as the placeholder, compare a<b and c<d"} />);
@@ -110,6 +110,70 @@ test("a link the reader cannot follow stays the words it was written as", () => 
     expect(container.querySelector("a")).toBeNull();
     expect(container.textContent).toContain("bad");
     expect(container.textContent).toContain("after");
+    unmount();
+  }
+});
+
+test("an address a member typed opens, under the same policy a reply's link opens under", () => {
+  render(<Linked text={"read https://example.com/d and mail me at mailto:sam@example.com"} />);
+  const page = screen.getByRole("link", { name: "https://example.com/d" });
+  expect(page.getAttribute("href")).toBe("https://example.com/d");
+  expect(page.getAttribute("target")).toBe("_blank");
+  expect(page.getAttribute("rel")).toBe("noopener noreferrer");
+  expect(screen.getByRole("link", { name: "mailto:sam@example.com" })).toBeTruthy();
+});
+
+test("everything a member wrote around the address stays the characters they typed", () => {
+  const { container } = render(
+    <Linked text={"**hi** see [docs](https://example.com/d) # not a heading"} />,
+  );
+  expect(container.querySelectorAll("a").length).toBe(1);
+  expect(container.querySelector("strong")).toBeNull();
+  expect(container.textContent).toBe("**hi** see [docs](https://example.com/d) # not a heading");
+});
+
+test("a member's plain words are left as one piece of text", () => {
+  const { container } = render(<Linked text={"first\nsecond"} />);
+  expect(container.querySelector("a")).toBeNull();
+  expect(container.textContent).toBe("first\nsecond");
+});
+
+test("an address ends where the address ends, not where the sentence does", () => {
+  const cases: Array<[string, string]> = [
+    ["see https://example.com/d.", "https://example.com/d"],
+    ["see (https://example.com/d) now", "https://example.com/d"],
+    ["see https://example.com/a_(b) now", "https://example.com/a_(b)"],
+    ["see https://example.com/d, then", "https://example.com/d"],
+  ];
+  for (const [source, address] of cases) {
+    const { container, unmount } = render(<Linked text={source} />);
+    expect(container.querySelector("a")?.getAttribute("href")).toBe(address);
+    expect(container.textContent).toBe(source);
+    unmount();
+  }
+});
+
+test("a long run of brackets behind an address is trimmed in one pass", () => {
+  const run = ")".repeat(50_000);
+  const source = `see https://example.com/a_(b)${run} now`;
+  const started = performance.now();
+  const { container } = render(<Linked text={source} />);
+  const spent = performance.now() - started;
+  expect(container.querySelector("a")?.getAttribute("href")).toBe("https://example.com/a_(b)");
+  expect(container.textContent).toBe(source);
+  expect(spent).toBeLessThan(1_000);
+});
+
+test("an address a member cannot be sent to stays the words it was typed as", () => {
+  for (const source of [
+    "try javascript:alert(1) now",
+    "try data:text/html,<script>alert(1)</script> now",
+    "try file:///etc/passwd now",
+    "try www.example.com now",
+  ]) {
+    const { container, unmount } = render(<Linked text={source} />);
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.textContent).toBe(source);
     unmount();
   }
 });

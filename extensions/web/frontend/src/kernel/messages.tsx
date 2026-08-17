@@ -25,7 +25,7 @@ import { Reveal } from "@/components/ui/reveal";
 import { speakerName } from "@/lib/audience";
 import { brailleOf, randomCell } from "@/lib/braille";
 import { cn } from "@/lib/cn";
-import { Markdown, StreamingBody } from "@/lib/markdown";
+import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
 import { subagentConversationHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
@@ -181,9 +181,11 @@ export function MessageLog({
             {message.role !== "user" ? (
               <Markdown text={message.text} />
             ) : message.arrival_id ? (
-              <span className="italic text-ink-soft">{message.text}</span>
+              <span className="italic text-ink-soft">
+                <Linked text={message.text} />
+              </span>
             ) : (
-              message.text
+              <Linked text={message.text} />
             )}
           </Said>
           {message.files?.length ? (

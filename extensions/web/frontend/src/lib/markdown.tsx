@@ -1,6 +1,6 @@
 import type { Root } from "mdast";
 import type { MermaidConfig } from "mermaid";
-import { createElement } from "react";
+import { createElement, type ReactNode } from "react";
 import remarkBreaks from "remark-breaks";
 
 import { arrive } from "@/lib/arrive";
@@ -132,6 +132,54 @@ const COMPONENTS: Components = {
   input: ({ node: _node, className: _className, ...props }) =>
     props.type === "checkbox" ? <input {...props} disabled /> : null,
 };
+
+/** Only an address written with the scheme it is followed by: anything else a member typed reads as
+ *  the words it is, so `www.example.com` is never resolved against the page it was typed on. */
+const LINKABLE = /(https?:\/\/|mailto:)[^\s<>]+/gi;
+
+/** An address typed into a sentence ends before the sentence does: the full stop that closes the
+ *  sentence, and a bracket the sentence put around the address, belong to the sentence. The scheme
+ *  is never trimmed into, so what is left still resolves as the address it was written as. */
+function address(match: string, scheme: string): string {
+  let opened = 0;
+  let closed = 0;
+  for (const character of match) {
+    if (character === "(") opened += 1;
+    else if (character === ")") closed += 1;
+  }
+  let end = match.length;
+  while (end > scheme.length) {
+    const last = match[end - 1];
+    const closing = last === ")" && closed > opened;
+    if (!".,:;!?'\"".includes(last) && !closing) break;
+    if (closing) closed -= 1;
+    end -= 1;
+  }
+  return match.slice(0, end);
+}
+
+/** A member's own words are not markup: their `#`, `*` and `[docs](url)` stay the characters they
+ *  typed. An address is the one exception, because a member who types one means the place it points
+ *  at, and it is drawn as the anchor a reply's link is drawn as, under the same policy. */
+export function Linked({ text }: { text: string }) {
+  const parts: ReactNode[] = [];
+  let read = 0;
+  for (const match of text.matchAll(LINKABLE)) {
+    const url = address(match[0], match[1]);
+    const target = resolved(url);
+    if (!target || !SPEAKABLE_PROTOCOLS.includes(target.protocol)) continue;
+    parts.push(text.slice(read, match.index));
+    parts.push(
+      <a key={match.index} href={url} target="_blank" rel="noopener noreferrer">
+        {url}
+      </a>,
+    );
+    read = match.index + url.length;
+  }
+  if (!parts.length) return <>{text}</>;
+  parts.push(text.slice(read));
+  return <>{parts}</>;
+}
 
 /** A single newline is a line break, because an agent writing a list of lines means the lines it
  *  wrote. `harden` is left out of the chain: it answers a refused link with a `[blocked]` span in

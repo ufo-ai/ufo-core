@@ -2510,3 +2510,17 @@ test("agent markdown renders as elements while the member's text stays literal",
   expect(link.getAttribute("href")).toBe("https://example.com/d");
   expect(screen.getByText("**hi**").textContent).toBe("**hi**");
 });
+
+test("an address a member sent is a link in the member's own bubble", async () => {
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "read https://example.com/d");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  const link = await screen.findByRole("link", { name: "https://example.com/d" });
+  expect(link.getAttribute("href")).toBe("https://example.com/d");
+  expect(link.getAttribute("target")).toBe("_blank");
+  expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  expect(link.closest("[data-role=me]")).not.toBeNull();
+});
