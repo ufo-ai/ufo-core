@@ -100,8 +100,6 @@ from ufo.sdk.surfaces import (
     PortalKind,
     ScheduledRun,
     SharedArtifact,
-    SubagentDetail,
-    SubagentRun,
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
@@ -141,6 +139,7 @@ ARTIFACT_LIST_LIMIT = 100
 RADAR_MIN_RUNS = 10
 RADAR_MAX_RUNS = 200
 SCHEDULED_TASK_KIND = "scheduled_task"
+SITE_KIND = "site"
 ARTIFACT_MEDIA_FILTERS = frozenset(("image", "document", "data", "other"))
 ARTIFACT_SCOPE_FILTERS = frozenset(("created", "shared"))
 OBJECT_FANOUT_LIMIT = 50
@@ -152,6 +151,16 @@ CHAT_STORE_PREFIX = "chat/"
 CHAT_PENDING_PREFIX = "chat_title_pending/"
 TITLE_JOB_NAME = "chat_titles"
 TITLE_JOB_SCHEDULE = "*/15 * * * * *"
+HOMEPAGE_SEED_PREFIX = "homepage-seed/"
+SEED_JOB_NAME = "seed_homepages"
+SEED_JOB_SCHEDULE = "0 */5 * * * *"
+HOMEPAGE_TOOLS = ("deploy_website", "set_homepage")
+SEED_PROMPT = (
+    "Build your homepage: the page members open on the agents screen. State what you are for, "
+    "what you watch, recent work, and what you need from members. Build a small static site in "
+    "the workspace, run deploy_website, then run set_homepage with the site name from the deploy "
+    "result. Update the homepage when what you report changes."
+)
 TITLE_EXCERPT_CHARS = 1000
 TITLE_MAX_TOKENS = 100
 TITLE_SYSTEM_PROMPT = (
@@ -513,6 +522,67 @@ async def summarize_chat_titles(ctx: ExtensionContext) -> None:
         )
         await ctx.retitle_conversation(conversation_id, summary)
         await ctx.store.delete(key)
+
+
+async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> None:
+    """One homepage-build turn per agent, ever — the batch job behind the Home tab's first fill.
+    The marker alone decides, so the sweep cannot fire on rows it caused and the fleet's existing
+    agents seed through the same sweep. The marker is written only for a turn admission accepted:
+    a refusal — a breached cap, an unseated on-behalf member — leaves the agent unmarked, and the
+    day-bucketed idempotency key retries it tomorrow. The turn rides on behalf of the agent's
+    owner — the earliest-seated admin for an ownerless row — because a deploy needs an acting
+    member, and it runs in that member's own room, the shape every on-behalf invocation takes, so
+    the authority it carries stays inside a room its member already reads. The homepage is
+    therefore born its creator's — the site defaults private, matching an ungranted agent's own
+    audience — and widens only by a member's act: the frame's selector, or the agent asked in
+    chat when its audience grows. An agent whose allowlist withholds the site tools is marked
+    settled rather than handed a turn it cannot finish — chat is its recovery if the allowlist
+    grows — and an ownerless agent in a workspace with no seated admin waits, unmarked, for one.
+    The candidates gate on due work: a workspace whose agents are all marked never fires this
+    handler, so the settled fleet costs nothing. `bucket` is the day the idempotency key names — a
+    refused admission is a durable turn its key would answer forever, so a refusal costs at most
+    one bucket's attempt while a crash between admitting and marking still dedupes to the turn
+    already admitted."""
+    bucket = bucket or datetime.now(UTC).date().isoformat()
+    agents = await ctx.workspace_agents()
+    if not agents:
+        return
+    marked = {key for key, _ in await ctx.store.list(HOMEPAGE_SEED_PREFIX)}
+    admin_resolved = False
+    admin: UUID | None = None
+    for agent in agents:
+        key = f"{HOMEPAGE_SEED_PREFIX}{agent.id}"
+        if key in marked:
+            continue
+        if agent.tools is not None and not set(HOMEPAGE_TOOLS) <= set(agent.tools):
+            await ctx.store.put(key, "withheld-tools")
+            continue
+        acting = agent.owner_member_id
+        if acting is None:
+            if not admin_resolved:
+                admin = await ctx.earliest_seated_admin()
+                admin_resolved = True
+            acting = admin
+        if acting is None:
+            continue
+        conversation_id = await ctx.open_conversation(
+            agent.id, f"homepage/{agent.id}/{acting}", member_id=acting
+        )
+        turn_id = await ctx.invoke(
+            conversation_id,
+            agent.id,
+            SEED_PROMPT,
+            f"homepage-seed:{agent.id}:{bucket}",
+            on_behalf_of_member_id=acting,
+            as_scheduled=True,
+        )
+        if turn_id is None:
+            raise RuntimeError(f"homepage seed for agent {agent.id} answered no turn")
+        outcomes = await ctx.turn_outcomes((turn_id,))
+        outcome = outcomes.get(turn_id)
+        if outcome is not None and outcome.status == "cancelled":
+            continue
+        await ctx.store.put(key, str(acting))
 
 
 async def _open_conversation(
@@ -2288,119 +2358,6 @@ ARTIFACTS_SLOT = ConversationSlotProvider(
 )
 
 
-async def _subagent_gate(
-    ctx: SurfaceContext, request: Request
-) -> tuple[UUID, WebAudience, SubagentDetail] | Response:
-    """The shared entry of every subagent page read: the session's member and audience, plus the
-    path's profile — 404 when this deploy registers no such profile. No audience narrows the
-    profile itself, so the whole roster reads; the audience decides only whose work the page can
-    show, and the work rides on agents, so every read below carries `agent_ids`."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, _email, audience = resolved
-    profile = ctx.subagent(request.path_params["subagent"])
-    if profile is None:
-        return Response("no such subagent", status_code=404)
-    return member_id, audience, profile
-
-
-def _reachable_agents(audience: WebAudience) -> frozenset[UUID]:
-    """The agents this viewer's audience reaches — every agent for an admin, since the audience is
-    built that way. A subagent page shows only work these agents spawned, so an out-of-audience
-    agent stays not-found here as on every other portal route."""
-    return frozenset(agent.id for agent in audience.agents)
-
-
-async def subagent_overview(ctx: SurfaceContext, request: Request) -> Response:
-    """One profile's configuration: the system prompt its children run under, the model it pins or
-    inherits from the spawning agent, its round cap, and whether its answer is walled as untrusted
-    content wherever a parent receives it."""
-    gated = await _subagent_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    _member_id, _audience, profile = gated
-    return JSONResponse({"subagent": profile.model_dump(mode="json")})
-
-
-async def subagent_skills(ctx: SurfaceContext, request: Request) -> Response:
-    """The deploy skills this profile can load, empty when it holds no `load_skill`. A spawn also
-    merges the spawning agent's member-authored skills into the child's index, and one profile is
-    reached by every agent, so those are listed on each agent's own skills panel and this names the
-    part every child of this profile loads."""
-    gated = await _subagent_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    _member_id, _audience, profile = gated
-    listed = ctx.deploy_skills if profile.loads_skills else ()
-    return JSONResponse(
-        {
-            "loads_skills": profile.loads_skills,
-            "skills": [{"name": name, "description": description} for name, description in listed],
-        }
-    )
-
-
-async def subagent_conversations(ctx: SurfaceContext, request: Request) -> Response:
-    """The conversations this profile ran in, under the agents this viewer's audience reaches — the
-    children of their own requests and of the workspace-shared ones, every one for an admin. A
-    spawn copies the spawning conversation's audience onto the child, so whose work a member sees
-    is the parent's answer. `q` narrows the read the same way an agent's own conversations read
-    narrows: ahead of the bound, so a run older than it is still reachable by name."""
-    gated = await _subagent_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    member_id, audience, profile = gated
-    listed = await ctx.list_subagent_conversations(
-        profile.name,
-        member_id,
-        _reachable_agents(audience),
-        admin=audience.admin,
-        limit=CONVERSATION_LIST_LIMIT,
-        search=_searched(request),
-    )
-    return JSONResponse({"conversations": [_subagent_run_row(run) for run in listed]})
-
-
-def _subagent_run_row(run: SubagentRun) -> dict[str, object]:
-    """One subagent run as both its listing row and the header its own page titles with — the same
-    conversation row every other portal index draws, naming the agent that ran it because this read
-    spans every agent the viewer reaches."""
-    return _conversation_row(run.conversation, {"id": str(run.agent_id), "name": run.agent_name})
-
-
-async def subagent_conversation(ctx: SurfaceContext, request: Request) -> Response:
-    """One subagent run's own transcript, as the same messages every other conversation reads back
-    as, scoped to the profile that ran it and to the agents this viewer's audience reaches. A row
-    the listing shows unreadable refuses here. `root` names the conversation the run was spawned
-    from, the way the changes and files of a child are already read through it: a member opening
-    the card in a transcript they may read reads the run behind it, and that is the one route by
-    which an admin's acknowledgement reaches a child. The run itself rides the response, so a
-    permalink opened cold titles its page from this one read."""
-    gated = await _subagent_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    member_id, audience, profile = gated
-    root = request.query_params.get("root")
-    try:
-        conversation_id = UUID(request.path_params["conversation_id"])
-        root_conversation_id = None if root is None else UUID(root)
-    except ValueError:
-        return Response("no such conversation", status_code=404)
-    run = await ctx.readable_subagent_conversation(
-        conversation_id,
-        profile.name,
-        member_id,
-        _reachable_agents(audience),
-        root_conversation_id=root_conversation_id,
-        admin=audience.admin,
-    )
-    if run is None:
-        return Response("no such conversation", status_code=404)
-    rendered, _turn = await _conversation_messages(ctx, conversation_id, member_id)
-    return JSONResponse({"run": _subagent_run_row(run), "messages": rendered})
-
-
 async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response:
     """Member-fillable declared BYOK slots and their fill state — never a value, and never the
     `member_filled=False` seals the `credential` object kind still lists (deploy machinery, not a
@@ -3152,6 +3109,34 @@ async def settings(ctx: SurfaceContext, request: Request) -> Response:
     return await agent_settings(ctx, agent_id, admin=audience.admin)
 
 
+async def homepage(ctx: SurfaceContext, request: Request) -> Response:
+    """The selected agent's homepage: the frame link of the hosted site `set_homepage` bound,
+    resolved through the site kind's own member gate — a site this viewer may not see, a binding
+    that no longer resolves, and an agent that never bound one all answer the same absent state
+    the Home tab renders. A private homepage answers its creator alone, admins included: the
+    frame's own gate would refuse everyone else, so the read never hands out a link that renders
+    a refusal."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, _email, audience, agent_id = gated
+    page = await ctx.list_member_objects(
+        SITE_KIND,
+        agent_id,
+        member_id,
+        admin=audience.admin,
+        query=ObjectListQuery(filters={"homepage_agent": str(agent_id)}),
+    )
+    if page is None:
+        return JSONResponse({"state": "none"})
+    bound = next((row for row in page.rows if "site_url" in row.fields), None)
+    if bound is None:
+        return JSONResponse({"state": "none"})
+    if bound.fields.get("visibility") == "private" and bound.fields.get("mine") is not True:
+        return JSONResponse({"state": "none"})
+    return JSONResponse({"state": "set", "url": bound.fields["site_url"]})
+
+
 ROUTES = (
     SurfaceRoute(method="GET", path="", handler=portal_page),
     SurfaceRoute(method="POST", path="", handler=open_session),
@@ -3162,6 +3147,7 @@ ROUTES = (
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
     SurfaceRoute(method="GET", path="agents/{agent_id}/settings", handler=settings),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/homepage", handler=homepage),
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="connections", handler=connection_pool),
@@ -3175,16 +3161,6 @@ ROUTES = (
     ),
     SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
     SurfaceRoute(method="GET", path="agents/{agent_id}/conversations", handler=conversations),
-    SurfaceRoute(method="GET", path="subagents/{subagent}/overview", handler=subagent_overview),
-    SurfaceRoute(method="GET", path="subagents/{subagent}/skills", handler=subagent_skills),
-    SurfaceRoute(
-        method="GET", path="subagents/{subagent}/conversations", handler=subagent_conversations
-    ),
-    SurfaceRoute(
-        method="GET",
-        path="subagents/{subagent}/conversations/{conversation_id}",
-        handler=subagent_conversation,
-    ),
     SurfaceRoute(
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/transcript",

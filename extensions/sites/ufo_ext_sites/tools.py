@@ -24,7 +24,11 @@ the port the readiness probe just proved, so nothing moves: a re-deploy of the s
 port in place and the link never changes. Visibility defaults from the conversation's audience; an
 explicit argument overrides that default, but only for the site's creator and only on a turn with a
 live speaker, because choosing who can open a site is a disclosure act. `start_server` registers
-nothing, since a scratch server is not a deliverable."""
+nothing, since a scratch server is not a deliverable.
+
+`set_homepage` binds one hosted site as the acting agent's homepage — the pointer the portal reads.
+It requires no speaker: binding widens nothing, since the frame still gates every viewer on the
+site's own visibility, and the homepage seed runs on scheduled turns."""
 
 import json
 import shlex
@@ -41,6 +45,7 @@ WEBSITE_TOOL = "website"
 START_SERVER_TOOL = "start_server"
 DEPLOY_WEBSITE_TOOL = "deploy_website"
 PUBLISH_WEBSITE_TOOL = "publish_website"
+SET_HOMEPAGE_TOOL = "set_homepage"
 
 APP_SERVE_PORT = 8000
 START_SERVER_PORT = 5000
@@ -87,6 +92,13 @@ VISIBILITY_DESCRIPTION = (
     "Who may open the hosted link: private (you alone), workspace (any member), or public (anyone "
     "with the link). Omit unless the member asked — a new site defaults from where it was built, "
     "and an existing one keeps the visibility it has."
+)
+SET_HOMEPAGE_DESCRIPTION = (
+    "Bind a hosted site as your homepage — the page the portal shows for this agent. Pass the "
+    "site object name from the deploy result; binding another site later moves the homepage and "
+    "the old site stays hosted. Viewers are gated on the site's own visibility, and a site "
+    "deployed in a direct conversation defaults private, so deploy a homepage with visibility "
+    "workspace unless it is for one member. The result echoes the bound site's visibility."
 )
 
 
@@ -148,6 +160,13 @@ class PublishWebsiteInput(BaseModel):
     )
     user_description: str = Field(
         description="Which app you are publishing, in plain language for the activity timeline."
+    )
+
+
+class SetHomepageInput(BaseModel):
+    site: str = Field(description="The site object name from the deploy result.")
+    user_description: str = Field(
+        description="Which site becomes the homepage, in plain language for the activity timeline."
     )
 
 
@@ -356,6 +375,33 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
     return _json_result({**served, **hosted})
 
 
+async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
+    if ctx.ext is None:
+        raise RuntimeError("the website tools dispatched without their ExtensionContext")
+    workspace_id = ctx.ext.store.workspace_id
+    sites = HostedSites(workspace_id, ctx.ext.transaction)
+    named = {site_object_name(site.conversation_id, site.name): site for site in await sites.all()}
+    site = named.get(args.site)
+    if site is None:
+        raise ValueError(
+            f"no hosted site is named {args.site!r}: deploy the site and bind the name its "
+            "result carries"
+        )
+    bound = await sites.set_homepage(ctx.turn.agent_id, site.conversation_id, site.name)
+    if bound is None:
+        raise ValueError(f"site {args.site!r} was unhosted while it was being bound")
+    return _json_result(
+        {
+            "site": args.site,
+            "site_url": site_url(
+                ctx.public_base_url, workspace_id, bound.conversation_id, bound.name
+            ),
+            "visibility": bound.visibility,
+            "homepage_agent": str(ctx.turn.agent_id),
+        }
+    )
+
+
 SITES_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name=WEBSITE_TOOL,
@@ -380,6 +426,12 @@ SITES_TOOLS: tuple[ToolDef, ...] = (
         description=PUBLISH_WEBSITE_DESCRIPTION,
         input_model=PublishWebsiteInput,
         handler=publish_website,
+    ),
+    ToolDef(
+        name=SET_HOMEPAGE_TOOL,
+        description=SET_HOMEPAGE_DESCRIPTION,
+        input_model=SetHomepageInput,
+        handler=set_homepage,
     ),
 )
 

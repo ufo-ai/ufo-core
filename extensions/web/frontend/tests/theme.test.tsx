@@ -222,7 +222,6 @@ test("a transcript bubble wraps an unbreakable string instead of widening the pa
           { role: "user", text: blob },
           { role: "assistant", text: blob },
         ]}
-        conversationId={CONVO_ID}
       />
     </TranscriptScroll>,
   );

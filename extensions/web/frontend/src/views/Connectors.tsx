@@ -414,6 +414,7 @@ function ConnectorList({
   async function act(envelope: unknown) {
     const outcome = await postIntent(agent.id, envelope);
     if (!outcome.applied) setConsentUrl(null);
+    if (outcome.applied) setAttachName("");
     setHandoff(outcomeNotice(outcome));
     setReloads((count) => count + 1);
   }

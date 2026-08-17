@@ -127,8 +127,7 @@ function subject(conversation: Conversation, viewer: string | null): string {
 
 /** Where a conversation came from, in the one slot a row and a heading each keep for it: the agent
  *  that ran it where the read spans every agent, else the surface it came in on. One fact, and it
- *  is the one the pane the member is standing in does not already state — a subagent's page names
- *  the profile and needs the agent, an agent's page names the agent and needs the surface. */
+ *  is the one the pane the member is standing in does not already state. */
 function origin(conversation: Conversation): string {
   return conversation.agent ? conversation.agent.name : surfaceOrigin(conversation);
 }
@@ -235,8 +234,8 @@ function WayOut({ out }: { out: { href: string; channel: string } }) {
   );
 }
 
-/** Every screen that lists conversations draws this one section — an agent's own and a subagent's
- *  runs alike — so a row reads the same wherever the member met it: the search on the bar, one
+/** Every screen that lists conversations draws this one section, so a row reads the same wherever
+ *  the member met it: the search on the bar, one
  *  row line per conversation, and the row itself as the control that opens it. The
  *  rows decide the rest: one carrying an agent states that agent where one read in a single
  *  agent's namespace states the surface, and a row nobody may open says which of the two it is. The
@@ -375,12 +374,10 @@ export function unreadable(message: string): ReactNode {
  *  file, and the one way out of the conversation is the channel its heading names rather than a
  *  control beside that heading. */
 export function ConversationTranscript({
-  conversationId,
   title,
   messages,
   onOpenArtifacts,
 }: {
-  conversationId: string;
   title: ReactNode;
   messages: Message[];
   onOpenArtifacts?: () => void;
@@ -389,11 +386,7 @@ export function ConversationTranscript({
     <Section title={title}>
       {messages.length ? (
         <TranscriptScroll>
-          <MessageLog
-            messages={messages}
-            conversationId={conversationId}
-            onOpenArtifacts={onOpenArtifacts}
-          />
+          <MessageLog messages={messages} onOpenArtifacts={onOpenArtifacts} />
         </TranscriptScroll>
       ) : (
         <PanelBlank body="No messages in this conversation yet." />
@@ -423,7 +416,6 @@ export function ConversationDetail({
       <Panel state={state} failed={unreadable}>
         {(payload) => (
           <ConversationTranscript
-            conversationId={conversation.id}
             title={conversationTitle(conversation, viewer)}
             messages={payload.messages}
             onOpenArtifacts={onOpenArtifacts}

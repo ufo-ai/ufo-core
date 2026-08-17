@@ -603,6 +603,34 @@ def store_key_workspaces(extension: str, prefix: str) -> WorkspaceCandidates:
     return owner_candidates(with_a_key)
 
 
+def unseeded_agent_workspaces(extension: str, prefix: str) -> WorkspaceCandidates:
+    """The candidate seam a once-per-agent sweep declares: the workspaces whose agents outnumber
+    the extension's `prefix` keys. The sweep writes one key per agent it settles and agent delete
+    is refused, so a workspace leaves this set exactly when every agent is settled — counted
+    rather than joined, because the key spells the agent id in Python's dashed form while the
+    column's SQL text differs by dialect. Core owns `agent` and `ext_store`, so it owns this
+    query — a workspace with nothing left to settle never fires the handler."""
+
+    def with_an_unsettled_agent() -> sa.Select[tuple[UUID]]:
+        agents = (
+            sa.select(sa.func.count())
+            .where(tables.agent.c.workspace_id == tables.workspace.c.id)
+            .scalar_subquery()
+        )
+        settled = (
+            sa.select(sa.func.count())
+            .where(
+                tables.ext_store.c.workspace_id == tables.workspace.c.id,
+                tables.ext_store.c.extension == extension,
+                tables.ext_store.c.key.startswith(prefix, autoescape=True),
+            )
+            .scalar_subquery()
+        )
+        return sa.select(tables.workspace.c.id).where(agents > settled)
+
+    return owner_candidates(with_an_unsettled_agent)
+
+
 class TurnInvoker(Protocol):
     """The internal turn seam a background handler drives. It never consumes a member's pause;
     idempotency collapses a redelivered invocation to the turn already admitted."""
@@ -884,6 +912,13 @@ class SeatedMember(BaseModel):
     timezone: str = "UTC"
 
 
+class WorkspaceAgent(BaseModel):
+    id: UUID
+    name: str
+    owner_member_id: UUID | None = None
+    tools: tuple[str, ...] | None = None
+
+
 class SeatedMemberPage(BaseModel):
     members: tuple[SeatedMember, ...]
     next_cursor: UUID | None = None
@@ -985,6 +1020,54 @@ class ExtensionContext:
             members=tuple(SeatedMember(id=row.id, timezone=row.timezone or "UTC") for row in page),
             next_cursor=page[-1].id if len(rows) > limit else None,
         )
+
+    async def workspace_agents(self) -> tuple[WorkspaceAgent, ...]:
+        """Every agent of the workspace with its owner, oldest first, for a first-party sweep
+        job."""
+        if not self.member_context_read_allowed:
+            raise PermissionError("this extension cannot read the agent roster")
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.agent.c.id,
+                        tables.agent.c.name,
+                        tables.agent.c.owner_member_id,
+                        tables.agent.c.tools,
+                    )
+                    .where(tables.agent.c.workspace_id == self.workspace_id)
+                    .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                )
+            ).all()
+        return tuple(
+            WorkspaceAgent(
+                id=row.id,
+                name=row.name,
+                owner_member_id=row.owner_member_id,
+                tools=None if row.tools is None else tuple(row.tools),
+            )
+            for row in rows
+        )
+
+    async def earliest_seated_admin(self) -> UUID | None:
+        """The workspace's earliest-seated admin — the deterministic member an ownerless agent's
+        background work acts on behalf of — or None in a workspace no admin holds a seat in."""
+        if not self.member_context_read_allowed:
+            raise PermissionError("this extension cannot read seated members")
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.member.c.id)
+                    .where(
+                        tables.member.c.workspace_id == self.workspace_id,
+                        tables.member.c.is_admin.is_(True),
+                        tables.member.c.seated_at.is_not(None),
+                    )
+                    .order_by(tables.member.c.seated_at, tables.member.c.id)
+                    .limit(1)
+                )
+            ).one_or_none()
+        return None if row is None else row.id
 
     async def invoke_agent_for_member(
         self,
@@ -1690,20 +1773,26 @@ class ExtensionContext:
         async with workspace_tx() as connection:
             return await workspace_domain(connection, self.workspace_id) == OPERATOR_EMAIL_DOMAIN
 
-    async def open_conversation(self, agent_id: UUID, key: str) -> UUID:
-        """Get-or-create the conversation this extension keys by `key`, held by `agent_id` and by
-        no member — the conversation a trigger opens rather than a member does. The work an event
-        starts is one conversation of the agent that does that work: it lists under that agent,
-        reaches no member's rail (which reads the conversations a member opened, on whatever
-        surface), holds its own queue partition, and takes its own sandbox, so two of them neither
-        serialize against each other nor share a checkout tree.
+    async def open_conversation(
+        self, agent_id: UUID, key: str, member_id: UUID | None = None
+    ) -> UUID:
+        """Get-or-create the conversation this extension keys by `key`, held by `agent_id` — the
+        conversation a trigger opens rather than a member does. The work an event starts is one
+        conversation of the agent that does that work: it lists under that agent, reaches no
+        member's rail (which reads the conversations a member opened, on whatever surface), holds
+        its own queue partition, and takes its own sandbox, so two of them neither serialize
+        against each other nor share a checkout tree.
 
         The key is the workflow subject — a pull request, a scheduled task, a delivery — so later
         events for that subject keep one history and a replay reopens the same conversation. The
         extension's name is the surface, so one extension's keys can never collide with another's.
-        The audience is the workspace's, since no member delegated it. `invoke` admits the turns;
-        this only opens the room they run in, and an agent of another workspace fails loud rather
-        than binding a conversation nothing can reach."""
+        Without `member_id` the audience is the workspace's, since no member delegated it. With
+        `member_id` the room is that member's own — the shape every on-behalf invocation runs in,
+        so the authority the turn carries stays inside the one room its member already reads; the
+        caller keys such rooms by the member as well as the subject, so a change of acting member
+        opens a fresh room rather than rebinding another member's. `invoke` admits the turns; this
+        only opens the room they run in, and an agent of another workspace fails loud rather than
+        binding a conversation nothing can reach."""
         workspace_id = self.store.workspace_id
         async with workspace_tx() as connection:
             known = (
@@ -1725,8 +1814,10 @@ class ExtensionContext:
                     agent_id=agent_id,
                     surface=self.store.extension,
                     queue_key=key,
-                    member_id=None,
-                    audience=str(SHARED_AUDIENCE),
+                    member_id=member_id,
+                    audience=str(
+                        SHARED_AUDIENCE if member_id is None else conversation_audience(member_id)
+                    ),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

@@ -5,6 +5,7 @@ import secrets
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -94,7 +95,6 @@ from ufo.ext.surface import (
     fence_member_message,
     member_message_text,
     mint_marker,
-    record_transcript_access,
 )
 from ufo.grants import (
     ConnectFlow,
@@ -118,7 +118,7 @@ from ufo.hub import (
 from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.loop import queue as loop_queue
 from ufo.loop.engine import FINISH_PROMPT
-from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
+from ufo.loop.subagents import SubagentRegistry
 from ufo.loop.transcript import Transcript
 from ufo.members import ADD_MEMBER_GATE
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
@@ -151,12 +151,13 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience, room_audience
-from ufo.sdk.jobs import store_key_workspaces
+from ufo.sdk.jobs import store_key_workspaces, unseeded_agent_workspaces
 from ufo.sdk.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
+from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.tools.context import ToolContext
 from ufo.transcript import Conversation
@@ -1021,7 +1022,8 @@ async def web(
                 SOURCE_TRIGGER_KIND_ONLY,
                 SLOTTED,
                 sites_manifest(),
-            )
+            ),
+            public_base_url="https://web",
         ),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
@@ -3345,6 +3347,7 @@ async def test_site_index_answers_through_the_kinds_own_gate(
     assert sorted(m_view["fields"]) == [
         "conversation",
         "created_at",
+        "homepage_agent",
         "mine",
         "owner_email",
         "site_url",
@@ -7061,6 +7064,267 @@ async def test_an_out_of_audience_agent_takes_no_intent(
     assert "admin" in outcome["message"]
 
 
+async def test_homepage_read_answers_none_without_a_binding(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "home-none@example.com")
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert read.status_code == 200
+    assert read.json() == {"state": "none"}
+
+
+async def test_homepage_read_carries_the_bound_site(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "home@example.com")
+    conversation_id = uuid4()
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        await sites.register(
+            conversation_id, "home", 8000, member_id, "workspace", SHARED_AUDIENCE, True
+        )
+        assert await sites.set_homepage(agent_id, conversation_id, "home") is not None
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert read.status_code == 200
+    payload = read.json()
+    assert payload["state"] == "set"
+    assert payload["url"].startswith("https://web/surface/sites/")
+    assert set(payload) == {"state", "url"}
+
+
+async def test_homepage_read_answers_a_private_homepage_to_its_creator_alone(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    creator_id, creator_token = await _seed_member(workspace_id, "home-creator@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "home-admin@example.com", admin=True)
+    conversation_id = uuid4()
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        await sites.register(
+            conversation_id, "own", 8000, creator_id, "private", SHARED_AUDIENCE, True
+        )
+        assert await sites.set_homepage(agent_id, conversation_id, "own") is not None
+    mine = await client.get(
+        f"/surface/web/agents/{agent_id}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={creator_token}"},
+    )
+    assert mine.json()["state"] == "set"
+    inspected = await client.get(
+        f"/surface/web/agents/{agent_id}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+    assert inspected.json() == {"state": "none"}
+
+
+async def test_homepage_read_is_not_found_out_of_audience(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    walled_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=walled_agent,
+                workspace_id=workspace_id,
+                name="walled",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    _outsider, token = await _seed_member(workspace_id, "home-outsider@example.com")
+    denied = await client.get(
+        f"/surface/web/agents/{walled_agent}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert denied.status_code == 404
+
+
+@dataclass
+class _SeedDbos:
+    enqueued: list[str] = dataclass_field(default_factory=list)
+
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
+
+
+async def test_homepage_seed_admits_one_turn_per_agent_once(db: None) -> None:
+    workspace_id, main_agent = await _seed_workspace()
+    admin_id, _admin_token = await _seed_member(workspace_id, "seed-admin@example.com", admin=True)
+    owner_id, _owner_token = await _seed_member(workspace_id, "seed-owner@example.com")
+    owned_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=owned_agent,
+                workspace_id=workspace_id,
+                name="owned",
+                prompt="be owned",
+                model="claude-opus-4-8",
+                owner_member_id=owner_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    dbos = _SeedDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx)
+        await web_surface.seed_homepages(ctx)
+        markers = await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX)
+    assert sorted(key for key, _ in markers) == sorted(
+        f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}" for agent_id in (main_agent, owned_agent)
+    )
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.conversation.c.agent_id,
+                    tables.conversation.c.member_id,
+                    tables.conversation.c.audience,
+                    tables.conversation.c.surface,
+                    tables.conversation.c.queue_key,
+                    tables.turn.c.inbound,
+                    tables.turn.c.on_behalf_of_member_id,
+                ).select_from(
+                    tables.turn.join(
+                        tables.conversation,
+                        tables.turn.c.conversation_id == tables.conversation.c.id,
+                    )
+                )
+            )
+        ).all()
+    assert len(rows) == 2
+    assert len(dbos.enqueued) == 2
+    on_behalf = {row.agent_id: row.on_behalf_of_member_id for row in rows}
+    assert on_behalf == {main_agent: admin_id, owned_agent: owner_id}
+    for row in rows:
+        acting = on_behalf[row.agent_id]
+        assert row.member_id == acting
+        assert row.audience == str(conversation_audience(acting))
+        assert row.surface == EXTENSION_WEB
+        assert row.queue_key == f"homepage/{row.agent_id}/{acting}"
+        assert row.inbound == web_surface.SEED_PROMPT
+
+
+async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools(
+    db: None,
+) -> None:
+    workspace_id, main_agent = await _seed_workspace()
+    await _seed_member(workspace_id, "seed-allow-admin@example.com", admin=True)
+    walled = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=walled,
+                workspace_id=workspace_id,
+                name="specialist",
+                prompt="be narrow",
+                model="claude-opus-4-8",
+                tools=["load_skill", "memory_search"],
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    dbos = _SeedDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    candidates = unseeded_agent_workspaces(EXTENSION_WEB, web_surface.HOMEPAGE_SEED_PREFIX)
+    assert workspace_id in await candidates()
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx)
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
+    assert markers[f"{web_surface.HOMEPAGE_SEED_PREFIX}{walled}"] == "withheld-tools"
+    assert sorted(markers) == sorted(
+        f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}" for agent_id in (main_agent, walled)
+    )
+    assert workspace_id not in await candidates()
+    async with workspace_tx() as connection:
+        seeded = (
+            await connection.execute(
+                sa.select(tables.conversation.c.agent_id).where(
+                    tables.conversation.c.queue_key.startswith("homepage/")
+                )
+            )
+        ).scalars()
+        assert list(seeded) == [main_agent]
+
+
+async def test_homepage_seed_leaves_a_refused_agent_unmarked_and_retries(db: None) -> None:
+    workspace_id, main_agent = await _seed_workspace()
+    unseated = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=unseated,
+                workspace_id=workspace_id,
+                email="seed-unseated@example.com",
+                is_admin=False,
+                seated_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == main_agent)
+            .values(owner_member_id=unseated)
+        )
+    dbos = _SeedDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx)
+        assert await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX) == ()
+        async with workspace_tx() as connection:
+            statuses = (await connection.execute(sa.select(tables.turn.c.status))).scalars()
+            assert list(statuses) == ["cancelled"]
+            await connection.execute(
+                sa.update(tables.member)
+                .where(tables.member.c.id == unseated)
+                .values(seated_at=sa.func.now())
+            )
+        await web_surface.seed_homepages(ctx, bucket="retry")
+        markers = await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX)
+    assert [key for key, _ in markers] == [f"{web_surface.HOMEPAGE_SEED_PREFIX}{main_agent}"]
+    async with workspace_tx() as connection:
+        statuses = (await connection.execute(sa.select(tables.turn.c.status))).scalars()
+        assert sorted(statuses) == ["cancelled", "queued"]
+
+
+async def test_homepage_seed_waits_for_an_admin_for_ownerless_agents(db: None) -> None:
+    workspace_id, _agent_id = await _seed_workspace()
+    await _seed_member(workspace_id, "seed-plain@example.com")
+    dbos = _SeedDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx)
+        assert await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX) == ()
+    assert dbos.enqueued == []
+    candidates = unseeded_agent_workspaces(EXTENSION_WEB, web_surface.HOMEPAGE_SEED_PREFIX)
+    assert workspace_id in await candidates()
+
+
 async def test_a_source_intent_reaches_the_source_kind(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -8876,12 +9140,10 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
         member_id=None,
     )
     transcript_path = f"/surface/web/agents/{agent_id}/conversations/{theirs}/transcript"
-    child_run = f"/surface/web/subagents/deep_research/conversations/{child_conversation}"
     admin_cookie = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
 
     blocked = await client.get(transcript_path, headers=admin_cookie)
     assert blocked.status_code == 404
-    assert (await client.get(f"{child_run}?root={theirs}", headers=admin_cookie)).status_code == 404
     child_changes = (
         f"/surface/web/agents/{agent_id}/conversations/{child_conversation}/slots/changes"
     )
@@ -8931,27 +9193,6 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
             ],
         },
     ]
-    assert (await client.get(child_run, headers=admin_cookie)).status_code == 404
-    opened_child = await client.get(f"{child_run}?root={theirs}", headers=admin_cookie)
-    assert opened_child.status_code == 200
-    assert opened_child.json()["run"]["id"] == str(child_conversation)
-    assert opened_child.json()["messages"] == [
-        {
-            "role": "assistant",
-            "text": "Reading the private file.",
-            "events": [
-                {
-                    "kind": "tool",
-                    "name": "bash",
-                    "preview": '{"command":"ls"}',
-                    "description": "",
-                }
-            ],
-        }
-    ]
-    assert (
-        await client.get(f"{child_run}?root={unrelated}", headers=admin_cookie)
-    ).status_code == 404
     assert (await client.get(child_changes, headers=admin_cookie)).status_code == 404
     rooted_changes = await client.get(f"{child_changes}?root={theirs}", headers=admin_cookie)
     assert rooted_changes.status_code == 200
@@ -9816,220 +10057,6 @@ async def test_the_team_panel_adds_a_member_at_another_domain(
         ).one_or_none() is not None
 
 
-async def test_subagent_page_reads_the_profile_and_refuses_an_unknown_name(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """A profile's own page: its instructions, the model it pins, its round cap, and whether its
-    answer is walled as untrusted. The roster is the whole set that exists, so a name outside it is
-    a 404 — and a profile holding no `load_skill` lists no skills rather than the deploy's."""
-    client, workspace_id, _agent_id = web
-    _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-
-    overview = await client.get("/surface/web/subagents/deep_research/overview", headers=cookie)
-    assert overview.status_code == 200
-    detail = overview.json()["subagent"]
-    assert {key: value for key, value in detail.items() if key != "prompt"} == {
-        "name": "deep_research",
-        "model": "claude-opus-4-8",
-        "max_rounds": 40,
-        "untrusted_output": False,
-        "loads_skills": False,
-    }
-    assert detail["prompt"] == subagent_system_prompt(
-        _profile("deep_research", "claude-opus-4-8", 40), skills=EMPTY_SKILL_REGISTRY.index()
-    )
-    assert detail["prompt"].startswith("be focused")
-    assert FINISH_CONTRACT in detail["prompt"]
-
-    inherits = await client.get("/surface/web/subagents/general_purpose/overview", headers=cookie)
-    assert inherits.json()["subagent"]["model"] is None
-
-    assert (
-        await client.get("/surface/web/subagents/nonexistent/overview", headers=cookie)
-    ).status_code == 404
-
-    skills_read = await client.get("/surface/web/subagents/general_purpose/skills", headers=cookie)
-    assert skills_read.json() == {"loads_skills": False, "skills": []}
-
-
-async def test_subagent_conversations_follow_the_spawning_conversation_audience(
-    web: tuple[AsyncClient, UUID, UUID],
-    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
-) -> None:
-    """A spawn copies the spawning conversation's audience onto the child, so a profile's page
-    lists the children of this member's own requests and of the workspace-shared ones, never
-    another member's — and an admin lists every one. Another profile's children never appear on
-    this page, and the transcript read fails closed on the same answer the listing shows. That read
-    carries the run itself, identical to the listing row, so a permalink opened cold titles its
-    page without the listing in hand."""
-    client, workspace_id, agent_id = web
-    _config, _hub, blob, _sandboxes = dbos_runtime
-    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
-    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
-    admin_id, token_admin = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    mine = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="mine",
-        audience=str(conversation_audience(member_m)),
-        member_id=member_m,
-        surface=SUBAGENT_SURFACE,
-    )
-    theirs = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="theirs",
-        audience=str(conversation_audience(member_n)),
-        member_id=member_n,
-        surface=SUBAGENT_SURFACE,
-    )
-    other_profile = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="other",
-        audience=str(conversation_audience(member_m)),
-        member_id=member_m,
-        surface=SUBAGENT_SURFACE,
-    )
-    await _seed_listed_turn(
-        workspace_id, mine, agent_id, seq=1, inbound="find it", subagent_profile="deep_research"
-    )
-    await _seed_listed_turn(
-        workspace_id, mine, agent_id, seq=2, inbound="and again", subagent_profile="deep_research"
-    )
-    await _seed_listed_turn(
-        workspace_id, theirs, agent_id, seq=1, inbound="theirs", subagent_profile="deep_research"
-    )
-    await _seed_listed_turn(
-        workspace_id,
-        other_profile,
-        agent_id,
-        seq=1,
-        inbound="general work",
-        subagent_profile="general_purpose",
-    )
-    await _write_transcript(
-        blob, mine, Conversation(seq=1, messages=(Message(role="assistant", content="found it"),))
-    )
-    path = "/surface/web/subagents/deep_research/conversations"
-
-    listed = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
-    assert listed.status_code == 200
-    rows = listed.json()["conversations"]
-    assert len(rows) == 1
-    assert rows[0] | {"last_turn_at": None, "created_at": None} == {
-        "id": str(mine),
-        "agent": {"id": str(agent_id), "name": "assistant"},
-        "surface": SUBAGENT_SURFACE,
-        "member_email": "m@example.com",
-        "surface_label": None,
-        "audience": rows[0]["audience"],
-        "description": "find it",
-        "source": None,
-        "speakers": [],
-        "turn_count": 2,
-        "created_at": None,
-        "last_turn_at": None,
-        "readable": True,
-        "disclosable": False,
-    }
-    assert rows[0]["audience"].startswith("member:")
-    assert datetime.fromisoformat(rows[0]["last_turn_at"]).tzinfo is not None
-
-    admin_rows = (
-        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
-    ).json()["conversations"]
-    assert {entry["id"] for entry in admin_rows} == {str(mine), str(theirs)}
-    assert {entry["readable"] for entry in admin_rows} == {False}
-
-    readable = await client.get(f"{path}/{mine}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
-    assert readable.status_code == 200
-    assert readable.json()["messages"] == [{"role": "assistant", "text": "found it"}]
-    assert readable.json()["run"] == rows[0]
-
-    for blocked in (theirs, other_profile):
-        refused = await client.get(
-            f"{path}/{blocked}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
-        )
-        assert refused.status_code == 404
-    admin_refused = await client.get(
-        f"{path}/{theirs}", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
-    )
-    assert admin_refused.status_code == 404
-    with ws(workspace_id):
-        assert await record_transcript_access(workspace_id, theirs, agent_id, admin_id) is not None
-    still_refused = await client.get(
-        f"{path}/{theirs}", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
-    )
-    assert still_refused.status_code == 404
-
-
-async def test_a_run_page_states_the_prose_a_run_wrote_not_the_payload_it_rode_in(
-    web: tuple[AsyncClient, UUID, UUID],
-    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
-) -> None:
-    """A run answers by calling finish, and `persist_transcript` closes its conversation with that
-    payload — so its own page would read back the JSON its output schema carried. The page states
-    the fields the run wrote, exactly as the tree under the reply that spawned it does."""
-    client, workspace_id, agent_id = web
-    _config, _hub, blob, _sandboxes = dbos_runtime
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    run = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="run",
-        audience=str(conversation_audience(member_id)),
-        member_id=member_id,
-        surface=SUBAGENT_SURFACE,
-    )
-    await _seed_listed_turn(
-        workspace_id, run, agent_id, seq=1, inbound="find it", subagent_profile="deep_research"
-    )
-    await _write_transcript(
-        blob,
-        run,
-        Conversation(
-            seq=1,
-            messages=(
-                Message(role="user", content='{"task": "find the deadline"}'),
-                Message(
-                    role="assistant",
-                    content=(
-                        ToolUseBlock(id="c1", name="fetch_url", input={"url": "https://x/y"}),
-                    ),
-                ),
-                Message(
-                    role="user",
-                    content=(ToolResultBlock(tool_use_id="c1", content="…", activity=True),),
-                ),
-                Message(role="assistant", content='{"result": "The deadline is March 31."}'),
-            ),
-        ),
-    )
-
-    read = await client.get(
-        f"/surface/web/subagents/deep_research/conversations/{run}",
-        headers={"cookie": f"{SESSION_COOKIE}={token}"},
-    )
-
-    assert read.status_code == 200
-    assert read.json()["messages"] == [
-        {
-            "role": "assistant",
-            "text": "The deadline is March 31.",
-            "events": [
-                {
-                    "kind": "tool",
-                    "name": "fetch_url",
-                    "preview": '{"url":"https://x/y"}',
-                    "description": "",
-                }
-            ],
-        }
-    ]
-
-
 RUN_FINDING = {
     "path": "core/x.py",
     "line": 42,
@@ -10038,120 +10065,6 @@ RUN_FINDING = {
     "failure": "The turn never commits a terminal",
     "impact": "production outage, deadlock, or permanently unfinished work",
 }
-
-
-async def test_a_run_page_states_an_answer_that_wrote_no_prose(
-    web: tuple[AsyncClient, UUID, UUID],
-    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
-) -> None:
-    """A profile whose output is findings rather than sentences carries no prose at the top of its
-    payload. Its page is the record, so it states those findings — reading them off the only names
-    they have — rather than the empty bubble a prose-only reading leaves behind."""
-    client, workspace_id, agent_id = web
-    _config, _hub, blob, _sandboxes = dbos_runtime
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    run = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="run",
-        audience=str(conversation_audience(member_id)),
-        member_id=member_id,
-        surface=SUBAGENT_SURFACE,
-    )
-    await _seed_listed_turn(
-        workspace_id, run, agent_id, seq=1, inbound="review it", subagent_profile="deep_research"
-    )
-    await _write_transcript(
-        blob,
-        run,
-        Conversation(
-            seq=1,
-            messages=(
-                Message(role="user", content='{"comparison": "pr-1409"}'),
-                Message(
-                    role="assistant",
-                    content=json.dumps({"findings": [RUN_FINDING]}),
-                ),
-            ),
-        ),
-    )
-
-    read = await client.get(
-        f"/surface/web/subagents/deep_research/conversations/{run}",
-        headers={"cookie": f"{SESSION_COOKIE}={token}"},
-    )
-
-    assert read.status_code == 200
-    assert read.json()["messages"] == [
-        {
-            "role": "assistant",
-            "text": (
-                "**Findings**\n"
-                "**Path** — core/x.py\n"
-                "**Line** — 42\n"
-                "**Title** — Wedged turn\n"
-                "**Trigger** — A cancel lands mid-dispatch\n"
-                "**Failure** — The turn never commits a terminal\n"
-                "**Impact** — production outage, deadlock, or permanently unfinished work"
-            ),
-        }
-    ]
-
-
-async def test_a_runs_page_claims_no_wait_on_a_row_its_turn_cannot_take_up(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """A run's conversation is its parent's private channel: the turn drains only what its own
-    children deliver and leaves an external row pending, deliberately. The page states such a row
-    as the message it is, with no wait under it — the run's turn will never take it up, so nothing
-    it publishes could clear one."""
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    run = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="run",
-        audience=str(conversation_audience(member_id)),
-        member_id=member_id,
-        surface=SUBAGENT_SURFACE,
-    )
-    running = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=running,
-                workspace_id=workspace_id,
-                conversation_id=run,
-                agent_id=agent_id,
-                seq=1,
-                status="running",
-                inbound='{"task": "find the deadline"}',
-                admission_source="internal",
-                subagent_profile="deep_research",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    await _seed_arrival(
-        workspace_id,
-        run,
-        running,
-        seq=1,
-        body="Stop and summarize.",
-        admission_source="member",
-        speaker_member_id=member_id,
-    )
-
-    read = await client.get(
-        f"/surface/web/subagents/deep_research/conversations/{run}",
-        headers={"cookie": f"{SESSION_COOKIE}={token}"},
-    )
-
-    assert read.status_code == 200
-    assert read.json()["messages"] == [
-        {"role": "user", "text": '{"task": "find the deadline"}'},
-        {"role": "user", "text": "Stop and summarize."},
-    ]
 
 
 def test_an_answer_arrives_whole_however_long_and_never_blank() -> None:
@@ -10225,62 +10138,6 @@ async def test_an_agents_own_reply_is_never_read_as_a_payload(
         {"role": "user", "text": "Give me the json."},
         {"role": "assistant", "text": reply},
     ]
-
-
-async def test_subagent_work_stays_behind_the_agent_wall(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """The page is deploy shape but the work it lists is an agent's, so an agent outside the
-    viewer's web audience is absent from the listing and not-found on the transcript — the same
-    answer every other portal route gives for it. A grant on that agent, or being an admin, shows
-    the row."""
-    client, workspace_id, _agent_id = web
-    walled_agent = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=walled_agent,
-                workspace_id=workspace_id,
-                name="ops",
-                prompt="be operational",
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    _admin_id, token_admin = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    walled = await _seed_agent_conversation(
-        workspace_id,
-        walled_agent,
-        queue_key="walled",
-        audience="shared",
-        member_id=None,
-        surface=SUBAGENT_SURFACE,
-    )
-    await _seed_listed_turn(
-        workspace_id,
-        walled,
-        walled_agent,
-        seq=1,
-        inbound="ops work",
-        subagent_profile="deep_research",
-    )
-    path = "/surface/web/subagents/deep_research/conversations"
-    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-
-    assert (await client.get(path, headers=cookie)).json()["conversations"] == []
-    assert (await client.get(f"{path}/{walled}", headers=cookie)).status_code == 404
-
-    admin_rows = (
-        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
-    ).json()["conversations"]
-    assert [entry["id"] for entry in admin_rows] == [str(walled)]
-
-    await _grant_web_access(workspace_id, walled_agent, "member@example.com")
-    granted = await client.get(path, headers=cookie)
-    assert [entry["id"] for entry in granted.json()["conversations"]] == [str(walled)]
-    assert (await client.get(f"{path}/{walled}", headers=cookie)).status_code == 200
 
 
 def test_projection_draws_no_member_bubble_for_a_delivered_subagent_result() -> None:

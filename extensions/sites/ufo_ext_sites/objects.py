@@ -135,6 +135,11 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                             base, scoped.store.workspace_id, site.conversation_id, site.name
                         )
                     }
+                )
+                | (
+                    {}
+                    if site.homepage_agent_id is None
+                    else {"homepage_agent": str(site.homepage_agent_id)}
                 ),
             )
             for name, site in named.items()
@@ -244,6 +249,8 @@ SITE_OBJECT = ObjectKind(
         "no public base URL and therefore hosts no reachable link. Listings filter and order on "
         "`conversation`, `created_at`, `visibility`, and `mine` — filter on this conversation's "
         "id for the sites it hosts, or order by `created_at` desc for the newest. "
+        "A site bound as an agent's homepage by set_homepage carries `homepage_agent` — that "
+        "agent's id, absent on every other site and filterable. "
         "object_get returns its visibility, and its status carries the hosted site_url, the "
         "sandbox port serving it, and its creator; the `created_in` link names the conversation "
         "that built it. Apply a manifest whose spec changes only `visibility` — private (creator "
@@ -256,6 +263,14 @@ SITE_OBJECT = ObjectKind(
     spec_model=SiteSpec,
     store=SiteObjects(),
     list_fields=frozenset(
-        {"conversation", "created_at", "visibility", "mine", "site_url", "owner_email"}
+        {
+            "conversation",
+            "created_at",
+            "visibility",
+            "mine",
+            "site_url",
+            "owner_email",
+            "homepage_agent",
+        }
     ),
 )

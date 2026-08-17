@@ -22,6 +22,9 @@ from ufo.ext.context import (
 from ufo.ext.context import (
     store_key_workspaces as store_key_workspaces,
 )
+from ufo.ext.context import (
+    unseeded_agent_workspaces as unseeded_agent_workspaces,
+)
 from ufo.ext.manifest import (
     JobSpec as JobSpec,
 )

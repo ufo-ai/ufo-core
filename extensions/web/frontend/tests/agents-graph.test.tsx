@@ -4,7 +4,16 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, AGENT_ID, MEMBER, SECOND_ID, json, useStreamFake, wire } from "./harness";
+import {
+  AGENT,
+  AGENT_ID,
+  MEMBER,
+  SECOND_ID,
+  agentIndex,
+  json,
+  useStreamFake,
+  wire,
+} from "./harness";
 
 const RESEARCH = { id: SECOND_ID, name: "research", model: "claude-opus-4-8", main: false };
 const SUBAGENTS = [
@@ -93,6 +102,13 @@ function box(graph: HTMLElement, label: string): HTMLElement {
   return drawn as HTMLElement;
 }
 
+/** One row inside a tile — dimmed on its own where the search misses it. */
+function row(graph: HTMLElement, label: string): HTMLElement {
+  const held = within(graph).getByText(label).parentElement;
+  if (!held) throw new Error("no tile row holding " + label);
+  return held;
+}
+
 function edges(kind: string): number {
   return document.querySelectorAll(`[data-edge="${kind}"]`).length;
 }
@@ -102,17 +118,16 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("the toggle turns the list into the topology graph and holds the choice", async () => {
+test("the toggle turns the wide pane into the topology graph and holds the choice", async () => {
   const { calls } = wireGraph();
   const first = renderAgents();
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  expect(await screen.findByRole("table")).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "assistant" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("tab", { name: "Graph" }));
 
   expect(await screen.findByRole("group", { name: "Agent topology" })).toBeTruthy();
-  expect(screen.queryByRole("table")).toBeNull();
-  expect(screen.queryByRole("tab", { name: "All" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "assistant" })).toBeNull();
   expect(localStorage.getItem("agents-view")).toBe("graph");
 
   const reads = calls.filter((url) => url.includes("/connections")).length;
@@ -126,21 +141,25 @@ test("the toggle turns the list into the topology graph and holds the choice", a
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
 
   expect(await screen.findByRole("group", { name: "Agent topology" })).toBeTruthy();
-  expect(screen.queryByRole("table")).toBeNull();
+  expect(screen.queryByRole("region", { name: "assistant" })).toBeNull();
 });
 
-test("the graph states what the workspace runs and what each agent reaches", async () => {
+test("the graph draws in the wide pane while the index column stays", async () => {
   wireGraph();
   renderAgents();
   const graph = await openGraph();
+
+  const index = within(await agentIndex());
+  expect(index.getByText("assistant")).toBeTruthy();
+  expect(index.getByText("research")).toBeTruthy();
 
   expect(within(graph).getByText("Portal")).toBeTruthy();
   expect(within(graph).getByText("Slack")).toBeTruthy();
   expect(within(graph).getByText("Terminal")).toBeTruthy();
   expect(node(graph, "assistant").tagName).toBe("BUTTON");
   expect(node(graph, "research").tagName).toBe("BUTTON");
-  expect(node(graph, "deep_research").tagName).toBe("BUTTON");
-  expect(node(graph, "general_purpose").tagName).toBe("BUTTON");
+  expect(within(graph).getByText("deep_research").closest("button, a")).toBeNull();
+  expect(within(graph).getByText("general_purpose").closest("button, a")).toBeNull();
   expect(within(graph).getByText("Subagents")).toBeTruthy();
   expect(node(graph, "Memory").getAttribute("href")).toBe("#/workspace/memory");
   expect(within(graph).getByText("metalcraft")).toBeTruthy();
@@ -174,7 +193,7 @@ test("hovering a node holds its own reach lit and dims the rest", async () => {
   expect(connector?.getAttribute("stroke-opacity")).toBe("0.5");
 });
 
-test("a graph node opens the record its list row opens", async () => {
+test("a graph node opens the agent it draws in the wide pane", async () => {
   wireGraph();
   renderAgents();
   const graph = await openGraph();
@@ -182,12 +201,8 @@ test("a graph node opens the record its list row opens", async () => {
   await userEvent.click(node(graph, "research"));
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
-  expect(await screen.findByRole("complementary", { name: "research" })).toBeTruthy();
-
-  await userEvent.click(node(graph, "deep_research"));
-
-  expect(location.hash).toBe("#/subagents/deep_research");
-  expect(await screen.findByRole("complementary", { name: "deep_research" })).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "research" })).toBeTruthy();
+  expect(screen.queryByRole("group", { name: "Agent topology" })).toBeNull();
 });
 
 test("the search dims the nodes it does not match", async () => {
@@ -198,7 +213,7 @@ test("the search dims the nodes it does not match", async () => {
   await userEvent.type(screen.getByLabelText("Search agents"), "res");
 
   expect(box(graph, "research").className).not.toContain("opacity-40");
-  expect(node(graph, "deep_research").className).not.toContain("opacity-40");
+  expect(row(graph, "deep_research").className).not.toContain("opacity-40");
   expect(box(graph, "assistant").className).toContain("opacity-40");
   expect(box(graph, "github").className).toContain("opacity-40");
   expect(node(graph, "support-mail").className).toContain("opacity-40");

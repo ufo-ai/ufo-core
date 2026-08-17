@@ -53,6 +53,7 @@ hosted_site = sa.Table(
     sa.Column("visibility", sa.Text, nullable=False),
     sa.Column("creator_member_id", sa.Uuid, nullable=False),
     sa.Column("generation", sa.Uuid, nullable=False, default=uuid4),
+    sa.Column("homepage_agent_id", sa.Uuid, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
@@ -130,6 +131,7 @@ class HostedSite:
     visibility: Visibility
     creator_member_id: UUID
     generation: UUID
+    homepage_agent_id: UUID | None
     created_at: datetime
     updated_at: datetime
 
@@ -280,6 +282,32 @@ class HostedSites:
             )
             return await self._read(connection, conversation_id, name)
 
+    async def set_homepage(
+        self, agent_id: UUID, conversation_id: UUID, name: str
+    ) -> HostedSite | None:
+        """Bind the named site as the agent's homepage, returning the bound row, or None when the
+        site is already gone. The agent's previous binding clears in the same transaction, so the
+        partial unique index holds at most one homepage per agent."""
+        async with self.transaction() as connection:
+            await connection.execute(
+                sa.update(hosted_site)
+                .where(
+                    hosted_site.c.workspace_id == self.workspace_id,
+                    hosted_site.c.homepage_agent_id == agent_id,
+                )
+                .values(homepage_agent_id=None)
+            )
+            await connection.execute(
+                sa.update(hosted_site)
+                .where(
+                    hosted_site.c.workspace_id == self.workspace_id,
+                    hosted_site.c.conversation_id == conversation_id,
+                    hosted_site.c.name == name,
+                )
+                .values(homepage_agent_id=agent_id)
+            )
+            return await self._read(connection, conversation_id, name)
+
     async def unregister(self, conversation_id: UUID, name: str) -> None:
         """Drop the site's registration: the link stops resolving. The sandbox keeps serving the
         port until its own lifecycle ends — hosting a site is registering a port, so unregistering
@@ -383,6 +411,7 @@ class HostedSites:
             hosted_site.c.visibility,
             hosted_site.c.creator_member_id,
             hosted_site.c.generation,
+            hosted_site.c.homepage_agent_id,
             hosted_site.c.created_at,
             hosted_site.c.updated_at,
         )
@@ -396,6 +425,7 @@ def _site(row: sa.Row) -> HostedSite:
         visibility=visibility_level(row.visibility),
         creator_member_id=row.creator_member_id,
         generation=row.generation,
+        homepage_agent_id=row.homepage_agent_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

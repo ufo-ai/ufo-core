@@ -363,13 +363,11 @@ test("a terminal subagent event nests its work under the reply", async () => {
 
   const summary = await screen.findByText("Completed 1 step");
   expect(summary.closest("summary")).toBeTruthy();
-  expect(screen.queryByRole("link", { name: /Subagent · general_purpose/ })).toBeNull();
+  expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
 
   await userEvent.click(summary);
-  const card = screen.getByRole("link", { name: /Subagent · general_purpose/ });
-  expect(card.getAttribute("href")).toBe(
-    "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
-  );
+  const card = screen.getByText("Subagent · general_purpose");
+  expect(card.closest("a")).toBeNull();
   expect(screen.queryByText("Reading the changelog.")).toBeNull();
 
   await userEvent.click(card.closest("summary")!);

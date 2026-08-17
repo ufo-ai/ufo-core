@@ -118,6 +118,7 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
         "start_server",
         "deploy_website",
         "publish_website",
+        "set_homepage",
         "build_website",
     }
     deploy = next(tool for tool in manifest.tools if tool.name == "deploy_website")

@@ -125,6 +125,7 @@ export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
   const table: Record<string, Route> = {
     "/api/chats": () => json({ chats: [] }),
+    "/homepage": () => json({ state: "none" }),
     ...routes,
   };
   const handler = vi.fn(async (url: string, init?: RequestInit) => {
@@ -274,6 +275,17 @@ export function fact(label: string): string {
 /** Open a table row's own record: the row itself is the control that reaches it. */
 export async function openRow(name: string): Promise<void> {
   await pressRow(name);
+}
+
+/** The agents screen's index column. */
+export function agentIndex(): Promise<HTMLElement> {
+  return screen.findByRole("navigation", { name: "Agents" });
+}
+
+/** Open one agent from the index: the row is the control, named by the text it carries. */
+export async function openAgentRow(name: string): Promise<void> {
+  const index = await agentIndex();
+  await userEvent.click(within(index).getByRole("button", { name: new RegExp("^" + name) }));
 }
 
 /** Press a record's own row, where the row itself is the control that opens it. */

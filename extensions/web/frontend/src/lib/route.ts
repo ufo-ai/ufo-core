@@ -1,4 +1,5 @@
 export const AGENT_TABS = [
+  "home",
   "settings",
   "conversations",
   "radar",
@@ -16,12 +17,9 @@ export const WORKSPACE_TABS = [
   "usage",
 ] as const;
 
-export const SUBAGENT_TABS = ["overview", "conversations", "skills"] as const;
-
 export const SECTIONS = ["radar", "artifacts"] as const;
 
 export type AgentTab = (typeof AGENT_TABS)[number];
-export type SubagentTab = (typeof SUBAGENT_TABS)[number];
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
 
@@ -50,13 +48,6 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents" }
   | { kind: "agent"; agentId: string; tab: AgentTab; place: WorkspacePlace }
-  | {
-      kind: "subagent";
-      name: string;
-      tab: SubagentTab;
-      conversationId?: string;
-      rootConversationId?: string;
-    }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
   | { kind: "admin" }
@@ -71,9 +62,6 @@ const CONVERSATION_SLOT_HASH =
   /^#\/agents\/([0-9a-f-]{36})\/conversations\/([0-9a-f-]{36})\/slots\/([a-z][a-z0-9_-]{0,63})(?:\?root=([0-9a-f-]{36}))?$/;
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
 const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?(?:\?(.*))?$/;
-const SUBAGENT_HASH = /^#\/subagents\/(\w+)(?:\/(\w+))?$/;
-const SUBAGENT_CONVERSATION_HASH =
-  /^#\/subagents\/(\w+)\/conversations\/([0-9a-f-]{36})(?:\?root=([0-9a-f-]{36}))?$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
 
@@ -102,10 +90,6 @@ function serializePlace(place: WorkspacePlace): string {
 
 function isAgentTab(name: string | undefined): name is AgentTab {
   return AGENT_TABS.includes((name ?? "") as AgentTab);
-}
-
-function isSubagentTab(name: string | undefined): name is SubagentTab {
-  return SUBAGENT_TABS.includes((name ?? "") as SubagentTab);
 }
 
 function isWorkspaceTab(name: string): name is WorkspaceTab {
@@ -153,26 +137,8 @@ export function parseHash(hash: string): Route {
     return {
       kind: "agent",
       agentId: agent[1],
-      tab: isAgentTab(agent[2]) ? agent[2] : "settings",
+      tab: isAgentTab(agent[2]) ? agent[2] : "home",
       place: parsePlace(agent[3]),
-    };
-  }
-  const run = hash.match(SUBAGENT_CONVERSATION_HASH);
-  if (run) {
-    return {
-      kind: "subagent",
-      name: run[1],
-      tab: "conversations",
-      conversationId: run[2],
-      ...(run[3] ? { rootConversationId: run[3] } : {}),
-    };
-  }
-  const subagent = hash.match(SUBAGENT_HASH);
-  if (subagent) {
-    return {
-      kind: "subagent",
-      name: subagent[1],
-      tab: isSubagentTab(subagent[2]) ? subagent[2] : "overview",
     };
   }
   return { kind: "home" };
@@ -199,22 +165,7 @@ export function newChatHash(agentId: string): string {
 }
 
 export function agentHash(agentId: string, tab: AgentTab, place: WorkspacePlace = {}): string {
-  return "#/agents/" + agentId + (tab === "settings" ? "" : "/" + tab) + serializePlace(place);
-}
-
-export function subagentHash(name: string, tab: SubagentTab): string {
-  return "#/subagents/" + name + (tab === "overview" ? "" : "/" + tab);
-}
-
-/** One subagent run, and — where the member reached it from the conversation that spawned it —
- *  that conversation, which is the read the run is authorized through. */
-export function subagentConversationHash(
-  name: string,
-  conversationId: string,
-  rootConversationId?: string,
-): string {
-  const root = rootConversationId ? "?root=" + rootConversationId : "";
-  return "#/subagents/" + name + "/conversations/" + conversationId + root;
+  return "#/agents/" + agentId + (tab === "home" ? "" : "/" + tab) + serializePlace(place);
 }
 
 export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {

@@ -85,9 +85,6 @@ from ufo.ext.surface import (
     SubagentDetail as SubagentDetail,
 )
 from ufo.ext.surface import (
-    SubagentRun as SubagentRun,
-)
-from ufo.ext.surface import (
     SubagentSummary as SubagentSummary,
 )
 from ufo.ext.surface import (

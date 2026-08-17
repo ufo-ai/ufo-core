@@ -201,6 +201,7 @@
   --breakpoint-narrow: 720px;
 
   --container-sidebar: 240px;
+  --container-index: 272px;
   --container-rail: 48px;
   --container-drawer: min(520px, 100vw);
   --container-card: min(440px, calc(100vw - 32px));

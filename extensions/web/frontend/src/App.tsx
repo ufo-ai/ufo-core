@@ -19,9 +19,7 @@ import logo from "@/assets/ufo-logo.svg";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
-import { AgentPane } from "@/views/AgentPane";
 import { Agents } from "@/views/Agents";
-import { SubagentPane } from "@/views/SubagentPane";
 import { ChatPane } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose } from "@/views/Conversations";
@@ -63,9 +61,7 @@ import {
   type RailSort,
 } from "@/lib/rail";
 import {
-  AGENT_TABS,
   SECTIONS,
-  SUBAGENT_TABS,
   WORKSPACE_TABS,
   agentHash,
   artifactTarget,
@@ -74,13 +70,11 @@ import {
   newChatHash,
   parseHash,
   sectionHash,
-  subagentHash,
   workspaceHash,
   type AgentTab,
   type PlaceStep,
   type Route,
   type Section,
-  type SubagentTab,
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
@@ -177,7 +171,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   const openAgents = useCallback(() => go("#/agents", { kind: "agents" }), [go]);
 
   const openAgent = useCallback(
-    (agentId: string, tab: AgentTab = "settings") =>
+    (agentId: string, tab: AgentTab = "home") =>
       go(agentHash(agentId, tab), { kind: "agent", agentId, tab, place: {} }),
     [go],
   );
@@ -223,12 +217,6 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
         conversationId,
         ...(slot ? { slot } : {}),
       }),
-    [go],
-  );
-
-  const openSubagent = useCallback(
-    (name: string, tab: SubagentTab = "overview") =>
-      go(subagentHash(name, tab), { kind: "subagent", name, tab }),
     [go],
   );
 
@@ -349,9 +337,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
               <li>
                 <NavRow
                   icon={<AgentsGlyph />}
-                  current={
-                    route.kind === "agents" || route.kind === "agent" || route.kind === "subagent"
-                  }
+                  current={route.kind === "agents" || route.kind === "agent"}
                   collapsed={collapsed}
                   label="Agents"
                   onClick={openAgents}
@@ -440,7 +426,6 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
             onActivity={activity}
             onOpenAgent={openAgent}
             onOpenSlot={openSlot}
-            onOpenSubagent={openSubagent}
             onAgentsIndex={openAgents}
             onPlaceWorkspace={placeWorkspace}
             onPlaceSection={placeSection}
@@ -468,7 +453,6 @@ function RoutedPane({
   onActivity,
   onOpenAgent,
   onOpenSlot,
-  onOpenSubagent,
   onAgentsIndex,
   onPlaceWorkspace,
   onPlaceSection,
@@ -488,7 +472,6 @@ function RoutedPane({
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
   onOpenSlot: (conversationId: string, slot: string | null) => void;
-  onOpenSubagent: (name: string, tab?: SubagentTab) => void;
   onAgentsIndex: () => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
@@ -496,17 +479,6 @@ function RoutedPane({
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, OwnedConversation>>;
 }) {
-  const agentsIndex = (
-    <Agents
-      agents={agents}
-      subagents={subagents}
-      newAgent={newAgent}
-      onOpen={onOpenAgent}
-      onOpenSubagent={onOpenSubagent}
-      onAgents={onAgents}
-    />
-  );
-
   if (route.kind === "admin") return <Admin />;
   if (route.kind === "bad-link") return <PaneNote>This conversation link is not valid.</PaneNote>;
   if (route.kind === "workspace") {
@@ -535,39 +507,26 @@ function RoutedPane({
       />
     );
   }
-  if (route.kind === "agents") return <Pane>{agentsIndex}</Pane>;
-  if (route.kind === "subagent") {
-    const subagent = subagents.find((entry) => entry.name === route.name);
-    if (!subagent) return <PaneNote>No such subagent.</PaneNote>;
+  if (route.kind === "agents" || route.kind === "agent") {
+    const selected =
+      route.kind === "agent" ? (agents.find((entry) => entry.id === route.agentId) ?? null) : null;
+    if (route.kind === "agent" && !selected) return <PaneNote>No such agent.</PaneNote>;
+    const shown = selected ?? mainAgent;
     return (
       <Pane>
-        {agentsIndex}
-        <SubagentPane
-          subagent={subagent}
-          tab={route.tab}
-          tabs={SUBAGENT_TABS}
-          onTab={(tab) => onOpenSubagent(subagent.name, tab)}
-          onClose={onAgentsIndex}
-          conversationId={route.conversationId}
-          rootConversationId={route.rootConversationId}
-        />
-      </Pane>
-    );
-  }
-  if (route.kind === "agent") {
-    const agent = agents.find((entry) => entry.id === route.agentId);
-    if (!agent) return <PaneNote>No such agent.</PaneNote>;
-    return (
-      <Pane>
-        {agentsIndex}
-        <AgentPane
-            agent={agent}
-          tab={route.tab}
-          tabs={AGENT_TABS}
-          onTab={(tab) => onOpenAgent(agent.id, tab)}
-          onClose={onAgentsIndex}
-          place={route.place}
-          onPlace={(place, step) => onPlaceAgent(route.tab, place, step)}
+        <Agents
+          agents={agents}
+          subagents={subagents}
+          newAgent={newAgent}
+          selected={selected}
+          tab={route.kind === "agent" ? route.tab : "home"}
+          place={route.kind === "agent" ? route.place : {}}
+          onOpen={onOpenAgent}
+          onTab={(tab) => (shown ? onOpenAgent(shown.id, tab) : undefined)}
+          onPlace={(place, step) =>
+            route.kind === "agent" ? onPlaceAgent(route.tab, place, step) : undefined
+          }
+          onAgents={onAgents}
         />
       </Pane>
     );

@@ -496,13 +496,9 @@ own store, granted and revoked in chat
 (`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent). A
 member-private extension conversation is listed as a chat and admits that member's replies, but
 does not grant another conversation or an agent panel. A workspace admin reaches and administers
-every agent. The deploy's typed subagent profiles
-are listed beside those agents unfiltered — a subagent belongs to no member, so no audience gates
-it and no chat route reaches it. Each opens a page of the same deploy shape: the system prompt its
-children run under, the deploy skills it can load (none without `load_skill`; a spawn adds the
-spawning agent's own member-authored ones), and the conversations it ran in — which a spawn stamps
-with the spawning conversation's audience, so whose work a member sees is the parent's answer while
-the agents their audience reaches still bound the page. An out-of-audience agent is not-found on
+every agent. A subagent profile is deploy shape, not an agent — no identity, no audience, no page
+of its own: a run's work is read inline under the reply that spawned it, and the topology graph
+draws the profile roster as one tile. An out-of-audience agent is not-found on
 every portal route,
 the administration view (agents with their policy,
 installations, and web-audience grants; members and seats; spend caps with their subjects named;
@@ -513,8 +509,16 @@ member, so a request reaching it without a session — the bare host `/`, which 
 surface claiming `SurfaceSpec.home`, or the portal path itself — is sent to `/login` and nothing of
 the shell is served to a stranger. The plan,
 invoices, and payment methods stay chat acts (`manage_billing`), and caps have no object kind
-yet, so the billing view is a read. Beside chat, each selected agent
-carries read projections shaped by the same contracts chat enforces: its loadable skills (the
+yet, so the billing view is a read. The agents screen is master-detail: a thin index of the
+agents themselves beside one selected agent's tabbed record — the bare route shows the main
+agent — with the topology graph as the index's other reading of the same pane. The record lands
+on Home: the agent's homepage — the hosted site its binding names, framed whole through the sites
+frame's own per-visit visibility gate — or one line stating the agent has not built one. Beside
+chat, each selected agent
+carries read projections shaped by the same contracts chat enforces: its homepage (the frame link
+of the hosted site `set_homepage` bound, resolved through the site kind's own member gate — a
+background job seeds one homepage-build turn per agent, ever, in the acting member's own room, so
+a homepage is born its creator's and widens only by a member's act), its loadable skills (the
 composition a turn loads), its connector accounts, its conversations, its settings
 (prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,
 with the grant list inside it the admin's), and its rolling-window spend beside its agent-scoped
@@ -530,8 +534,7 @@ conversation in that same conversation view read-only. A link into the portal fr
 names its target as `?c=<conversation_id>`,
 because a fragment never reaches the server: the sign-in redirect and the signed-in card carry that
 target, so a signed-out click lands on the conversation rather than a new chat, and a permalink
-whose id is not a conversation id reports the bad link rather than opening one. A reply links the
-subagent conversations its turn spawned through the child turns' existing parent linkage. The
+whose id is not a conversation id reports the bad link rather than opening one. The
 conversations view lists the member's own plus the workspace-shared ones and opens each as its
 turns, the turns those spawned nested beneath them (a subagent runs in its own
 conversation carrying the parent's audience, in the spawning turn's sandbox); an admin lists every

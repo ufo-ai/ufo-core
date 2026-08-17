@@ -153,6 +153,63 @@ async def test_seated_members_are_paged_with_utc_fallback(db: None) -> None:
     assert second.next_cursor is None
 
 
+async def test_workspace_agents_carry_the_roster_with_owners(db: None) -> None:
+    workspace_id, member_id, _other_member_id, sweep_id = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == sweep_id)
+            .values(owner_member_id=member_id, tools=["load_skill", "sweep_newspaper"])
+        )
+    with ws(workspace_id):
+        context = context_for("sweep", frozenset(), member_context_read=True)
+        agents = await context.workspace_agents()
+    assert {a.name for a in agents} == {"assistant", "daily-brief", "daily-brief-sweep"}
+    owners = {a.id: a.owner_member_id for a in agents}
+    assert owners[sweep_id] == member_id
+    assert [owner for agent_id, owner in owners.items() if agent_id != sweep_id] == [None, None]
+    allowlists = {a.id: a.tools for a in agents}
+    assert allowlists[sweep_id] == ("load_skill", "sweep_newspaper")
+    assert [tools for agent_id, tools in allowlists.items() if agent_id != sweep_id] == [None, None]
+
+
+async def test_agent_roster_reads_are_gated_on_member_context(db: None) -> None:
+    workspace_id, _member_id, _other_member_id, _sweep_id = await _seed()
+    with ws(workspace_id):
+        context = context_for("sweep", frozenset())
+        with pytest.raises(PermissionError):
+            await context.workspace_agents()
+        with pytest.raises(PermissionError):
+            await context.earliest_seated_admin()
+
+
+async def test_earliest_seated_admin_is_deterministic(db: None) -> None:
+    workspace_id, member_id, other_member_id, _sweep_id = await _seed()
+    early = datetime(2026, 1, 1, tzinfo=UTC)
+    late = datetime(2026, 2, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == other_member_id)
+            .values(is_admin=True, seated_at=early)
+        )
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(is_admin=True, seated_at=late)
+        )
+    with ws(workspace_id):
+        context = context_for("sweep", frozenset(), member_context_read=True)
+        assert await context.earliest_seated_admin() == other_member_id
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.member)
+                .where(tables.member.c.workspace_id == workspace_id)
+                .values(is_admin=False)
+            )
+        assert await context.earliest_seated_admin() is None
+
+
 async def test_scheduled_member_turn_uses_a_private_stable_conversation(db: None) -> None:
     workspace_id, member_id, _other_member_id, sweep_id = await _seed()
     invoker = Invoker()

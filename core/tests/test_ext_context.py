@@ -17,7 +17,7 @@ from opentelemetry.sdk.metrics.export import (
 
 from ufo import o11y
 from ufo.agent_scope import agent
-from ufo.audience import SHARED_AUDIENCE
+from ufo.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialSlotUnset, CredentialStore
@@ -1404,6 +1404,43 @@ async def test_open_conversation_is_the_agents_own_and_keyed_by_its_trigger(db: 
     assert row.queue_key == "code-review:abc"
     assert row.audience == str(SHARED_AUDIENCE)
     assert row.sandbox_conversation_id is None
+
+
+async def test_open_conversation_binds_a_member_when_named(db: None) -> None:
+    """A member-bound trigger room is that member's own — their id and their private audience —
+    so the authority an on-behalf turn carries stays inside a room its member already reads."""
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="bound@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        ext = context_for("coding", frozenset())
+        opened = await ext.open_conversation(agent_id, f"brief:{member_id}", member_id=member_id)
+        replayed = await ext.open_conversation(agent_id, f"brief:{member_id}", member_id=member_id)
+    assert replayed == opened
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id, tables.conversation.c.audience).where(
+                    tables.conversation.c.id == opened
+                )
+            )
+        ).one()
+    assert row.member_id == member_id
+    assert row.audience == str(conversation_audience(member_id))
 
 
 async def test_open_conversation_refuses_an_agent_of_another_workspace(db: None) -> None:

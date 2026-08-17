@@ -53,8 +53,8 @@ from ufo.ext.loader import (
 )
 from ufo.hub import InProcessHub
 from ufo.indexing import TextChunker
-from ufo.loop.prompts.render import SKILL_INDEX_SLOT, render_skill_index
-from ufo.loop.subagents import CORE_SKILL_INDEX, SubagentRegistry
+from ufo.loop.prompts.render import SKILL_INDEX_SLOT
+from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_PRICING
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
@@ -1135,42 +1135,3 @@ async def test_the_subject_fence_holds_on_every_page(
 
     walked = await _walk_older(client, "/surface/web/workspace/memory", headers)
     assert sorted(walked) == ["mine 0", "mine 1", "mine 2"]
-
-
-async def test_subagent_skills_list_the_deploys_and_only_where_load_skill_is_held(portal) -> None:
-    """A profile is deploy shape, so its page names the deploy index every agent shares — the same
-    top-level skills the agent panel lists as `deploy`, a child skill never among them — and never
-    an agent's member-authored ones, which belong to whichever agent spawned the child. A profile
-    holding no `load_skill` reaches none of them and its page says so."""
-    client, workspace_id, _agent_a, _agent_b = portal
-    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
-
-    listed = (await client.get("/surface/web/subagents/researcher/skills", headers=headers)).json()
-    assert listed["loads_skills"] is True
-    assert [(skill["name"], skill["description"]) for skill in listed["skills"]] == list(
-        DEPLOY_SKILLS.index()
-    )
-    assert CHILD_SKILL.name in DEPLOY_SKILLS.by_name
-    assert CHILD_SKILL.name not in {skill["name"] for skill in listed["skills"]}
-
-    narrow = (await client.get("/surface/web/subagents/narrow/skills", headers=headers)).json()
-    assert narrow == {"loads_skills": False, "skills": []}
-
-
-async def test_subagent_overview_composes_the_prompt_a_child_runs(portal) -> None:
-    """The page shows the boot composition, not the profile's template: a profile whose
-    instructions carry `{{skill_index}}` has it filled from the deploy registry, so the whole
-    rendered index reaches the prompt and the slot never does. The index asserted whole is what
-    separates the deploy registry from the core default a spawn would otherwise fall back to —
-    `deploy-probe` is in one and not the other."""
-    client, workspace_id, _agent_a, _agent_b = portal
-    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
-
-    prompt = (
-        await client.get("/surface/web/subagents/researcher/overview", headers=headers)
-    ).json()["subagent"]["prompt"]
-    assert SKILL_INDEX_SLOT not in prompt
-    assert render_skill_index(DEPLOY_SKILLS.index()) in prompt
-    assert DEPLOY_ONLY_SKILL.name in {name for name, _ in DEPLOY_SKILLS.index()} - set(
-        name for name, _ in CORE_SKILL_INDEX
-    )

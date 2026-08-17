@@ -130,7 +130,6 @@ export function Chat({
         <MessageLog
           messages={messages ?? []}
           live={state.live}
-          conversationId={conversationId}
           className={cn(COLUMN, "p-2xl")}
           question={(question) => (
             <Question

@@ -6,7 +6,7 @@ config knob — installed means mounted, like Slack. The surface admits without 
 the hub in its own stream route, and claims the browser home, so the deploy's bare host opens the
 portal."""
 
-from ufo.sdk.jobs import JobSpec, store_key_workspaces
+from ufo.sdk.jobs import JobSpec, store_key_workspaces, unseeded_agent_workspaces
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo_ext_web.audience import EXTENSION_WEB, WEB_ACCESS_TOOLS
@@ -14,11 +14,15 @@ from ufo_ext_web.surface import (
     ARTIFACTS_SLOT,
     CHANGES_SLOT,
     CHAT_PENDING_PREFIX,
+    HOMEPAGE_SEED_PREFIX,
     ROUTES,
+    SEED_JOB_NAME,
+    SEED_JOB_SCHEDULE,
     SURFACE_WEB,
     TITLE_JOB_NAME,
     TITLE_JOB_SCHEDULE,
     resolve_workspace,
+    seed_homepages,
     summarize_chat_titles,
 )
 
@@ -42,5 +46,12 @@ def manifest() -> Manifest:
                 handler=summarize_chat_titles,
                 candidates=store_key_workspaces(EXTENSION_WEB, CHAT_PENDING_PREFIX),
             ),
+            JobSpec(
+                name=SEED_JOB_NAME,
+                schedule=SEED_JOB_SCHEDULE,
+                handler=seed_homepages,
+                candidates=unseeded_agent_workspaces(EXTENSION_WEB, HOMEPAGE_SEED_PREFIX),
+            ),
         ),
+        member_context_read=True,
     )

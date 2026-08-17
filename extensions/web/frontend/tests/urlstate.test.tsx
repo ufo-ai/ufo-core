@@ -4,13 +4,12 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import {
+  agentHash,
   artifactTarget,
   bootRoute,
   chatHash,
   parseHash,
   sectionHash,
-  subagentConversationHash,
-  subagentHash,
   workspaceHash,
 } from "@/lib/route";
 
@@ -157,28 +156,27 @@ test("conversation slots parse in chat and standalone URLs", () => {
   });
 });
 
-test("the subagent conversation hash names its run and lands on the conversations tab", () => {
-  expect(parseHash(subagentConversationHash("deep_research", CONVO_ID))).toEqual({
-    kind: "subagent",
-    name: "deep_research",
-    tab: "conversations",
-    conversationId: CONVO_ID,
+test("the agent hash defaults to Home, and every other tab takes its own segment", () => {
+  expect(agentHash(AGENT.id, "home")).toBe("#/agents/" + AGENT.id);
+  expect(parseHash("#/agents/" + AGENT.id)).toEqual({
+    kind: "agent",
+    agentId: AGENT.id,
+    tab: "home",
+    place: {},
   });
-  expect(parseHash(subagentHash("deep_research", "conversations"))).toEqual({
-    kind: "subagent",
-    name: "deep_research",
-    tab: "conversations",
+  expect(agentHash(AGENT.id, "settings")).toBe("#/agents/" + AGENT.id + "/settings");
+  expect(parseHash("#/agents/" + AGENT.id + "/settings")).toEqual({
+    kind: "agent",
+    agentId: AGENT.id,
+    tab: "settings",
+    place: {},
   });
 });
 
-test("a run reached from the conversation that spawned it carries that conversation", () => {
-  const parent = "44444444-4444-4444-8444-444444444444";
-  expect(parseHash(subagentConversationHash("deep_research", CONVO_ID, parent))).toEqual({
-    kind: "subagent",
-    name: "deep_research",
-    tab: "conversations",
-    conversationId: CONVO_ID,
-    rootConversationId: parent,
+test("a hash under the torn-out subagent namespace names no route", () => {
+  expect(parseHash("#/subagents/deep_research")).toEqual({ kind: "home" });
+  expect(parseHash("#/subagents/deep_research/conversations/" + CONVO_ID)).toEqual({
+    kind: "home",
   });
 });
 

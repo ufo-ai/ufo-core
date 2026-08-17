@@ -25,7 +25,7 @@ import {
   TRIGGER_KIND,
   json,
   objectIndex,
-  pressRow,
+  openAgentRow,
   useStreamFake,
   wire,
 } from "./harness";
@@ -692,8 +692,7 @@ test("the agents index opens the agent's page, and the sidebar starts the conver
   ).toBeNull();
 
   location.hash = "#/agents";
-  await screen.findByRole("button", { name: "Main" });
-  await pressRow("assistant");
+  await openAgentRow("assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
@@ -809,10 +808,9 @@ test("the sidebar marks the section the member is in and leaves the others off",
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
   expect(marked()).toEqual(["Agents"]);
-  const index = within(await screen.findByRole("main"));
+  const index = within(await screen.findByRole("navigation", { name: "Agents" }));
   expect(index.getByText("assistant")).toBeTruthy();
   expect(index.getByText("second")).toBeTruthy();
-  expect(index.getByRole("table").querySelectorAll("tbody tr").length).toBe(2);
 });
 
 test("a failed rail read states it and retries on demand", async () => {

@@ -918,20 +918,6 @@ class ListedConversation(BaseModel):
     speakers: tuple[ConversationSpeaker, ...]
 
 
-class SubagentRun(BaseModel):
-    """One conversation a subagent profile ran in, as its own page lists and titles it: the
-    conversation exactly as every other portal index lists one, plus the agent that spawned it —
-    the owner a read across every agent states on the row, where a read inside one agent's
-    namespace has the pane to state it. A row exists only where a turn of the profile ran, so the
-    summary's `last_turn_at` always names one, and `readable` is whether this viewer reads its
-    content. `disclosable` is false on every row: a disclosure is acknowledged against the
-    conversation that spawned the child, never against the child."""
-
-    conversation: ListedConversation
-    agent_id: UUID
-    agent_name: str
-
-
 class LedgerEntry(BaseModel):
     """One accounting row of a turn — a dimension's metered amount and its priced cost."""
 
@@ -1136,11 +1122,6 @@ class SurfaceContext:
         portal lists beside the workspace's agents and the page each row opens, fixed at boot from
         the same registry `spawn` dispatches against."""
         return self._subagents
-
-    def subagent(self, name: str) -> SubagentDetail | None:
-        """One profile by name, or None when this deploy registers no such profile — the 404 a
-        portal page answers on, since the roster is the whole set that exists."""
-        return next((profile for profile in self._subagents if profile.name == name), None)
 
     @property
     def deploy_skills(self) -> tuple[tuple[str, str], ...]:
@@ -3184,232 +3165,12 @@ class SurfaceContext:
             )
         return None if value is None else parse_audience(value)
 
-    async def list_subagent_conversations(
-        self,
-        profile: str,
-        member_id: UUID,
-        agent_ids: frozenset[UUID],
-        *,
-        admin: bool,
-        limit: int,
-        search: str | None = None,
-    ) -> tuple[SubagentRun, ...]:
-        """Every conversation one subagent profile ran in, newest activity first and bounded — the
-        per-profile view of the work `list_agent_conversations` deliberately withholds, where that
-        one lists an agent's conversations with members. Two filters, because one profile serves
-        every agent: `agent_ids` is the caller's audience, so an agent it does not reach is absent
-        here exactly as it is not-found on every other portal route, and the child's own audience —
-        the spawning conversation's, which a spawn copies onto it — decides whose work a member
-        sees. An admin lists every one and reads only what `readable` says. The agent that spawned
-        it names each row, and the words it was spawned with name the row itself — read for the
-        rows this viewer may read, exactly as `list_agent_conversations` reads them."""
-        activity = (
-            sa.select(
-                tables.turn.c.conversation_id,
-                sa.func.count().label("turn_count"),
-                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
-            )
-            .where(
-                tables.turn.c.workspace_id == self.workspace_id,
-                tables.turn.c.subagent_profile == profile,
-            )
-            .group_by(tables.turn.c.conversation_id)
-            .subquery()
-        )
-        query = (
-            sa.select(
-                tables.conversation.c.id,
-                tables.conversation.c.surface,
-                tables.conversation.c.queue_key,
-                tables.conversation.c.audience,
-                tables.conversation.c.surface_label,
-                tables.conversation.c.title,
-                tables.conversation.c.created_at,
-                tables.conversation.c.agent_id,
-                tables.agent.c.name.label("agent_name"),
-                tables.member.c.email,
-                activity.c.turn_count,
-                activity.c.last_turn_at,
-            )
-            .select_from(
-                tables.conversation.join(
-                    activity, activity.c.conversation_id == tables.conversation.c.id
-                )
-                .join(tables.agent, tables.agent.c.id == tables.conversation.c.agent_id)
-                .outerjoin(tables.member, tables.member.c.id == tables.conversation.c.member_id)
-            )
-            .where(
-                tables.conversation.c.workspace_id == self.workspace_id,
-                tables.conversation.c.surface == SUBAGENT_SURFACE,
-                tables.conversation.c.agent_id.in_(agent_ids),
-            )
-            .order_by(activity.c.last_turn_at.desc())
-            .limit(limit)
-        )
-        if not admin:
-            query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
-        if search:
-            query = query.where(self._matches(search, member_id))
-        async with workspace_tx() as connection:
-            rows = (await connection.execute(query)).all()
-        if not rows:
-            return ()
-        readable = readable_audiences(member_id)
-        content = [row.id for row in rows if row.audience in readable]
-        sources = await self._conversation_sources(content)
-        speakers = await self._conversation_speakers(content)
-        return tuple(
-            SubagentRun(
-                conversation=ListedConversation(
-                    summary=ConversationSummary(
-                        id=row.id,
-                        surface=row.surface,
-                        queue_key=row.queue_key,
-                        member_email=row.email,
-                        created_at=row.created_at,
-                        turn_count=row.turn_count,
-                        last_turn_at=row.last_turn_at,
-                    ),
-                    audience=row.audience,
-                    surface_label=row.surface_label,
-                    readable=row.audience in readable,
-                    disclosable=False,
-                    title=row.title or "" if row.audience in readable else "",
-                    source=sources.get(row.id),
-                    speakers=speakers.get(row.id, ()),
-                ),
-                agent_id=row.agent_id,
-                agent_name=row.agent_name,
-            )
-            for row in rows
-        )
-
-    async def readable_subagent_conversation(
-        self,
-        conversation_id: UUID,
-        profile: str,
-        member_id: UUID,
-        agent_ids: frozenset[UUID],
-        *,
-        root_conversation_id: UUID | None,
-        admin: bool,
-    ) -> SubagentRun | None:
-        """The readable subagent conversation of this profile as its own page names it, or None —
-        the gate a per-profile transcript read answers on, returning the row that titles the page a
-        permalink lands on cold, where the listing beside it is not in hand. It must be this
-        profile's own child work, under an agent the caller's audience reaches, and readable by the
-        same gate every other content route fails closed on — so a row the listing shows unreadable
-        is a row this refuses.
-
-        `root_conversation_id` is how a child is read through the conversation that spawned it,
-        the way its changes and its files already are: the child must hold a turn of this profile
-        whose parent turn ran in that conversation, and the gate is then asked of the parent, where
-        an admin's recorded disclosure counts. Without one the child answers on its own audience
-        alone and no disclosure applies, because the listing beside it reports audience alone and
-        the two must answer together."""
-        query = (
-            sa.select(
-                tables.conversation.c.agent_id,
-                tables.conversation.c.surface,
-                tables.conversation.c.queue_key,
-                tables.conversation.c.audience,
-                tables.conversation.c.surface_label,
-                tables.conversation.c.title,
-                tables.conversation.c.created_at,
-                tables.agent.c.name.label("agent_name"),
-                tables.member.c.email,
-                sa.func.count().label("turn_count"),
-                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
-            )
-            .select_from(
-                tables.conversation.join(
-                    tables.turn, tables.turn.c.conversation_id == tables.conversation.c.id
-                )
-                .join(tables.agent, tables.agent.c.id == tables.conversation.c.agent_id)
-                .outerjoin(tables.member, tables.member.c.id == tables.conversation.c.member_id)
-            )
-            .where(
-                tables.conversation.c.workspace_id == self.workspace_id,
-                tables.conversation.c.id == conversation_id,
-                tables.conversation.c.surface == SUBAGENT_SURFACE,
-                tables.conversation.c.agent_id.in_(agent_ids),
-                tables.turn.c.subagent_profile == profile,
-            )
-            .group_by(
-                tables.conversation.c.agent_id,
-                tables.conversation.c.surface,
-                tables.conversation.c.queue_key,
-                tables.conversation.c.audience,
-                tables.conversation.c.surface_label,
-                tables.conversation.c.title,
-                tables.conversation.c.created_at,
-                tables.agent.c.name,
-                tables.member.c.email,
-            )
-        )
-        async with workspace_tx() as connection:
-            found = (await connection.execute(query)).one_or_none()
-            if found is None:
-                return None
-            if root_conversation_id is not None:
-                spawned_here = (
-                    await connection.execute(
-                        sa.select(tables.turn.c.id).where(
-                            tables.turn.c.workspace_id == self.workspace_id,
-                            tables.turn.c.conversation_id == conversation_id,
-                            tables.turn.c.subagent_profile == profile,
-                            tables.turn.c.parent_turn_id.in_(
-                                sa.select(tables.turn.c.id).where(
-                                    tables.turn.c.workspace_id == self.workspace_id,
-                                    tables.turn.c.conversation_id == root_conversation_id,
-                                )
-                            ),
-                        )
-                    )
-                ).first()
-                if spawned_here is None:
-                    return None
-        if root_conversation_id is None:
-            authorized = await self.readable_conversation(
-                conversation_id, found.agent_id, member_id, admin=False
-            )
-        else:
-            authorized = await self.readable_conversation(
-                root_conversation_id, found.agent_id, member_id, admin=admin
-            )
-        if not authorized:
-            return None
-        sources = await self._conversation_sources([conversation_id])
-        speakers = await self._conversation_speakers([conversation_id])
-        return SubagentRun(
-            conversation=ListedConversation(
-                summary=ConversationSummary(
-                    id=conversation_id,
-                    surface=found.surface,
-                    queue_key=found.queue_key,
-                    member_email=found.email,
-                    created_at=found.created_at,
-                    turn_count=found.turn_count,
-                    last_turn_at=found.last_turn_at,
-                ),
-                audience=found.audience,
-                surface_label=found.surface_label,
-                readable=True,
-                disclosable=False,
-                title=found.title or "",
-                source=sources.get(conversation_id),
-                speakers=speakers.get(conversation_id, ()),
-            ),
-            agent_id=found.agent_id,
-            agent_name=found.agent_name,
-        )
-
     async def conversation_subagent_turns(
         self, conversation_id: UUID, limit: int = LIST_TURNS_LIMIT
     ) -> tuple[Turn, ...]:
         """Every turn spawned beneath this conversation's turns, transitively — a subagent that
         spawns its own is nested again. Each runs in its own conversation carrying the parent's
-        audience and agent (`SubagentRunner`), so a caller authorized for the parent conversation is
+        audience and agent, so a caller authorized for the parent conversation is
         authorized for these; the tree a view nests is `parent_turn_id` over this set. Breadth
         first, so a parent always precedes the turns it spawned however the timestamps tie, and
         bounded."""

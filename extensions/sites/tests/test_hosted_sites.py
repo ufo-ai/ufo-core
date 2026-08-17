@@ -22,6 +22,7 @@ import sqlalchemy as sa
 import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import IntegrityError
 from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
@@ -45,6 +46,7 @@ from ufo_ext_sites.tools import (
     APP_SERVE_PORT,
     DEPLOY_WEBSITE_TOOL,
     PUBLISH_WEBSITE_TOOL,
+    SET_HOMEPAGE_TOOL,
 )
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import (
@@ -1625,3 +1627,171 @@ async def test_sites_slot_rejects_stale_visibility_and_recreated_row_grants(db: 
         )
         assert recreated.generation != registered.generation
         assert (await SITES_SLOT.read(context)).sites == ()
+
+
+async def test_set_homepage_binds_one_row_per_agent(db: None) -> None:
+    """Rebinding moves the pointer in one transaction: the old row's binding clears as the new row
+    takes it, so the partial unique index never sees two homepages for one agent."""
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    first = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+    second = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+
+    with ws(workspace.id):
+        sites = HostedSites(workspace.id, workspace_tx)
+        await sites.register(first, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True)
+        await sites.register(second, "status", 8000, owner_id, "workspace", SHARED_AUDIENCE, True)
+
+        bound = await sites.set_homepage(workspace.agent_id, first, "about")
+        moved = await sites.set_homepage(workspace.agent_id, second, "status")
+
+        assert bound is not None and bound.homepage_agent_id == workspace.agent_id
+        assert moved is not None and moved.homepage_agent_id == workspace.agent_id
+        former = await sites.read(first, "about")
+        assert former is not None and former.homepage_agent_id is None
+
+
+async def test_a_redeploy_keeps_the_binding(db: None) -> None:
+    """A same-name re-deploy updates the port in place, and the homepage pointer is not the
+    deploy's to touch — the register update path leaves it exactly as it was."""
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    conversation_id = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+
+    with ws(workspace.id):
+        sites = HostedSites(workspace.id, workspace_tx)
+        await sites.register(
+            conversation_id, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True
+        )
+        await sites.set_homepage(workspace.agent_id, conversation_id, "about")
+
+        redeployed = await sites.register(
+            conversation_id, "about", 8000, owner_id, None, SHARED_AUDIENCE, True
+        )
+
+        assert redeployed.homepage_agent_id == workspace.agent_id
+
+
+async def test_unhost_clears_the_binding(db: None) -> None:
+    """The binding is held by the row itself, so unregistering the bound site leaves no dangling
+    pointer — and a fresh site binds cleanly afterwards."""
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    conversation_id = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+
+    with ws(workspace.id):
+        sites = HostedSites(workspace.id, workspace_tx)
+        await sites.register(
+            conversation_id, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True
+        )
+        await sites.set_homepage(workspace.agent_id, conversation_id, "about")
+        await sites.unregister(conversation_id, "about")
+
+        assert await sites.read(conversation_id, "about") is None
+        assert await sites.set_homepage(workspace.agent_id, conversation_id, "about") is None
+        await sites.register(
+            conversation_id, "status", 8001, owner_id, "workspace", SHARED_AUDIENCE, True
+        )
+        rebound = await sites.set_homepage(workspace.agent_id, conversation_id, "status")
+        assert rebound is not None and rebound.homepage_agent_id == workspace.agent_id
+
+
+async def test_the_index_holds_one_homepage_per_agent(db: None) -> None:
+    """The store clears before it stamps; the partial unique index is what makes a second binding
+    impossible rather than merely unwritten. Driven by a raw update because the store never writes
+    one — the index is the backstop under any future writer."""
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    first = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+    second = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+
+    with ws(workspace.id):
+        sites = HostedSites(workspace.id, workspace_tx)
+        await sites.register(first, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True)
+        await sites.register(second, "status", 8000, owner_id, "workspace", SHARED_AUDIENCE, True)
+        await sites.set_homepage(workspace.agent_id, first, "about")
+
+        with pytest.raises(IntegrityError):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(hosted_site)
+                    .where(
+                        hosted_site.c.workspace_id == workspace.id,
+                        hosted_site.c.conversation_id == second,
+                    )
+                    .values(homepage_agent_id=workspace.agent_id)
+                )
+
+
+async def test_set_homepage_refuses_a_dangling_name(db: None) -> None:
+    """A name that resolves to no hosted site is refused naming the site, and nothing binds."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    await _deploy(workspace, conversation_id, audience, member_id)
+    dangling = site_object_name(conversation_id, "never-deployed")
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+
+    with ws(workspace.id), pytest.raises(ValueError, match=re.escape(dangling)):
+        await _dispatch(tool, _bind(ctx, workspace, conversation_id, member_id), site=dangling)
+
+    (row,) = await _stored(workspace)
+    assert row.homepage_agent_id is None
+
+
+async def test_set_homepage_binds_on_a_speakerless_turn(db: None) -> None:
+    """Binding widens nothing — the frame still gates every viewer on the site's own visibility —
+    so it runs on a scheduled turn with no live speaker, which seeding requires. The result echoes
+    the bound site's visibility, which for a DM deploy is the private default."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    hosted = await _deploy(workspace, conversation_id, audience, member_id)
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+    scheduled = replace(
+        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=member_id
+    )
+
+    with ws(workspace.id):
+        payload = await _dispatch(tool, scheduled, site=str(hosted["site"]))
+
+    assert payload == {
+        "site": hosted["site"],
+        "site_url": hosted["site_url"],
+        "visibility": "private",
+        "homepage_agent": str(workspace.agent_id),
+    }
+    (row,) = await _stored(workspace)
+    assert row.homepage_agent_id == workspace.agent_id
+
+
+async def test_site_rows_carry_homepage_agent(db: None) -> None:
+    """The kind row carries `homepage_agent` only on the bound site — the declared field the portal
+    reads and filters the binding through — and every other site lacks it."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    first = await _seed_conversation(workspace, audience, member_id)
+    second = await _seed_conversation(workspace, audience, member_id)
+    await _deploy(workspace, first, audience, member_id)
+    bound = await _deploy(workspace, second, audience, member_id)
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+
+    with ws(workspace.id):
+        await _dispatch(tool, _bind(ctx, workspace, second, member_id), site=str(bound["site"]))
+        listed = await _verb("object_list", workspace, first, member_id, kind=SITE_KIND)
+        filtered = await _verb(
+            "object_list",
+            workspace,
+            first,
+            member_id,
+            kind=SITE_KIND,
+            filters={"homepage_agent": str(workspace.agent_id)},
+        )
+
+    rows = {row["name"]: row for row in listed["objects"]}
+    assert rows[str(bound["site"])]["homepage_agent"] == str(workspace.agent_id)
+    assert "homepage_agent" not in rows[site_object_name(first, SITE)]
+    assert [row["name"] for row in filtered["objects"]] == [str(bound["site"])]

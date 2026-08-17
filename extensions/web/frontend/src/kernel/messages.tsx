@@ -26,7 +26,6 @@ import { speakerName } from "@/lib/audience";
 import { brailleOf, randomCell } from "@/lib/braille";
 import { cn } from "@/lib/cn";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
-import { subagentConversationHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
@@ -128,7 +127,6 @@ export function useTakeMeToTheFoot(): () => void {
 export function MessageLog({
   messages,
   live = null,
-  conversationId,
   question,
   onOpenArtifacts,
   className,
@@ -136,7 +134,6 @@ export function MessageLog({
 }: {
   messages: Spoken[];
   live?: LiveTurn | null;
-  conversationId: string | null;
   question?: (asked: ChatQuestion) => ReactNode;
   onOpenArtifacts?: () => void;
   /** The reading column, set on the messages rather than on the pane that scrolls them: a pane
@@ -167,12 +164,7 @@ export function MessageLog({
             <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
           ) : null}
           {message.role === "user" ? null : (
-            <Activity
-              events={message.events ?? []}
-              runs={message.subagents ?? []}
-              root={conversationId}
-              live={false}
-            />
+            <Activity events={message.events ?? []} runs={message.subagents ?? []} live={false} />
           )}
           <Said mine={message.role === "user"}>
             {message.role === "user" && message.asked ? (
@@ -206,7 +198,6 @@ export function MessageLog({
               <Activity
                 events={row.live.events}
                 runs={row.live.subagents}
-                root={conversationId}
                 live
                 working={
                   row.live.reconnecting
@@ -379,13 +370,11 @@ export function Meta({ children }: { children: ReactNode }) {
 function Activity({
   events,
   runs,
-  root,
   live,
   working,
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
-  root: string | null;
   live: boolean;
   working?: string;
 }) {
@@ -428,24 +417,20 @@ function Activity({
           />
         ) : null}
       </Marker>
-      {shown ? <ActivityTree events={events} runs={runs} root={root} live={live} /> : null}
+      {shown ? <ActivityTree events={events} runs={runs} live={live} /> : null}
     </details>
   );
 }
 
-/** A run's link is rooted at the conversation that spawned it: the one being read for a run under
- *  a reply, and the run's own for the runs it spawned in turn — which is the one generation the
- *  read behind that link authorizes against. Rows interleave where their run started (`at`);
- *  a durable run carries no slot and stands after the events. */
+/** The reply's work in order. Rows interleave where their run started (`at`); a durable run
+ *  carries no slot and stands after the events. */
 function ActivityTree({
   events,
   runs,
-  root,
   live,
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
-  root: string | null;
   live: boolean;
 }) {
   if (!events.length && !runs.length) return null;
@@ -455,9 +440,7 @@ function ActivityTree({
   const place = (index: number) => {
     for (const run of runs) {
       if (slot(run) === index) {
-        rows.push(
-          <RunRow key={run.conversation_id} run={run} root={root} live={live} />,
-        );
+        rows.push(<RunRow key={run.conversation_id} run={run} live={live} />);
       }
     }
   };
@@ -484,15 +467,7 @@ function ActivityTree({
 /** One run's row: its name (the profile when the spawn gave none) linking to the run's own record,
  *  with what it is doing now beside it while it works; opening the row shows the work it has done,
  *  the runs it spawned in turn, and — once it answered — its answer. */
-function RunRow({
-  run,
-  root,
-  live,
-}: {
-  run: SubagentRun;
-  root: string | null;
-  live: boolean;
-}) {
+function RunRow({ run, live }: { run: SubagentRun; live: boolean }) {
   const [open, setOpen] = useState(false);
   const running = live && run.running === true;
   const current = running && run.current ? run.current : "";
@@ -500,22 +475,12 @@ function RunRow({
     <li className="flex flex-col gap-hair">
       <details className="group/run" onToggle={(event) => setOpen(event.currentTarget.open)}>
         <summary className="flex cursor-pointer list-none items-center gap-sm">
-          {run.profile.startsWith("agent:") ? (
-            <span className="shrink-0">
-              {run.name || "Agent · " + run.profile.slice("agent:".length)}
-            </span>
-          ) : (
-            <a
-              className="shrink-0"
-              href={subagentConversationHash(
-                run.profile,
-                run.conversation_id,
-                root ?? undefined,
-              )}
-            >
-              {run.name || "Subagent · " + run.profile}
-            </a>
-          )}
+          <span className="shrink-0">
+            {run.name ||
+              (run.profile.startsWith("agent:")
+                ? "Agent · " + run.profile.slice("agent:".length)
+                : "Subagent · " + run.profile)}
+          </span>
           {current ? (
             <span className="shimmer min-w-0 truncate">{"· " + current}</span>
           ) : null}
@@ -526,12 +491,7 @@ function RunRow({
         </summary>
         {open ? (
           <>
-            <ActivityTree
-              events={run.events}
-              runs={run.subagents}
-              root={run.conversation_id}
-              live={live}
-            />
+            <ActivityTree events={run.events} runs={run.subagents} live={live} />
             {run.output ? (
               <div className="pl-lg">
                 <Reveal bare>

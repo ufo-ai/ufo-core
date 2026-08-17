@@ -299,13 +299,11 @@ test("a live subagent run nests under the reply it produced", async () => {
 
   const summary = await screen.findByText("Completed 1 step");
   await userEvent.click(summary);
-  const link = screen.getByRole("link", { name: /Subagent · general_purpose/ });
-  expect(link.getAttribute("href")).toBe(
-    "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
-  );
+  const row = screen.getByText("Subagent · general_purpose");
+  expect(row.closest("a")).toBeNull();
   expect(screen.queryByText("Fetching the page")).toBeNull();
 
-  await userEvent.click(link.closest("summary")!);
+  await userEvent.click(row.closest("summary")!);
   expect(screen.getByText("Fetching the page")).toBeTruthy();
   expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
 });
@@ -792,7 +790,7 @@ test("a settled conversation tails nothing", async () => {
   expect(screen.queryByText("Thinking…")).toBeNull();
 });
 
-test("a reloaded conversation nests its subagent work under the reply and still links it", async () => {
+test("a reloaded conversation nests its subagent work under the reply", async () => {
   const conversationId = "66666666-6666-4666-8666-666666666666";
   const nestedId = "77777777-7777-4777-8777-777777777777";
   wire(
@@ -835,21 +833,17 @@ test("a reloaded conversation nests its subagent work under the reply and still 
 
   await userEvent.click(summary);
   expect(screen.getByText("Reading the tree")).toBeTruthy();
-  const link = screen.getByRole("link", { name: /Subagent · general_purpose/ });
-  expect(link.getAttribute("href")).toBe(
-    "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
-  );
-  expect(link.closest("summary")!.querySelector("svg")).toBeTruthy();
+  const row = screen.getByText("Subagent · general_purpose");
+  expect(row.closest("a")).toBeNull();
+  expect(row.closest("summary")!.querySelector("svg")).toBeTruthy();
   expect(screen.queryByText("Fetching the page")).toBeNull();
 
-  await userEvent.click(link.closest("summary")!);
+  await userEvent.click(row.closest("summary")!);
   expect(screen.getByText("Checking the release notes first.")).toBeTruthy();
   expect(screen.getByText("Fetching the page")).toBeTruthy();
   expect(screen.getByText("Tuesday").tagName).toBe("STRONG");
-  const nested = screen.getByRole("link", { name: /Subagent · deep_research/ });
-  expect(nested.getAttribute("href")).toBe(
-    "#/subagents/deep_research/conversations/" + nestedId + "?root=" + conversationId,
-  );
+  const nested = screen.getByText("Subagent · deep_research");
+  expect(nested.closest("a")).toBeNull();
   expect(screen.queryByText("Searching")).toBeNull();
 
   await userEvent.click(nested.closest("summary")!);
@@ -858,7 +852,7 @@ test("a reloaded conversation nests its subagent work under the reply and still 
 
   await userEvent.click(summary);
   expect(screen.queryByText("Fetching the page")).toBeNull();
-  expect(screen.queryByRole("link", { name: /Subagent · general_purpose/ })).toBeNull();
+  expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
 });
 
 /** jsdom lays nothing out, so the fold — the one measurement `Reveal` reads — is stated here. */
@@ -2046,7 +2040,6 @@ test("a markdown file the turn shares opens the artifacts sidebar instead of dow
   cleanup();
   render(
     <ConversationTranscript
-      conversationId={CONVO_ID}
       title="Review PR 1268"
       messages={[
         {
@@ -2125,7 +2118,6 @@ test("the live chat scrolls its own pane and a transcript read back scrolls with
   cleanup();
   render(
     <ConversationTranscript
-      conversationId={CONVO_ID}
       title="Review PR 1268"
       messages={[{ role: "assistant", text: "Done." }]}
     />,

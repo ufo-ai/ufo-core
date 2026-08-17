@@ -38,10 +38,8 @@ const CARD = cn(
   FADE,
 );
 const TILE = cn("absolute overflow-hidden rounded-control border border-edge bg-surface", FADE);
-const ROW = cn(
-  "flex w-full items-center border-0 bg-transparent px-lg text-left text-label text-inherit hover:bg-fill",
-  FADE,
-);
+const TILE_ROW = cn("flex w-full items-center px-lg text-left text-label", FADE);
+const ROW = cn(TILE_ROW, "border-0 bg-transparent text-inherit hover:bg-fill");
 const HEADER = "flex items-center px-lg text-small text-ink-soft";
 const DIM = "opacity-40";
 const IDLE_LEAD = 0.5;
@@ -249,14 +247,12 @@ export function AgentGraph({
   query,
   reloads,
   onOpen,
-  onOpenSubagent,
 }: {
   agents: Agent[];
   subagents: Subagent[];
   query: string;
   reloads: number;
   onOpen: (agentId: string) => void;
-  onOpenSubagent: (name: string) => void;
 }) {
   const [focus, setFocus] = useState<string | null>(null);
   const surfaces = usePanelRead<SurfacesPayload>("/workspace/surfaces", reloads);
@@ -419,15 +415,13 @@ export function AgentGraph({
               Subagents
             </div>
             {subagents.map((subagent) => (
-              <button
+              <div
                 key={subagent.name}
-                type="button"
-                onClick={() => onOpenSubagent(subagent.name)}
-                className={cn(ROW, unsaid(subagent.name) && DIM)}
+                className={cn(TILE_ROW, unsaid(subagent.name) && DIM)}
                 style={{ height: TILE_ROW_H }}
               >
                 <span className="min-w-0 truncate">{subagent.name}</span>
-              </button>
+              </div>
             ))}
           </div>
         ) : null}

@@ -29,6 +29,7 @@ import {
   pick,
   refusedNotice,
   useStreamFake,
+  openAgentRow,
   pressRow,
   viewCard,
   wire,
@@ -98,7 +99,7 @@ test("the settings page states the agent's facts, renders its schema, and submit
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID;
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Main agent")).toBeTruthy();
   expect(fact("Installations")).toBe("Portal, Terminal");
@@ -148,14 +149,14 @@ test("switching agents discards unsaved settings edits", async () => {
       ),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID;
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(
     <App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
   await userEvent.clear(await screen.findByLabelText("Prompt"));
   await userEvent.type(screen.getByLabelText("Prompt"), "do not carry this");
 
-  location.hash = "#/agents/" + SECOND_ID;
+  location.hash = "#/agents/" + SECOND_ID + "/settings";
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 
   await waitFor(() =>
@@ -188,7 +189,7 @@ test("settings polling preserves dirty edits", async () => {
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID;
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   vi.useFakeTimers();
   try {
     render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
@@ -238,13 +239,13 @@ test("a non-admin reads an agent prompt but cannot edit it", async () => {
     "/settings": () => json({ ...SETTINGS, audience: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID;
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("be useful")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save prompt" })).toBeNull();
 });
 
-test("the agents index states what a row is, and leaves the address list to its own page", async () => {
+test("the agents index states a row's name and model, and leaves the address list to its own page", async () => {
   location.hash = "#/agents";
   render(
     <App
@@ -260,18 +261,22 @@ test("the agents index states what a row is, and leaves the address list to its 
     />,
   );
 
-  expect(await screen.findByRole("button", { name: MAIN_MARK })).toBeTruthy();
+  const index = within(await screen.findByRole("navigation", { name: "Agents" }));
+  expect(index.getByText("Main")).toBeTruthy();
+  expect(index.getAllByText("opus").length).toBe(3);
   expect(within(screen.getByRole("main")).queryByText("member@example.com")).toBeNull();
   expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });
 
-test("non-admin agent rows keep their marks and no address list", () => {
+test("a non-admin reads the same index rows", async () => {
   location.hash = "#/agents";
   render(
     <App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
 
-  expect(screen.getByRole("button", { name: MAIN_MARK })).toBeTruthy();
+  const index = within(await screen.findByRole("navigation", { name: "Agents" }));
+  expect(index.getByText("Main")).toBeTruthy();
+  expect(index.getByText("second")).toBeTruthy();
   expect(screen.queryByText("Every member")).toBeNull();
   expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });
@@ -281,7 +286,7 @@ test("a settings read that fails states the error and offers no form", async () 
     "/settings": () => new Response("nope", { status: 503 }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID;
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
@@ -828,12 +833,10 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
 
   await userEvent.click(summary);
   expect(screen.getByText("bash ls")).toBeTruthy();
-  const link = screen.getByRole("link", { name: /Subagent · research/ });
-  expect(link.getAttribute("href")).toBe(
-    "#/subagents/research/conversations/" + child + "?root=" + held,
-  );
+  const run = screen.getByText("Subagent · research");
+  expect(run.closest("a")).toBeNull();
 
-  await userEvent.click(link.closest("summary")!);
+  await userEvent.click(run.closest("summary")!);
   expect(screen.getByText("Reading the deploy job.")).toBeTruthy();
   expect(screen.getByText("It runs nightly.")).toBeTruthy();
   expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
@@ -1115,7 +1118,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/agents");
   expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
 
-  await pressRow("second");
+  await openAgentRow("second");
   expect(location.hash).toBe("#/agents/" + SECOND.id);
   expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
 
@@ -1143,16 +1146,8 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(await screen.findByText("No memories yet.")).toBeTruthy();
 });
 
-/** The mark a subagent's name carries in the list, which stands in the cell beside the name. */
-const SUBAGENT_MARK = "Subagent";
-/** The same mark on the one agent this workspace answers with by default. */
-const MAIN_MARK = "Main";
-
-test("the agents view lists the deploy's subagents under the agents in one table", async () => {
-  wire({
-    "/connections": () => json({ connections: [] }),
-    "/transcript": () => json({ messages: [] }),
-  });
+test("the agents index lists agents only, whatever subagent profiles the deploy declares", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
   render(
     <App
       agents={[AGENT]}
@@ -1167,20 +1162,12 @@ test("the agents view lists the deploy's subagents under the agents in one table
   );
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  const rows = [
-    ...screen.getByRole("table").querySelectorAll<HTMLTableRowElement>("tbody tr"),
-  ];
-  expect(rows.map((row) => row.cells[0].textContent)).toEqual([
-    "assistant" + MAIN_MARK,
-    "deep_research" + SUBAGENT_MARK,
-    "general_purpose" + SUBAGENT_MARK,
-  ]);
-  expect(screen.queryByText(/Spawned by an agent for one task/)).toBeNull();
-  await waitFor(() =>
-    expect(rows.map((row) => row.cells[1].textContent)).toEqual(["—", "—", "—"]),
-  );
-  expect(rows.map((row) => row.cells[2].textContent)).toEqual(["opus", "claude-opus-4-8", "—"]);
-  expect(rows.every((row) => row.getAttribute("tabindex") === "0")).toBe(true);
+  const index = within(await screen.findByRole("navigation", { name: "Agents" }));
+  expect(index.getByText("assistant")).toBeTruthy();
+  expect(index.queryByText("deep_research")).toBeNull();
+  expect(index.queryByText("general_purpose")).toBeNull();
+  expect(screen.queryByText("deep_research")).toBeNull();
+  expect(screen.queryByText("general_purpose")).toBeNull();
 });
 
 test("a member who is not an admin is offered no administration control", () => {
@@ -1189,7 +1176,7 @@ test("a member who is not an admin is offered no administration control", () => 
   expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
 });
 
-test("the agent tab strip opens the tab named in the hash", async () => {
+test("the agent tab strip opens the tab named in the hash, and Home takes the bare hash", async () => {
   location.hash = "#/agents/" + AGENT_ID + "/connectors";
   wire({
     "/connections": () => json({ connections: [] }),
@@ -1201,6 +1188,12 @@ test("the agent tab strip opens the tab named in the hash", async () => {
   expect(screen.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
     "true",
   );
+
+  await userEvent.click(screen.getByRole("tab", { name: "Home" }));
+
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+  expect(screen.getByRole("tab", { name: "Home" }).getAttribute("aria-selected")).toBe("true");
+  expect(await screen.findByText("assistant has not built its homepage.")).toBeTruthy();
 });
 
 test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
@@ -1208,7 +1201,7 @@ test("the model field offers the deploy's models, which its schema alone cannot 
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID;
+  location.hash = "#/agents/" + AGENT_ID + "/settings";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect((await opened("model")).map((option) => option.textContent)).toEqual([
     "opus",
