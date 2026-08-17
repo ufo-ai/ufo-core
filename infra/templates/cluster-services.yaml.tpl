@@ -93,6 +93,9 @@ spec:
     # Serve trusts the proxy certificate; only the proxy receives the key.
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_platform}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}
+    # The bearer the standalone ufo-egress data plane presents to serve's egress-control RPC. serve
+    # reads it whole through envFrom to gate the RPC; the proxy pod references the same key.
+    - {secretKey: UFO_EGRESS_CONTROL_TOKEN, remoteRef: {key: ${secret_platform}, property: egress-control-token}}
     # The sandbox cache daemon's callback token (RFC 0032); unused until the cache is enabled.
     - {secretKey: UFO_CACHE_CONTROL_TOKEN, remoteRef: {key: ${secret_platform}, property: ufo-cache-control-token}}
 ---

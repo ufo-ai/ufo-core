@@ -25,9 +25,9 @@ test for the extension API — every entry must be expressible without touching 
 
 | Decision | Value |
 |---|---|
-| Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*` + the top-level `evals/` operator package, built and shipped as one pip-installable distribution (`ufo`). `pip install ufo` brings core and evals directly; first-party extensions and packs register through entry points. Rust was considered and rejected for core: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. A hot data plane (egress proxy) may become a Rust component later without changing this. |
+| Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*` + the top-level `evals/` operator package, built and shipped as one pip-installable distribution (`ufo`). `pip install ufo` brings core and evals directly; first-party extensions and packs register through entry points. Rust was considered and rejected for core: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. The one hot data plane, the egress proxy, is a standalone Rust service (`ufo-egress`, RFC 0035) that resolves policy and keys through core over an internal RPC — the data plane in Rust, the control plane in Python — without changing this. |
 | Persistence | One async-SQLAlchemy schema over **SQLite by default** (aiosqlite, WAL — zero services for dev) and **Postgres for deploys** (asyncpg); alembic migrations are the single schema source, dialect-neutral (integers for money/tokens; dialect-only types live inside IndexBackend impls). Plus a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys — the S3 API is the cloud-portability seam. Every row carries `workspace_id`; one shared fleet serves every workspace, scoping each request and turn to its `workspace_id` under row-level security. Blob keys are workspace-relative: the store prepends `workspaces/<id>/` from the ambient `ws(...)` scope (RFC 0032), and deploy-owned data (`static/`, `term/`) rides a fleet store whose namespace is closed. |
-| Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. Shutdown stops admission, gives requests `[serve].request_shutdown_seconds`, waits `[serve].graceful_shutdown_seconds` for active workflows and proxy connections, then retires the executor heartbeat only if no workflow remains active — a workflow that outlives the drain keeps the seat, so no peer re-dispatches work this process still executes; the seat ages out with the process. The supervisor's termination budget exceeds the sequential drains. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
+| Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. Shutdown stops admission, gives requests `[serve].request_shutdown_seconds`, waits `[serve].graceful_shutdown_seconds` for active workflows (the standalone `ufo-egress` proxy drains its own live tunnels for that same window on its own SIGTERM), then retires the executor heartbeat only if no workflow remains active — a workflow that outlives the drain keeps the seat, so no peer re-dispatches work this process still executes; the seat ages out with the process. The supervisor's termination budget exceeds the sequential drains. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
 | Topology | `ufoctl serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
 | Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — only tool arguments are workspace-guarded), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. A conversation opened from a connected CLI terminal takes the `client` carrier instead — its workspace is the member's own `$PWD`, its ops the member's own subprocesses — same trust posture as local, offered only to a terminal the member connected. |
@@ -864,7 +864,7 @@ containerized for development:
 ```bash
 uv tool install ufo        # the Python package is the primitive; brew formula = later wrapper
 ufoctl init                   # writes ufo.toml; onboards workspace + initial admin + main agent + model key
-ufoctl serve                  # one process: surfaces + workers + jobs + proxy — SQLite, zero services
+ufoctl serve                  # one process: surfaces + workers + jobs + egress-control RPC — SQLite, zero services
 ufoctl portal                 # opens your workspace in the browser; the terminal client connects via curl
 ```
 
@@ -907,13 +907,15 @@ executors; a peer that stops heartbeating has its in-flight turns recovered by t
 
 ### Roles — the split that's already paid for
 
-An instance logically comprises four roles: **surfaces** (HTTP in, streams out), **workers** (turn
-workflows), **jobs** (sync, derivation), **proxy** (sandbox egress). Core runs all four in
-every instance and defines no per-role deployment — mapping processes now would be speculation.
-What core does fix is the seam that makes the eventual split free: **roles share nothing in
-memory** — cross-role communication is only Postgres/DBOS queues, the blob store, the hub, and the
-proxy's HTTP endpoint (any instance's proxy derives identical rules from DB state; sandboxes are
-co-located with the instance that created them). An import-boundary gate enforces the seam. The
+An instance logically comprises three in-process roles — **surfaces** (HTTP in, streams out),
+**workers** (turn workflows), **jobs** (sync, derivation) — plus the **egress data plane**
+(`ufo-egress`, RFC 0035), a standalone Rust process that holds no keys and resolves every policy and
+secret through the egress-control RPC these roles serve. Core runs the three in-process roles in
+every instance and defines no per-role deployment — mapping processes now would be speculation. What
+core does fix is the seam that makes the eventual split free: **roles share nothing in memory** —
+cross-role communication is only Postgres/DBOS queues, the blob store, the hub, and the
+egress-control RPC (any instance answers identical rules from DB state; sandboxes are co-located
+with the instance that created them). An import-boundary gate enforces the in-process seam. The
 enterprise k8s layer then splits roles into Deployments with per-role autoscaling by
 configuration, not code change.
 `ufoctl bundle` produces a runnable artifact (OCI image + pinned config + lockfile) — the same

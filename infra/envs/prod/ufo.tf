@@ -246,6 +246,7 @@ data "kubectl_file_documents" "hosted" {
     workload_ha                      = true
     prestop_seconds                  = local.prestop_seconds
     termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60
+    graceful_shutdown_seconds        = local.graceful_shutdown_seconds
 
     region        = var.region
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
@@ -332,6 +333,14 @@ resource "kubectl_manifest" "ufo_migrate" {
 resource "kubectl_manifest" "ufo" {
   for_each  = local.ufo_workload_manifests
   yaml_body = each.value
+
+  # CI pushes the ufo-egress image after this apply, because its ECR repository is created in this
+  # same apply and the push cannot precede it. So this apply must not block on the sandbox-proxy
+  # rollout, or it deadlocks: the new ReplicaSet would wait for an image the post-apply push has not
+  # produced yet. The workflow's own `kubectl rollout status deployment/ufo-sandbox-proxy` confirms
+  # the rollout once the push lands, and maxUnavailable=0 keeps the old proxy pods serving egress
+  # until the new ones pull it — so the gap is drained, never downtime.
+  wait_for_rollout = !strcontains(each.key, "deployments/ufo-sandbox-proxy")
 
   depends_on = [kubectl_manifest.ufo_migrate, module.platform]
 }

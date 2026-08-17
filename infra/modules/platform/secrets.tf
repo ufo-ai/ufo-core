@@ -24,6 +24,13 @@ resource "random_password" "cache_control_token" {
   special = false
 }
 
+# The bearer the standalone ufo-egress data plane presents to serve's egress-control RPC (RFC 0035).
+# Minted here so serve (which reads ufo-platform-secrets whole) and the proxy pod share one value.
+resource "random_password" "egress_control_token" {
+  length  = 48
+  special = false
+}
+
 # The shared serve fleet's process keys live only in the ufo-serve Secret.
 # The Fernet credential key seals every hosted workspace's BYOK credential rows, so it is minted once
 # and reused verbatim every apply — a re-minted key orphans every stored credential. A Fernet key is
@@ -173,8 +180,11 @@ resource "aws_secretsmanager_secret_version" "platform" {
   secret_id = aws_secretsmanager_secret.platform.id
   secret_string = jsonencode({
     "ufo-token-secret"        = random_password.ufo_token.result
-    "egress-ca-cert"          = tls_self_signed_cert.egress_ca.cert_pem
-    "egress-ca-key"           = tls_private_key.egress_ca.private_key_pem
+    "egress-ca-cert" = tls_self_signed_cert.egress_ca.cert_pem
+    # PKCS#8, not the RSA-PKCS#1 `private_key_pem`: the Rust proxy loads this with rcgen's
+    # `KeyPair::from_pem`, which parses PKCS#8 (`BEGIN PRIVATE KEY`) and refuses PKCS#1.
+    "egress-ca-key"           = tls_private_key.egress_ca.private_key_pem_pkcs8
+    "egress-control-token"    = random_password.egress_control_token.result
     "ufo-cache-control-token" = random_password.cache_control_token.result
   })
 }

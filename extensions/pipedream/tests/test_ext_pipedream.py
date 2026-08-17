@@ -44,11 +44,11 @@ from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
+from ufo.egress_rules import connector_transfer_hosts
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
 from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
 from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
-from ufo.sandbox.proxy.rules import connector_transfer_hosts
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.sdk.audience import conversation_audience

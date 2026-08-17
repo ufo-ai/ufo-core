@@ -32,7 +32,8 @@ machine's CLI token to a local one-shot page, which posts it to the portal exact
 sign-in card does. Nothing is typed or pasted, and the bearer never rides a URL.
 
 **Full hosted stack** — the whole hosted topology in one command: Postgres, the onboarding
-**gateway** (`/login`), and the **serve** fleet (surfaces + DBOS workers + embedded egress proxy):
+**gateway** (`/login`), the **serve** fleet (surfaces + DBOS workers + the egress-control RPC), and
+the standalone **ufo-egress** data plane (the Rust egress proxy, sharing serve's network namespace):
 
 ```bash
 export ANTHROPIC_API_KEY=...   # required for serve to boot; the gateway/login needs no key

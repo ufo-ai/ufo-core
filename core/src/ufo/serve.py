@@ -2,16 +2,22 @@
 
 import asyncio
 import os
+import secrets
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import uvicorn
+from cryptography import x509
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI
 from starlette.requests import Request
@@ -50,6 +56,13 @@ from ufo.db import (
     verify_db_reachable,
 )
 from ufo.durability import ReplaySafeSerializer, replay_safe_client
+from ufo.egress_control import EgressControl
+from ufo.egress_resolver import PerAgentRules
+from ufo.egress_rules import (
+    connector_transfer_hosts,
+    derive_artifact_store_rules,
+    derive_manifest_rules,
+)
 from ufo.ext.context import ConversationProbes, CredentialAccess, ModelAccess
 from ufo.ext.context import context_for as extension_context_for
 from ufo.ext.conversation_slots import BoundConversationSlot
@@ -123,8 +136,6 @@ from ufo.runtime_instance import (
     record_fleet_seat,
 )
 from ufo.sandbox.cache import (
-    CACHE_CALLBACK_HOST,
-    CACHE_CALLBACK_PORT,
     CACHE_CONTROL_TOKEN_ENV,
     CACHE_HOST,
     CACHE_PKG_HOSTS,
@@ -132,16 +143,10 @@ from ufo.sandbox.cache import (
 )
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import ProbeEnv
-from ufo.sandbox.proxy.credential_callback import CredentialCallback
-from ufo.sandbox.proxy.rules import (
-    connector_transfer_hosts,
-    derive_artifact_store_rules,
-    derive_manifest_rules,
-)
-from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import (
     EGRESS_CA_CERT_ENV,
+    EGRESS_CONTROL_TOKEN_ENV,
     ProbeTokenCodec,
     ProxyEndpoint,
     RunTokenCodec,
@@ -165,7 +170,6 @@ from ufo.surfaces.hub_tail import HubTailer
 from ufo.surfaces.stop import MemberStop
 from ufo.workspace import init_workspace_credentials, ws
 
-PROXY_STARTUP_TIMEOUT_SECONDS = 30
 RESERVED_HOST_PREFIXES = (LOGIN_PATH, "/v1/onboard", "/ufo")
 
 
@@ -237,6 +241,7 @@ def run() -> None:
     def invoker_for(workspace_id: UUID) -> AdmissionInvoker:
         return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
 
+    app = FastAPI(lifespan=_serve_lifespan)
     runtime = Runtime(
         config=config,
         blob=blob,
@@ -246,7 +251,7 @@ def run() -> None:
             off_cluster=carrier_spec.off_cluster,
             image_ref=SANDBOX_IMAGE_REF,
             proxy=_proxy_endpoint(
-                config, manifests, credentials, registry.pricing, run_tokens, blob_backend
+                app, config, manifests, credentials, registry.pricing, run_tokens, blob_backend
             ),
             workspace_root=config.sandbox.workspace_root,
             terminals=_select_terminal_transport(config, manifests, fleet_blob),
@@ -300,7 +305,6 @@ def run() -> None:
         }
     )
     DBOS.launch()
-    app = FastAPI(lifespan=_serve_lifespan)
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.instance_id = instance_id
@@ -1106,6 +1110,7 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def _proxy_endpoint(
+    app: FastAPI,
     config: Config,
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
@@ -1113,22 +1118,67 @@ def _proxy_endpoint(
     run_tokens: RunTokenCodec,
     blob: FilesystemBlobStore | S3BlobStore,
 ) -> ProxyEndpoint:
-    """The egress proxy endpoint the carrier threads into every sandbox, in the shape this deploy
-    takes. With `[sandbox] proxy_public_url` set (hosted, multi-node) the proxy runs as a standalone
-    `ufoctl proxy` outside this process, so serve only carries the address and trust material: the
-    stable shared CA from env (the sandbox's trust anchor for the proxy's minted leaves), the
-    stable `proxy_port`, and the public base. An unset CA fails loud rather than
-    shipping a sandbox that reaches no host. Unset (local, single-node) serve runs the proxy
-    in-process, minting its own ephemeral CA — no shared trust material to source, no separate
-    service to run alongside."""
-    if config.sandbox.proxy_public_url is None:
-        return _local_egress_proxy(config, manifests, credentials, pricing, run_tokens, blob)
-    ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
-    if not ca_cert:
+    """The egress endpoint the carrier threads into every sandbox, plus the egress-control RPC the
+    standalone Rust `ufo-egress` proxy calls back into. The wire is that separate process, local and
+    hosted alike; serve owns the policy. It builds the `PerAgentRules` resolver — the model-provider
+    base, this deploy's S3 artifact host, and each turn's keyed credentials and grants — and mounts
+    `EgressControl` on `app` so the proxy resolves, authorizes, forwards, and meters through it,
+    gated by `UFO_EGRESS_CONTROL_TOKEN`. The endpoint carries only what the sandbox needs to trust
+    and reach the proxy: the stable `proxy_port`, the public dial-back base, and the CA cert — the
+    trust anchor for the proxy's minted leaves. A hosted deploy (`proxy_public_url` set) has a real
+    `ufo-egress` process behind that URL, so it sources the shared CA and the control token from env
+    and fails loud without them, since that process holds the matching key. A local boot runs no
+    proxy unless the dev rig (`make stack`) starts one: `ufoctl serve` alone comes up with the
+    control RPC mounted and a throwaway trust anchor, so an in-sandbox CONNECT to the unmanned proxy
+    port is refused — no egress, the documented local default. The dev rig supplies the real shared
+    CA (both serve and `ufo-egress` read it) through the same env, and egress works."""
+    if config.sandbox.proxy_public_url is not None:
+        ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
+        if not ca_cert:
+            raise RuntimeError(
+                f"{EGRESS_CA_CERT_ENV} must hold the shared egress CA certificate (PEM) so the "
+                "sandbox trusts the proxy's TLS; the egress wire runs as a separate `ufo-egress` "
+                "process that holds the matching key"
+            )
+        control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV)
+        if not control_token:
+            raise RuntimeError(
+                f"{EGRESS_CONTROL_TOKEN_ENV} must be set so `ufo-egress` authenticates to serve's "
+                "egress-control RPC"
+            )
+    else:
+        ca_cert = os.environ.get(EGRESS_CA_CERT_ENV) or _ephemeral_egress_ca()
+        control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32)
+    cache_daemon = parse_cache_daemon(config.sandbox.cache_daemon)
+    cache_control_token = os.environ.get(CACHE_CONTROL_TOKEN_ENV)
+    if cache_daemon is not None and not cache_control_token:
         raise RuntimeError(
-            f"{EGRESS_CA_CERT_ENV} must hold the shared egress proxy's CA certificate (PEM) so the "
-            "sandbox trusts the proxy's TLS; the proxy runs as a separate `ufoctl proxy` process"
+            f"{CACHE_CONTROL_TOKEN_ENV} must be set when the sandbox cache is enabled so the cache "
+            "daemon authenticates to serve's git-credential route; without it every cache-routed "
+            "git request is refused"
         )
+    clis = connector_clis(manifests)
+    resolver = PerAgentRules(
+        base=(*model_rule_base(config), *_one_shot(derive_artifact_store_rules(blob))),
+        grants=GrantStore() if credentials is not None else None,
+        credentials=credentials,
+        slots=injecting_slots(manifests),
+        internet=derive_manifest_rules(manifests),
+        transfer_hosts=connector_transfer_hosts(manifests),
+        clis=clis,
+        cache_host=CACHE_HOST if cache_daemon is not None else None,
+        cache_pkg_hosts=CACHE_PKG_HOSTS if cache_daemon is not None else (),
+    )
+    control = EgressControl(
+        control_token=control_token,
+        cache_control_token=cache_control_token or secrets.token_urlsafe(32),
+        resolver=resolver,
+        clis=clis,
+        pricing=pricing,
+        run_tokens=run_tokens,
+    )
+    app.include_router(control.router())
+    app.include_router(control.git_credential_router())
     return ProxyEndpoint(
         port=config.sandbox.proxy_port,
         ca_cert=ca_cert,
@@ -1136,65 +1186,26 @@ def _proxy_endpoint(
     )
 
 
-def _local_egress_proxy(
-    config: Config,
-    manifests: tuple[Manifest, ...],
-    credentials: CredentialStore | None,
-    pricing: Pricing,
-    run_tokens: RunTokenCodec,
-    blob: FilesystemBlobStore | S3BlobStore,
-) -> ProxyEndpoint:
-    """The single-node sandbox's sole route out, run in-process on its own event loop — a
-    standalone network service, not part of the turn loop, that outlives every turn for the
-    process's life. It mints an ephemeral CA with no shared trust material to carry. The resolver
-    reads the turn's agent, its workspace's keyed credentials, and its grants per turn through
-    `workspace_tx`, binding each request's own workspace, and authorizes each keyed-host CONNECT
-    against the turn's live status. It binds `proxy_port` and carries no `public_url`: a local
-    carrier forms a process-local address from the port alone."""
-    loop = asyncio.new_event_loop()
-    threading.Thread(target=loop.run_forever, daemon=True).start()
-
-    cache_daemon = parse_cache_daemon(config.sandbox.cache_daemon)
-
-    async def _boot() -> ProxyEndpoint:
-        resolver = PerAgentRules(
-            base=(*model_rule_base(config), *await derive_artifact_store_rules(blob)),
-            grants=GrantStore() if credentials is not None else None,
-            credentials=credentials,
-            slots=injecting_slots(manifests),
-            internet=derive_manifest_rules(manifests),
-            transfer_hosts=connector_transfer_hosts(manifests),
-            clis=connector_clis(manifests),
-            cache_host=CACHE_HOST if cache_daemon is not None else None,
-            cache_pkg_hosts=CACHE_PKG_HOSTS if cache_daemon is not None else (),
-        )
-        ca_cert, ca_key = await generate_ca()
-        endpoint = await EgressProxy(
-            resolve=resolver.resolve,
-            authorize=resolver.turn_live,
-            ca_cert=ca_cert,
-            ca_key=ca_key,
-            run_tokens=run_tokens,
-            generation=resolver.rules_generation,
-            pricing=pricing,
-            cache_daemon=cache_daemon,
-        ).start(port=config.sandbox.proxy_port)
-        if cache_daemon is not None:
-            # The cache daemon resolves its git credential through this loopback callback; without
-            # it every cache-routed clone would 502. Runs for the process's life on the proxy loop.
-            token = os.environ.get(CACHE_CONTROL_TOKEN_ENV)
-            if not token:
-                raise RuntimeError(
-                    f"{CACHE_CONTROL_TOKEN_ENV} must be set when the sandbox cache is enabled"
-                )
-            await CredentialCallback(
-                credentials=credentials,
-                slots=injecting_slots(manifests),
-                token=token,
-            ).serve(CACHE_CALLBACK_HOST, CACHE_CALLBACK_PORT)
-        return endpoint
-
-    return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
+def _ephemeral_egress_ca() -> str:
+    """The sandbox's egress trust anchor for a local boot with no shared CA. `ufoctl serve` alone
+    runs no `ufo-egress`, so an in-sandbox CONNECT to the unmanned proxy port is refused before this
+    ever validates a leaf — it is a well-formed anchor for a proxy that isn't there, the documented
+    no-egress local default. Cert only: serve holds no signing key (the wire would), so the dev rig
+    supplies a shared CA whose key its `ufo-egress` holds when real local egress is wanted."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ufo-egress-local")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(UTC))
+        .not_valid_after(datetime.now(UTC) + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM).decode()
 
 
 WILDCARD_BINDS = frozenset({"0.0.0.0", "::"})

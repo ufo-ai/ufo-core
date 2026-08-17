@@ -50,6 +50,14 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
+      # The eval-stack integration tests boot a real serve beside its ufo-egress data plane (the
+      # deleted in-process proxy's replacement), so an in-sandbox fetch has a proxy to reach. The
+      # stack locates the built binary and fails loud without it, so build it here.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: egress
+      - run: cargo build --manifest-path egress/Cargo.toml
       # The docker-gated tests need the ~6-7 GB sandbox image, and building it is ~3.3 minutes of
       # this job. `sandbox-image.yml` publishes it from main under a tag keyed by the pinned
       # Dockerfile, so a tag that exists was built from this commit's definition on this base: pull

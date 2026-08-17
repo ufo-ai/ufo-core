@@ -16,19 +16,29 @@ import socket
 import sys
 import tomllib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO, Self
 
 import asyncpg
 import tomli_w
+from cryptography import x509
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from httpx import AsyncClient, HTTPError
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from evals.harness.viewer import load_runs, write_viewer
+from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.config import Config, DatabaseConfig, O11yConfig
 from ufo.proxy_serve import OWNER_DSN_ENV
+from ufo.sandbox.session import (
+    EGRESS_CA_CERT_ENV,
+    EGRESS_CA_KEY_ENV,
+    EGRESS_CONTROL_TOKEN_ENV,
+)
 
 RUNS_ROOT = Path(".local/evals")
 DEFAULT_OUT = Path("eval-reports")
@@ -37,6 +47,8 @@ POSTGRES_NAME_LIMIT = 63
 READY_DEADLINE_SECONDS = 180.0
 READY_POLL_SECONDS = 0.5
 SHUTDOWN_GRACE_SECONDS = 30.0
+EGRESS_READY_DEADLINE_SECONDS = 30.0
+EGRESS_GRACEFUL_SHUTDOWN_SECONDS = 2
 ORCHESTRATOR_ARGS = (
     "--out",
     "--view",
@@ -179,6 +191,7 @@ class EvalStack:
     otlp_probe: socket.socket | None
     seed_log: IO[bytes]
     serve_log: IO[bytes]
+    egress_log: IO[bytes]
     eval_log: IO[bytes]
 
     @classmethod
@@ -218,6 +231,14 @@ class EvalStack:
         env[key_env] = env.get(key_env) or Fernet.generate_key().decode()
         secret_env = config.artifacts.token_secret_env
         env[secret_env] = env.get(secret_env) or secrets.token_urlsafe(32)
+        # The shared egress material serve and its ufo-egress read from the same env: serve trusts
+        # the CA and mounts the control RPC, the proxy signs leaves with the key and calls back with
+        # the control token, and both verify sandbox run tokens against one UFO_TOKEN_SECRET.
+        ca_cert, ca_key = _mint_egress_ca()
+        env[EGRESS_CA_CERT_ENV] = ca_cert
+        env[EGRESS_CA_KEY_ENV] = ca_key
+        env.setdefault(EGRESS_CONTROL_TOKEN_ENV, secrets.token_urlsafe(32))
+        env.setdefault(UFO_TOKEN_SECRET_ENV, secrets.token_urlsafe(32))
         return cls(
             spec=spec,
             root=root,
@@ -234,6 +255,7 @@ class EvalStack:
             otlp_probe=otlp_probe,
             seed_log=(root / "seed.log").open("wb"),
             serve_log=(root / "serve.log").open("wb"),
+            egress_log=(root / "egress.log").open("wb"),
             eval_log=(root / "eval.log").open("wb"),
         )
 
@@ -243,11 +265,13 @@ class EvalStack:
                 await self._create_databases()
             readiness = await self._seed()
             serve = await self._start_serve()
+            egress = await self._start_egress()
             try:
                 await self._ready(serve)
-                exit_code = await self._drive(serve, readiness)
+                await self._egress_ready(egress)
+                exit_code = await self._drive(serve, egress, readiness)
             finally:
-                await self._shutdown(serve)
+                await self._shutdown(serve, egress)
         finally:
             for handle in (
                 self.serve_probe,
@@ -255,6 +279,7 @@ class EvalStack:
                 self.otlp_probe,
                 self.seed_log,
                 self.serve_log,
+                self.egress_log,
                 self.eval_log,
             ):
                 if handle is not None:
@@ -334,6 +359,44 @@ class EvalStack:
         self.proxy_probe.close()
         return await self._ufoctl("serve", log=self.serve_log)
 
+    async def _start_egress(self) -> asyncio.subprocess.Process:
+        """Run ufo-egress on the probed proxy port, sharing serve's env (the CA, control token, and
+        run-token secret) and pointing back at serve's egress-control RPC. `_start_serve` freed the
+        proxy-port probe, so the wire binds it and the local carrier's HTTP(S)_PROXY reaches it."""
+        binary = _egress_binary(self.repo_root)
+        env = dict(self.env) | {
+            "UFO_EGRESS_BIND": "127.0.0.1",
+            "UFO_EGRESS_PORT": str(self.config.sandbox.proxy_port),
+            "UFO_EGRESS_CONTROL_URL": f"http://127.0.0.1:{self.config.serve.port}",
+            "UFO_EGRESS_GRACEFUL_SHUTDOWN_SECONDS": str(EGRESS_GRACEFUL_SHUTDOWN_SECONDS),
+        }
+        return await asyncio.create_subprocess_exec(
+            str(binary), cwd=self.root, env=env, stdout=self.egress_log, stderr=self.egress_log
+        )
+
+    async def _egress_ready(self, egress: asyncio.subprocess.Process) -> None:
+        port = self.config.sandbox.proxy_port
+        deadline = asyncio.get_running_loop().time() + EGRESS_READY_DEADLINE_SECONDS
+        while True:
+            if egress.returncode is not None:
+                raise RuntimeError(
+                    f"ufo-egress exited {egress.returncode} before it bound the proxy port — "
+                    f"see {self._log_path('egress')}"
+                )
+            try:
+                _, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.close()
+                await writer.wait_closed()
+                return
+            except OSError:
+                pass
+            if asyncio.get_running_loop().time() > deadline:
+                raise RuntimeError(
+                    f"ufo-egress not listening on :{port} after "
+                    f"{EGRESS_READY_DEADLINE_SECONDS:.0f}s — see {self._log_path('egress')}"
+                )
+            await asyncio.sleep(READY_POLL_SECONDS)
+
     async def _ready(self, serve: asyncio.subprocess.Process) -> None:
         url = f"http://127.0.0.1:{self.config.serve.port}/openapi.json"
         deadline = asyncio.get_running_loop().time() + READY_DEADLINE_SECONDS
@@ -357,7 +420,12 @@ class EvalStack:
                     )
                 await asyncio.sleep(READY_POLL_SECONDS)
 
-    async def _drive(self, serve: asyncio.subprocess.Process, readiness: Path | None) -> int:
+    async def _drive(
+        self,
+        serve: asyncio.subprocess.Process,
+        egress: asyncio.subprocess.Process,
+        readiness: Path | None,
+    ) -> int:
         if self.otlp_probe is not None:
             self.otlp_probe.close()
         child = await asyncio.create_subprocess_exec(
@@ -371,11 +439,16 @@ class EvalStack:
             stderr=self.eval_log,
         )
         child_wait = asyncio.ensure_future(child.wait())
-        serve_wait = asyncio.ensure_future(serve.wait())
+        infra = {
+            asyncio.ensure_future(serve.wait()): ("serve", serve),
+            asyncio.ensure_future(egress.wait()): ("egress", egress),
+        }
         done, pending = await asyncio.wait(
-            (child_wait, serve_wait), return_when=asyncio.FIRST_COMPLETED
+            (child_wait, *infra), return_when=asyncio.FIRST_COMPLETED
         )
-        if serve_wait in done and child_wait not in done:
+        dead = next((infra[future] for future in infra if future in done), None)
+        if dead is not None and child_wait not in done:
+            name, process = dead
             child.terminate()
             try:
                 await asyncio.wait_for(asyncio.shield(child_wait), SHUTDOWN_GRACE_SECONDS)
@@ -383,7 +456,7 @@ class EvalStack:
                 child.kill()
                 await child.wait()
             raise RuntimeError(
-                f"serve exited {serve.returncode} mid-run — see {self._log_path('serve')}"
+                f"{name} exited {process.returncode} mid-run — see {self._log_path(name)}"
             )
         for future in pending:
             future.cancel()
@@ -408,17 +481,65 @@ class EvalStack:
             argv += ["--issue-recall", str(readiness)]
         return tuple(argv)
 
-    async def _shutdown(self, serve: asyncio.subprocess.Process) -> None:
-        if serve.returncode is None:
-            serve.terminate()
+    async def _shutdown(
+        self,
+        serve: asyncio.subprocess.Process,
+        egress: asyncio.subprocess.Process | None = None,
+    ) -> None:
+        # Drain the proxy first, while serve's control RPC is up for its meter flush, then serve.
+        for process in (egress, serve):
+            if process is None or process.returncode is not None:
+                continue
+            process.terminate()
             try:
-                await asyncio.wait_for(serve.wait(), SHUTDOWN_GRACE_SECONDS)
+                await asyncio.wait_for(process.wait(), SHUTDOWN_GRACE_SECONDS)
             except TimeoutError:
-                serve.kill()
-                await serve.wait()
+                process.kill()
+                await process.wait()
 
     def _log_path(self, step: str) -> Path:
         return self.root / f"{step}.log"
+
+
+def _mint_egress_ca() -> tuple[str, str]:
+    """The shared CA a stack's serve hands its sandbox and its `ufo-egress` signs leaves with — the
+    dev rig's minted CA, per run. Returns (cert PEM, PKCS#8 key PEM): serve trusts the cert, the
+    proxy holds the key, so the sandbox trusts the leaf the proxy mints for each host it MITMs."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ufo-egress-eval")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(UTC))
+        .not_valid_after(datetime.now(UTC) + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    return cert_pem, key_pem
+
+
+def _egress_binary(repo_root: Path) -> Path:
+    """The `ufo-egress` data-plane binary the stack runs beside serve so an in-sandbox fetch has a
+    proxy to reach. It is the deleted in-process proxy's replacement, built from `egress/`; a stack
+    with no egress wire refuses every sandbox CONNECT, so a missing binary fails loud here rather
+    than as an unexplained connection-refused inside a suite that fetches over the network."""
+    for profile in ("release", "debug"):
+        candidate = repo_root / "egress" / "target" / profile / "ufo-egress"
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(
+        "ufo-egress binary not found under egress/target/{release,debug}/ — the eval sandbox "
+        "routes egress through it. Build it: cargo build --manifest-path egress/Cargo.toml"
+    )
 
 
 def materialize_readiness(returncode: int | None, stdout: bytes, seed_log: Path) -> Path:

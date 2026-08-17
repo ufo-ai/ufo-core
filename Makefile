@@ -55,7 +55,7 @@ init: ## Write ufo.toml, apply the schema, onboard the workspace (EMAIL=you@exam
 	@test -n "$(EMAIL)" || { echo "EMAIL is required: make init EMAIL=you@example.com"; exit 1; }
 	uv run ufoctl init --email $(EMAIL)
 
-serve: ## Run surfaces, workers, and the embedded egress proxy (needs ANTHROPIC_API_KEY)
+serve: ## Run surfaces + workers, no sandbox egress (needs ANTHROPIC_API_KEY; `make stack` adds the ufo-egress rig)
 	uv run ufoctl serve
 
 portal: ## Open the portal in a browser, signed in with this machine's CLI token

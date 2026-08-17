@@ -29,10 +29,10 @@ from ufo.credentials import (
     seal_installation,
 )
 from ufo.db import workspace_tx
+from ufo.egress_rules import InjectionRule, ScopeRule, derive_credential_rules
 from ufo.ext.context import CredentialAccess
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.sandbox.exec_env import ProbeEnv
-from ufo.sandbox.proxy.rules import InjectionRule, ScopeRule, derive_credential_rules
 from ufo.schema import tables
 from ufo.workspace import init_workspace_credentials, ws
 

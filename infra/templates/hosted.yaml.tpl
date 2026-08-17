@@ -225,11 +225,12 @@ spec:
   issuerRef: {name: ${cluster_issuer}, kind: ClusterIssuer}
   dnsNames: [${apex_host}]
 ---
-# The shared egress proxy meters every workspace sandbox through one service. It runs
-# from the ufo bundle image (`ufoctl proxy`), opens the RLS-bypassing owner DSN and scopes every
-# rule query by the run token's own workspace_id, signs sandbox leaves from a stable platform CA
-# (UFO_EGRESS_CA_*), and injects only the platform model-provider key. An off-cluster sandbox (e2b)
-# dials it through the internet-facing TLS service managed by the environment.
+# The shared egress proxy meters every workspace sandbox through one service. It runs the standalone
+# ufo-egress binary (RFC 0035) — a thin data plane holding no keys and no database: it verifies the
+# run token locally to scope caps, then calls serve's internal egress-control RPC
+# (UFO_EGRESS_CONTROL_URL, bearer UFO_EGRESS_CONTROL_TOKEN) for every resolve/authorize/forward/meter
+# decision, and signs sandbox leaves from a stable platform CA (UFO_EGRESS_CA_*). An off-cluster
+# sandbox (e2b) dials it through the internet-facing TLS service managed by the environment.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -284,9 +285,8 @@ spec:
       enableServiceLinks: false
       containers:
         - name: proxy
-          image: ${bundle_image}
-          # ENTRYPOINT ["ufoctl"] is baked in; `proxy` reads the shared fleet config mounted below.
-          args: [proxy]
+          image: ${registry}/ufo-egress:${image_tag}
+          # The ufo-egress binary is the image entrypoint and reads its whole configuration from env.
           # Endpoint/NLB-target deregistration propagates for a beat after the pod turns
           # Terminating; keep the listener accepting until it lands, then SIGTERM starts the drain.
           lifecycle:
@@ -296,14 +296,21 @@ spec:
           ports:
             - {name: proxy, containerPort: 8888}
           env:
-            - {name: UFO_OTLP_ENDPOINT, value: "${otlp_endpoint}"}
-            # The RLS-bypassing owner DSN (password-bearing → a Secret, never a ConfigMap).
-            - name: UFO_OWNER_DSN
-              valueFrom:
-                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            # Drain live tunnels on SIGTERM for as long as serve drains its own turns, so a rollout
+            # never cuts sandbox egress mid-stream; bounded above by terminationGracePeriodSeconds.
+            - {name: UFO_EGRESS_GRACEFUL_SHUTDOWN_SECONDS, value: "${graceful_shutdown_seconds}"}
+            - {name: UFO_EGRESS_PORT, value: "8888"}
+            # serve's internal egress-control RPC: the data plane resolves, authorizes, forwards, and
+            # meters through it, so it holds no keys and no database of its own.
+            - {name: UFO_EGRESS_CONTROL_URL, value: "http://ufo-serve.${namespace}.svc.cluster.local:8710"}
+            # Verifies the run token locally to scope caps before it calls the control RPC.
             - name: UFO_TOKEN_SECRET
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}
+            # The bearer serve's egress-control RPC requires; serve reads the same key via envFrom.
+            - name: UFO_EGRESS_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: UFO_EGRESS_CONTROL_TOKEN}
             # The stable platform CA the proxy signs every per-host sandbox leaf from.
             - name: UFO_EGRESS_CA_CERT
               valueFrom:
@@ -311,51 +318,13 @@ spec:
             - name: UFO_EGRESS_CA_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-egress-ca, key: UFO_EGRESS_CA_KEY}
-            # The platform model-provider keys the proxy swaps onto the wire for sandbox egress.
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: ANTHROPIC_API_KEY}
-            - name: OPENAI_API_KEY
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: OPENAI_API_KEY}
-            # The broker key the proxy forwards sentinel CLI requests with (Composio proxy-execute).
-            - name: COMPOSIO_API_KEY
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}
-            # The GitHub App source mints each workspace's installation token in this process.
-            # The coding manifest treats the registration as all-or-none, so the proxy receives
-            # the same four values serve uses even though minting consumes only the id and PEM.
-            - name: GITHUB_APP_ID
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: GITHUB_APP_ID}
-            - name: GITHUB_APP_CLIENT_ID
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: GITHUB_APP_CLIENT_ID}
-            - name: GITHUB_APP_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: GITHUB_APP_CLIENT_SECRET}
-            - name: GITHUB_APP_PRIVATE_KEY
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: GITHUB_APP_PRIVATE_KEY}
-            # The one Fernet the fleet stores workspace credentials under: the proxy decrypts each
-            # workspace's keyed-provider secrets per turn to swap them onto the wire. A pack with a
-            # keyed provider fails loud without it, so proxy and serve read the same secret.
-            - name: UFO_CREDENTIAL_KEY
-              valueFrom:
-                secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}
 %{ if cache_enabled }
-            # The shared secret the cache daemon presents to this process's loopback credential
-            # callback (RFC 0032). proxy and cache read the same value; a request without it is
-            # refused before any resolution.
-            - name: UFO_CACHE_CONTROL_TOKEN
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: UFO_CACHE_CONTROL_TOKEN}
+            # The local cache daemon a Service rule relays to (RFC 0032); the daemon binds loopback.
+            - {name: UFO_EGRESS_CACHE_DAEMON, value: "127.0.0.1:9110"}
 %{ endif }
           resources:
             requests: {cpu: 250m, memory: 384Mi}
             limits: {cpu: "2", memory: 768Mi}
-          volumeMounts:
-            - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
           # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind.
           readinessProbe:
             tcpSocket: {port: proxy}
@@ -367,15 +336,16 @@ spec:
             periodSeconds: 20
 %{ if cache_enabled }
         # The sandbox cache daemon: git mirrors + npm/PyPI caching for internet-holding sandboxes,
-        # sharing loopback with the proxy. It authenticates upstream by phoning the proxy's
-        # credential callback; the proxy routes `cache.ufo.internal` to it (config.sandbox.cache_daemon).
+        # sharing loopback with the proxy. For a git upstream it needs authentication for, it phones
+        # serve's `/internal/git-credential` route, which resolves the workspace's own credential;
+        # that route carries its own cache token, so the cache never reaches the egress secrets tier.
         # Bound to loopback, so its health probe execs against 127.0.0.1 rather than the pod IP.
         - name: cache
           image: ${registry}/ufo-cache:${image_tag}
           env:
             - {name: UFO_CACHE_LISTEN, value: "127.0.0.1:9110"}
             - {name: UFO_CACHE_STATE, value: /var/cache/ufo}
-            - {name: UFO_CACHE_CONTROL_URL, value: "http://127.0.0.1:9111"}
+            - {name: UFO_CACHE_CONTROL_URL, value: "http://ufo-serve.${namespace}.svc.cluster.local:8710"}
             - name: UFO_CACHE_CONTROL_TOKEN
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: UFO_CACHE_CONTROL_TOKEN}
@@ -397,13 +367,8 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 20
 %{ endif }
-      volumes:
-        - name: config
-          secret:
-            secretName: ufo-serve
-            items:
-              - {key: ufo.toml, path: ufo.toml}
 %{ if cache_enabled }
+      volumes:
         # The cache's hot tier: node-local scratch, wiped on pod roll. Durability is the S3 tier the
         # daemon restores from on a cold start, not this volume. Sized above the daemon's ceilings —
         # UFO_CACHE_DISK_LIMIT_BYTES (default 4 GiB of git mirrors), UFO_CACHE_PKG_DISK_LIMIT_BYTES
@@ -727,7 +692,11 @@ metadata:
 spec:
   selector: {app: ufo-serve}
   ports:
+    # `http` (80) is the member-facing port the shared_host ingress routes to; `internal` (8710) is
+    # the same app on its own port, reached only in-cluster — the ufo-egress data plane dials serve's
+    # egress-control RPC here (UFO_EGRESS_CONTROL_URL), off the ingress path.
     - {name: http, port: 80, targetPort: http}
+    - {name: internal, port: 8710, targetPort: http}
 ---
 # The one authenticated host for every hosted workspace (no per-workspace subdomain — RFC 0011):
 # the whole browser sign-in flow is same-origin here, so the host-only `ufo_session` cookie is set

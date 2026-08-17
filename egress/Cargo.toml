@@ -1,0 +1,43 @@
+[package]
+name = "ufo-egress"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ufo-egress"
+path = "src/main.rs"
+
+[lib]
+name = "ufo_egress"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+webpki-roots = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+hickory-resolver = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+flate2 = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

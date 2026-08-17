@@ -2,9 +2,10 @@
 #
 #   postgres ─┐
 #   redis ────┤
-#   init ─────┤  ufoctl migrate → ufo-control migrate → ufo-control rls-bootstrap (one-shot)
+#   init ─────┤  ufoctl migrate → ufo-control migrate → ufo-control rls-bootstrap + egress CA (one-shot)
 #   gateway ──┤  ufo-control gateway   :8080   onboarding/login (WorkOS sign-in)
-#   serve ────┘  ufoctl serve          :8710   surfaces + DBOS workers + embedded egress proxy
+#   serve ────┤  ufoctl serve          :8710   surfaces + DBOS workers + the egress-control RPC
+#   egress ───┘  ufo-egress            :8888   the Rust egress data plane, in serve's netns
 #
 # Postgres keeps the ufo:ufo credentials the test/eval matrix expects; init creates the ufo_owner
 # and (via rls-bootstrap) ufo_serve roles the hosted topology uses. WorkOS emails the sign-in
@@ -59,6 +60,7 @@ services:
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}
     volumes:
       - ./dev:/app/dev:ro
+      - egress-ca:/egress-ca
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -112,8 +114,8 @@ services:
       AWS_REGION: us-east-1
       # Shared serve enumerates every workspace for job sweeps through the RLS-bypass owner role.
       UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
-      # A model provider key is REQUIRED for serve to boot — the embedded egress proxy needs an
-      # egress route. Set one in your shell (export ANTHROPIC_API_KEY=…) before `docker compose up`.
+      # A model provider key is REQUIRED for serve to boot — the egress-control RPC's model base
+      # needs one. Set it in your shell (export ANTHROPIC_API_KEY=…) before `docker compose up`.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # The base-pinned embed backend reads this on every embed call, so memory indexing and recall
       # raise without it while the rest of the deploy runs. `ufoctl init` names it when it is unset.
@@ -130,11 +132,37 @@ services:
     volumes:
       - ./dev:/app/dev:ro
       - blobs:/data
+      - egress-ca:/egress-ca:ro
     depends_on:
       postgres: {condition: service_healthy}
       init: {condition: service_completed_successfully}
     restart: unless-stopped
 
+  # The egress data plane (RFC 0035): a standalone Rust MITM proxy that holds no keys and no DB — it
+  # resolves, authorizes, forwards, and meters through serve's egress-control RPC. It shares serve's
+  # network namespace, so the local carrier reaches it at 127.0.0.1:8888 (the address the carrier
+  # already forms) and it reaches serve's RPC at 127.0.0.1:8710. `ufoctl serve` alone gives no
+  # sandbox egress; this service is what makes an in-sandbox CONNECT land somewhere.
+  egress:
+    build: {context: ./egress, dockerfile: Dockerfile}
+    image: ${UFO_EGRESS_DEV_IMAGE:-ufo-egress-dev}
+    network_mode: "service:serve"
+    environment:
+      UFO_EGRESS_BIND: "0.0.0.0"
+      UFO_EGRESS_PORT: "8888"
+      UFO_EGRESS_CONTROL_URL: http://127.0.0.1:8710
+      UFO_EGRESS_CONTROL_TOKEN: ufo-local-dev-egress-token
+      UFO_TOKEN_SECRET: ufo-local-dev-token-secret
+      UFO_EGRESS_CA_CERT_FILE: /egress-ca/ca.crt
+      UFO_EGRESS_CA_KEY_FILE: /egress-ca/ca.key
+    volumes:
+      - egress-ca:/egress-ca:ro
+    depends_on:
+      init: {condition: service_completed_successfully}
+      serve: {condition: service_started}
+    restart: unless-stopped
+
 volumes:
   pgdata:
   blobs:
+  egress-ca:

@@ -255,17 +255,68 @@ def test_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None
     assert routing == expected
 
 
-def test_hosted_proxy_receives_the_composio_broker_key() -> None:
-    """The shared egress proxy forwards sentinel CLI requests through Composio's proxy-execute, so
-    its pod needs the broker key exactly as it needs the model keys it swaps."""
-    assert "name: COMPOSIO_API_KEY" in PROXY_DEPLOYMENT
-    assert "secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}" in PROXY_DEPLOYMENT
+def test_hosted_proxy_runs_the_ufo_egress_data_plane() -> None:
+    """The proxy pod runs the standalone ufo-egress image as its entrypoint (no `args`), binds 8888,
+    and reaches serve's egress-control RPC: the control URL on serve's internal port, the bearer and
+    the run-token secret from ufo-platform-secrets, and the signing CA (cert + key) from
+    ufo-egress-ca. With the cache on it relays to the loopback cache daemon."""
+    assert "image: ${registry}/ufo-egress:${image_tag}" in PROXY_DEPLOYMENT
+    assert "args:" not in PROXY_DEPLOYMENT
+    assert '- {name: UFO_EGRESS_PORT, value: "8888"}' in PROXY_DEPLOYMENT
+    assert (
+        "- {name: UFO_EGRESS_CONTROL_URL, "
+        'value: "http://ufo-serve.${namespace}.svc.cluster.local:8710"}' in PROXY_DEPLOYMENT
+    )
+    assert "name: UFO_EGRESS_CONTROL_TOKEN" in PROXY_DEPLOYMENT
+    assert (
+        "secretKeyRef: {name: ufo-platform-secrets, key: UFO_EGRESS_CONTROL_TOKEN}"
+        in PROXY_DEPLOYMENT
+    )
+    for ca_key in ("UFO_EGRESS_CA_CERT", "UFO_EGRESS_CA_KEY"):
+        assert f"secretKeyRef: {{name: ufo-egress-ca, key: {ca_key}}}" in PROXY_DEPLOYMENT
+    assert '- {name: UFO_EGRESS_CACHE_DAEMON, value: "127.0.0.1:9110"}' in PROXY_DEPLOYMENT
 
 
-def test_hosted_proxy_receives_the_github_app_registration() -> None:
-    """The proxy loads the coding manifest itself and mints GitHub installation tokens there, so
-    its process must see the same projected all-or-none App registration that makes the source
-    exist."""
+def test_hosted_proxy_is_a_keyless_data_plane() -> None:
+    """The ufo-egress data plane holds no provider, broker, or credential keys and no database — it
+    verifies the run token locally and calls serve's egress-control RPC for every decision. So every
+    secret the deleted Python proxy carried (the model/provider keys, the Composio broker key, the
+    GitHub App registration, the credential Fernet, the RLS-bypassing owner DSN) is gone from its
+    pod; only the token secret, the control bearer, and the signing CA remain."""
+    for absent in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "COMPOSIO_API_KEY",
+        "GITHUB_APP_ID",
+        "GITHUB_APP_CLIENT_ID",
+        "GITHUB_APP_CLIENT_SECRET",
+        "GITHUB_APP_PRIVATE_KEY",
+        "UFO_CREDENTIAL_KEY",
+        "UFO_OWNER_DSN",
+    ):
+        assert absent not in PROXY_DEPLOYMENT
+
+
+def test_egress_control_token_is_minted_and_projected() -> None:
+    """The bearer the ufo-egress data plane presents to serve's egress-control RPC is minted in
+    terraform, written into the platform secret, and projected into ufo-platform-secrets — so serve
+    (which reads that secret whole via envFrom) and the proxy (an explicit secretKeyRef) resolve one
+    shared value."""
+    secrets_tf = PLATFORM_SECRETS.read_text()
+    assert 'resource "random_password" "egress_control_token"' in secrets_tf
+    assert '"egress-control-token"' in secrets_tf
+    assert "random_password.egress_control_token.result" in secrets_tf
+    assert (
+        "{secretKey: UFO_EGRESS_CONTROL_TOKEN, "
+        "remoteRef: {key: ${secret_platform}, property: egress-control-token}}"
+        in CLUSTER_SERVICES_TEMPLATE.read_text()
+    )
+
+
+def test_hosted_github_app_registration_is_projected_for_serve() -> None:
+    """serve loads the coding manifest and mints GitHub installation tokens in-process, so the
+    all-or-none App registration is projected into ufo-platform-secrets, which serve reads whole via
+    envFrom. The keyless ufo-egress data plane never receives it."""
     platform_secrets = CLUSTER_SERVICES_TEMPLATE.read_text()
     for name, remote_property in (
         ("GITHUB_APP_ID", "github-app-id"),
@@ -277,17 +328,13 @@ def test_hosted_proxy_receives_the_github_app_registration() -> None:
             f"{{secretKey: {name}, remoteRef: "
             f"{{key: ${{secret_api_keys}}, property: {remote_property}}}}}" in platform_secrets
         )
-        assert f"name: {name}" in PROXY_DEPLOYMENT
-        assert f"secretKeyRef: {{name: ufo-platform-secrets, key: {name}}}" in PROXY_DEPLOYMENT
 
 
-def test_hosted_proxy_receives_the_fleet_credential_key() -> None:
-    """A keyed provider's secret is decrypted by the proxy itself, per workspace per turn, so its
-    pod opens the same Fernet serve does. Without it the proxy fails loud at boot and every keyed
-    host goes unreachable fleet-wide — a live outage rather than a red check — so the rendered
-    manifest is what has to carry it, not only the Python config path."""
-    assert "name: UFO_CREDENTIAL_KEY" in PROXY_DEPLOYMENT
-    assert "secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}" in PROXY_DEPLOYMENT
+def test_hosted_serve_holds_the_fleet_credential_key() -> None:
+    """A keyed provider's secret is decrypted serve-side now — the egress data plane holds no keys —
+    so serve, not the proxy, opens the fleet Fernet."""
+    assert "name: UFO_CREDENTIAL_KEY" in SERVE_DEPLOYMENT
+    assert "secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}" in SERVE_DEPLOYMENT
 
 
 def test_hosted_proxy_receives_the_run_token_signing_secret() -> None:
@@ -342,9 +389,12 @@ def test_sites_answer_one_label_under_the_apex_behind_the_proxy() -> None:
         assert "loadBalancerSourceRanges = local.cloudflare_ipv4_ranges" in config
 
 
-def test_hosted_proxy_and_serve_share_the_rendered_config() -> None:
+def test_serve_mounts_the_rendered_config_and_the_proxy_reads_env() -> None:
+    """serve mounts the rendered shared-fleet ufo.toml; the ufo-egress data plane reads its whole
+    configuration from env and mounts no config, so only serve carries the config volume."""
     config_mount = "{name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}"
-    for deployment in (PROXY_DEPLOYMENT, SERVE_DEPLOYMENT):
-        assert config_mount in deployment
-        assert "secretName: ufo-serve" in deployment
-        assert "{key: ufo.toml, path: ufo.toml}" in deployment
+    assert config_mount in SERVE_DEPLOYMENT
+    assert "secretName: ufo-serve" in SERVE_DEPLOYMENT
+    assert "{key: ufo.toml, path: ufo.toml}" in SERVE_DEPLOYMENT
+    assert config_mount not in PROXY_DEPLOYMENT
+    assert "ufo.toml" not in PROXY_DEPLOYMENT

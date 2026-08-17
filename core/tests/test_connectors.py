@@ -5,16 +5,15 @@ server-side execution.
 The installed sample extension is the real consumer — its stub connector (a canned OAuth handoff and
 one server-side-execute tool) stands in for a provider so the seam runs end to end without a live
 provider. These tests source the provider registry the way `serve` does (`_connect_flow` over the
-manifests) and drive the resulting grant through the proxy exactly as U8b/U8c do. The broker holds
-the account's token and executes tools server-side, so a grant admits and meters its host but
-injects nothing on the wire."""
+manifests) and read the resulting grant back through the turn's tool context. The broker holds the
+account's token and executes tools server-side, so a grant admits and meters its host but injects
+nothing on the wire — the admit/meter rules the grant derives are proved in `test_egress_rules` and
+`test_egress_control`, the wire that enforces them in the Rust `proxy_it`."""
 
 import asyncio
-import base64
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
 import pytest
@@ -34,22 +33,16 @@ from ufo.connectors import (
 )
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
-from ufo.sandbox.proxy.rules import REQUEST_METER_DIMENSION, MeterRule, ScopeRule
-from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from ufo.sandbox.session import RunToken, RunTokenCodec
+from ufo.grants import GrantStore, install_connect_flow
 from ufo.schema import tables
-from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
+from ufo.schema.records import Agent, Turn
 from ufo.serve import CONNECT_CALLBACK_PATH, _connect_flow, _connect_redirect_uri
-from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
 
-UNGRANTED_HOST = "api.ungranted.test"
 PUBLIC_BASE_URL = "https://ufo.example.com"
 EXPECTED_REDIRECT_URI = "https://ufo.example.com/v1/connect/callback"
 DISCONNECT_TIMEOUT_SECONDS = 5
-RUN_TOKENS = RunTokenCodec(b"connectors-test-run-token-secret")
 
 
 class _BarrierTransport(AsyncBaseTransport):
@@ -144,94 +137,6 @@ def test_redirect_uri_requires_config_once_a_connector_is_registered() -> None:
     providers = {c.oauth.provider: c.oauth for c in sample.manifest().connectors}
     with pytest.raises(RuntimeError, match="public_base_url"):
         _connect_redirect_uri(_config(None), providers)
-
-
-async def test_connect_binds_a_grant_and_the_proxy_admits_and_meters_the_host(
-    db: None,
-) -> None:
-    """Connect the account in chat, binding a grant, then resolve it through the REAL egress proxy:
-    the provider host is admitted (a ScopeRule) and metered (a MeterRule), an ungranted host is
-    refused at CONNECT. The broker holds the token, so the grant injects nothing on the wire."""
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    turn_id = await _turn(workspace_id, agent_id, conversation_id)
-    flow = _connect_flow(_credentials(), _config(PUBLIC_BASE_URL), (sample.manifest(),))
-    assert flow is not None
-    install_connect_flow(flow)
-
-    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id=turn_id)
-    result = await connect_account_handler(
-        ctx,
-        ConnectAccountInput(
-            provider=sample.CONNECTOR_PROVIDER, user_description="connecting their account"
-        ),
-    )
-    request = ConnectRequest.model_validate_json(result.content[0].text.splitlines()[1])
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == turn_id)
-            .values(
-                status="done",
-                speaker_member_id=member_id,
-                terminal=TerminalFrame(status="done", connect_request=request).model_dump(
-                    mode="json"
-                ),
-                updated_at=sa.func.now(),
-            )
-        )
-    url = await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
-    assert url.startswith(sample.CONNECTOR_AUTHORIZE_URL)
-    state = parse_qs(urlparse(url).query)["state"][0]
-    recorded = await flow.complete(state=state, code="the-code")
-    assert (recorded.provider, recorded.account_id) == (
-        sample.CONNECTOR_PROVIDER,
-        sample.CONNECTOR_ACCOUNT,
-    )
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(
-                    tables.connection.c.host,
-                    tables.connection.c.owner_member_id,
-                ).where(tables.connection.c.workspace_id == workspace_id)
-            )
-        ).one()
-    assert (row.host, row.owner_member_id) == (sample.CONNECTOR_HOST, member_id)
-
-    resolver = PerAgentRules(base=(), grants=flow.store)
-    cert, key = await generate_ca()
-    proxy = EgressProxy(
-        resolve=resolver.resolve,
-        authorize=resolver.turn_live,
-        generation=resolver.rules_generation,
-        ca_cert=cert,
-        ca_key=key,
-        run_tokens=RUN_TOKENS,
-    )
-    endpoint = await proxy.start(bind_host="127.0.0.1")
-    try:
-        run = RunToken(workspace_id, turn_id)
-        assert await _connect_status(endpoint.port, UNGRANTED_HOST, RUN_TOKENS.encode(run)) == 403
-        rules = await proxy._rules_for(run)
-        assert any(
-            isinstance(r, ScopeRule) and sample.CONNECTOR_HOST in r.allowed_hosts for r in rules
-        )
-        assert MeterRule(host=sample.CONNECTOR_HOST, dimension=REQUEST_METER_DIMENSION) in rules
-        await proxy._meter_ledger(sample.CONNECTOR_HOST, run, rules)
-    finally:
-        await proxy.stop()
-
-    async with workspace_tx() as connection:
-        ledger = (
-            await connection.execute(
-                sa.select(tables.ledger.c.dimension, tables.ledger.c.amount).where(
-                    tables.ledger.c.turn_id == turn_id
-                )
-            )
-        ).one()
-    assert (ledger.dimension, int(ledger.amount)) == ("egress", 1)
 
 
 async def test_connector_account_is_scoped_to_the_turn_agents_own_grants(db: None) -> None:
@@ -555,38 +460,3 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
             )
         )
     return conversation_id
-
-
-async def _turn(workspace_id: UUID, agent_id: UUID, conversation_id: UUID) -> UUID:
-    turn_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="running",
-                inbound="hi",
-                terminal=None,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    return turn_id
-
-
-def _basic(run_token: str) -> str:
-    return "Basic " + base64.b64encode(f"{run_token}:".encode()).decode()
-
-
-async def _connect_status(port: int, host: str, run_token: str) -> int:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    head = f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}\r\n"
-    head += f"Proxy-Authorization: {_basic(run_token)}\r\n"
-    writer.write((head + "\r\n").encode())
-    await writer.drain()
-    status_line = await reader.readline()
-    writer.close()
-    return int(status_line.split()[1])

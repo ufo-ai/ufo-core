@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
@@ -18,6 +17,17 @@ from ufo.audience import conversation_audience
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
+from ufo.egress_resolver import PerAgentRules
+from ufo.egress_rules import (
+    REQUEST_METER_DIMENSION,
+    ConnectorTransferHosts,
+    ForwardRule,
+    InjectionRule,
+    InternetRule,
+    MeterRule,
+    ScopeRule,
+    derive_grant_rules,
+)
 from ufo.ext.loader import connection_hooks
 from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
 from ufo.grants import (
@@ -37,18 +47,7 @@ from ufo.grants import (
     grant_summaries,
     install_connect_flow,
 )
-from ufo.sandbox.proxy.rules import (
-    REQUEST_METER_DIMENSION,
-    ConnectorTransferHosts,
-    ForwardRule,
-    InjectionRule,
-    InternetRule,
-    MeterRule,
-    ScopeRule,
-    derive_grant_rules,
-)
-from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from ufo.sandbox.session import RunToken, RunTokenCodec
+from ufo.sandbox.session import RunToken
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.surfaces.cli import callback_router
@@ -61,7 +60,6 @@ UNGRANTED_HOST = "api.ungranted.test"
 HOST_A = "api.aaa.test"
 HOST_B = "api.bbb.test"
 REDIRECT_URI = "http://surface/v1/connect/callback"
-RUN_TOKENS = RunTokenCodec(b"grants-test-run-token-secret")
 
 
 @pytest.fixture(autouse=True)
@@ -708,40 +706,11 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
     assert (summary.owner_member_id, summary.conversation_id) == (member_id, conversation_id)
 
 
-async def test_proxy_resolves_the_granted_host_but_blocks_tokenless_connect() -> None:
-    """A grant contributes an exact host rule but no unsigned caller can exercise it."""
-    grant = Grant(
-        id=uuid4(),
-        connection_id=uuid4(),
-        provider="stub",
-        account_id="acct-42",
-        host=GRANTED_HOST,
-        owner_member_id=uuid4(),
-        connection_shared=False,
-    )
-    resolver = PerAgentRules(base=derive_grant_rules((grant,)), grants=None)
-    cert, key = await generate_ca()
-    proxy = EgressProxy(
-        resolve=resolver.resolve,
-        authorize=resolver.turn_live,
-        generation=resolver.rules_generation,
-        ca_cert=cert,
-        ca_key=key,
-        run_tokens=RUN_TOKENS,
-    )
-    endpoint = await proxy.start(bind_host="127.0.0.1")
-    try:
-        assert await _connect_status(endpoint.port, GRANTED_HOST) == 403
-        rules = await proxy._rules_for(None)
-    finally:
-        await proxy.stop()
-    assert any(isinstance(r, ScopeRule) and GRANTED_HOST in r.allowed_hosts for r in rules)
-    assert not any(isinstance(r, InjectionRule) for r in rules)
-
-
 async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> None:
-    """Per-agent authentication isolation: agent A gets an exact rule for A's provider only. The
-    public internet rule may reach B's host opaquely, but cannot forward or inject B's account."""
+    """Per-agent authentication isolation: agent A's resolved rules carry an exact rule for A's
+    provider only — B's host is neither scoped nor forwardable in A's set, so A cannot inject or
+    forward through B's account. A's internet rule may reach B's host opaquely, but with no
+    credential."""
     workspace_id = await _workspace()
     member_id, agent_a = await _member_agent(workspace_id)
     agent_b = await _agent(workspace_id, "assistant-b")
@@ -786,39 +755,10 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
     assert not any(isinstance(r, ForwardRule) and r.host == HOST_B for r in rules_a)
     assert InternetRule() in rules_a
 
-    async def local_public(_host: str, _port: int) -> str:
-        return "127.0.0.1"
-
-    received = asyncio.Future[bytes]()
-
-    async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        received.set_result(await reader.read())
-        writer.close()
-
-    stub = await asyncio.start_server(upstream, "127.0.0.1", 0)
-    stub_port = stub.sockets[0].getsockname()[1]
-    cert, key = await generate_ca()
-    proxy = EgressProxy(
-        resolve=resolver.resolve,
-        authorize=resolver.turn_live,
-        generation=resolver.rules_generation,
-        ca_cert=cert,
-        ca_key=key,
-        run_tokens=RUN_TOKENS,
-        resolve_public=local_public,
-    )
-    endpoint = await proxy.start(bind_host="127.0.0.1")
-    try:
-        run_a = RUN_TOKENS.encode(RunToken(workspace_id, turn_a))
-        assert await _connect_status(endpoint.port, HOST_B, run_a, stub_port, b"opaque") == 200
-        assert await received == b"opaque"
-    finally:
-        await proxy.stop()
-        stub.close()
-        await stub.wait_closed()
-
 
 async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) -> None:
+    """The resolver derives each call, so a grant recorded after it was built is live on the next
+    turn's resolve — nothing pins a snapshot at boot."""
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
@@ -827,37 +767,20 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
     store = GrantStore()
     resolver = PerAgentRules(base=(), grants=store)
 
-    cert, key = await generate_ca()
-    proxy = EgressProxy(
-        resolve=resolver.resolve,
-        authorize=resolver.turn_live,
-        generation=resolver.rules_generation,
-        ca_cert=cert,
-        ca_key=key,
-        run_tokens=RUN_TOKENS,
+    rules_1 = await resolver.resolve(RunToken(workspace_id, turn_1))
+    assert not any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_1)
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-a",
+        host=HOST_A,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=False,
     )
-    endpoint = await proxy.start(bind_host="127.0.0.1")
-    try:
-        assert (
-            await _connect_status(
-                endpoint.port, HOST_A, RUN_TOKENS.encode(RunToken(workspace_id, turn_1))
-            )
-            == 403
-        )
-        await _record(
-            store,
-            workspace_id,
-            agent_id,
-            provider="stub",
-            account_id="acct-a",
-            host=HOST_A,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-            shared=False,
-        )
-        rules_2 = await proxy._rules_for(RunToken(workspace_id, turn_2))
-    finally:
-        await proxy.stop()
+    rules_2 = await resolver.resolve(RunToken(workspace_id, turn_2))
     assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_2)
 
 
@@ -1611,30 +1534,6 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
             )
         )
     return conversation_id
-
-
-def _basic(run_token: str) -> str:
-    return "Basic " + base64.b64encode(f"{run_token}:".encode()).decode()
-
-
-async def _connect_status(
-    port: int,
-    host: str,
-    run_token: str = "",
-    target_port: int = 443,
-    payload: bytes = b"",
-) -> int:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    head = f"CONNECT {host}:{target_port} HTTP/1.1\r\nHost: {host}\r\n"
-    if run_token:
-        head += f"Proxy-Authorization: {_basic(run_token)}\r\n"
-    writer.write((head + "\r\n").encode())
-    await writer.drain()
-    status_line = await reader.readline()
-    writer.write(payload)
-    await writer.drain()
-    writer.close()
-    return int(status_line.split()[1])
 
 
 async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(db: None) -> None:

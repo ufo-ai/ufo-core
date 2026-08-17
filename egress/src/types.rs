@@ -1,0 +1,136 @@
+//! The shared value types. `Rule` and `MeterRecord` are the RPC wire contract with core `serve`
+//! (Python serializes, Rust deserializes / posts); the token types are what the proxy verifies
+//! locally to scope connection caps and the rule cache.
+
+use std::collections::BTreeSet;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// A model call's token split, one i64 per class — posted to the meter RPC, priced core-side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_5m_tokens: i64,
+    pub cache_write_30m_tokens: i64,
+    pub cache_write_1h_tokens: i64,
+}
+
+impl Usage {
+    pub fn total(&self) -> i64 {
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_read_tokens
+            + self.cache_write_5m_tokens
+            + self.cache_write_30m_tokens
+            + self.cache_write_1h_tokens
+    }
+}
+
+/// What egress is allowed for one principal, resolved by core `serve` and returned over the resolve
+/// RPC. `Injection.real` carries the resolved secret the proxy swaps onto the wire; the master key
+/// that produced it never crosses. The `kind`-tagged JSON is the one contract both sides share.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Rule {
+    Scope {
+        #[serde(rename = "hosts")]
+        allowed_hosts: BTreeSet<String>,
+    },
+    Internet,
+    Injection {
+        host: String,
+        header: String,
+        sentinel: String,
+        real: String,
+    },
+    Meter {
+        host: String,
+        dimension: String,
+    },
+    Forward {
+        host: String,
+        header: String,
+        sentinel: String,
+        account_id: String,
+    },
+    Service {
+        host: String,
+        #[serde(default)]
+        daemon_prefix: Option<String>,
+    },
+}
+
+/// One metered event the proxy posts to the meter RPC; `serve` groups, prices, and writes the ledger.
+/// `Metric` carries no ledger charge — it is the `sandbox_egress_total{host, dimension}` observability
+/// counter the in-process Python proxy emitted directly, now teed through the RPC so `serve` (which
+/// holds the OTLP meter provider) emits it. It fires once per metered CONNECT — for a token-metered
+/// host that means at establish time, before and independent of whether usage parses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MeterRecord {
+    Egress {
+        workspace_id: Uuid,
+        turn_id: Option<Uuid>,
+    },
+    Tokens {
+        workspace_id: Uuid,
+        turn_id: Uuid,
+        model: String,
+        usage: Usage,
+    },
+    Metric {
+        host: String,
+        dimension: String,
+    },
+}
+
+/// The turn and member authority one sandbox process tree carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunToken {
+    pub workspace_id: Uuid,
+    pub turn_id: Uuid,
+    pub acting_member_id: Option<Uuid>,
+}
+
+/// The conversation and member authority one off-turn sandbox exec carries, until it expires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProbeToken {
+    pub workspace_id: Uuid,
+    pub conversation_id: Uuid,
+    pub probe_id: Uuid,
+    pub expires_at: i64,
+    pub acting_member_id: Option<Uuid>,
+}
+
+/// What a CONNECT presents itself as: a turn's run token, or one probe exec's own token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Principal {
+    Run(RunToken),
+    Probe(ProbeToken),
+}
+
+impl Principal {
+    pub fn workspace_id(&self) -> Uuid {
+        match self {
+            Principal::Run(t) => t.workspace_id,
+            Principal::Probe(t) => t.workspace_id,
+        }
+    }
+}
+
+/// A broker-forwarded provider response, reconstructed core-side and returned over the forward RPC.
+#[derive(Clone, Debug)]
+pub struct ForwardedResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+pub const SENTINEL_MODEL_KEY: &str = "UFO_SENTINEL_MODEL_KEY";
+pub const ANTHROPIC_HOST: &str = "api.anthropic.com";
+pub const OPENAI_HOST: &str = "api.openai.com";
+pub const REQUEST_METER_DIMENSION: &str = "requests";
+pub const TOKENS_DIMENSION: &str = "tokens";

@@ -13,14 +13,14 @@ from ufo_ext_keyed_connectors import KEYED_PROVIDERS, manifest
 from ufo.credential_kind import CREDENTIAL_KIND
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
-from ufo.ext.loader import core_object_kinds, injecting_slots
-from ufo.ext.manifest import Manifest
-from ufo.sandbox.proxy.rules import (
+from ufo.egress_rules import (
     InjectionRule,
     MeterRule,
     ScopeRule,
     derive_credential_rules,
 )
+from ufo.ext.loader import core_object_kinds, injecting_slots
+from ufo.ext.manifest import Manifest
 from ufo.schema import tables
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws

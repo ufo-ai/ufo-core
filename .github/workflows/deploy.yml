@@ -296,6 +296,23 @@ jobs:
             docker push "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE"
           fi
 
+      # Egress proxy (RFC 0035): the Rust data-plane MITM proxy built from `egress/`, run as the
+      # sandbox-proxy pod's main container in place of `ufoctl proxy`. After the apply, so a first run
+      # creates the ufo-egress repository before the push — unlike the cache sidecar, the proxy
+      # Deployment references this image unconditionally, so it cannot wait behind an enable flag. The
+      # apply sets wait_for_rollout=false on that one Deployment (ufo.tf) so it does not block on a
+      # ReplicaSet waiting for this unpushed image; the rollout is confirmed below once the push lands,
+      # and maxUnavailable=0 keeps the old proxy pods serving egress until then — the gap is drained.
+      - name: Build + push egress image
+        if: github.event_name != 'pull_request'
+        run: |
+          if aws ecr describe-images --repository-name ufo-egress --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "ufo-egress:$IMAGE_TAG already pushed — skipping"
+          else
+            docker build -f egress/Dockerfile -t "$ECR_REGISTRY/ufo-egress:$IMAGE_TAG" egress
+            docker push "$ECR_REGISTRY/ufo-egress:$IMAGE_TAG"
+          fi
+
       - name: Wait for runtime rollout
         if: github.event_name != 'pull_request'
         run: |

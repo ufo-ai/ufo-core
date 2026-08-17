@@ -30,18 +30,18 @@ from ufo.credentials import (
     slot_secret,
 )
 from ufo.db import workspace_tx
+from ufo.egress_rules import (
+    InjectionRule,
+    MeterRule,
+    ScopeRule,
+    derive_credential_rules,
+)
 from ufo.ext.loader import injecting_slots
 from ufo.ext.manifest import (
     ConnectorProvider,
     CredentialSlot,
     InjectionTarget,
     Manifest,
-)
-from ufo.sandbox.proxy.rules import (
-    InjectionRule,
-    MeterRule,
-    ScopeRule,
-    derive_credential_rules,
 )
 from ufo.schema import tables
 from ufo.workspace import init_workspace_credentials, ws, ws_current

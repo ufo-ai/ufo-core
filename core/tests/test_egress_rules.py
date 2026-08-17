@@ -7,10 +7,7 @@ import pytest
 
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import CliCredential, ForwardedResponse
-from ufo.ext.loader import connector_clis
-from ufo.ext.manifest import ConnectorProvider, Manifest
-from ufo.grants import Grant, grant_sentinel
-from ufo.sandbox.proxy.rules import (
+from ufo.egress_rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
     REQUEST_METER_DIMENSION,
@@ -29,6 +26,9 @@ from ufo.sandbox.proxy.rules import (
     derive_model_rules,
     provider_host,
 )
+from ufo.ext.loader import connector_clis
+from ufo.ext.manifest import ConnectorProvider, Manifest
+from ufo.grants import Grant, grant_sentinel
 
 
 def test_provider_host_by_prefix() -> None:

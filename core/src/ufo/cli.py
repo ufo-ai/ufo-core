@@ -40,7 +40,6 @@ from ufo.grants import GrantSummary, workspace_grant_summaries
 from ufo.ingress_serve import run as ingress_run
 from ufo.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.proxy_serve import OWNER_DSN_ENV
-from ufo.proxy_serve import run as proxy_run
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import email_domain
@@ -271,7 +270,7 @@ def migrate() -> None:
     table-owning extension, before `serve`, so the extension's tables exist. Idempotent.
 
     The shared-schema deploy runs this once as the RLS-bypassing owner (the tables' owner), so the
-    cluster migrate Job injects the owner DSN as `UFO_OWNER_DSN` — mirroring `ufoctl proxy` — while
+    cluster migrate Job injects the owner DSN as `UFO_OWNER_DSN` — mirroring `ingress` — while
     the baked config still supplies `[pack]`. Without it, the config's own `database.url` is used
     for local development or a dedicated server."""
     config = load_config()
@@ -287,7 +286,7 @@ def migrate() -> None:
 
 @main.command()
 def serve() -> None:
-    """Run surfaces, workers, and jobs; embed the egress proxy for single-node config."""
+    """Run surfaces, workers, jobs, and the egress-control RPC the Rust proxy calls."""
     config = load_config()
     surface = home_surface(load_manifests(config.pack.name))
     if surface is not None:
@@ -373,12 +372,6 @@ class BrowserHandoff:
             '<button type="submit">Open your workspace</button>\n</form>\n'
             "<script>document.getElementById('open').submit()</script>\n"
         )
-
-
-@main.command()
-def proxy() -> None:
-    """Run the shared egress proxy: one service fronting every workspace sandbox."""
-    proxy_run()
 
 
 @main.command()

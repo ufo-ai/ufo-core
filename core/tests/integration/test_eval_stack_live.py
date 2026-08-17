@@ -76,7 +76,7 @@ def test_two_stacks_serve_simultaneously_without_collisions(
         assert asyncio.run(both_serve_at_once()) == [200, 200]
     finally:
         for stack in (first, second):
-            for log in (stack.seed_log, stack.serve_log, stack.eval_log):
+            for log in (stack.seed_log, stack.serve_log, stack.egress_log, stack.eval_log):
                 log.close()
 
     for stack in (first, second):
