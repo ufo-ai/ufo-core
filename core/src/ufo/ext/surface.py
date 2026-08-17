@@ -2439,32 +2439,7 @@ class SurfaceContext:
         row would refuse is still refused. A turn still going is not yet a run — it has no reply
         to report — so only terminal turns list, and each carries its terminal reply and the files
         it shared, so a feed renders output and previews without a second walk."""
-        query = (
-            sa.select(
-                tables.turn.c.id,
-                tables.turn.c.conversation_id,
-                tables.turn.c.agent_id,
-                tables.turn.c.status,
-                tables.turn.c.idempotency_key,
-                tables.turn.c.terminal,
-                tables.turn.c.created_at,
-                tables.conversation.c.surface,
-            )
-            .select_from(
-                tables.turn.join(
-                    tables.conversation,
-                    tables.turn.c.conversation_id == tables.conversation.c.id,
-                )
-            )
-            .where(
-                tables.turn.c.workspace_id == self.workspace_id,
-                tables.turn.c.admission_source == SCHEDULED_ADMISSION,
-                tables.turn.c.terminal.is_not(None),
-                tables.conversation.c.audience.in_(readable_audiences(member_id)),
-            )
-        )
-        if agent_id is not None:
-            query = query.where(tables.turn.c.agent_id == agent_id)
+        query = self._scheduled_runs(member_id, agent_id)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -2527,6 +2502,52 @@ class SurfaceContext:
                 str(row.id),
             ),
         )
+
+    async def count_scheduled_runs_since(
+        self,
+        member_id: UUID,
+        since: datetime,
+        *,
+        agent_id: UUID | None = None,
+    ) -> int:
+        """How many runs this reader's feed holds that fired at or after `since` — the rows
+        `list_scheduled_runs` would page, under the same audience fence, counted instead of read.
+        A feed sizes its newest page by a span of time rather than a fixed number of rows with
+        this, and reads no reply or file to do it."""
+        query = (
+            self._scheduled_runs(member_id, agent_id)
+            .with_only_columns(sa.func.count())
+            .where(tables.turn.c.created_at >= since)
+        )
+        async with workspace_tx() as connection:
+            return int((await connection.execute(query)).scalar_one())
+
+    def _scheduled_runs(self, member_id: UUID, agent_id: UUID | None) -> sa.Select[Any]:
+        query = (
+            sa.select(
+                tables.turn.c.id,
+                tables.turn.c.conversation_id,
+                tables.turn.c.agent_id,
+                tables.turn.c.status,
+                tables.turn.c.idempotency_key,
+                tables.turn.c.terminal,
+                tables.turn.c.created_at,
+                tables.conversation.c.surface,
+            )
+            .select_from(
+                tables.turn.join(
+                    tables.conversation,
+                    tables.turn.c.conversation_id == tables.conversation.c.id,
+                )
+            )
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.admission_source == SCHEDULED_ADMISSION,
+                tables.turn.c.terminal.is_not(None),
+                tables.conversation.c.audience.in_(readable_audiences(member_id)),
+            )
+        )
+        return query if agent_id is None else query.where(tables.turn.c.agent_id == agent_id)
 
     async def list_member_objects(
         self,

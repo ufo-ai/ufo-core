@@ -1867,6 +1867,42 @@ async def test_scheduled_runs_page_by_keyset_without_repeats(db: None, tmp_path)
     assert [run.turn_id for run in back.rows] == [run.turn_id for run in first.rows]
 
 
+async def test_scheduled_run_count_holds_the_page_fence_and_the_span(db: None, tmp_path) -> None:
+    """The count answers over exactly the rows the page lists: terminal scheduled admissions of
+    conversations the reader reads, from the moment asked for onward. A run before that moment, a
+    run of another member's private conversation, a running turn, and a member's own typed turn
+    are all absent, and `agent_id` narrows the count as it narrows the page."""
+    workspace_id, agent_id, _ = await _seed()
+    member_id = await _seed_member_row(workspace_id, "m@example.com")
+    other_id = await _seed_member_row(workspace_id, "n@example.com")
+    midnight = datetime(2026, 8, 15, tzinfo=UTC)
+    for key, status, source, member, fired in (
+        ("N1", "done", "scheduled", None, midnight),
+        ("N2", "failed", "scheduled", None, midnight + timedelta(hours=9)),
+        ("N3", "done", "scheduled", None, midnight - timedelta(microseconds=1)),
+        ("N4", "done", "scheduled", other_id, midnight + timedelta(hours=10)),
+        ("N5", "running", "scheduled", None, midnight + timedelta(hours=11)),
+        ("N6", "done", "internal", None, midnight + timedelta(hours=12)),
+    ):
+        await _seed_turn(
+            workspace_id,
+            key,
+            status,
+            key,
+            member_id=member,
+            admission_source=source,
+            created_at=fired,
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.count_scheduled_runs_since(member_id, midnight) == 2
+    assert await context.count_scheduled_runs_since(other_id, midnight) == 3
+    assert await context.count_scheduled_runs_since(member_id, midnight - timedelta(days=1)) == 3
+    assert await context.count_scheduled_runs_since(other_id, midnight, agent_id=agent_id) == 3
+    assert await context.count_scheduled_runs_since(other_id, midnight, agent_id=uuid4()) == 0
+    page = await context.list_scheduled_runs(member_id, limit=10)
+    assert len(page.rows) == 3
+
+
 async def test_workspace_candidates_rotate_and_recover_from_cursor_deletion_and_restart(
     db: None,
 ) -> None:

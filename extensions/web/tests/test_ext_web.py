@@ -3128,7 +3128,7 @@ async def test_radar_pages_by_keyset(
         )
         for index in range(3)
     ]
-    monkeypatch.setattr(web_surface, "RADAR_LIST_LIMIT", 2)
+    monkeypatch.setattr(web_surface, "RADAR_MIN_RUNS", 2)
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     first = (await client.get(RADAR_PATH, headers=headers)).json()
     assert [run["turn_id"] for run in first["runs"]] == [str(runs[2]), str(runs[1])]
@@ -3144,6 +3144,56 @@ async def test_radar_pages_by_keyset(
         await client.get(f"{RADAR_PATH}?after={quote(second['newer'])}", headers=headers)
     ).json()
     assert [run["turn_id"] for run in back["runs"]] == [run["turn_id"] for run in first["runs"]]
+
+
+async def test_radar_newest_page_holds_today_whole(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The newest page never reads shorter than the floor on a quiet day, and grows past the floor
+    to carry today's runs whole once today holds more than that. The ceiling bounds the one
+    response: the rest of today reads behind the `older` cursor, which pages the floor at a time."""
+    client, workspace_id, agent_id = web
+    _member, token = await _seed_member(workspace_id, "m@example.com")
+    conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="slack/radar-today",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    stale = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+    for index in range(4):
+        await _seed_scheduled_run(
+            workspace_id,
+            agent_id,
+            conversation,
+            seq=index + 1,
+            text="the older digest",
+            fired=stale + timedelta(minutes=index),
+        )
+    monkeypatch.setattr(web_surface, "RADAR_MIN_RUNS", 3)
+    monkeypatch.setattr(web_surface, "RADAR_MAX_RUNS", 4)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    quiet = (await client.get(RADAR_PATH, headers=headers)).json()
+    assert len(quiet["runs"]) == 3 and quiet["older"] is not None
+    fired = datetime.now(UTC)
+    today = [
+        await _seed_scheduled_run(
+            workspace_id,
+            agent_id,
+            conversation,
+            seq=index + 5,
+            text="today's digest",
+            fired=fired + timedelta(milliseconds=index),
+        )
+        for index in range(5)
+    ]
+    busy = (await client.get(RADAR_PATH, headers=headers)).json()
+    assert [run["turn_id"] for run in busy["runs"]] == [str(run) for run in reversed(today[1:])]
+    rest = (await client.get(f"{RADAR_PATH}?after={quote(busy['older'])}", headers=headers)).json()
+    assert len(rest["runs"]) == 3
+    assert rest["runs"][0]["turn_id"] == str(today[0])
 
 
 async def test_artifacts_paging_is_stable_across_a_concurrent_share(

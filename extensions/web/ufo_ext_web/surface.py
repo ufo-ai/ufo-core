@@ -27,7 +27,7 @@ import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -138,7 +138,8 @@ MAX_SEARCH_CHARS = 200
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
-RADAR_LIST_LIMIT = 20
+RADAR_MIN_RUNS = 10
+RADAR_MAX_RUNS = 200
 SCHEDULED_TASK_KIND = "scheduled_task"
 ARTIFACT_MEDIA_FILTERS = frozenset(("image", "document", "data", "other"))
 ARTIFACT_SCOPE_FILTERS = frozenset(("created", "shared"))
@@ -2574,7 +2575,13 @@ async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
     whose content this reader reads, an admin's page included, each naming the task that fired it
     and linking the files it shared: what a run made is its published report, so a successful
     run's reply carries no text here and only a run that did not end well says why. `agent`
-    narrows the page to one agent the audience holds."""
+    narrows the page to one agent the audience holds.
+
+    The newest page holds today whole: it carries every run of the current UTC day — the day the
+    portal dates a stamp by — and never fewer than `RADAR_MIN_RUNS`, so a quiet day still reads as
+    a feed and a busy one is not cut mid-day. `RADAR_MAX_RUNS` bounds the one response; a day past
+    that ceiling, and every older run, reads behind the `older` cursor, which pages
+    `RADAR_MIN_RUNS` at a time."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -2595,9 +2602,12 @@ async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
             return Response("invalid agent", status_code=400)
         if not audience.allows(agent_id):
             return Response("unknown agent", status_code=404)
-    page = await ctx.list_scheduled_runs(
-        member_id, limit=RADAR_LIST_LIMIT, cursor=cursor, agent_id=agent_id
-    )
+    limit = RADAR_MIN_RUNS
+    if cursor is None:
+        midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        today = await ctx.count_scheduled_runs_since(member_id, midnight, agent_id=agent_id)
+        limit = min(max(RADAR_MIN_RUNS, today), RADAR_MAX_RUNS)
+    page = await ctx.list_scheduled_runs(member_id, limit=limit, cursor=cursor, agent_id=agent_id)
     task_names = await _radar_task_names(ctx, audience, member_id, page.rows)
     return JSONResponse(
         {
