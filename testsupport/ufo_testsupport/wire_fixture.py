@@ -49,7 +49,7 @@ WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "ask": (">",),
     "exit": ("0",),
     "file": ("quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"),
-    "secret": ("sealed-blob", "exa_api_key", "Paste your Exa key"),
+    "secret": ("sealed-blob", "perplexity_api_key", "Paste your Perplexity key"),
     "since": ("turn-1", "cursor-9"),
     "poll": ("1",),
     "run": ("op-1", "exec", "exec", "120", "", '{"argv":["ls"]}'),

@@ -73,7 +73,7 @@ def _seed(path: Path) -> tuple[Config, dict[str, UUID]]:
                     "now": NOW,
                 },
             )
-        for slot in ("yc_cli_credentials", "exa_api_key"):
+        for slot in ("yc_cli_credentials", "perplexity_api_key"):
             connection.execute(
                 sa.text(
                     "insert into credential "
@@ -156,7 +156,7 @@ def test_removing_yc_takes_its_rows_and_leaves_every_neighbour(tmp_path: Path) -
             ("memory", "page_cursor")
         ]
         assert connection.execute(sa.text("select slot from credential")).scalars().all() == [
-            "exa_api_key"
+            "perplexity_api_key"
         ]
         sources = {
             UUID(row.id): row

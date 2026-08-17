@@ -305,7 +305,7 @@ class ConnectorsConfig(BaseModel):
 
 class ResearchConfig(BaseModel):
     """Web research settings. `search_provider` names a search backend an extension registers
-    through its Manifest `search_providers` point (e.g. the `exa` backend); the research extension's
+    through its Manifest `search_providers` point (e.g. `perplexity`); the research extension's
     tools call the selected provider host-side. Unset selects no backend — a deploy with a research
     extension active (which `requires` the seam) fails loud at boot until it is set."""
 

@@ -3,8 +3,8 @@
 Packs are discovered through `ufo.pack` entry points exactly as extensions are through
 `ufo.extension`; activating one by name makes exactly its bundled extensions' manifests active
 plus a manifest of the pack's own pack-level skills and onboarding. The assistant pack is the
-flagship — memory with its index and embed backends, the browser tools, connectors, and Exa come up
-together. The fail-loud cases ride along: an unknown pack name, a pack naming an uninstalled
+flagship — memory with its index and embed backends, browser tools, connectors, and Perplexity come
+up together. The fail-loud cases ride along: an unknown pack name, a pack naming an uninstalled
 extension, and a pack whose name collides with a bundled extension each raise (the uninstalled and
 collision cases stub discovery — the real dependency — to drive the real narrowing)."""
 

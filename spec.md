@@ -320,7 +320,7 @@ Manifest registers (each optional):
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
 | `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox_chrome`). Core ships none: `sandbox_chrome` drives Chrome inside the sandbox the turn runs in; `browserbase` mints a hosted session per browser run (the hosted default) against a Browserbase Context it keeps for that run and deletes with the session. A provider mints a per-turn `CdpLease` the loop releases at turn end, and the lease answers both file questions only the transport can: `place_file` where its Chrome can open a workspace file (the same path when Chrome shares the sandbox, an upload when it is remote) and `download_dir`/`fetch_download` where that Chrome may write a download and how its bytes come back (a sandbox path read back out of the sandbox, or a hosted provider's storage read back over its API) — so a file input works whichever transport is selected, and a hosted browser is never handed a path it refuses. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
 | `auth_proxies` | The credential backend a feed-sync source resolves through when it registered against `DIRECT_ACCOUNT` because the member set a workspace credential instead of connecting an account. The sole installed backend is automatic; `[connectors] auth_backend` selects one when several are installed and must name a registered choice. `direct` BYOK reads that key host-side, never reaching the sandbox. A source holding an account id resolves only while its registering member owns the active connection, independent of agent grants; another member reconnecting the same account does not reactivate it. **The account handle is the routing signal, not the provider name.** |
-| `search_providers` | Web-search backends the research extension's tools call, selected by `[research] search_provider`. A backend runs host-side — it reads its BYOK key in-process and reaches its API over async HTTP, so the key never enters the sandbox — and answers a search query; `supports_fetch` marks whether it also fetches a URL's content (Exa's search + contents does; an answer-with-citations backend need not, and the `fetch_url` tool gates on it). Core ships no default: every backend is an extension, and the research extension `requires` this seam. |
+| `search_providers` | Web-search backends the research extension's tools call, selected by `[research] search_provider`. A backend runs host-side — it reads its BYOK key in-process and reaches its API over async HTTP, so the key never enters the sandbox — and answers a search query; `supports_fetch` marks whether it also fetches a URL's content (Perplexity's exact-URL search does; an answer-with-citations backend need not, and the `fetch_url` tool gates on it). Core ships no default: every backend is an extension, and the research extension `requires` this seam. |
 | `memory_search` | A named workspace-scoped memory search provider (`default` is selected). Core passes the exact readable subject set; consumers declare `requires=("memory_search",)`, and boot fails unless exactly one default provider is active. |
 | `requires` | Sub-seams this extension consumes from another (the browser pack `requires` `cdp_providers`); `serve` resolves each at boot and fails loud — naming the extension and the seam — if the backend is absent, unknown, or unkeyed, so a missing dependency stops startup rather than the first tool call. |
 
@@ -369,7 +369,7 @@ unnarrowed set (the lockfile's pins, or every discovered extension in dev). The 
 **assistant** — memory (with its index and embed backends), the browser pack (its BUA engine over
 the default `sandbox_chrome` transport), brokered connectors (Composio's open namespace plus the
 Pipedream allowlist), and web
-research (the research tools over the Exa search backend).
+research (the research tools over the Perplexity search backend).
 
 ## Third-party extensions
 
@@ -929,7 +929,7 @@ bundle installs OSS, on-prem, or hosted.
 
 Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the browser pack
 (its BUA engine over the default `sandbox_chrome` transport), brokered connectors, and web research
-(the research tools over the Exa search backend) (the flagship); **chief-of-staff** bundles
+(the research tools over the Perplexity search backend) (the flagship); **chief-of-staff** bundles
 brokered connector grants plus feed sync (Google Meet transcripts and Gemini smart notes, Slack, a
 folder-synced state repo) with memory, the Slack surface, scheduling, todos, workspace
 skills, and self-improvement behind four pack skills (`sync`, `prep`, `triage`, setup).

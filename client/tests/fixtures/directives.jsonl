@@ -7,7 +7,7 @@
 {"wire": "workspace", "verb": "poll", "fields": ["1"], "line": "poll\t1"}
 {"wire": "workspace", "verb": "run", "fields": ["op-1", "exec", "exec", "120", "", "{\"argv\":[\"ls\"]}"], "line": "run\top-1\texec\texec\t120\t\t{\"argv\":[\"ls\"]}"}
 {"wire": "workspace", "verb": "say", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "say\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}
-{"wire": "workspace", "verb": "secret", "fields": ["sealed-blob", "exa_api_key", "Paste your Exa key"], "line": "secret\tsealed-blob\texa_api_key\tPaste your Exa key"}
+{"wire": "workspace", "verb": "secret", "fields": ["sealed-blob", "perplexity_api_key", "Paste your Perplexity key"], "line": "secret\tsealed-blob\tperplexity_api_key\tPaste your Perplexity key"}
 {"wire": "workspace", "verb": "sent", "fields": ["turn-1", "1", "arr-1"], "line": "sent\tturn-1\t1\tarr-1"}
 {"wire": "workspace", "verb": "since", "fields": ["turn-1", "cursor-9"], "line": "since\tturn-1\tcursor-9"}
 {"wire": "workspace", "verb": "status", "fields": ["12 tok - $0.000110"], "line": "status\t12 tok - $0.000110"}

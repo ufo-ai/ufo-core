@@ -27,7 +27,7 @@ public_base_url = "http://evals.invalid"
 name = "assistant"
 
 [research]
-search_provider = "exa"
+search_provider = "perplexity"
 """
 
 

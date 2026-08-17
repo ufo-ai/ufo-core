@@ -53,7 +53,7 @@ partition whose leaves are disjoint.
 The packs are cumulative main-agent surfaces:
 
 - `dsqa_core`: core tools plus the required index, embed, and judge-model providers.
-- `dsqa_search`: `dsqa_core` plus Exa and the research extension.
+- `dsqa_search`: `dsqa_core` plus Perplexity and the research extension.
 - `dsqa_browser`: `dsqa_search` plus browser delegation and sandbox Chrome.
 
 A main turn receives every non-profile-only tool in its active pack, so one server cannot enforce
@@ -67,7 +67,7 @@ runner pins the background judge to `google/gemini-2.5-flash` independently:
 
 ```toml
 [research]
-search_provider = "exa"
+search_provider = "perplexity"
 
 [pack]
 name = "dsqa_search"

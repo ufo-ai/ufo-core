@@ -152,7 +152,7 @@ which is the same answer the object index gives — a task posting into a shared
 more private than the fires it posts there, and one posting into a member's own conversation
 reaches nobody else. The payload never carries the task prompt, owner identity, or proof metadata.
 
-Exa is a search backend, not the Sources owner. Browser and connector outputs remain Files or
+Perplexity is a search backend, not the Sources owner. Browser and connector outputs remain Files or
 Artifacts until they gain a distinct durable conversation record. Memory is not a slot because it
 has no conversation provenance. The todo board qualifies because its existing durable key is the
 conversation id; the provider reads that record directly and does not infer task state from tool

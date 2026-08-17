@@ -872,7 +872,7 @@ def test_browser_profile_registers_and_is_spawnable() -> None:
     assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["task"]
     assert "maxLength" not in profile.output_model.model_json_schema()["properties"]["result"]
     # Browser primitives + core builtins + the cross-extension search_web the prompt tells the agent
-    # to prefer over navigating to a search engine (resolves only when research/exa is installed).
+    # to prefer over navigating to a search engine (resolves only when research is installed).
     available = set(BROWSER_TOOL_NAMES) | {tool.name for tool in BUILTIN_TOOLS} | {"search_web"}
     assert set(profile.tool_names) <= available
     assert "web automation subagent" in profile.prompt

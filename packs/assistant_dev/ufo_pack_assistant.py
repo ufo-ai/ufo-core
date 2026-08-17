@@ -2,7 +2,7 @@
 
 Activating it (config `[pack] name = "assistant"`) narrows the deploy to exactly the extensions it
 names — durable memory and recall over the base-pinned local index and OpenAI embeddings, web
-research (the research tools over the Exa and Perplexity search backends), brokered connectors
+research (the research tools over the Perplexity search backend), brokered connectors
 (Composio's open namespace plus the Pipedream allowlist), keyed connectors (a workspace API key
 injected at the egress proxy) and MCP,
 the sandbox browser/computer-use tools with Chrome driven inside each conversation's sandbox (the
@@ -20,7 +20,6 @@ from ufo.sdk.manifest import Pack
 NAME = "assistant"
 VERSION = "0.1.0"
 EXTENSIONS = (
-    "exa",
     "perplexity",
     "todos",
     "objectives",

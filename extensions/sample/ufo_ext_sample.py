@@ -992,7 +992,7 @@ class SampleSearchProvider:
     """A trivial SearchProvider the probe registers through the `search_providers` Manifest point:
     `search` answers a canned SearchResults (carrying an `answer` to exercise that field) and
     `fetch` a canned FetchedPage. A real object consumed through the protocol, so a test drives it
-    as core selects and the research tools call it; the exa backend keeps its own HTTP proof."""
+    as core selects and the research tools call it; the Perplexity backend keeps its HTTP proof."""
 
     supports_fetch: bool = True
 

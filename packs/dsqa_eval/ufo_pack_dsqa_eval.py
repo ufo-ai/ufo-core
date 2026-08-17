@@ -6,7 +6,7 @@ CORE_NAME = "dsqa_core"
 SEARCH_NAME = "dsqa_search"
 BROWSER_NAME = "dsqa_browser"
 CORE_EXTENSIONS = BASE_EXTENSIONS
-SEARCH_EXTENSIONS = (*BASE_EXTENSIONS, "exa", "research")
+SEARCH_EXTENSIONS = (*BASE_EXTENSIONS, "perplexity", "research")
 BROWSER_EXTENSIONS = (*SEARCH_EXTENSIONS, "browser", "sandbox_chrome")
 
 

@@ -96,9 +96,9 @@ def _synthesized() -> list[bytes]:
         _event(
             "credentials",
             {
-                "reason": "Exa search needs a key",
+                "reason": "Perplexity search needs a key",
                 "sealed": "sealed-blob",
-                "prompts": [{"slot": "exa_api_key", "prompt": "Paste your Exa key"}],
+                "prompts": [{"slot": "perplexity_api_key", "prompt": "Paste your Perplexity key"}],
             },
         ),
         _event(

@@ -41,7 +41,7 @@
   },
   {
     "event": "credentials",
-    "data": "{\"reason\": \"Exa search needs a key\", \"sealed\": \"sealed-blob\", \"prompts\": [{\"slot\": \"exa_api_key\", \"prompt\": \"Paste your Exa key\"}]}"
+    "data": "{\"reason\": \"Perplexity search needs a key\", \"sealed\": \"sealed-blob\", \"prompts\": [{\"slot\": \"perplexity_api_key\", \"prompt\": \"Paste your Perplexity key\"}]}"
   },
   {
     "event": "files",

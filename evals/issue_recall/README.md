@@ -165,7 +165,7 @@ duration of a run — it re-reads the same staged bytes and changes nothing.
 The stack orchestrator materializes the corpus before serve boots (`ufoctl init`, then
 `python -m evals.issue_recall.materialize`), then drives the leaf against the running deploy. The
 run needs `ANTHROPIC_API_KEY` (target turns), `OPENAI_API_KEY` (corpus and query embeddings, and the
-fact-derivation pass on the default `models.background_jobs_model`), and `EXA_API_KEY` (the
+fact-derivation pass on the default `models.background_jobs_model`), and `PERPLEXITY_API_KEY` (the
 assistant pack's research extension refuses to boot without its search provider), and a template
 `[o11y] otlp_endpoint` — the recall collector binds a free loopback port per run.
 
@@ -191,7 +191,7 @@ root = "./blobs"
 name = "assistant"
 
 [research]
-search_provider = "exa"
+search_provider = "perplexity"
 
 [connect]
 public_base_url = "http://127.0.0.1:8710"

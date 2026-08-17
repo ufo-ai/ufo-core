@@ -4,7 +4,8 @@ its profiles register, and its web section renders.
 A `_FakeSearchProvider` on the ToolContext stands in for the deploy's backend — it records the
 `SearchQuery`/`FetchRequest` the tools build and answers with canned seam objects, so the tests
 assert the tools' own marshalling (queries fanned and merged, the vertical folded in, the fetch
-gate, the fail-loud on a missing provider), never the fake. The exa backend keeps its own proof."""
+gate, the fail-loud on a missing provider), never the fake. The Perplexity backend keeps its
+proof."""
 
 import json
 import re

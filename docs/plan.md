@@ -125,7 +125,7 @@ services: SQLite + filesystem blobs + in-process hub.
 
 - Packs seam (`ufo.pack` entry point → `Pack` bundling installed extensions + pack-level
   skills/onboarding; `[pack] name` activates one, narrowing the active manifest set); assistant pack
-  bundling memory + browser + connectors + exa; scheduled-tasks extension (JobSpec cron → `invoke`).
+  bundling memory + browser + connectors + Perplexity; scheduled-tasks extension (JobSpec cron → `invoke`).
 - **Proof**: activating a pack makes exactly its bundled extensions' manifests active and its
   pack-level skill loads; a cron fires a real turn on schedule; `wide_browse`-style fan-out runs as
   subagent spawns.

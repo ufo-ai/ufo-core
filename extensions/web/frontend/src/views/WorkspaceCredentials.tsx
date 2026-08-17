@@ -38,7 +38,7 @@ const SERVICE_KEY_SLOTS = [
   "datadog_api_key",
   "datadog_application_key",
   "datadog_api_host",
-  "exa_api_key",
+  "perplexity_api_key",
   "turbopuffer_api_key",
   "browserbase_api_key",
   "browser_use_api_key",
@@ -50,7 +50,7 @@ const SECTION_ORDER = ["Model providers", "Service keys", "MCP"];
 const EXTENSION_SECTIONS: Record<string, string> = {
   browser_use: "Service keys",
   browserbase: "Service keys",
-  exa: "Service keys",
+  perplexity: "Service keys",
   keyed_connectors: "Service keys",
   mcp: "MCP",
   turbopuffer: "Service keys",

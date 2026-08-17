@@ -4,7 +4,7 @@ deploy selects.
 
 `serve` sources the tools into the turn's tool set and the profiles into the SubagentRegistry, and
 threads the selected `SearchProvider` onto each `ToolContext`. The pack owns no credential slot —
-the search backend (exa) owns its own — so it declares `requires=("search_providers",)`: a deploy
+the search backend owns its own — so it declares `requires=("search_providers",)`: a deploy
 that activates research with no search backend configured fails loud at boot rather than on the
 first search."""
 

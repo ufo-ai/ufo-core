@@ -51,7 +51,7 @@ auto_model = "claude-opus-4-8"
 name = "assistant"
 
 [research]
-search_provider = "exa"
+search_provider = "perplexity"
 """
 POSTGRES_TEMPLATE = """\
 [database]
@@ -86,7 +86,7 @@ def test_derived_config_isolates_a_sqlite_template(tmp_path: Path) -> None:
     assert config.o11y.otlp_endpoint is None
     assert config.pack.name == "assistant"
     assert config.models.auto_model == "claude-opus-4-8"
-    assert config.research.search_provider == "exa"
+    assert config.research.search_provider == "perplexity"
 
 
 def test_derived_config_forces_shared_serve_with_a_self_owner_dsn(tmp_path: Path) -> None:

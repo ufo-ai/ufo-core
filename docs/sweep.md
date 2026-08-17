@@ -7,14 +7,14 @@ all seated members when it is installed.
 ## Install
 
 The `assistant` and `assistant_hosted` packs include `sweep`, `memory`, `objectives`, `todos`,
-`research`, and `exa`. Select one pack in `ufo.toml`:
+`research`, and `perplexity`. Select one pack in `ufo.toml`:
 
 ```toml
 [pack]
 name = "assistant"
 
 [research]
-search_provider = "exa"
+search_provider = "perplexity"
 ```
 
 Set the model keys before `serve` starts:
@@ -24,10 +24,10 @@ export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
 ```
 
-Set the Exa credential through the hidden credential prompt:
+Set the Perplexity credential through the hidden credential prompt:
 
 ```bash
-ufoctl credential set exa_api_key
+ufoctl credential set perplexity_api_key
 ```
 
 For a lockfile deploy without an assistant pack, install the complete set, then apply the schema:
@@ -39,7 +39,7 @@ ufoctl ext install objectives
 ufoctl ext install todos
 ufoctl ext install scheduled_tasks
 ufoctl ext install research
-ufoctl ext install exa
+ufoctl ext install perplexity
 ufoctl ext install index_default
 ufoctl ext install embed_openai
 ufoctl migrate
@@ -82,7 +82,7 @@ Check these conditions if a brief does not arrive:
 
 1. The member has a seat.
 2. The member has sent a message from a surface that supplies their timezone, or UTC is acceptable.
-3. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `exa_api_key` are valid.
+3. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `perplexity_api_key` are valid.
 4. The `sweep`, `memory`, `objectives`, `todos`, and search-provider extensions are active.
 5. An agent with `provisioned_by: sweep` exists with the settings above.
 

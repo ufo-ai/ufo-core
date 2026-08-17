@@ -592,7 +592,7 @@ spec:
 # The shared serve fleet is one Deployment serving turns for every workspace. It runs the
 # bundle image (`ufoctl serve`) over the ufo-serve Secret's ufo.toml (mounted over the image's baked
 # dev config): the RLS-SUBJECT ufo_serve DSN and the hosted assistant_hosted backends (s3 blob, e2b
-# sandbox behind the shared proxy, redis hub and terminal transport, turbopuffer + exa). It connects
+# sandbox behind the shared proxy, redis hub and terminal transport, Turbopuffer + Perplexity). It connects
 # as ufo_serve and
 # scopes each request/turn to its workspace per transaction (the app.workspace_id GUC).
 apiVersion: v1
@@ -656,7 +656,7 @@ spec:
                 command: [sleep, "${prestop_seconds}"]
           ports:
             - {name: http, containerPort: 8710}
-          # Model/provider keys the fleet shares across workspaces (ANTHROPIC/OPENAI/OPENROUTER, EXA,
+          # Model/provider keys the fleet shares across workspaces (ANTHROPIC/OPENAI/OPENROUTER, PERPLEXITY,
           # TURBOPUFFER, E2B, BROWSERBASE, COMPOSIO, PIPEDREAM, UFO_TOKEN_SECRET), the billing settings the
           # metronome extension reads host-side (METRONOME_BEARER_TOKEN,
           # STRIPE_SECRET_KEY/STRIPE_BILLING_PORTAL_CONFIGURATION_ID), this deploy's one Slack app's

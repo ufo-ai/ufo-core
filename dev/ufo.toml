@@ -11,7 +11,7 @@ name = "__PACK__"
 # The assistant pack's extensions that require a named seam (the provider must be registered; the
 # API key itself is a per-workspace BYOK credential, fetched lazily, so serve boots without it).
 [research]
-search_provider = "exa"
+search_provider = "perplexity"
 
 [browser]
 cdp_provider = "sandbox_chrome"

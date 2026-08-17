@@ -64,7 +64,7 @@ command in the serve log. Host ports override via
 `UFO_SERVE_PORT_HOST` / `UFO_REDIS_PORT`, and `UFO_DEV_PACK` selects the pack the serve config names
 (`assistant_billing` adds Metronome, so the owner's billing choice can be driven locally — see
 `docs/onboarding.md`). The dev config (`dev/ufo.toml`) swaps the hosted cloud
-backends for local ones; the Turbopuffer/Exa index, the Redis hub (multi-replica), and the Docker
+backends for local ones; the Turbopuffer index, Perplexity search, the Redis hub (multi-replica), and the Docker
 sandbox carrier each need their extension added to a local pack — out of scope for this single node.
 
 Postgres (this compose, or an existing instance) also backs the Postgres half of the test matrix —

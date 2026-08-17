@@ -23,11 +23,13 @@ def _environment() -> dict[str, str]:
 
 
 def test_testing_secret_write_preserves_the_live_document() -> None:
-    raw = json.dumps({"anthropic-api-key": "anthropic-value", "exa-api-key": "exa-value"}).encode()
+    raw = json.dumps(
+        {"anthropic-api-key": "anthropic-value", "existing-api-key": "existing-value"}
+    ).encode()
     write = testing_secrets.testing_secret_write(_environment(), raw)
     assert json.loads(write.payload) == {
         "anthropic-api-key": "anthropic-value",
-        "exa-api-key": "exa-value",
+        "existing-api-key": "existing-value",
         "perplexity-api-key": "perplexity-value",
     }
     assert "file:///dev/stdin" in write.command
@@ -70,7 +72,7 @@ def test_main_reads_and_writes_through_stdin(
         "with Path(os.environ['AWS_STUB_OUTPUT']).open('a') as stream:\n"
         "    stream.write(json.dumps(record) + '\\n')\n"
         "if sys.argv[2] == 'get-secret-value':\n"
-        '    print(\'{"exa-api-key":"exa-value"}\')\n'
+        '    print(\'{"existing-api-key":"existing-value"}\')\n'
     )
     aws.chmod(0o755)
     environment = (
@@ -90,7 +92,7 @@ def test_main_reads_and_writes_through_stdin(
     assert calls[0]["argv"][1] == "get-secret-value"
     assert calls[1]["argv"][1] == "put-secret-value"
     assert json.loads(calls[1]["stdin"]) == {
-        "exa-api-key": "exa-value",
+        "existing-api-key": "existing-value",
         "perplexity-api-key": "perplexity-value",
     }
     assert all(call["key"] is None for call in calls)

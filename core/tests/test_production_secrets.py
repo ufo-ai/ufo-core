@@ -208,14 +208,14 @@ def test_production_secret_writes_preserve_owned_values() -> None:
 def test_production_secret_writes_add_a_configured_property() -> None:
     existing = json.dumps(
         {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES - {"perplexity-api-key"})}
-        | {"exa-api-key": "exa-value"}
+        | {"unmanaged-api-key": "unmanaged-value"}
     ).encode()
     (api_keys, _gateway) = production_secret_writes(
         _environment(), existing, _payload(GATEWAY_PROPERTIES)
     )
     written = json.loads(api_keys.payload)
     assert written["perplexity-api-key"] == "perplexity-value"
-    assert written["exa-api-key"] == "exa-value"
+    assert written["unmanaged-api-key"] == "unmanaged-value"
 
 
 def test_main_rejects_unknown_arguments() -> None:

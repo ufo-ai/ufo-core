@@ -68,7 +68,7 @@ root = "./blobs"
 name = "assistant"
 
 [research]
-search_provider = "exa"
+search_provider = "perplexity"
 
 [connect]
 public_base_url = "http://localhost:8710"
