@@ -170,6 +170,7 @@ resource "helm_release" "ingress_nginx" {
   values = [yamlencode({
     controller = {
       ingressClassResource = { name = "nginx", default = false }
+      config               = { proxy-body-size = "100m" }
       service = {
         type                     = "LoadBalancer"
         loadBalancerSourceRanges = local.cloudflare_ipv4_ranges

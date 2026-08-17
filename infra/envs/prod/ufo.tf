@@ -168,6 +168,7 @@ resource "helm_release" "ingress_nginx" {
       replicaCount         = 2
       minAvailable         = 1
       ingressClassResource = { name = "nginx", default = false }
+      config               = { proxy-body-size = "100m" }
       affinity = {
         podAntiAffinity = {
           requiredDuringSchedulingIgnoredDuringExecution = [{
