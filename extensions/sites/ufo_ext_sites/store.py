@@ -16,7 +16,7 @@ import re
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -283,11 +283,17 @@ class HostedSites:
             return await self._read(connection, conversation_id, name)
 
     async def set_homepage(
-        self, agent_id: UUID, conversation_id: UUID, name: str
+        self,
+        agent_id: UUID,
+        conversation_id: UUID,
+        name: str,
+        visibility: Visibility | None = None,
     ) -> HostedSite | None:
         """Bind the named site as the agent's homepage, returning the bound row, or None when the
         site is already gone. The agent's previous binding clears in the same transaction, so the
-        partial unique index holds at most one homepage per agent."""
+        partial unique index holds at most one homepage per agent. An explicit `visibility` rides
+        the bind — the caller has already applied the visibility gate — and moves the generation
+        exactly as `set_visibility` would."""
         async with self.transaction() as connection:
             await connection.execute(
                 sa.update(hosted_site)
@@ -297,6 +303,11 @@ class HostedSites:
                 )
                 .values(homepage_agent_id=None)
             )
+            values: dict[str, object] = {"homepage_agent_id": agent_id}
+            if visibility is not None:
+                existing = await self._read(connection, conversation_id, name)
+                if existing is not None and existing.visibility != visibility:
+                    values |= {"visibility": visibility, "generation": uuid4()}
             await connection.execute(
                 sa.update(hosted_site)
                 .where(
@@ -304,7 +315,7 @@ class HostedSites:
                     hosted_site.c.conversation_id == conversation_id,
                     hosted_site.c.name == name,
                 )
-                .values(homepage_agent_id=agent_id)
+                .values(**values)
             )
             return await self._read(connection, conversation_id, name)
 
@@ -417,6 +428,12 @@ class HostedSites:
         )
 
 
+def _aware(moment: datetime) -> datetime:
+    """The stored UTC instant as an aware datetime — sqlite hands the column back naive, and a
+    reader comparing it against a turn's aware stamp must never guess the zone."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
 def _site(row: sa.Row) -> HostedSite:
     return HostedSite(
         conversation_id=row.conversation_id,
@@ -426,6 +443,6 @@ def _site(row: sa.Row) -> HostedSite:
         creator_member_id=row.creator_member_id,
         generation=row.generation,
         homepage_agent_id=row.homepage_agent_id,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
+        created_at=_aware(row.created_at),
+        updated_at=_aware(row.updated_at),
     )

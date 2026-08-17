@@ -94,6 +94,7 @@ DEPLOY_MODELS = ("auto", "claude-opus-4-8")
 INGRESS_HOST = "sites.example.test"
 INGRESS_BASE_URL = f"https://{INGRESS_HOST}"
 OWNER_EMAIL = "owner@example.com"
+TEAMMATE_EMAIL = "teammate@example.com"
 OTHER_EMAIL = "other@example.com"
 TOOL_NARRATION = "putting the site online"
 SITE = "marketing"
@@ -1740,15 +1741,19 @@ async def test_set_homepage_refuses_a_dangling_name(db: None) -> None:
     assert row.homepage_agent_id is None
 
 
-async def test_set_homepage_binds_on_a_speakerless_turn(db: None) -> None:
-    """Binding widens nothing — the frame still gates every viewer on the site's own visibility —
-    so it runs on a scheduled turn with no live speaker, which seeding requires. The result echoes
-    the bound site's visibility, which for a DM deploy is the private default."""
+async def test_set_homepage_binds_on_a_speakerless_turn_and_main_reads_workspace_wide(
+    db: None,
+) -> None:
+    """Binding runs on a scheduled turn with no live speaker, which seeding requires. The seeded
+    workspace's agent is main, whose web audience is every member, so binding the site this same
+    turn deployed sets it `workspace` and moves the generation — the site's `private` was the
+    room's default, not a choice anyone made, which is what lets the widen run speakerlessly."""
     workspace = await _seed_workspace()
     member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(member_id)
     conversation_id = await _seed_conversation(workspace, audience, member_id)
     hosted = await _deploy(workspace, conversation_id, audience, member_id)
+    (before,) = await _stored(workspace)
     tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
     scheduled = replace(
         _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=member_id
@@ -1760,11 +1765,120 @@ async def test_set_homepage_binds_on_a_speakerless_turn(db: None) -> None:
     assert payload == {
         "site": hosted["site"],
         "site_url": hosted["site_url"],
-        "visibility": "private",
+        "visibility": "workspace",
         "homepage_agent": str(workspace.agent_id),
     }
     (row,) = await _stored(workspace)
     assert row.homepage_agent_id == workspace.agent_id
+    assert row.visibility == "workspace"
+    assert row.generation != before.generation
+
+
+async def test_a_standing_private_site_refuses_the_speakerless_main_widen(db: None) -> None:
+    """A private site deployed before this turn may be private by its creator's choice, so a turn
+    with no live speaker refuses to open it — the seed's deploy-and-bind is the only speakerless
+    widen — and nothing binds or widens."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    hosted = await _deploy(workspace, conversation_id, audience, member_id)
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+    scheduled = replace(
+        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=member_id
+    )
+    later = replace(
+        scheduled,
+        turn=scheduled.turn.model_copy(update={"created_at": datetime(2027, 1, 1, tzinfo=UTC)}),
+    )
+
+    with ws(workspace.id), pytest.raises(RuntimeError, match="standing private site"):
+        await _dispatch(tool, later, site=str(hosted["site"]))
+
+    (row,) = await _stored(workspace)
+    assert row.homepage_agent_id is None
+    assert row.visibility == "private"
+
+
+async def test_the_creator_speaking_widens_their_standing_private_site(db: None) -> None:
+    """The creator asking main to bind their older private site is the disclosure act itself, so a
+    live speaker carries the widen that a speakerless turn refuses."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    hosted = await _deploy(workspace, conversation_id, audience, member_id)
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+    spoken = _bind(ctx, workspace, conversation_id, member_id)
+    later = replace(
+        spoken,
+        turn=spoken.turn.model_copy(update={"created_at": datetime(2027, 1, 1, tzinfo=UTC)}),
+    )
+
+    with ws(workspace.id):
+        payload = await _dispatch(tool, later, site=str(hosted["site"]))
+
+    assert payload["visibility"] == "workspace"
+    (row,) = await _stored(workspace)
+    assert row.homepage_agent_id == workspace.agent_id
+    assert row.visibility == "workspace"
+
+
+async def test_binding_main_never_discloses_anothers_private_site(db: None) -> None:
+    """The widening a main bind performs is the creator's alone: another member's private site is
+    refused naming the rule, and nothing binds or widens."""
+    workspace = await _seed_workspace()
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    other_id, _other_token = await _seed_member(workspace, TEAMMATE_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    hosted = await _deploy(workspace, conversation_id, audience, creator_id)
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+
+    with ws(workspace.id), pytest.raises(ValueError, match="only a site's creator"):
+        await _dispatch(
+            tool, _bind(ctx, workspace, conversation_id, other_id), site=str(hosted["site"])
+        )
+
+    (row,) = await _stored(workspace)
+    assert row.homepage_agent_id is None
+    assert row.visibility == "private"
+
+
+async def test_binding_a_non_main_agent_widens_nothing(db: None) -> None:
+    """Every agent but main keeps the bind disclosure-free: the frame gates each viewer on the
+    site's own visibility, so a private DM deploy stays private when a non-main agent binds it."""
+    workspace = await _seed_workspace()
+    specialist = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=specialist,
+                workspace_id=workspace.id,
+                name="specialist",
+                prompt="be narrow",
+                model="claude-opus-4-8",
+                is_main=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    as_specialist = Workspace(id=workspace.id, agent_id=specialist)
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    hosted = await _deploy(workspace, conversation_id, audience, member_id)
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+
+    with ws(workspace.id):
+        payload = await _dispatch(
+            tool, _bind(ctx, as_specialist, conversation_id, member_id), site=str(hosted["site"])
+        )
+
+    assert payload["visibility"] == "private"
+    (row,) = await _stored(workspace)
+    assert row.homepage_agent_id == specialist
+    assert row.visibility == "private"
 
 
 async def test_site_rows_carry_homepage_agent(db: None) -> None:

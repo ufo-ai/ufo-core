@@ -98,7 +98,19 @@ SET_HOMEPAGE_DESCRIPTION = (
     "site object name from the deploy result; binding another site later moves the homepage and "
     "the old site stays hosted. Viewers are gated on the site's own visibility, and a site "
     "deployed in a direct conversation defaults private, so deploy a homepage with visibility "
-    "workspace unless it is for one member. The result echoes the bound site's visibility."
+    "workspace unless it is for one member. The main agent answers every member, so binding your "
+    "own private site to it makes the site workspace-readable. The result echoes the bound "
+    "site's visibility."
+)
+MAIN_HOMEPAGE_NEEDS_ITS_CREATOR = (
+    "the main agent's homepage is readable by every member, and only a site's creator may open "
+    "it that wide: {site} is someone else's private site, so have its creator bind it or deploy "
+    "a site of your own"
+)
+MAIN_HOMEPAGE_WIDEN_NEEDS_A_SPEAKER = (
+    "binding {site} to the main agent would open a standing private site to every member, and "
+    "that disclosure needs its creator speaking: deploy the homepage fresh in this turn, or have "
+    "the creator ask"
 )
 
 
@@ -376,6 +388,17 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
 
 
 async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
+    """Bind one hosted site as the acting agent's homepage.
+
+    For every agent but main, binding widens nothing: the frame keeps gating each viewer on the
+    site's own visibility, which is what lets the bind run speakerlessly. The main agent is the
+    exception because its web audience is every member by construction — a homepage only its
+    creator can open is not the page the workspace's agent shows — so binding a private site to
+    main sets it `workspace`. That widening honours the module's disclosure rule: it is the
+    creator's alone, and without a live speaker it reaches only a site this same turn deployed —
+    a site whose `private` is the room's default, not a choice anyone made — so a background bind
+    can never reverse a member's standing private setting, while the seed turn's deploy-and-bind
+    still lands the main homepage open."""
     if ctx.ext is None:
         raise RuntimeError("the website tools dispatched without their ExtensionContext")
     workspace_id = ctx.ext.store.workspace_id
@@ -387,7 +410,20 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
             f"no hosted site is named {args.site!r}: deploy the site and bind the name its "
             "result carries"
         )
-    bound = await sites.set_homepage(ctx.turn.agent_id, site.conversation_id, site.name)
+    widened: Visibility | None = None
+    if site.visibility == "private" and await ctx.agent_is_main():
+        if ctx.acting_member_id != site.creator_member_id:
+            raise ValueError(MAIN_HOMEPAGE_NEEDS_ITS_CREATOR.format(site=args.site))
+        deployed_this_turn = (
+            site.conversation_id == ctx.sandbox.handle.conversation_id
+            and site.created_at >= ctx.turn.created_at
+        )
+        if ctx.speaker_member_id is None and not deployed_this_turn:
+            raise RuntimeError(MAIN_HOMEPAGE_WIDEN_NEEDS_A_SPEAKER.format(site=args.site))
+        widened = "workspace"
+    bound = await sites.set_homepage(
+        ctx.turn.agent_id, site.conversation_id, site.name, visibility=widened
+    )
     if bound is None:
         raise ValueError(f"site {args.site!r} was unhosted while it was being bound")
     return _json_result(

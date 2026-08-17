@@ -544,7 +544,9 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     the authority it carries stays inside a room its member already reads. The homepage is
     therefore born its creator's — the site defaults private, matching an ungranted agent's own
     audience — and widens only by a member's act: the frame's selector, or the agent asked in
-    chat when its audience grows. An agent whose allowlist withholds the site tools is marked
+    chat when its audience grows. The main agent is the exception: `set_homepage` makes the
+    creator's own site workspace-readable, since main answers every member by construction.
+    An agent whose allowlist withholds the site tools is marked
     settled rather than handed a turn it cannot finish — chat is its recovery if the allowlist
     grows — and an ownerless agent in a workspace with no seated admin waits, unmarked, for one.
     The candidates gate on due work: a workspace whose agents are all marked never fires this

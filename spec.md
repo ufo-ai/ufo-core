@@ -518,7 +518,9 @@ chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its homepage (the frame link
 of the hosted site `set_homepage` bound, resolved through the site kind's own member gate — a
 background job seeds one homepage-build turn per agent, ever, in the acting member's own room, so
-a homepage is born its creator's and widens only by a member's act), its loadable skills (the
+a homepage is born its creator's and widens only by a member's act — the main agent's excepted:
+binding it makes the creator's site readable by the workspace main already answers), its
+loadable skills (the
 composition a turn loads), its connector accounts, its conversations, its settings
 (prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,
 with the grant list inside it the admin's), and its rolling-window spend beside its agent-scoped

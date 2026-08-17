@@ -488,7 +488,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "skill_create_0002",
         "coding_0004",
         "eval_env_0001",
-        "sites_0003",
+        "sites_0004",
         "web_0002",
         "sweep_0001",
     } <= set(heads)
