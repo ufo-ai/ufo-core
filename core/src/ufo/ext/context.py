@@ -542,6 +542,7 @@ class ConversationProbes:
         with agent(agent_id):
             session = await self._sandboxes.open(
                 conversation_id,
+                None,
                 self._probe_tokens.encode(probe),
                 await self._env(conversation_id, probe.probe_id, acting_member_id),
             )

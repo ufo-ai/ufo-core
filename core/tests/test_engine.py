@@ -827,9 +827,16 @@ class RecordingCarrier:
     writes: list[tuple[str, bytes]] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)
     write_error: Exception | None = None
+    stops: int = 0
+    """How many times the carrier was asked to stop what it still has running — the capability a
+    carrier whose commands outlive their `exec` declares, and which a deliberate cancel alone
+    uses."""
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
+
+    async def stop_commands(self, handle: SandboxHandle) -> None:
+        self.stops += 1
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
@@ -2713,11 +2720,12 @@ async def test_an_interrupted_intent_turn_names_what_interrupted_it(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An intent turn is interrupted by the same two events a chat turn is, and it has to tell them
-    apart the same way: a deliberate cancel writes a terminal elsewhere, an executor pre-emption
-    writes none and lets DBOS re-run the turn."""
-    for interrupt, status in (
-        (DBOSWorkflowCancelledError("cancelled"), CANCELLED),
-        (asyncio.CancelledError(), PREEMPTED),
+    apart the same way: a deliberate cancel writes a terminal elsewhere and stops what the turn left
+    running in its sandbox, an executor pre-emption writes none, stops nothing, and lets DBOS re-run
+    the turn."""
+    for interrupt, status, stops in (
+        (DBOSWorkflowCancelledError("cancelled"), CANCELLED, 1),
+        (asyncio.CancelledError(), PREEMPTED, 0),
     ):
         reader = _metric_capture(monkeypatch)
         turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
@@ -2731,8 +2739,10 @@ async def test_an_interrupted_intent_turn_names_what_interrupted_it(
             input_model=_NoArgs,
             handler=InterruptedHandler(interrupt),
         )
+        carrier = RecordingCarrier()
         engine = replace(
-            _engine(turn, object(), tmp_path, member_id=owner), tools=ToolRegistry((tool,))
+            _engine(turn, object(), tmp_path, carrier=carrier, member_id=owner),
+            tools=ToolRegistry((tool,)),
         )
         with pytest.raises(type(interrupt)):
             await engine.run_intent()
@@ -2740,6 +2750,7 @@ async def test_an_interrupted_intent_turn_names_what_interrupted_it(
         (wall,) = points["ufo.turn_ms"]
         assert (wall.count, wall.attributes["status"]) == (1, status)
         assert "ufo.turn_terminal_total" not in points
+        assert carrier.stops == stops
 
 
 async def test_a_read_back_frame_never_carries_another_errors_stack(
@@ -4623,6 +4634,32 @@ async def test_workflow_cancel_mid_stream_persists_the_inbound(db: None, tmp_pat
     (inbound,) = stored.messages
     assert inbound.role == "user"
     assert isinstance(inbound.content, str) and inbound.content.endswith("\nhi")
+
+
+async def test_a_deliberate_cancel_stops_what_the_turn_left_running_in_its_sandbox(
+    db: None, tmp_path: Path
+) -> None:
+    """A carrier cannot tell a member's stop from an executor preemption: both reach its `exec` as a
+    bare `asyncio.CancelledError`. So the carrier leaves the command running and the stop is issued
+    here, on the one path that means the turn is over for good."""
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier()
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await _engine(turn, WorkflowCancelModel(), tmp_path, carrier=carrier).run()
+    assert carrier.stops == 1
+
+
+async def test_a_preempted_execution_leaves_its_sandbox_commands_running(
+    db: None, tmp_path: Path
+) -> None:
+    """The pre-emption that a deploy roll or a pod death causes re-runs the turn, and the command
+    the interrupted step launched is work the re-run finds finished — stopping it destroys exactly
+    that. An agent losing its commits to a deploy is what this costs when it is wrong."""
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier()
+    with pytest.raises(asyncio.CancelledError):
+        await _engine(turn, ExecutorDeathModel(), tmp_path, carrier=carrier).run()
+    assert carrier.stops == 0
 
 
 async def test_per_step_cap_parks_a_running_turn(db: None, tmp_path: Path) -> None:

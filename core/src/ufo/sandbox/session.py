@@ -12,7 +12,7 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
@@ -221,7 +221,14 @@ class SandboxSpec:
     `size` is the owning agent's sandbox size, read off its row by the open that builds this spec.
     It shapes only a fresh sandbox on a carrier that declares sizes — a resumed sandbox keeps the
     size it was created at, and a single-shape carrier ignores it. None means the caller states no
-    size (an attach, a terminal bind)."""
+    size (an attach, a terminal bind).
+
+    `turn_id` is the turn this open serves, which one container answers many of: a subagent inherits
+    the sandbox of the turn that spawned it, so several turns run commands in one container at once.
+    A `CommandStopping` carrier keys the commands it leaves running on it, so a stop reaches the
+    turn's own groups and no sibling's. None means no turn owns the open (a read, an off-turn write,
+    a probe) and nothing will ever stop its commands; a carrier whose commands die with the call
+    that launched them ignores it."""
 
     conversation_id: UUID
     image_ref: str
@@ -231,6 +238,7 @@ class SandboxSpec:
     resume_id: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)
     size: str | None = None
+    turn_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -241,13 +249,16 @@ class SandboxHandle:
     rewrites for each exec. A container shared across turns never pins either one's authority.
     Whatever a public per-port host requires on the wire is not here: `dial` reads it off the live
     container, so a handle rebuilt from the durable row alone (the ingress) reaches a port exactly
-    as the process that created it does."""
+    as the process that created it does. `turn_id` names the turn this reference was opened for —
+    `SandboxSpec.turn_id`, carried across re-authorization — and is what scopes a stop to that
+    turn's own commands where several turns share the container."""
 
     conversation_id: UUID
     container_id: str
     workspace_host_path: str | None = None
     run_token: str | None = None
     egress_env: Mapping[str, str] = field(default_factory=dict)
+    turn_id: UUID | None = None
 
 
 SANDBOX_HANDLE_SEP = ":"
@@ -361,6 +372,26 @@ class Carrier(Protocol):
         ...
 
 
+@runtime_checkable
+class CommandStopping(Protocol):
+    """A carrier whose commands outlive the call that launched them, and which can stop them on
+    demand. It is separate from `Carrier` because it answers a question only some backends have: one
+    that runs a command off-box, where the launch and the wait are two round trips, holds work a
+    cancelled `exec` leaves behind, while one whose command dies with the call it was made in has
+    nothing to stop.
+
+    Which cancel a carrier is unwinding is not knowable inside `exec` — a member's stop and an
+    executor preemption both arrive there as a bare `asyncio.CancelledError`, and DBOS names the
+    difference only once the step's body has unwound — so a carrier that implements this leaves the
+    command running and the engine issues the stop on a deliberate cancel alone.
+
+    The stop reaches only what `handle.turn_id` launched. One container serves every turn of a
+    conversation and every subagent turn that inherited it, so a stop scoped to the container would
+    kill the in-flight commands of turns nobody cancelled."""
+
+    async def stop_commands(self, handle: SandboxHandle) -> None: ...
+
+
 async def sbxfs_file_op(
     carrier: Carrier, handle: SandboxHandle, op: str, params: dict[str, object]
 ) -> dict[str, object]:
@@ -443,6 +474,7 @@ class SandboxSession:
                 workspace_host_path=self.handle.workspace_host_path,
                 run_token=run_token,
                 egress_env={**authorized, **env},
+                turn_id=self.handle.turn_id,
             ),
         )
 
@@ -478,6 +510,13 @@ class SandboxSession:
             ("python3", SANDBOX_PYTHON_FLAG, "-c", f"{SANDBOX_MODULE_BOOTSTRAP}{program}", *args),
             timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
         )
+
+    async def stop_commands(self) -> None:
+        """Stop what this turn left running in the container, for a cancel already known to be a
+        member's. A carrier whose commands cannot outlive the `exec` that launched them declares no
+        stop and needs none — there is nothing left for this to reach."""
+        if isinstance(self.carrier, CommandStopping):
+            await self.carrier.stop_commands(self.handle)
 
     async def write_file(self, path: str, content: bytes) -> None:
         await self.carrier.write(self.handle, workspace_path(path), content)

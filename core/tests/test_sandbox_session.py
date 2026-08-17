@@ -16,6 +16,7 @@ from ufo.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
+    PROXY_ENV_NAMES,
     WORKSPACE_DIR,
     ExecResult,
     ProbeToken,
@@ -180,6 +181,31 @@ def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_ba
     assert base.handle.egress_env["HTTP_PROXY"] == proxy
 
 
+def test_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
+    """A tool runs its commands through a session re-authorized for the acting member, while the
+    cancel path stops through the turn's own base session. Both name the same turn, so the stop
+    reaches exactly the groups the turn's commands left running — in a container its sibling turns
+    are still running commands in."""
+    turn_id = uuid4()
+    common = RUN_TOKENS.encode(RunToken(uuid4(), turn_id))
+    member = RUN_TOKENS.encode(RunToken(uuid4(), turn_id, uuid4()))
+    proxy = f"http://{common}:@proxy:9000"
+    base = SandboxSession(
+        carrier=_RecordingCarrier(),
+        handle=SandboxHandle(
+            conversation_id=uuid4(),
+            container_id="c",
+            run_token=common,
+            egress_env=dict.fromkeys(PROXY_ENV_NAMES, proxy),
+            turn_id=turn_id,
+        ),
+    )
+
+    authorized = base.authorize(member, frozenset(), {})
+
+    assert authorized.handle.turn_id == turn_id
+
+
 class _RecordingCarrier:
     """Records the exec timeout so the bash tool's ms→s conversion and cap can be asserted, and
     answers the liveness probe as a sandbox that never ran the command at all — no wrapper alive,
@@ -273,6 +299,20 @@ def _tool_ctx(
         audience=conversation_audience(None),
         artifact_token_secret="",
     )
+
+
+async def test_a_carrier_that_declares_no_stop_is_never_asked_for_one() -> None:
+    """The stop is a capability, not a contract every carrier owes: a carrier whose command dies
+    with the call it was made in has nothing left for a cancel to reach, so the session asks it
+    nothing rather than requiring it to answer with a no-op."""
+    session = SandboxSession(
+        carrier=_RecordingCarrier(),
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+    )
+
+    await session.stop_commands()
+
+    assert not hasattr(session.carrier, "stop_commands")
 
 
 async def test_bash_timeout_is_milliseconds_capped_and_converted(tmp_path: Path) -> None:

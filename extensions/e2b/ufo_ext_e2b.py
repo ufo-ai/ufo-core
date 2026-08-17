@@ -302,6 +302,13 @@ class E2BCarrier:
     """Containers whose command channel did not answer the stop after their own deadline fired. A
     box that reaches this has already failed to answer twice, and every later command on it would
     otherwise pay its whole deadline before saying so."""
+    _launched: dict[tuple[str, UUID | None], set[int]] = field(default_factory=dict)
+    """Per container and turn, the process groups this carrier launched and has not seen end — what
+    a member's cancel stops through `stop_commands`. The container is in the key because a pid means
+    nothing outside the box that issued it; the turn is, because one box serves every turn of a
+    conversation and every subagent turn that inherited it, several of them running commands at
+    once, so a stop keyed on the container alone would signal the groups of turns nobody cancelled.
+    Emptied as each command ends, so no group is ever signalled twice or after the pid moved on."""
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Open the conversation's sandbox: the one `spec.resume_id` names, else the one this
@@ -378,6 +385,7 @@ class E2BCarrier:
             container_id=sandbox.sandbox_id,
             run_token=spec.run_token,
             egress_env={**egress_env, **spec.env},
+            turn_id=spec.turn_id,
         )
 
     async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
@@ -403,6 +411,7 @@ class E2BCarrier:
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
             run_token=spec.run_token,
+            turn_id=spec.turn_id,
         )
 
     async def _resume_or_open(self, spec: SandboxSpec, resume_id: str | None) -> E2BSandbox:
@@ -615,19 +624,19 @@ class E2BCarrier:
         so this is never retried — it is reported, and the lease is
         dropped so the next call reattaches rather than trust a deadline the provider abandoned.
 
-        A cancelled step — the turn preempted, the whole call unwound — ends the wait without ever
-        reaching those paths, and the command it launched would otherwise outlive every process that
-        can name it: its group runs on with its output going to a stream nobody reads, and no replay
-        reattaches, because every `bash` caller but the builtin tool re-issues its command rather
-        than resuming one. So the group is stopped here exactly as the deadline stops it, which
-        leaves whatever the command detached into a group of its own — the builtin tool's background
-        task — running to be reattached by the task files it keeps. The lease goes first, since
+        A cancelled step ends the wait without ever reaching those paths, and what the command must
+        do then depends on which cancel it was: a member's stop ends the turn for good, while an
+        executor preemption replays the step, and a replay that finds its command finished is the
+        whole point of leaving it alone. This call site cannot tell the two apart — DBOS cancels the
+        step's task for both and names the difference only once the body has unwound — so the group
+        is left running and only `stop_commands` ever signals it. The lease still goes, since
         dropping the reference cannot be interrupted and a lease the next call trusts is worse than
         one it re-leases: the cancel says nothing about how long this container still answers."""
         sandbox = await self._sandbox(handle, timeout_s + LEASE_MARGIN_SECONDS)
         await self._still_there(sandbox, handle.container_id)
         command = f"{SESSION_LEADER_CMD} {shlex.join(argv)}"
         running: E2BCommandHandle | None = None
+        left_running = False
         try:
             running = await sandbox.commands.run(
                 command,
@@ -636,6 +645,7 @@ class E2BCarrier:
                 timeout=timeout_s,
                 background=True,
             )
+            self._launched.setdefault((handle.container_id, handle.turn_id), set()).add(running.pid)
             result = await running.wait()
         except CommandExitException as error:
             return ExecResult(stdout=error.stdout, stderr=error.stderr, exit_code=error.exit_code)
@@ -652,14 +662,52 @@ class E2BCarrier:
                 timed_out_after_s=timeout_s,
             )
         except asyncio.CancelledError:
+            left_running = True
             self._drop(handle.conversation_id, "cancel")
-            if running is not None:
-                await self._stop_group(sandbox, handle.container_id, running.pid)
             raise
         except Exception:
             self._drop(handle.conversation_id, "exec")
             raise
+        finally:
+            if running is not None and not left_running:
+                self._forget_group(handle, running.pid)
         return ExecResult(stdout=result.stdout, stderr=result.stderr, exit_code=result.exit_code)
+
+    async def stop_commands(self, handle: SandboxHandle) -> None:
+        """Signal every group `handle.turn_id` still has running in the container — the stop a
+        cancelled `exec` deliberately did not issue. It runs from the one place that knows a cancel
+        was a member's: the step's own body sees a member's stop and an executor preemption as the
+        same bare `asyncio.CancelledError`, and a preempted step is replayed, so stopping there
+        destroyed work the replay would have found done.
+
+        The turn is the whole reach. A subagent inherits the sandbox of the turn that spawned it, so
+        the parent, its children and every later turn of the conversation run their commands in one
+        container: a stop that took the container as its unit would kill the build, clone or push a
+        sibling turn nobody cancelled is holding, and destroy the work in its workspace.
+
+        A turn with nothing running costs no provider call: a cancel with no command in flight is
+        the common one, and leasing a box to signal nothing would put a control-plane round trip on
+        every stop. What the signal reaches is what the deadline's stop reaches — whatever the
+        command detached into a group of its own keeps running, to be reattached by the task files
+        it keeps."""
+        pids = self._launched.pop((handle.container_id, handle.turn_id), set())
+        if not pids:
+            return
+        sandbox = await self._sandbox(handle, LEASE_MARGIN_SECONDS)
+        for pid in sorted(pids):
+            await self._stop_group(sandbox, handle.container_id, pid)
+
+    def _forget_group(self, handle: SandboxHandle, pid: int) -> None:
+        """Drop a group that ended on its own or under the deadline's stop, and the turn's entry
+        with the last of them — the map holds the groups still running, not every turn this process
+        has ever run a command for."""
+        key = (handle.container_id, handle.turn_id)
+        groups = self._launched.get(key)
+        if groups is None:
+            return
+        groups.discard(pid)
+        if not groups:
+            del self._launched[key]
 
     async def _stop_group(self, sandbox: E2BSandbox, container_id: str, pid: int) -> None:
         """Signal the stopped command's whole process group, which `setsid` made the pid's own —

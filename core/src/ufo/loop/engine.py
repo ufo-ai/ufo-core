@@ -106,6 +106,7 @@ from ufo.o11y import (
     emit_up_down_metric,
     formatted_stack,
     log,
+    log_error,
     span,
     turn_profile,
 )
@@ -1103,6 +1104,7 @@ class TurnEngine:
             await self._bill_cancelled(usage_events)
             await self._release_unabsorbed(tuple(absorbed_ids))
             await self._persist_inbound(tuple(arrival_log), founding_denial)
+            await self._stop_sandbox_commands()
             raise
         except asyncio.CancelledError:
             meter.exited(PREEMPTED)
@@ -1216,6 +1218,7 @@ class TurnEngine:
             return frame
         except DBOSWorkflowCancelledError:
             meter.exited(CANCELLED)
+            await self._stop_sandbox_commands()
             raise
         except asyncio.CancelledError:
             meter.exited(PREEMPTED)
@@ -2798,6 +2801,24 @@ class TurnEngine:
         except Exception as error:
             log(
                 "hub.publish_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
+
+    async def _stop_sandbox_commands(self) -> None:
+        """Stop what the turn left running in its sandbox, on a deliberate cancel only. This is the
+        place the two cancels are told apart: a carrier's `exec` meets a member's stop and an
+        executor preemption as the same bare `asyncio.CancelledError`, while this path is the one
+        DBOS raises after `cancel_workflow` landed — the turn is over and its commands answer to
+        nobody, where a preempted step is replayed and needs the work its command is still doing. It
+        runs after the turn's own records are written, since a provider round trip must not hold
+        them up, and a stop that fails leaves the cancel standing: the cancelled terminal is already
+        durable and a sandbox fault must not re-label it."""
+        try:
+            await self.sandbox.stop_commands()
+        except Exception as error:
+            log_error(
+                "turn.sandbox_stop_failed",
                 turn_id=str(self.turn.id),
                 error_class=type(error).__name__,
             )

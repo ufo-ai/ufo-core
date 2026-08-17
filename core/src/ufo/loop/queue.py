@@ -828,11 +828,16 @@ async def _open_sandbox(
     the same clone and a turn id would rename work the turn before it already pushed.
     Re-authorization keeps the export: `SandboxSession.authorize` rewrites only `PROXY_ENV_NAMES`
     and drops only the connector CLI vars it is handed, carrying everything else across
-    unchanged."""
+    unchanged.
+
+    The turn is stated all the same, and only to the carrier: the container is the conversation's,
+    so the commands one turn leaves running in it are told from a sibling turn's by nothing else,
+    and a cancel must stop its own turn's alone."""
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
     cache_config = cache_git_config() if cache_rewrite else ()
     return await sandboxes.open(
         turn.sandbox_conversation_id or turn.conversation_id,
+        turn.id,
         run_tokens.encode(run),
         {
             CONVERSATION_ID_ENV: str(turn.conversation_id),

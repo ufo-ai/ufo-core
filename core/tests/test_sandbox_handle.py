@@ -333,6 +333,26 @@ async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
     assert await _stored_handle(conversation_id) == "e2b:sbx-1"
 
 
+async def test_open_states_the_turn_a_carrier_scopes_its_running_commands_to(
+    db: None, tmp_path: Path
+) -> None:
+    """One container serves every turn of its conversation, plus every subagent turn that inherited
+    it, so the turn is the only thing that tells one caller's running command from another's. The
+    spec states it, which is what keeps a cancelled turn's stop off a sibling turn's in-flight
+    command. An open no turn owns — an off-turn attachment write, a probe — states none, and nothing
+    ever stops what it launched."""
+    workspace_id, conversation_id = await _conversation()
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    sandboxes = _sandboxes(carrier, "e2b", tmp_path)
+    turn = _turn(workspace_id, conversation_id)
+
+    with ws(workspace_id):
+        await _open_sandbox(sandboxes, RUN_TOKENS, turn, None, {}, None, ())
+        await sandboxes.open(conversation_id, None, "run-off-turn", {})
+
+    assert [spec.turn_id for spec in carrier.specs] == [turn.id, None]
+
+
 async def test_open_carries_the_owning_agents_sandbox_size_on_the_spec(
     db: None, tmp_path: Path
 ) -> None:
@@ -343,7 +363,9 @@ async def test_open_carries_the_owning_agents_sandbox_size_on_the_spec(
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
     with ws(workspace_id):
-        await _conversation_sandboxes(carrier, tmp_path, "e2b").open(conversation_id, "run-a", {})
+        await _conversation_sandboxes(carrier, tmp_path, "e2b").open(
+            conversation_id, None, "run-a", {}
+        )
 
     assert carrier.specs[0].size == "large"
 
@@ -1149,8 +1171,8 @@ async def test_concurrent_first_opens_converge_on_one_persisted_sandbox(
 
     with ws(workspace_id):
         first, second = await asyncio.gather(
-            sandboxes.open(conversation_id, "run-a", {}),
-            sandboxes.open(conversation_id, "run-b", {}),
+            sandboxes.open(conversation_id, None, "run-a", {}),
+            sandboxes.open(conversation_id, None, "run-b", {}),
         )
         stored = await _stored_handle(conversation_id)
 
@@ -1199,7 +1221,7 @@ async def test_workspace_listing_warns_when_the_walk_truncates(
     sandboxes = _conversation_sandboxes(_TruncatingCarrier(), tmp_path, "local")
 
     with ws(workspace_id):
-        await sandboxes.open(conversation_id, "run-a", {})
+        await sandboxes.open(conversation_id, None, "run-a", {})
         with caplog.at_level(logging.WARNING, logger="ufo"):
             entries = await sandboxes.entries(conversation_id)
 
@@ -1361,7 +1383,7 @@ async def test_a_fresh_conversation_binds_to_the_connected_terminal(
     sandboxes = _terminal_sandboxes(tmp_path, terminals)
 
     with ws(workspace_id):
-        session = await sandboxes.open(conversation_id, "run-a", {})
+        session = await sandboxes.open(conversation_id, None, "run-a", {})
 
     assert isinstance(session.carrier, TerminalCarrier)
     assert session.handle.workspace_host_path == "/Users/member/proj"
@@ -1395,7 +1417,7 @@ async def test_a_bound_conversation_refuses_a_terminal_standing_elsewhere(
 
     with ws(workspace_id):
         with pytest.raises(TerminalGone) as refusal:
-            await sandboxes.open(conversation_id, "run-a", {})
+            await sandboxes.open(conversation_id, None, "run-a", {})
 
     assert "/Users/member/proj" in str(refusal.value)
     assert "/Users/member/other" in str(refusal.value)
@@ -1410,7 +1432,7 @@ async def test_a_bound_conversation_refuses_when_no_terminal_is_connected(
 
     with ws(workspace_id):
         with pytest.raises(TerminalGone):
-            await sandboxes.open(conversation_id, "run-a", {})
+            await sandboxes.open(conversation_id, None, "run-a", {})
         assert await sandboxes.existing(conversation_id) is None
 
 
@@ -1426,7 +1448,7 @@ async def test_a_deploy_conversation_keeps_its_carrier_beside_a_connected_termin
     sandboxes = _terminal_sandboxes(tmp_path, terminals)
 
     with ws(workspace_id):
-        session = await sandboxes.open(conversation_id, "run-a", {})
+        session = await sandboxes.open(conversation_id, None, "run-a", {})
 
     assert isinstance(session.carrier, LocalCarrier)
     assert await _stored_handle(conversation_id) == "local:local"

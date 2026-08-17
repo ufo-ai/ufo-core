@@ -17,6 +17,7 @@ from ufo.sandbox.session import SENTINEL_MODEL_KEY as SENTINEL_MODEL_KEY
 from ufo.sandbox.session import TOOL_OUTPUT_DIR as TOOL_OUTPUT_DIR
 from ufo.sandbox.session import WORKSPACE_DIR as WORKSPACE_DIR
 from ufo.sandbox.session import Carrier as Carrier
+from ufo.sandbox.session import CommandStopping as CommandStopping
 from ufo.sandbox.session import DialTarget as DialTarget
 from ufo.sandbox.session import ExecResult as ExecResult
 from ufo.sandbox.session import ProxyEndpoint as ProxyEndpoint

@@ -78,6 +78,7 @@ from ufo.sandbox.session import (
     ExecResult,
     ProxyEndpoint,
     SandboxHandle,
+    SandboxSession,
     SandboxSpec,
     SandboxUnreachable,
 )
@@ -458,7 +459,7 @@ def _templates(reference: str) -> dict[str, str]:
     return dict.fromkeys(SANDBOX_SIZES, reference)
 
 
-def _spec(conversation: UUID, size: str | None = "small") -> SandboxSpec:
+def _spec(conversation: UUID, size: str | None = "small", turn: UUID | None = None) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=conversation,
         image_ref="ufo-sandbox:latest",
@@ -466,6 +467,7 @@ def _spec(conversation: UUID, size: str | None = "small") -> SandboxSpec:
         proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=PROXY_PUBLIC_URL),
         run_token="run-token",
         size=size,
+        turn_id=turn,
     )
 
 
@@ -1294,13 +1296,14 @@ async def _until(condition: Callable[[], bool]) -> None:
     raise AssertionError("the carrier never reached the state the cancel is aimed at")
 
 
-async def test_a_cancelled_command_is_stopped_and_leaves_no_lease(
+async def test_a_cancelled_command_keeps_running_and_leaves_no_lease(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A preempted turn unwinds the whole call, and the command it launched answers to nobody after
-    it: its output goes to a stream no reader holds, and a replayed step re-issues the command
-    rather than reattaching. So the group ends here, as the deadline ends it, and the lease goes
-    with it — a cancel says nothing about how long the container still answers."""
+    """An executor preemption — a deploy roll, a pod death — cancels the step and replays it, and
+    the replay finds the command's work done only if the command was left alone. Nothing at this
+    call site tells that cancel from a member's stop, so the group runs on and the stop is issued
+    from where the difference is known. The lease goes all the same: a cancel says nothing about how
+    long the container still answers."""
     sdk, carrier = _leased(_Clock())
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
@@ -1313,8 +1316,8 @@ async def test_a_cancelled_command_is_stopped_and_leaves_no_lease(
         with pytest.raises(asyncio.CancelledError):
             await running
 
-    assert commands.alive == {}
-    assert any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
+    assert list(commands.alive.values()) == ["setsid bash -lc 'pytest -n auto'"]
+    assert not any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
     assert _events(caplog, "sandbox.e2b.lease_dropped") == [
         {"conversation_id": str(handle.conversation_id), "during": "cancel"}
     ]
@@ -1323,6 +1326,75 @@ async def test_a_cancelled_command_is_stopped_and_leaves_no_lease(
 
     assert recovered.exit_code == 0
     assert sdk.connected == ["sbx-1"]
+
+
+async def test_a_member_cancel_stops_the_group_the_cancelled_step_left_running() -> None:
+    """The stop a member's cancel earns, reached the way the engine reaches it — through the
+    session, so the capability the carrier declares is what carries the signal. The turn is over on
+    that path, so the command answers to nobody and its whole group ends."""
+    sdk, carrier = _leased(_Clock())
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.hangs = True
+    running = asyncio.ensure_future(carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60))
+    await _until(lambda: bool(commands.alive))
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    (pid,) = commands.alive
+
+    await SandboxSession(carrier=carrier, handle=handle).stop_commands()
+
+    assert commands.alive == {}
+    assert [cmd for cmd, _, _ in commands.runs if cmd.startswith("kill")] == [f"kill -9 -{pid}"]
+
+
+async def test_a_turns_stop_spares_the_commands_of_the_turns_sharing_its_container() -> None:
+    """A subagent inherits the sandbox of the turn that spawned it, so a parent, its children and
+    every later turn of the conversation run their commands in one container. The stop reaches the
+    cancelled turn's own group and nothing else: a sibling turn is holding a build, a clone, a push
+    nobody cancelled, and signalling it would destroy that work in the workspace they share."""
+    sdk, carrier = _leased(_Clock())
+    conversation = uuid4()
+    cancelled = await carrier.create(_spec(conversation, turn=uuid4()))
+    sibling = await carrier.create(_spec(conversation, turn=uuid4()))
+    assert cancelled.container_id == sibling.container_id
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.hangs = True
+    stopped = asyncio.ensure_future(carrier.exec(cancelled, ("bash", "-lc", "pytest -n auto"), 60))
+    await _until(lambda: bool(commands.alive))
+    stopped.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopped
+    (stopped_pid,) = commands.alive
+    spared = asyncio.ensure_future(carrier.exec(sibling, ("bash", "-lc", "git push"), 60))
+    await _until(lambda: len(commands.alive) == 2)
+
+    await SandboxSession(carrier=carrier, handle=cancelled).stop_commands()
+
+    assert list(commands.alive.values()) == ["setsid bash -lc 'git push'"]
+    assert [cmd for cmd, _, _ in commands.runs if cmd.startswith("kill")] == [
+        f"kill -9 -{stopped_pid}"
+    ]
+    spared.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await spared
+
+
+async def test_a_stop_with_nothing_running_asks_the_provider_nothing() -> None:
+    """A cancel with no command in flight is the common one, so leasing a box to signal nothing
+    would put a control-plane round trip on every stop. A command that already ended is not a group
+    anything may signal either — its pid belongs to the box now."""
+    sdk, carrier = _leased(_Clock())
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    await carrier.exec(handle, ("bash", "-lc", "echo done"), 60)
+    before = len(commands.runs)
+
+    await carrier.stop_commands(handle)
+
+    assert len(commands.runs) == before
+    assert sdk.connected == []
 
 
 async def test_a_cancel_before_the_launch_answers_names_no_group(
@@ -1347,6 +1419,10 @@ async def test_a_cancel_before_the_launch_answers_names_no_group(
     assert _events(caplog, "sandbox.e2b.lease_dropped") == [
         {"conversation_id": str(handle.conversation_id), "during": "cancel"}
     ]
+
+    await carrier.stop_commands(handle)
+
+    assert not any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
 
 
 async def test_a_box_that_stopped_answering_refuses_the_next_command_at_once(
@@ -1509,11 +1585,11 @@ async def test_the_deadline_stop_ends_the_launcher_and_spares_its_detached_task(
     raise AssertionError("the stopped task never wrote its exit code")
 
 
-async def test_a_cancel_ends_the_launcher_and_spares_its_detached_task(tmp_path: Path) -> None:
-    """A cancel reaches exactly as far as the deadline does, proved on real processes: the
-    launcher's group ends, and the wrapper the launcher forked into a group of its own keeps running
-    with its log and exit file intact, so the recovered turn reattaches to the work instead of
-    paying for it twice."""
+async def test_a_cancel_leaves_the_launcher_running_until_the_member_stop(tmp_path: Path) -> None:
+    """Proved on real processes: a cancelled exec leaves the launcher's group running, because the
+    replay of a preempted step must find the work it launched still going, and only the member's
+    stop ends it. That stop reaches exactly as far as the deadline's does — the launcher dies and
+    the wrapper it forked into a group of its own keeps running, log and exit file intact."""
     sdk = _Sdk()
     carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
     commands = _ProcessCommands(root=tmp_path)
@@ -1543,6 +1619,10 @@ async def test_a_cancel_ends_the_launcher_and_spares_its_detached_task(tmp_path:
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
         await running
+
+    assert launcher.returncode is None
+
+    await carrier.stop_commands(handle)
 
     assert await asyncio.wait_for(launcher.wait(), 10) == -9
     probe = await carrier.exec(handle, ("sh", "-c", TASK_PROBE, "sh", base), 5)

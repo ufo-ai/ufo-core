@@ -91,9 +91,18 @@ class ConversationSandbox:
     owns whether the held connection and the turn's workflow reach one terminal."""
 
     async def open(
-        self, conversation_id: UUID, run_token: str, env: Mapping[str, str]
+        self,
+        conversation_id: UUID,
+        turn_id: UUID | None,
+        run_token: str,
+        env: Mapping[str, str],
     ) -> SandboxSession:
         """The conversation's sandbox, created or resumed, with its handle persisted.
+
+        `turn_id` is the turn this session serves, and None where no turn owns the open. It scopes
+        the commands a carrier leaves running to the turn that launched them: one container serves
+        every turn of the conversation, plus every subagent turn that inherited it, so the turn is
+        the only thing that tells one caller's in-flight command from another's.
 
         The session carries the carrier that serves this conversation — the deploy's own, or the
         member's connected terminal — so which backend a conversation runs on is answered in one
@@ -113,7 +122,7 @@ class ConversationSandbox:
         stored, size = await self._binding(conversation_id)
         for _ in range(OPEN_CLAIM_ATTEMPTS):
             backend, carrier, handle = await self._opened(
-                conversation_id, stored, run_token, env, size
+                conversation_id, turn_id, stored, run_token, env, size
             )
             persisted = f"{backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
             if persisted == stored:
@@ -193,7 +202,7 @@ class ConversationSandbox:
                 f"{rel} is {len(content)} bytes, over the {WORKSPACE_WRITE_MAX_BYTES}-byte limit "
                 "for a workspace write"
             )
-        session = await self.open(conversation_id, UNSIGNED_RUN_TOKEN, {})
+        session = await self.open(conversation_id, None, UNSIGNED_RUN_TOKEN, {})
         await session.write_file(rel, content)
         return workspace_path(rel)
 
@@ -270,6 +279,7 @@ class ConversationSandbox:
     async def _opened(
         self,
         conversation_id: UUID,
+        turn_id: UUID | None,
         stored: str | None,
         run_token: str,
         env: Mapping[str, str],
@@ -299,6 +309,7 @@ class ConversationSandbox:
                     proxy=self.proxy,
                     run_token=run_token,
                     env=env,
+                    turn_id=turn_id,
                 )
             )
             return CLIENT_BACKEND, carrier, handle
@@ -318,6 +329,7 @@ class ConversationSandbox:
                 resume_id=None if stored is None else sandbox_handle_id(self.backend, stored),
                 env=env,
                 size=size,
+                turn_id=turn_id,
             )
         )
         return self.backend, self.carrier, handle

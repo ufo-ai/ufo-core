@@ -578,7 +578,7 @@ async def test_workspace_host_path_is_absolute_for_a_relative_workspace_root(
         workspace_root=Path("workspaces"),
     )
     with ws(seed.workspace_id):
-        handle = (await sandboxes.open(seed.conversation_id, UNSIGNED_RUN_TOKEN, {})).handle
+        handle = (await sandboxes.open(seed.conversation_id, None, UNSIGNED_RUN_TOKEN, {})).handle
     assert handle.workspace_host_path is not None
     assert Path(handle.workspace_host_path).is_absolute()
     assert await asyncio.to_thread(Path(handle.workspace_host_path).is_dir)
