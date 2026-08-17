@@ -35,6 +35,7 @@ from ufo.sdk.credentials import (
     CredentialStore,
     open_installation,
 )
+from ufo.sdk.o11y import warn
 
 GITHUB_API = "https://api.github.com"
 GIT_SLOT = "github_git_token"
@@ -43,6 +44,15 @@ JWT_LIFETIME_SECONDS = 540
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 MINT_TIMEOUT_SECONDS = 10
 GIT_INSTALLATION_PERMISSIONS = (("contents", "write"),)
+REQUIRED_INSTALLATION_PERMISSIONS = (
+    ("contents", "write"),
+    ("pull_requests", "write"),
+    ("checks", "write"),
+    ("issues", "write"),
+    ("statuses", "write"),
+    ("actions", "read"),
+)
+PERMISSION_RANK = {"read": 1, "write": 2, "admin": 3}
 
 
 def _segment(payload: dict[str, object]) -> bytes:
@@ -125,7 +135,13 @@ class GitHubAppTokens:
         for it — the JWT that fetched it lives minutes and the token an hour, so caching on the
         wrong one would re-mint fifteen times as often as it needs to. A failure raises: a workspace
         that installed the App and then cannot mint must not silently fall back to a stored token,
-        which would authenticate as a different identity than the one the organization granted."""
+        which would authenticate as a different identity than the one the organization granted.
+
+        A mint that names no permissions is also the only place the installation's real grant is
+        readable, so it is where a permission this App's callers need and the organization never
+        approved is named. It is said, not raised: the grant is settled in the registration and by
+        an org owner, and a turn that can still do most of its work is worth more than one that
+        fails on a scope it may not need."""
         async with httpx.AsyncClient(
             timeout=MINT_TIMEOUT_SECONDS, transport=self.transport
         ) as client:
@@ -151,11 +167,25 @@ class GitHubAppTokens:
             )
         try:
             payload = response.json()
-            return payload["token"], datetime.fromisoformat(payload["expires_at"]).timestamp()
+            minted = payload["token"], datetime.fromisoformat(payload["expires_at"]).timestamp()
         except (KeyError, TypeError, ValueError) as error:
             raise CredentialMintFailed(
                 f"github app installation {installation} answered an unreadable token: {error}"
             ) from error
+        if self.permissions is None:
+            granted = payload.get("permissions") or {}
+            unmet = tuple(
+                name
+                for name, level in REQUIRED_INSTALLATION_PERMISSIONS
+                if PERMISSION_RANK[level] > PERMISSION_RANK.get(str(granted.get(name, "")), 0)
+            )
+            if unmet:
+                warn(
+                    "github_app.permissions_unmet",
+                    installation=installation,
+                    unmet=",".join(unmet),
+                )
+        return minted
 
     def _jwt(self) -> str:
         now = int(time.time())

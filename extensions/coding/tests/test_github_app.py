@@ -3,6 +3,7 @@ it refuses. GitHub stands in as a transport — the assertions are on what we se
 what comes back, never on the fake."""
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from json import dumps, loads
 from uuid import UUID, uuid4
@@ -587,3 +588,92 @@ async def test_bound_refuses_a_seal_this_deploy_cannot_open_exactly_as_secret_do
     VALUES[(workspace_id, SLOT)] = seal_installation(fernet, workspace_id, SLOT, INSTALLATION)
 
     assert await _tokens().bound(workspace_id, store) is True
+
+
+@pytest.mark.asyncio
+async def test_an_installation_missing_a_permission_the_app_needs_names_it_at_the_mint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The registration's permission set lives on GitHub, so the only moment this deploy sees what
+    an organization actually approved is the token it mints without naming permissions. A scope the
+    App's callers need and the installation never granted is named there, rather than reaching a
+    member as a 403 in the middle of a turn.
+
+    It is named, not raised: an installation still pending an owner's approval of a new scope keeps
+    minting, and every call that does not need the missing scope keeps working."""
+    VALUES.clear()
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES[(workspace_id, SLOT)] = seal_installation(fernet, workspace_id, SLOT, INSTALLATION)
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    granted = {
+        "contents": "write",
+        "pull_requests": "write",
+        "checks": "write",
+        "metadata": "read",
+    }
+
+    async def github(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            201, json={"token": "ghs_minted", "expires_at": expires, "permissions": granted}
+        )
+
+    tokens = _tokens(permissions=None, transport=httpx.MockTransport(github))
+    store = _Store(fernet=fernet)
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        assert await tokens.secret(workspace_id, store) == "ghs_minted"
+
+    assert [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "github_app.permissions_unmet"
+    ] == [{"installation": INSTALLATION, "unmet": "issues,statuses,actions"}]
+
+    caplog.clear()
+    tokens.minted.clear()
+    granted.update({"issues": "write", "statuses": "write", "actions": "read"})
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        assert await tokens.secret(workspace_id, store) == "ghs_minted"
+
+    assert [
+        record for record in caplog.records if record.getMessage() == "github_app.permissions_unmet"
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_the_git_token_is_never_judged_against_the_set_every_caller_needs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The git token names the one permission it needs, so what comes back is that subset by
+    construction and says nothing about what the organization approved. Judging it against the full
+    set would warn on every clone of a fully granted installation."""
+    VALUES.clear()
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES[(workspace_id, SLOT)] = seal_installation(fernet, workspace_id, SLOT, INSTALLATION)
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+    async def github(request: httpx.Request) -> httpx.Response:
+        assert loads(request.content)["permissions"] == {"contents": "write"}
+        return httpx.Response(
+            201,
+            json={
+                "token": "ghs_git",
+                "expires_at": expires,
+                "permissions": {"contents": "write"},
+            },
+        )
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        assert (
+            await _tokens(transport=httpx.MockTransport(github)).secret(
+                workspace_id, _Store(fernet=fernet)
+            )
+            == "ghs_git"
+        )
+
+    assert [
+        record for record in caplog.records if record.getMessage() == "github_app.permissions_unmet"
+    ] == []
