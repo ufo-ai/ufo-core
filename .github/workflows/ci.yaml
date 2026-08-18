@@ -145,25 +145,43 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # The control plane is a Rust crate (RFC 0036). Its ledger, gateway, and Slack suites run against a
+  # real Postgres — partial unique indexes, row locks, and `for update skip locked` leases have no
+  # meaning against a fake — and each test takes a database of its own, so the connecting role owns
+  # the cluster. The RLS half runs in the `rls` job below, on its own cluster.
   control-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: control
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ufo
+          POSTGRES_PASSWORD: ufo
+          POSTGRES_DB: ufo
+        ports:
+          - 5549:5432
+        options: >-
+          --health-cmd "pg_isready -U ufo"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      UFO_CONTROL_TEST_POSTGRES: postgresql://ufo:ufo@127.0.0.1:5549/ufo
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
-          enable-cache: true
-      - run: uv sync
-      - run: make test-control
-      - uses: actions/upload-artifact@v4
-        if: always()
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
         with:
-          name: test-timings-control-test
-          path: .pytest-timings
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 14
+          workspaces: control
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
 
   integration:
     uses: ./.github/workflows/integration.yaml
@@ -178,15 +196,19 @@ jobs:
       - run: test "${{ needs.integration.result }}" = success
       - run: test "${{ needs.wheel.result }}" = success
 
-  # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel
-  # suite's :5541). Setup CREATEs roles + databases, applies RLS
-  # policies, and mints the RLS-subject serve role — so it needs a superuser and is the sole owner of
-  # its cluster (global DROP ROLE/DATABASE), which is why it runs on its own runner, serial, off the
-  # `test` job's xdist. This is the gate the U1 / ufo_dbos / serve-role bugs slipped past; UFO_RLS_
-  # REQUIRED makes an unreachable DB a hard collection error, so the suite can never silently skip.
+  # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel suite's
+  # :5541, nor `control-test`'s :5549). It CREATEs roles and databases, applies RLS policies, and
+  # mints the RLS-subject serve role — so it needs a superuser and is the sole owner of its cluster
+  # (global CREATE/DROP ROLE), which is why it runs on its own runner. A Postgres role is
+  # cluster-wide while a database is not, so sharing a cluster with `control-test` would let the two
+  # jobs write the same `ufo_serve` and `ufo_control` rows. This is the gate the U1 / ufo_dbos /
+  # serve-role bugs slipped past.
   rls:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: control
     services:
       postgres-admin:
         image: pgvector/pgvector:pg17
@@ -200,21 +222,12 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 15
+    env:
+      UFO_CONTROL_TEST_POSTGRES: postgresql://admin:admin@127.0.0.1:5544/postgres
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          python-version: "3.12"
-          enable-cache: true
-      - run: uv sync
-      - run: uv run --project control pytest control/tests/test_rls.py -q
-        env:
-          UFO_RLS_REQUIRED: "1"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-timings-rls
-          path: .pytest-timings
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 14
+          workspaces: control
+      - run: cargo test --test rls_it

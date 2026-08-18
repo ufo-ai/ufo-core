@@ -105,7 +105,6 @@ ufo_testsupport = "ufo_testsupport.plugin"
 [dependency-groups]
 dev = [
     "pre-commit>=4.0",
-    "ufo-control",
     "mammoth>=1.8",
     "mypy>=1.13",
     "openpyxl>=3.1",
@@ -260,8 +259,4 @@ markers = [
     "serial: shares the process-singleton DBOS executor, a live container, or one database — must not run in parallel",
 ]
 
-[tool.uv.workspace]
-members = ["control"]
-
 [tool.uv.sources]
-ufo-control = { workspace = true }

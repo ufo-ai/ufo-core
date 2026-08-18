@@ -33,6 +33,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0032](0032-sandbox-cache.md) | Sandbox cache — a Rust data-plane daemon behind the egress proxy | proposed |
 | [0033](0033-spawn.md) | Spawn — one verb over typed targets: profiles and workspace agents | implemented |
 | [0035](0035-egress-proxy-rust.md) | Egress proxy in Rust — a data plane over a core control RPC | proposed |
+| [0036](0036-control-plane-rust.md) | Control plane in Rust — its own ledgers, a core RPC for core's tables | implemented |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working

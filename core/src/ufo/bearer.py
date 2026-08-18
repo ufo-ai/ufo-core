@@ -1,8 +1,9 @@
 """The member bearer's codec — one home for the claim every surface checks and every minter issues.
 
 A self-contained HMAC claim, no server-side state. Both minters — the control-plane gateway
-(`ufo_control.gateway_token`, which delegates here) for a hosted member, and `ufoctl init` for the
-local single-workspace developer — issue through `mint_token`; the verify roles live in extensions
+(`control/src/token.rs`, held to this codec by a golden contract) for a hosted member, and `ufoctl
+init` for the local single-workspace developer — issue through `mint_token`; the verify roles live
+in extensions
 (the `ufo` terminal surface, the `debug` surface) through the `ufo.sdk.bearer` re-export. The codec
 is spelled out here once:
 

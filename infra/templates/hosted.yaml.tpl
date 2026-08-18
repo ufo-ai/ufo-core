@@ -104,16 +104,20 @@ spec:
             - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
             - {name: UFO_SES_SENDER, value: "${ses_sender}"}
             - {name: UFO_SES_REGION, value: "${ses_region}"}
-            - name: UFO_CONTROL_POSTGRES_OWNER_DSN
+            # The gateway's own role: granted the `ufo_control` schema and no privilege on any
+            # table in `public`, so this pod cannot read a tenant's rows even by mistake. The owner
+            # DSN reaches the migrate and rls-bootstrap Jobs above, never here.
+            - name: UFO_CONTROL_GATEWAY_DSN
               valueFrom:
-                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+                secretKeyRef: {name: ufo-control-secrets, key: control-dsn}
             - name: UFO_TOKEN_SECRET
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}
-            # Onboarding writes workspace rows through the RLS-subject serve role.
-            - name: UFO_CONTROL_SERVE_DSN
+            # Every read and write of a core table goes to serve over the onboarding RPC.
+            - {name: UFO_CONTROL_SERVE_INTERNAL_URL, value: "http://ufo-serve:8710"}
+            - name: UFO_ONBOARD_CONTROL_TOKEN
               valueFrom:
-                secretKeyRef: {name: ufo-serve, key: UFO_CONTROL_SERVE_DSN}
+                secretKeyRef: {name: ufo-platform-secrets, key: UFO_ONBOARD_CONTROL_TOKEN}
             # WorkOS verifies the member's email — Magic Auth for the email step both surfaces
             # collect, a Google OAuth hop for the browser's Continue-with-Google. The gateway
             # refuses to start without all three. The redirect URI is the app

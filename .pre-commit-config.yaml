@@ -26,15 +26,15 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
-      - id: ruff-control
-        name: ruff control
-        entry: uv run --project control ruff check control/src control/tests
+      - id: fmt-control
+        name: cargo fmt control
+        entry: sh -c 'cd control && cargo fmt --check'
         language: system
-        types: [python]
+        files: ^control/
         pass_filenames: false
-      - id: mypy-control
-        name: mypy control
-        entry: uv run --project control mypy --config-file control/pyproject.toml control/src/ufo_control control/tests
+      - id: clippy-control
+        name: cargo clippy control
+        entry: sh -c 'cd control && cargo clippy --all-targets -- -D warnings'
         language: system
-        types: [python]
+        files: ^control/
         pass_filenames: false

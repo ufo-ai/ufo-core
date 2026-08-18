@@ -87,8 +87,17 @@ test-one: ## Run one file or node id serially (FILE=path) — xdist only pays ab
 	@test -n "$(FILE)" || { echo "FILE is required: make test-one FILE=core/tests/test_hooks.py"; exit 1; }
 	uv run pytest -m "not integration and not docker" -q $(FILE)
 
-test-control: ## Run the control (gateway) suite
-	uv run --project control pytest control/tests --ignore=control/tests/test_rls.py -q
+control-pg: ## Start the control suite's Postgres on :5549
+	docker rm -f ufo-control-rust-pg >/dev/null 2>&1 || true
+	docker run -d --rm --name ufo-control-rust-pg -e POSTGRES_USER=ufo -e POSTGRES_PASSWORD=ufo \
+		-e POSTGRES_DB=ufo -p 127.0.0.1:5549:5432 pgvector/pgvector:pg17
+	until docker exec ufo-control-rust-pg pg_isready -U ufo >/dev/null 2>&1; do sleep 1; done
+
+test-control: ## Run the control (gateway) suite — needs `make control-pg`
+	cd control && cargo test
+
+check-control: ## Run the control crate's static gates — fmt and clippy
+	cd control && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 test-web: $(WEB)/node_modules ## Run the portal's vitest suite
 	npm --prefix $(WEB) test

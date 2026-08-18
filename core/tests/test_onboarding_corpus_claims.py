@@ -21,11 +21,11 @@ CORPUS = REPO_ROOT / "packs/assistant_hosted/skills/customer-onboarding-help"
 SLACK_SETUP_SKILL_MD = "extensions/slack/ufo_ext_slack/skills/slack-app-setup/SKILL.md"
 SLACK_TOOLS = "extensions/slack/ufo_ext_slack/tools.py"
 METRONOME = "extensions/metronome/ufo_ext_metronome.py"
-GATEWAY = "control/src/ufo_control/gateway.py"
-GATEWAY_WEB = "control/src/ufo_control/gateway_web.py"
-GATEWAY_SHARED = "control/src/ufo_control/gateway_shared.py"
-INVITES = "control/src/ufo_control/gateway_invite.py"
-SLACK_CONNECT = "control/src/ufo_control/gateway_slack_connect.py"
+GATEWAY = "control/src/gateway.rs"
+GATEWAY_WEB = "control/src/login.html"
+ONBOARD_CONTROL = "core/src/ufo/onboard_control.py"
+INVITES = "control/src/invite.rs"
+SLACK_CONNECT = "control/src/slack_connect.rs"
 AUDIENCE = "core/src/ufo/audience.py"
 MEMBERS = "core/src/ufo/members.py"
 BALANCE = "core/src/ufo/balance.py"
@@ -71,76 +71,73 @@ CLAIMS = (
         corpus="references/getting-started.md",
         phrase="nothing in it to retype",
         source=INVITES,
-        pattern=r"async def redeem\(\s*self, email_domain: str",
+        pattern=r"pub async fn redeem\(",
     ),
     Claim(
         claim="an invitation works once per email domain",
         corpus="references/getting-started.md",
         phrase="works once per domain",
         source=INVITES,
-        pattern=r"LIVE_DOMAIN_INDEX.*\n.*where consumed_at is null",
+        pattern=(
+            r"invite_code_live_domain \\\n\s+on ufo_control\.invite_code \(email_domain\) "
+            r"where consumed_at is null"
+        ),
     ),
     Claim(
         claim="an unused invitation lapses after a couple of weeks",
         corpus="references/getting-started.md",
         phrase="lapses if it goes unused for a couple",
         source=INVITES,
-        pattern=r"INVITE_TTL = timedelta\(days=14\)",
+        pattern=r"INVITE_TTL_DAYS: i64 = 14",
     ),
     Claim(
         claim="a refusal ends the session instead of asking again",
         corpus="references/getting-started.md",
         phrase="ends the session with the reason rather than asking again",
         source=GATEWAY,
-        pattern=r'directive\("exit", "0"\)',
+        pattern=r'directive\("exit", &\["0"\]\)',
     ),
     Claim(
         claim="one workspace per email domain",
         corpus="references/not-yet.md",
         phrase="One workspace exists per email domain",
         source=GATEWAY,
-        pattern=r"workspaces\.create\(claim\.email_domain",
+        pattern=r"\.create\(&claim\.email_domain",
     ),
     Claim(
         claim="a sign-in offers every workspace the verified address can enter",
         corpus="references/getting-started.md",
         phrase="asks them to choose when an exact",
-        source=GATEWAY_SHARED,
-        pattern=r"where matching\.email = \$1",
+        source=ONBOARD_CONTROL,
+        pattern=r"where matching\.email = :member",
     ),
     Claim(
         claim="an exact membership bypasses the new-workspace invite gate",
         corpus="references/getting-started.md",
         phrase="An exact membership needs no invite",
         source=GATEWAY,
-        pattern=r"if not choices:",
+        pattern=r"if choices\.is_empty\(\)",
     ),
     Claim(
         claim="an admin is offered connecting Slack, then billing setup, at the end of signup",
         corpus="references/getting-started.md",
         phrase="offered connecting Slack, then billing setup at the end",
         source=GATEWAY,
-        pattern=(
-            r'directive\(\s*"choose", FIRST_MOVE_PROMPT, SLACK_CHOICE, BILLING_CHOICE, TOUR_CHOICE'
-        ),
+        pattern=(r"\[FIRST_MOVE_PROMPT, SLACK_CHOICE, BILLING_CHOICE, TOUR_CHOICE\]"),
     ),
     Claim(
         claim="the browser card names connecting Slack to an admin, and never carries the link",
         corpus="references/getting-started.md",
         phrase="card names connecting Slack for an admin",
         source=GATEWAY,
-        pattern=r'directive\("slack", SLACK_CHOICE\) if ensured\.admin else b""',
+        pattern=r'directive\("slack", &\[SLACK_CHOICE\]\)',
     ),
     Claim(
         claim="the shared Slack channel's invitation is a deploy switch away, so never promise it",
         corpus="references/slack-install.md",
         phrase="never promise them an automatic email",
         source=SLACK_CONNECT,
-        pattern=(
-            r'match os\.environ\.get\(ENABLED_ENV, "false"\)\.strip\(\)\.lower\(\):\n'
-            r'\s+case "false" \| "0":\n'
-            r"\s+return None"
-        ),
+        pattern=r'"false" \| "0" => Ok\(None\)',
     ),
     Claim(
         claim="pending is tied to the current Slack signing secret",

@@ -729,9 +729,7 @@ def test_authorization_expansions_co_deploy_but_contractions_split() -> None:
             )
     # Fail closed: no diff supplied means expand-vs-contract is unknown, so enforce the split.
     with pytest.raises(ValueError, match="contract IAM only after"):
-        gate.validate_deploy_change(
-            ("infra/modules/platform/ses.tf", "control/src/ufo_control/gateway_email.py")
-        )
+        gate.validate_deploy_change(("infra/modules/platform/ses.tf", "control/src/email.rs"))
 
 
 def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
@@ -3970,8 +3968,8 @@ def test_the_client_target_set_is_one_set_everywhere() -> None:
         assert isinstance(client, dict)
         return {entry["target"] for entry in client["strategy"]["matrix"]["include"]}
 
-    gateway = (ROOT / "control" / "src" / "ufo_control" / "gateway.py").read_text()
-    literal = re.search(r"CLIENT_TARGETS = frozenset\(\s*\{(.*?)\}", gateway, re.DOTALL)
+    gateway = (ROOT / "control" / "src" / "gateway.rs").read_text()
+    literal = re.search(r"CLIENT_TARGETS: &\[&str\] = &\[(.*?)\];", gateway, re.DOTALL)
     assert literal
     served = set(re.findall(r'"([^"]+)"', literal.group(1)))
     assert matrix_targets("client.yml", "build") == served

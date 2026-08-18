@@ -58,10 +58,13 @@ RAW_CSS_VALUE = re.compile(
     r"#[0-9a-fA-F]|\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|%)(?![\w-])"
 )
 UFO_SURFACE_MODULE = Path("extensions/ufo/ufo_ext_ufo/surface.py")
-GATEWAY_DIRECTIVES_MODULE = Path("control/src/ufo_control/gateway_directives.py")
-GATEWAY_MODULES = (Path("control/src/ufo_control/gateway.py"), GATEWAY_DIRECTIVES_MODULE)
+GATEWAY_MODULES = (
+    Path("control/src/gateway.rs"),
+    Path("control/src/directives.rs"),
+)
 RUST_WIRE_MODULE = Path("client/src/wire.rs")
-ONBOARD_WEB_MODULE = Path("control/src/ufo_control/gateway_web.py")
+ONBOARD_WEB_MODULE = Path("control/src/login.html")
+RUST_DIRECTIVE_CALL = re.compile(r'\bdirective\(\s*"([a-z]+)"')
 TERMINAL_DROPPED_VERBS = frozenset({"debugger", "slack"})
 ONBOARD_WEB_DROPPED_VERBS = frozenset({"install"})
 WEB_SURFACE_MODULE = Path("extensions/web/ufo_ext_web/surface.py")
@@ -880,14 +883,18 @@ def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
         for verb in sorted(WORKSPACE_WIRE - emitted)
     )
 
+    # The gateway is Rust, so its emitted verbs are read off the source rather than an AST. The
+    # two codecs sharing one escaping is proved instead by `control/tests/contract.rs`, which
+    # renders the golden fixture `ufo_testsupport.wire_fixture` writes through the Python codec —
+    # an equivalence a test can hold and a text comparison could only approximate.
     gateway_emitted: set[str] = set()
-    gateway_trees: dict[Path, ast.Module] = {}
+    found_gateway = False
     for rel in GATEWAY_MODULES:
         text = _required_text(rel, failures)
         if text is not None:
-            gateway_trees[rel] = ast.parse(text, filename=str(rel))
-            gateway_emitted |= _directive_calls(gateway_trees[rel])
-    if gateway_trees:
+            found_gateway = True
+            gateway_emitted |= set(RUST_DIRECTIVE_CALL.findall(text))
+    if found_gateway:
         failures.extend(
             f"wire: verb {verb!r} emitted by the gateway but not in ONBOARD_WIRE"
             for verb in sorted(gateway_emitted - ONBOARD_WIRE)
@@ -896,15 +903,6 @@ def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
             f"wire: ONBOARD_WIRE verb {verb!r} is emitted nowhere in the gateway"
             for verb in sorted(ONBOARD_WIRE - gateway_emitted)
         )
-
-    codec = trees.get(UFO_SURFACE_MODULE)
-    gateway_codec = gateway_trees.get(GATEWAY_DIRECTIVES_MODULE)
-    if codec is not None and gateway_codec is not None:
-        if _stripped_dump(codec, "directive") != _stripped_dump(gateway_codec, "directive"):
-            failures.append(
-                f"wire: directive() diverged between {UFO_SURFACE_MODULE} and "
-                f"{GATEWAY_DIRECTIVES_MODULE}"
-            )
 
     terminal_verbs = (WORKSPACE_WIRE | ONBOARD_WIRE) - TERMINAL_DROPPED_VERBS
     rust_source = _required_text(RUST_WIRE_MODULE, failures)

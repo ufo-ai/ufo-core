@@ -1,0 +1,44 @@
+[package]
+name = "ufo-control"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ufo-control"
+path = "src/main.rs"
+
+[lib]
+name = "ufo_control"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["json", "query"] }
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+deadpool-postgres = "0.14"
+getrandom = "0.3"
+hostname = "0.4"
+hmac = "0.12"
+quick-xml = "0.37"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync", "fs"] }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+tokio-postgres-rustls = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+webpki-roots = "0.26"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true

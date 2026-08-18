@@ -24,6 +24,14 @@ resource "random_password" "cache_control_token" {
   special = false
 }
 
+# The bearer the Rust control plane presents to serve's onboarding RPC (RFC 0036). Its own secret,
+# never the egress control token: control's credential reaches those four routes and nothing else.
+# Minted here so serve (which reads ufo-platform-secrets whole) and the gateway pod share one value.
+resource "random_password" "onboard_control_token" {
+  length  = 48
+  special = false
+}
+
 # The bearer the standalone ufo-egress data plane presents to serve's egress-control RPC (RFC 0035).
 # Minted here so serve (which reads ufo-platform-secrets whole) and the proxy pod share one value.
 resource "random_password" "egress_control_token" {
@@ -56,14 +64,20 @@ locals {
 
   # The shared serve fleet's DSN — the RLS-*subject* ufo_serve role on the shared app database, the
   # one role for every hosted workspace (it sets app.workspace_id per transaction). The password is
-  # derived from the same seed + formula as control/rls.py serve_password()
-  # (sha256("<seed>:ufo_serve")), reproduced here so the terraform-rendered config matches the role the
-  # rls-bootstrap Job creates — a cross-runtime contract, control/src/ufo_control/rls.py is the
-  # source of truth. Core
+  # derived from the same seed + formula as `control/src/rls.rs` role_password()
+  # (sha256("<seed>:ufo_serve")), reproduced here so the terraform-rendered config matches the role
+  # the rls-bootstrap Job creates — a cross-runtime contract, `control/src/rls.rs` is the source of
+  # truth. Core
   # derives the DBOS system store as the `<name>_dbos` sibling (config.DatabaseConfig), so this url
   # alone resolves the fleet's shared `ufo_dbos` system database; the rls-bootstrap Job provisions it.
   serve_password = sha256("${random_password.pg_role_seed.result}:ufo_serve")
   serve_dsn      = "postgresql+asyncpg://ufo_serve:${local.serve_password}@${local.rds_endpoint}/${var.app_database_name}"
+
+  # The gateway's own role, derived the same way and created by the same Job. It is granted the
+  # `ufo_control` schema and nothing in `public`, so the pod on the unauthenticated sign-in path
+  # holds a credential that cannot reach a tenant's rows.
+  control_password = sha256("${random_password.pg_role_seed.result}:ufo_control")
+  control_dsn      = "postgresql://ufo_control:${local.control_password}@${local.rds_endpoint}/${var.app_database_name}"
 
   # Fernet key: url-safe base64 of 32 bytes needs one "=" of padding, which random_id.b64_url omits.
   serve_credential_key = "${random_id.serve_credential_key.b64_url}="
@@ -79,6 +93,7 @@ resource "aws_secretsmanager_secret_version" "postgres" {
   secret_id = aws_secretsmanager_secret.postgres.id
   secret_string = jsonencode({
     "postgres-admin-dsn" = local.admin_dsn
+    "control-dsn"        = local.control_dsn
     "pg-role-seed"       = random_password.pg_role_seed.result
   })
 }
@@ -185,6 +200,7 @@ resource "aws_secretsmanager_secret_version" "platform" {
     # `KeyPair::from_pem`, which parses PKCS#8 (`BEGIN PRIVATE KEY`) and refuses PKCS#1.
     "egress-ca-key"           = tls_private_key.egress_ca.private_key_pem_pkcs8
     "egress-control-token"    = random_password.egress_control_token.result
+    "onboard-control-token"   = random_password.onboard_control_token.result
     "ufo-cache-control-token" = random_password.cache_control_token.result
   })
 }

@@ -1,16 +1,20 @@
 """The directive wires' one vocabulary home and golden fixture.
 
 `WORKSPACE_WIRE` and `ONBOARD_WIRE` are the closed verb tables `gates.py` holds every producer and
-client to. `fixture_rows()` renders one line per verb through the real producers — the ufo
-surface's codec for the workspace wire, the gateway's for the onboarding wire — and the checked-in
-copy at `FIXTURE_PATH` is what each client's own test suite replays, so a wire change is a fixture
-diff that runs every client's tests. Regenerate: `uv run python -m ufo_testsupport.wire_fixture`.
+client to. `fixture_rows()` renders one line per verb, and the checked-in copy at `FIXTURE_PATH` is
+what each client's own test suite replays, so a wire change is a fixture diff that runs every
+client's tests. Regenerate: `uv run python -m ufo_testsupport.wire_fixture`.
+
+Both wires share one escaping — a field's backslash, tab, and newline, in that order, with carriage
+returns dropped — so one codec renders both here. The onboarding wire's producer is the Rust gateway
+(`control/src/directives.rs`), which is held to these same lines by
+`control/tests/contract.rs::every_onboard_fixture_line_is_this_encoder`: the fixture is generated on
+this side and asserted on that one, so neither half can move without the other going red.
 """
 
 import json
 from pathlib import Path
 
-from ufo_control.gateway_directives import directive as gateway_directive
 from ufo_ext_ufo.surface import directive as surface_directive
 
 WORKSPACE_WIRE = frozenset(
@@ -82,7 +86,7 @@ def fixture_rows() -> list[dict[str, object]]:
             "wire": "onboard",
             "verb": verb,
             "fields": list(fields),
-            "line": gateway_directive(verb, *fields).decode().removesuffix("\n"),
+            "line": surface_directive(verb, *fields).decode().removesuffix("\n"),
         }
         for verb, fields in sorted(ONBOARD_FIELDS.items())
     ]

@@ -7,6 +7,7 @@ outside, by running a session that behaves that way and reading the files it lef
 
 import csv
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -218,19 +219,71 @@ def test_instrumentation_can_be_turned_off(pytester: pytest.Pytester) -> None:
     assert not (pytester.path / ".pytest-timings").exists()
 
 
+def _make_recipes(makefile: Path) -> dict[str, str]:
+    """Each target's recipe body, so a step running `make <target>` can be read for what the
+    target actually invokes — the integration job reaches pytest that way, and a gate that only
+    scanned the workflow text would miss it."""
+    recipes: dict[str, str] = {}
+    target = None
+    for line in makefile.read_text().splitlines():
+        if line.startswith("\t"):
+            if target is not None:
+                recipes[target] += line
+            continue
+        head = line.split(":", 1)
+        target = (
+            head[0].strip() if len(head) == 2 and head[0] and " " not in head[0].strip() else None
+        )
+        if target is not None:
+            recipes.setdefault(target, "")
+    return recipes
+
+
+MAKE_TARGET = re.compile(r"\bmake\s+(?:-{1,2}[\w-]+\s+)*([\w.-]+)")
+
+
+def _runs_pytest(command: str, recipes: dict[str, str]) -> bool:
+    """Whether this step executes tests, following only the targets a literal `make` names — a
+    bare word matching a target is not one. `cargo test` and `test "$x" = success` both carry the
+    word `test`, and resolving those against the `test` target would read every Rust job and the
+    aggregate gate as pytest runners.
+
+    `--collect-only` executes no test and writes no timings, so a job that only collects is not
+    one that has to upload."""
+    reached = command
+    for target in MAKE_TARGET.findall(command):
+        reached += recipes.get(target, "")
+    return "pytest" in reached and "--collect-only" not in reached
+
+
 def test_ci_uploads_every_hidden_timing_directory() -> None:
-    workflows = Path(__file__).parents[2] / ".github" / "workflows"
-    uploads = []
+    """Every job that *runs* pytest uploads the directory the plugin wrote, so merging the
+    artifacts accounts for the whole suite's wall clock.
+
+    The expectation is derived rather than counted. A hardcoded total fails whenever a job is
+    added or removed and is repaired by editing the number, which asserts nothing about the job
+    that moved; a job that executes pytest and forgets its upload has to be what breaks this."""
+    repo = Path(__file__).parents[2]
+    workflows = repo / ".github" / "workflows"
+    recipes = _make_recipes(repo / "Makefile")
+    executes: set[str] = set()
+    uploaded: dict[str, dict[str, str]] = {}
     for name in ("ci.yaml", "integration.yaml"):
         workflow = yaml.load((workflows / name).read_text(), Loader=yaml.BaseLoader)
-        uploads.extend(
-            step["with"]
-            for job in workflow["jobs"].values()
-            for step in job.get("steps", [])
-            if step.get("uses") == "actions/upload-artifact@v4"
-            and step.get("with", {}).get("name", "").startswith("test-timings-")
-        )
+        for job, spec in workflow["jobs"].items():
+            for step in spec.get("steps", []):
+                if _runs_pytest(step.get("run", ""), recipes):
+                    executes.add(f"{name}:{job}")
+                given = step.get("with", {})
+                if step.get("uses") == "actions/upload-artifact@v4" and given.get(
+                    "name", ""
+                ).startswith("test-timings-"):
+                    uploaded[f"{name}:{job}"] = given
 
-    assert len(uploads) == 4
-    assert all(upload["path"] == ".pytest-timings" for upload in uploads)
-    assert all(upload["include-hidden-files"] == "true" for upload in uploads)
+    assert executes, "no job runs pytest — the workflow parse is wrong, not the suite"
+    assert executes == set(uploaded), (
+        f"jobs running pytest without a timings upload: {sorted(executes - set(uploaded))}; "
+        f"uploads from jobs that run none: {sorted(set(uploaded) - executes)}"
+    )
+    assert all(upload["path"] == ".pytest-timings" for upload in uploaded.values())
+    assert all(upload["include-hidden-files"] == "true" for upload in uploaded.values())

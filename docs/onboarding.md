@@ -483,36 +483,22 @@ infra/modules/edge/
   worker.js               public edge behavior
   worker.test.mjs         its behavior proof (node --test, ci checks job)
 
-control/src/ufo_control/
-  gateway.py              Onboarding machine and apex routes
-  gateway_directives.py   the directive wire the client renders
-  gateway_web.py          the /login page + JSON rendering of the same wire
-  gateway_claim.py        the claim under its TTL: start, verify, admit verified
-  gateway_workos.py       WorkOS custody: the Google hop and Magic Auth codes
-  gateway_invite.py       one-time domain grants gating workspace creation
-  gateway_slack_connect.py
-                          the signup Slack Connect delivery: table, client, leased workflow
-  gateway_token.py        bearer minting
-  gateway_shared.py       domain/roster workspace resolution, member/default-agent writes
-  gateway_store.py        claim custody
-  schema.py               the ufo_control schema, shaped by the deploy's `ufo-control migrate`
-  rls.py                  shared serve role and workspace policies
-  client/ufo              the bootstrap installer `/ufo` serves — download the binary, exec it
-
-extensions/slack/ufo_ext_slack/
-  surface.py              Slack ingest, OAuth install callback, identity record + url marker
-  tools.py                slack_connect (oauth + manifest) and slack_app_manifest tools
-
-extensions/ufo/ufo_ext_ufo/
-  surface.py              the terminal wire: secret rendering + fulfillment
-
-core/src/ufo/
-  tools/builtins.py       request_credentials
-  credentials.py          the sealed-request contract
-  ext/surface.py          privileged SurfaceContext seam (pending/fulfill)
-  sdk/surfaces.py         public re-exports for surface extensions
-
-packs/assistant_hosted/
-  ufo_pack_assistant_hosted.py
-                           shared-mountable ufo + Slack surfaces and hosted capabilities
+control/src/
+  main.rs                 the six CLI verbs: gateway, migrate, invite, slack-connect-retry,
+                          rls-bootstrap, serve-dsn
+  gateway.rs              the HTTP routes and the onboarding state machine
+  claim.rs                claim time-to-live, verification, and the races each write loses
+  workos.rs               Magic Auth, the Google hop, and the signed state and cookie seals
+  web.rs                  the browser's renderer; login.html is the page it serves
+  shared.rs               the onboarding RPC client — every core table is read and written there
+  invite.rs               one-time domain-grant custody
+  store.rs                the platform onboarding ledger
+  slack_connect.rs        the signup Slack Connect channel and its delivery poller
+  email.rs                work-email policy and SES delivery
+  schema.rs               the ufo_control schema, shaped by the deploy's `ufo-control migrate`
+  rls.rs                  shared database role and policy bootstrap
+  db.rs                   the pool over control's own three ledgers, and nothing else
+  token.rs                bearer minting; the ufo surface owns verification
+  directives.rs           the directive wire both renderers read
+  client/ufo              the POSIX installer the gateway serves at /ufo
 ```

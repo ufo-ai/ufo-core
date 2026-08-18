@@ -14,6 +14,8 @@
 
 x-dev-env: &dev-env
   UFO_CONTROL_POSTGRES_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
+  # Both ends of the onboarding RPC hold this: the gateway presents it, serve gates on it.
+  UFO_ONBOARD_CONTROL_TOKEN: ufo-local-dev-onboard-token
   UFO_CONTROL_PG_ROLE_SEED: ufo-local-dev
   PG_HOST: postgres:5432
   APP_DB: ufo
@@ -73,9 +75,11 @@ services:
       <<: *dev-env
       UFO_CONTROL_EMAIL_MODE: console
       UFO_TOKEN_SECRET: ufo-local-dev-token-secret
-      # Dev onboarding writes workspaces through the owner role (RLS is a serve-side concern); the
-      # hosted gateway uses the RLS-subject ufo_serve role here.
-      UFO_CONTROL_SERVE_DSN: postgresql+asyncpg://ufo:ufo@postgres:5432/ufo
+      # The gateway reads its own three ledgers and nothing else. Locally that is the owner role for
+      # convenience; a deploy hands it the `ufo_control` role, which holds no privilege on any table
+      # in `public`. Either way core's tables are reached over the onboarding RPC below.
+      UFO_CONTROL_GATEWAY_DSN: postgresql://ufo:ufo@postgres:5432/ufo
+      UFO_CONTROL_SERVE_INTERNAL_URL: http://serve:8710
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}
       UFO_WORKSPACE_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
       # WorkOS is off locally: WORKOS_MODE=console runs a credential-free dev verifier, so
@@ -100,6 +104,8 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       init: {condition: service_completed_successfully}
+      # Sign-in seats a member through serve's onboarding RPC, so the gateway starts behind it.
+      serve: {condition: service_started}
     restart: unless-stopped
 
   serve:

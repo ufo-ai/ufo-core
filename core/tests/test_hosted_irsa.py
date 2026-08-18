@@ -427,3 +427,59 @@ def test_serve_mounts_the_rendered_config_and_the_proxy_reads_env() -> None:
     assert "{key: ufo.toml, path: ufo.toml}" in SERVE_DEPLOYMENT
     assert config_mount not in PROXY_DEPLOYMENT
     assert "ufo.toml" not in PROXY_DEPLOYMENT
+
+
+def _rendered_cluster_services() -> list[dict[str, object]]:
+    rendered = re.sub(
+        r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", "value", CLUSTER_SERVICES_TEMPLATE.read_text()
+    )
+    return [document for document in yaml.safe_load_all(rendered) if document]
+
+
+def test_every_secret_key_a_workload_reads_is_one_an_external_secret_supplies() -> None:
+    """A `secretKeyRef` naming a key no ExternalSecret syncs is not a plan error, a terraform error,
+    or a test failure — the pod stops at `CreateContainerConfigError` and the rollout times out. The
+    `data` lists are enumerated key by key, so writing a value into the AWS secret is only half of
+    wiring it, and nothing else compares the two halves.
+    """
+    supplied: dict[str, set[str]] = {}
+    for document in _rendered_cluster_services():
+        if document.get("kind") != "ExternalSecret":
+            continue
+        target = document["spec"].get("target", {}).get("name") or document["metadata"]["name"]
+        keys = {entry["secretKey"] for entry in document["spec"].get("data", [])}
+        supplied.setdefault(target, set()).update(keys)
+        # A `dataFrom` block syncs the whole secret, so anything it targets is unconstrained here.
+        if document["spec"].get("dataFrom"):
+            supplied[target].add("*")
+
+    read: set[tuple[str, str]] = set()
+    for workload_ha in (False, True):
+        for document in _documents(workload_ha):
+            if not document or document.get("kind") not in {"Deployment", "Job", "CronJob"}:
+                continue
+            for reference in re.finditer(
+                r"secretKeyRef:\s*\{name:\s*([\w-]+),\s*key:\s*([\w.-]+)\}",
+                yaml.safe_dump(document),
+            ):
+                read.add((reference.group(1), reference.group(2)))
+
+    # `safe_dump` reflows the flow-style mappings, so read the references off the source instead.
+    read = {
+        (match.group(1), match.group(2))
+        for match in re.finditer(
+            r"secretKeyRef:\s*\{name:\s*([\w-]+),\s*key:\s*([\w.-]+)\}",
+            HOSTED_TEMPLATE.read_text(),
+        )
+    }
+    assert read, "no workload reads a secret key — the template parse is wrong, not the manifests"
+
+    missing = sorted(
+        f"{secret}.{key}"
+        for secret, key in read
+        if secret in supplied and "*" not in supplied[secret] and key not in supplied[secret]
+    )
+    assert not missing, (
+        f"secretKeyRef names keys no ExternalSecret syncs: {missing}. "
+        f"Add each to the matching `data` list in {CLUSTER_SERVICES_TEMPLATE.name}."
+    )

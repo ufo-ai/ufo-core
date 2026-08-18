@@ -1,0 +1,37 @@
+[
+  {
+    "secret": "local-dev-token-secret",
+    "workspace_id": "11111111-1111-1111-1111-111111111111",
+    "email": "dana@acme.com",
+    "exp": 1800000000,
+    "token": "eyJlbWFpbCI6ImRhbmFAYWNtZS5jb20iLCJleHAiOjE4MDAwMDAwMDAsIndzIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIn0.1d8ca315a1a2e9941e928425a5413d05a522c9e518c0d96777efe5ab6a780dac"
+  },
+  {
+    "secret": "local-dev-token-secret",
+    "workspace_id": "11111111-1111-1111-1111-111111111111",
+    "email": "  Dana@Acme.COM ",
+    "exp": 1800000000,
+    "token": "eyJlbWFpbCI6ImRhbmFAYWNtZS5jb20iLCJleHAiOjE4MDAwMDAwMDAsIndzIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIn0.1d8ca315a1a2e9941e928425a5413d05a522c9e518c0d96777efe5ab6a780dac"
+  },
+  {
+    "secret": "a",
+    "workspace_id": "00000000-0000-0000-0000-000000000000",
+    "email": "x@y.z",
+    "exp": 0,
+    "token": "eyJlbWFpbCI6InhAeS56IiwiZXhwIjowLCJ3cyI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCJ9.993732496bff9dce510141f03826cb407e0a505288b459497c858bbb64479589"
+  },
+  {
+    "secret": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+    "workspace_id": "deadbeef-dead-beef-dead-beefdeadbeef",
+    "email": "a+b@sub.example.co.uk",
+    "exp": 2147483647,
+    "token": "eyJlbWFpbCI6ImErYkBzdWIuZXhhbXBsZS5jby51ayIsImV4cCI6MjE0NzQ4MzY0Nywid3MiOiJkZWFkYmVlZi1kZWFkLWJlZWYtZGVhZC1iZWVmZGVhZGJlZWYifQ.75331fe7bb157d52a53cf804cab4d2e55310b23528548b9b93800b581a7eb508"
+  },
+  {
+    "secret": "sécret-ünicode",
+    "workspace_id": "12345678-1234-5678-1234-567812345678",
+    "email": "josé@exämple.com",
+    "exp": 1735689600,
+    "token": "eyJlbWFpbCI6Impvc1x1MDBlOUBleFx1MDBlNG1wbGUuY29tIiwiZXhwIjoxNzM1Njg5NjAwLCJ3cyI6IjEyMzQ1Njc4LTEyMzQtNTY3OC0xMjM0LTU2NzgxMjM0NTY3OCJ9.70dfa41e9d7a3faaefefae2342a6fba7c171dabc298d7ca318c0d575cd07d0c3"
+  }
+]

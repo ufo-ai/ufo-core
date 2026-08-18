@@ -60,16 +60,11 @@ PY
 
 render_config() {
   local dsn
-  dsn="$(python - <<PY
-from ufo_control.rls import serve_dsn
-print(serve_dsn("${PG_HOST}", "${APP_DB}"))
-PY
-)"
+  dsn="$(ufo-control serve-dsn "${PG_HOST}" "${APP_DB}")"
   sed -e "s#__SERVE_DSN__#${dsn}#g" -e "s#__PACK__#${DEV_PACK}#g" \
     -e "s#__PUBLIC_BASE_URL__#${PUBLIC_BASE_URL}#g" \
     /app/dev/ufo.toml > "$RENDERED_CONFIG"
   export UFO_CONFIG="$RENDERED_CONFIG"
-  export UFO_CONTROL_SERVE_DSN="$dsn"
 }
 
 case "${1:-}" in

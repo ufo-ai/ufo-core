@@ -1,5 +1,6 @@
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -57,3 +58,27 @@ def test_fails_loud_without_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:
         mint_surface_token("sites", {"ws": "w"})
     with pytest.raises(RuntimeError, match=UFO_TOKEN_SECRET_ENV):
         verify_surface_token("sites", "anything")
+
+
+BEARER_CONTRACT = Path(__file__).parents[2] / "control" / "tests" / "bearer_contract.json"
+
+
+def test_the_rust_contract_vectors_are_this_codec() -> None:
+    """The gateway mints in Rust and every surface verifies here, so one drift in either half is a
+    token nothing accepts. `control/tests/contract.rs` signs these same vectors and asserts the same
+    strings; this end proves the file still describes the codec it was generated from, so neither
+    half can move without the other going red.
+
+    The unicode vector is the one that earns its place: `json.dumps` escapes non-ASCII under its
+    default `ensure_ascii=True`, and a JSON writer that emits UTF-8 straight through signs a
+    different body for the same address.
+    """
+    vectors = json.loads(BEARER_CONTRACT.read_text())
+    assert len(vectors) >= 5
+    assert any(not vector["email"].isascii() for vector in vectors)
+    for vector in vectors:
+        moment = datetime.fromtimestamp(vector["exp"], tz=UTC)
+        minted = mint_token(
+            vector["secret"], vector["workspace_id"], vector["email"], timedelta(0), moment
+        )
+        assert minted == vector["token"], vector["email"]

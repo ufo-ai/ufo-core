@@ -127,6 +127,7 @@ from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
 from ufo.objects import BoundKind
+from ufo.onboard_control import ONBOARD_CONTROL_TOKEN_ENV, OnboardControl
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.runtime_instance import (
     CancelReconciler,
@@ -322,6 +323,9 @@ def run() -> None:
     app.state.artifact_token_secret = artifact_secret
     app.include_router(callback_router)
     app.include_router(artifacts_router)
+    onboard_token = os.environ.get(ONBOARD_CONTROL_TOKEN_ENV, "")
+    if onboard_token:
+        app.include_router(OnboardControl(control_token=onboard_token).router())
     sync_driver = SyncDriver(
         backends=_source_backends(manifests),
         blob=blob,

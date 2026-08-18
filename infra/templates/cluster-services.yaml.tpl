@@ -45,6 +45,9 @@ spec:
   target: {name: ufo-control-secrets}
   data:
     - {secretKey: postgres-admin-dsn, remoteRef: {key: ${secret_postgres}, property: postgres-admin-dsn}}
+    # The gateway's own role. The keys here are enumerated, so a Deployment reading a key this
+    # list omits stops at CreateContainerConfigError rather than failing anything earlier.
+    - {secretKey: control-dsn, remoteRef: {key: ${secret_postgres}, property: control-dsn}}
     - {secretKey: pg-role-seed, remoteRef: {key: ${secret_postgres}, property: pg-role-seed}}
 ---
 apiVersion: external-secrets.io/v1beta1
@@ -98,6 +101,7 @@ spec:
     # The bearer the standalone ufo-egress data plane presents to serve's egress-control RPC. serve
     # reads it whole through envFrom to gate the RPC; the proxy pod references the same key.
     - {secretKey: UFO_EGRESS_CONTROL_TOKEN, remoteRef: {key: ${secret_platform}, property: egress-control-token}}
+    - {secretKey: UFO_ONBOARD_CONTROL_TOKEN, remoteRef: {key: ${secret_platform}, property: onboard-control-token}}
     # The sandbox cache daemon's callback token (RFC 0032); unused until the cache is enabled.
     - {secretKey: UFO_CACHE_CONTROL_TOKEN, remoteRef: {key: ${secret_platform}, property: ufo-cache-control-token}}
 ---
