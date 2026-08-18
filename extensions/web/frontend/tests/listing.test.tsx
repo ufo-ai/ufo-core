@@ -817,7 +817,7 @@ test("an outcome released after the member left never resets the view they are o
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/intents": () => held,
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   location.hash = "#/workspace/sources";
   await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
@@ -1267,7 +1267,7 @@ test("leaving the workspace entirely also releases held controls", async () => {
     "/transcript": () => json({ messages: [] }),
     "/api/admin": () => new Response("no", { status: 404 }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await narrow("rss");
   location.hash = "#/agents/" + AGENT.id + "/chat";

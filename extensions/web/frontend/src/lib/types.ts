@@ -15,8 +15,6 @@ export type AdminAgent = Agent & {
   web_audience: string[];
 };
 
-export type Subagent = { name: string; model: string | null };
-
 export type Member = { id?: string; email: string; admin: boolean; seated?: boolean };
 
 /** The agent a conversation ran under, carried by a read that spans every agent the member
@@ -54,7 +52,6 @@ export type NewAgentForm = {
 
 export type AgentsPayload = {
   agents: Agent[];
-  subagents: Subagent[];
   member: Member;
   new_agent: NewAgentForm | null;
 };

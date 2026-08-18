@@ -91,7 +91,7 @@ test("the tab follows the hash the member opens", async () => {
     "/transcript": () => json({ messages: [] }),
     "/slots": () => json({ slots: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   await waitFor(() => expect(document.title).toBe("Pick one thread · assistant · ufo"));

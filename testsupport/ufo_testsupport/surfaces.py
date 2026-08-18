@@ -1,6 +1,6 @@
-"""Inert dependencies for tests that mount surfaces without exercising the skills view, the subagent
-roster, or the ambient reply decision — a surface context requires all three, so a test that reads
-none of them passes something real and empty."""
+"""Inert dependencies for tests that mount surfaces without exercising the skills view or the
+ambient reply decision — a surface context requires both, so a test that reads neither passes
+something real and empty."""
 
 import asyncio
 from dataclasses import dataclass, field
@@ -8,12 +8,10 @@ from uuid import UUID
 
 from ufo.ambient_reply import AmbientDecision, AmbientReplyClassifier
 from ufo.ext.surface import Stopped
-from ufo.loop.subagents import SubagentRegistry
 from ufo.models.interface import ModelRequest
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 
 EMPTY_SKILL_REGISTRY = SkillRegistry({})
-NO_SUBAGENTS = SubagentRegistry(())
 
 
 async def no_user_skills() -> tuple[RuntimeSkill, ...]:

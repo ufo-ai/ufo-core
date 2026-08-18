@@ -206,7 +206,6 @@ def _context(workspace_id: UUID, tmp_path: Path, dbos: StubDbos) -> SurfaceConte
         _models=("auto", "claude-opus-4-8"),
         _skills=EMPTY_SKILL_REGISTRY,
         _user_skills=no_user_skills,
-        _subagents=(),
         _declared_slots=(),
         _ambient_reply=UNREACHED_AMBIENT_REPLY,
     )

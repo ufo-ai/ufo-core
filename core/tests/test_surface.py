@@ -274,7 +274,6 @@ def _context(
         _artifact_token_secret="artifact-token-secret",
         _skills=EMPTY_SKILL_REGISTRY,
         _user_skills=no_user_skills,
-        _subagents=(),
         _public_base_url="https://ufo.example.test",
         _home_surface="web",
         _ingress_public_url="https://sites.example.test",

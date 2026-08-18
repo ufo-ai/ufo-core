@@ -150,7 +150,7 @@ test("an admin is offered administration, which reads the admin projection", asy
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   await openAdministration();
   expect(await screen.findByText("Seated")).toBeTruthy();
@@ -162,7 +162,7 @@ test("an admin is offered administration, which reads the admin projection", asy
 
 test("the top bar names the categories on the left and workspace and the member on the right", () => {
   wire({});
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const bar = screen.getByRole("navigation", { name: "Primary" });
   const names = within(bar)
@@ -176,7 +176,7 @@ test("the top bar names the categories on the left and workspace and the member 
 
 test("the member's menu states who is signed in and offers the theme choice", async () => {
   wire({});
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
 
@@ -217,7 +217,6 @@ async function administration(routes: Record<string, Route>) {
   render(
     <App
       agents={[SECOND_AGENT]}
-      subagents={[]}
       member={{ ...MEMBER, admin: true }}
       newAgent={null}
       onAgents={() => {}}
@@ -266,7 +265,6 @@ test("an agent's record carries its surfaces and the web access grant, and the r
   render(
     <App
       agents={[SECOND_AGENT]}
-      subagents={[]}
       member={{ ...MEMBER, admin: true }}
       newAgent={null}
       onAgents={() => {}}
@@ -408,7 +406,7 @@ test("a failed administration read stays inside the scrolling frame the view own
     "/api/admin": () => new Response("no", { status: 500 }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   await openAdministration();
   const message = await screen.findByText("Error 500 — reload to retry.");
@@ -427,7 +425,7 @@ test("the admin loading arm keeps the padded frame its other arms own", async ()
     "/api/admin": () => new Promise<Response>(() => {}),
   });
   location.hash = "#/admin";
-  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   const loading = await screen.findByTestId("admin-loading");
   expect(loading.closest("main")).not.toBeNull();

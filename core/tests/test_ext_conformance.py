@@ -27,7 +27,6 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -1467,7 +1466,6 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     body = json.dumps(
         {"external_id": "ext-1", "email": email, "message": "hello", "inbound_text": "note!"}
@@ -1598,7 +1596,6 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     body = json.dumps({"external_id": "ext-live-1", "message": "hello"})
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:

@@ -23,7 +23,6 @@ from ufo_ext_memory.manifest import manifest as memory_manifest
 from ufo_ext_memory.store import memory_item
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -94,7 +93,6 @@ async def explorer(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
         yield client

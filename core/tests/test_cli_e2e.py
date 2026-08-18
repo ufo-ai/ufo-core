@@ -36,7 +36,6 @@ from ufo_ext_ufo.manifest import manifest as ufo_manifest
 from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -622,7 +621,6 @@ def wire_server(
             ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
             user_skills=no_user_skills,
-            subagents=NO_SUBAGENTS,
         )
         server = _ThreadedServer(app, port)
         server.start()

@@ -17,11 +17,10 @@ import { AgentSkills } from "@/views/AgentSkills";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import { AGENT_TABS, type AgentTab, type PlaceStep, type WorkspacePlace } from "@/lib/route";
-import type { Agent, NewAgentForm, Subagent } from "@/lib/types";
+import type { Agent, NewAgentForm } from "@/lib/types";
 
 export type AgentsProps = {
   agents: Agent[];
-  subagents: Subagent[];
   newAgent: NewAgentForm | null;
   /** The agent the hash names, or null on the bare route — which shows the main agent without
    *  navigating. */

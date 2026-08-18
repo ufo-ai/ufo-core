@@ -58,7 +58,7 @@ function connectors() {
 test("the workspace tab lists the connection pool", async () => {
   location.hash = "#/workspace/connectors";
   connectors();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.getByText("Only you")).toBeTruthy();
@@ -75,7 +75,7 @@ test("the pool narrows on the header's search, which names what it searches", as
     "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("notion")).toBeTruthy();
   const box = screen.getByLabelText("Search connectors");
@@ -93,7 +93,7 @@ test("the pool narrows on the header's search, which names what it searches", as
 test("the pool fits the desktop it is read on, so the row's act never scrolls off", async () => {
   location.hash = "#/workspace/connectors";
   connectors();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const across = (await screen.findByText("github")).closest("table")!.style.minWidth;
   expect(pageFits(across)).toBe(true);
@@ -105,7 +105,7 @@ test("the pool fits the desktop it is read on, so the row's act never scrolls of
 test("the agent's own edges fit that same desktop", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   connectors();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("assistant", "Connectors");
 
   const across = (await screen.findByText("github")).closest("table")!.style.minWidth;
@@ -118,7 +118,7 @@ test("the agent's own edges fit that same desktop", async () => {
 test("the agent's settings read its attached connections", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   const { calls } = connectors();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
@@ -137,7 +137,7 @@ test("the pool's record states what the row gave up, and attaches to the agent n
     },
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await pressRow("github");
 
@@ -166,7 +166,7 @@ test("the pool's record shares and revokes into the lane of the agent already ho
     },
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Unshare" }));
@@ -193,7 +193,7 @@ test("a grant change is admitted into the lane of the agent whose settings hold 
     },
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("assistant", "Connectors");
 
   await pressRow("github");
@@ -219,7 +219,7 @@ test("the agent's record revokes the grant it stands on", async () => {
     },
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("assistant", "Connectors");
 
   await pressRow("github");
@@ -244,7 +244,7 @@ test("a revoked connection stays shut when the grant comes back on a later read"
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("assistant", "Connectors");
 
   await pressRow("github");
@@ -274,7 +274,7 @@ test("the attach picker names the provider and the account, not the broker id", 
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("assistant", "Connectors");
 
   await userEvent.click(await screen.findByRole("combobox", { name: "Connection" }));
@@ -292,7 +292,7 @@ test("the account column names the account the member holds, not the broker id",
     "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const pool = within(await screen.findByRole("table"));
   expect(pool.getByText("member@example.com")).toBeTruthy();
@@ -306,7 +306,7 @@ test("an empty pool states that no connector is connected yet", async () => {
     "/github/coverage": () => json({ api: false, git_push: false, sources: false }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No connector is connected yet.")).toBeTruthy();
 });
@@ -326,7 +326,7 @@ test("the bar is drawn while the first read is still in flight", async () => {
       return json({ chats: [] });
     }),
   );
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("assistant", "Connectors");
 
   expect(await screen.findByRole("combobox", { name: "Connection" })).toBeTruthy();
@@ -341,7 +341,7 @@ test("the agent's own section states what is shared with that agent", async () =
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
@@ -353,7 +353,7 @@ test("the agent's own section states what is shared with that agent", async () =
 test("the agent's connectors stand on their own tab of its settings dialog", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   connectors();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const dialog = within(await openAgentSettings("assistant", "Connectors"));
   expect(dialog.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([

@@ -48,7 +48,7 @@ const transcript = (payload: unknown = { messages: [] }) => ({
 });
 
 function open() {
-  return render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  return render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 }
 
 function waiting(text: string): boolean {
@@ -2503,7 +2503,7 @@ test("switching conversations remounts the log so scroll state never leaks acros
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
 
   const first = screen.getByTestId("log");

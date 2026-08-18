@@ -682,38 +682,6 @@ class DeployExtensionView(BaseModel):
     sandbox_internet: bool
 
 
-class SubagentSummary(BaseModel):
-    """One typed subagent profile as a surface lists it beside the workspace's agents. `model` is
-    the model the profile pins for its children, `None` when a child inherits the model of the
-    agent that spawned it. Deploy shape, fixed at boot — a subagent belongs to no member, so no
-    audience filters this."""
-
-    name: str
-    model: str | None
-
-
-class SubagentDetail(BaseModel):
-    """One profile as its own portal page reads it: the summary's fields plus the system prompt a
-    child runs under, the agentic round cap a spawn forces a finish at, whether the child's answer
-    is walled as untrusted, and whether it may load skills at all — a profile without `load_skill`
-    reaches none.
-
-    `prompt` is the boot composition — the profile's instructions with the deploy skill index
-    filled in, then the shared output discipline and the finish contract. A spawn composes the same
-    way against the spawning agent's index, which adds that agent's member-authored skills, and
-    appends the bodies of any skills the payload preloads."""
-
-    name: str
-    model: str | None
-    prompt: str
-    max_rounds: int
-    untrusted_output: bool
-    loads_skills: bool
-
-    def summary(self) -> SubagentSummary:
-        return SubagentSummary(name=self.name, model=self.model)
-
-
 class CredentialSlotView(BaseModel):
     """One declared BYOK slot and whether the workspace holds a value for it — never the value.
     Slots come from installed manifests, the same declarations the `credential` object kind
@@ -1094,7 +1062,6 @@ class SurfaceContext:
     _models: tuple[str, ...]
     _skills: SkillRegistry
     _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
-    _subagents: tuple[SubagentDetail, ...]
     _declared_slots: tuple[DeclaredSlot, ...]
     _ambient_reply: AmbientReplyClassifier
     _key_slot_for: Callable[[str], str | None] | None = None
@@ -1141,13 +1108,6 @@ class SurfaceContext:
         """Whether this deploy's active extensions grant sandbox public internet at all — the
         ceiling a portal shows an agent's `internet_access_allowed` narrowing."""
         return self._deploy_sandbox_internet
-
-    @property
-    def subagents(self) -> tuple[SubagentDetail, ...]:
-        """The typed subagent profiles this deploy's agents delegate to, by name — the roster a
-        portal lists beside the workspace's agents and the page each row opens, fixed at boot from
-        the same registry `spawn` dispatches against."""
-        return self._subagents
 
     @property
     def deploy_skills(self) -> tuple[tuple[str, str], ...]:

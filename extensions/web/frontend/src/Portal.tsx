@@ -68,7 +68,6 @@ export function Portal() {
   return (
     <App
       agents={boot.payload.agents}
-      subagents={boot.payload.subagents}
       member={boot.payload.member}
       newAgent={boot.payload.new_agent}
       onAgents={reload}

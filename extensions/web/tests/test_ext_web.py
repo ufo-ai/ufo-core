@@ -69,7 +69,6 @@ from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -1050,7 +1049,6 @@ async def web(
             DefaultIndex(transaction=workspace_tx),
             StubEmbed(),
         ),
-        subagents=PORTAL_SUBAGENTS,
         objects=member_object_registry(
             (
                 web_manifest(),
@@ -2157,10 +2155,6 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
         "agents": [
             {"id": str(agent_id), "name": "assistant", "main": True, "model": "claude-opus-4-8"}
         ],
-        "subagents": [
-            {"name": "deep_research", "model": "claude-opus-4-8"},
-            {"name": "general_purpose", "model": None},
-        ],
     }
     empty_rail = await client.get("/surface/web/api/chats", headers=cookie)
     assert empty_rail.status_code == 200
@@ -2256,12 +2250,6 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         str(second_agent),
     ]
     assert all("web_audience" not in agent for agent in member_view.json()["agents"])
-    roster = [
-        {"name": "deep_research", "model": "claude-opus-4-8"},
-        {"name": "general_purpose", "model": None},
-    ]
-    assert admin_view.json()["subagents"] == roster
-    assert member_view.json()["subagents"] == roster
     reachable = await client.get(
         f"/surface/web/agents/{agent_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
@@ -8374,7 +8362,6 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
         sandbox_sizes=("small", "medium", "large"),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
@@ -8476,7 +8463,6 @@ async def test_settings_reports_the_deploy_internet_ceiling_when_granted(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         seen = await client.get(

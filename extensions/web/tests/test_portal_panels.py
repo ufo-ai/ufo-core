@@ -17,7 +17,6 @@ import ufo_ext_memory.manifest as memory_manifest_module
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from pydantic import BaseModel
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
@@ -52,14 +51,12 @@ from ufo.ext.loader import (
 )
 from ufo.hub import InProcessHub
 from ufo.indexing import TextChunker
-from ufo.loop.prompts.render import SKILL_INDEX_SLOT
-from ufo.loop.subagents import SubagentRegistry
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
-from ufo.sdk.manifest import Manifest, SubagentProfile
+from ufo.sdk.manifest import Manifest
 from ufo.serve import _mount_shared_surfaces
 from ufo.skills.runtime import RuntimeSkill
 from ufo.subjects import member_subject
@@ -180,29 +177,6 @@ DEPLOY_SKILLS = skill_registry(
 )
 
 
-class ProbeTask(BaseModel):
-    task: str
-
-
-class ProbeResult(BaseModel):
-    result: str
-
-
-def _profile(name: str, tools: tuple[str, ...]) -> SubagentProfile:
-    return SubagentProfile(
-        name=name,
-        prompt=f"be focused\n\n{SKILL_INDEX_SLOT}" if tools else "be focused",
-        tool_names=tools,
-        input_model=ProbeTask,
-        output_model=ProbeResult,
-    )
-
-
-PORTAL_SUBAGENTS = SubagentRegistry(
-    (_profile("researcher", ("read", "load_skill")), _profile("narrow", ()))
-)
-
-
 SCHEDULED_TASK_KIND_ONLY = Manifest(
     name="scheduled_tasks",
     version="0.1.0",
@@ -243,7 +217,6 @@ def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=DEPLOY_SKILLS,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
-        subagents=PORTAL_SUBAGENTS,
         objects=member_object_registry(manifests),
         memory=memory_search(manifests, None, index, embed) if with_memory else None,
     )

@@ -30,7 +30,6 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.loader import skill_registry
 from ufo.hub import InProcessHub
-from ufo.loop.subagents import SubagentRegistry
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
@@ -122,7 +121,6 @@ def _mount(blob: FilesystemBlobStore, tmp_path: Path) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=skill_registry((web_manifest(),)),
         user_skills=_no_user_skills,
-        subagents=SubagentRegistry(()),
     )
     return app
 

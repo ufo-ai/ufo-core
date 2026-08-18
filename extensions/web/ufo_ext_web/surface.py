@@ -718,15 +718,11 @@ async def _audience_for(
 
 
 async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
-    """The portal's first read: the signed-in member, the agents their web audience holds — every
-    agent for a workspace admin, the main agent plus the granted non-main agents for everyone else
-    — and the deploy's subagent profiles, the same roster for every member because a subagent
-    belongs to none of them. Each profile rides as its summary, the boot read narrowed to what a
-    list shows: its own page carries the instructions and the work it did. `agents` stays the set a
-    member may open and message, so the roster never reaches the chat paths. `new_agent` is the
-    create form's source — the kind's spec schema and the deploy's model ids — for every signed-in
-    member, because the `agent` kind admits a create from any speaking member and stamps them the
-    owner."""
+    """The portal's first read: the signed-in member and the agents their web audience holds — every
+    agent for a workspace admin, the main agent plus the granted non-main agents for everyone else.
+    `agents` is the set a member may open and message. `new_agent` is the create form's source — the
+    kind's spec schema and the deploy's model ids — for every signed-in member, because the `agent`
+    kind admits a create from any speaking member and stamps them the owner."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -751,7 +747,6 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 }
                 for agent in audience.agents
             ],
-            "subagents": [subagent.summary().model_dump(mode="json") for subagent in ctx.subagents],
             "new_agent": {
                 "spec_schema": agent_create_schema(ctx.sandbox_sizes),
                 "models": list(ctx.models),

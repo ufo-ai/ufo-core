@@ -22,7 +22,6 @@ from ufo_ext_debugger import surface as debugger_surface
 from ufo_ext_debugger.manifest import manifest as debugger_manifest
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -107,7 +106,6 @@ async def debug(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
         yield client, blob, sandboxes

@@ -80,11 +80,10 @@ import {
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
-import type { Agent, Member, NewAgentForm, OwnedConversation, Subagent } from "@/lib/types";
+import type { Agent, Member, NewAgentForm, OwnedConversation } from "@/lib/types";
 
 export type AppProps = {
   agents: Agent[];
-  subagents: Subagent[];
   member: Member;
   newAgent: NewAgentForm | null;
   onAgents: () => void;
@@ -99,7 +98,7 @@ type Sought =
   | { kind: "signed-out" }
   | { kind: "failed"; message: string };
 
-export function App({ agents, subagents, member, newAgent, onAgents }: AppProps) {
+export function App({ agents, member, newAgent, onAgents }: AppProps) {
   const [route, setRoute] = useState<Route>(() => bootRoute(location.hash, location.search));
   useEffect(() => {
     const target = artifactTarget(location.search);
@@ -347,7 +346,6 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
               <RoutedPane
                 route={route}
                 agents={agents}
-                subagents={subagents}
                 member={member}
                 newAgent={newAgent}
                 mainAgent={mainAgent}
@@ -644,7 +642,6 @@ function ChatSidebar({
 function RoutedPane({
   route,
   agents,
-  subagents,
   member,
   newAgent,
   mainAgent,
@@ -662,7 +659,6 @@ function RoutedPane({
 }: {
   route: Route;
   agents: Agent[];
-  subagents: Subagent[];
   member: Member;
   newAgent: NewAgentForm | null;
   mainAgent: Agent | null;
@@ -715,7 +711,6 @@ function RoutedPane({
       <Pane>
         <Agents
           agents={agents}
-          subagents={subagents}
           newAgent={newAgent}
           selected={selected}
           tab={route.kind === "agent" ? route.tab : "home"}

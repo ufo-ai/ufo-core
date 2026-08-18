@@ -51,7 +51,6 @@ from ufo_ext_sites.tools import (
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -204,7 +203,6 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
             ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
             user_skills=no_user_skills,
-            subagents=NO_SUBAGENTS,
             objects=member_object_registry(manifests, public_base_url=PUBLIC_BASE_URL),
         )
         return AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL)

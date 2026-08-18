@@ -15,7 +15,7 @@ beforeEach(() => {
 function open(routes: Parameters<typeof wire>[0]) {
   wire({ "/transcript": () => json({ messages: [] }), ...routes });
   render(
-    <App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+    <App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
 }
 

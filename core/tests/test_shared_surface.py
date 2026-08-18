@@ -12,7 +12,6 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -105,7 +104,6 @@ def _site_link_app(tmp_path: Path, ingress_public_url: str | None) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     return app
 
@@ -142,7 +140,6 @@ def _app(tmp_path: Path) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     return app
 
@@ -176,7 +173,6 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     return app
 

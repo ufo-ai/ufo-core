@@ -38,7 +38,6 @@ from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_web.audience import EXTENSION_WEB
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     FixedDecisionModel,
     no_user_skills,
@@ -553,7 +552,6 @@ async def _mount_transport(
         ambient_reply=ambient_reply,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
     return app, client, blob
@@ -631,7 +629,6 @@ async def test_manifest_workspace_verifies_with_its_own_signing_slot(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     body = _event_body(
         type="app_mention", user="U1", channel="C1", ts="100.5", text=f"<@{BOT_USER_ID}> hi"
@@ -1209,7 +1206,6 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     handshake = json.dumps({"type": "url_verification", "challenge": "shared-c"}).encode()
     event = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="hi")
@@ -1278,7 +1274,6 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -1338,7 +1333,6 @@ async def test_oauth_callback_declined_carries_no_workspace_and_reflects_no_erro
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
         response = await client.get(
@@ -1376,7 +1370,6 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -1412,7 +1405,6 @@ async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monke
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
         response = await client.get(
@@ -1458,7 +1450,6 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -1496,7 +1487,6 @@ async def test_shared_oauth_callback_binds_the_sealed_workspace(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
@@ -3995,7 +3985,6 @@ async def test_shared_slack_rejects_an_unknown_installation_without_binding(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     body = _event_body(
         type="message",
@@ -4067,7 +4056,6 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     body_a = json.dumps(
         {
@@ -9575,7 +9563,6 @@ async def test_shared_interactive_routes_by_registered_team(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     click = _click_body()
     unknown = urlencode(

@@ -41,7 +41,7 @@ function reading(chat: Route, turn: string | null = TURN_ID) {
 
 function open() {
   render(
-    <App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+    <App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
 }
 

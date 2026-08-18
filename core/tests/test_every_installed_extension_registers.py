@@ -21,7 +21,6 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -259,7 +258,6 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
     )
     mounted = {route.path for route in app.routes}
     for spec in manifest.surfaces:

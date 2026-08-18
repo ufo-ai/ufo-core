@@ -25,7 +25,6 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from ufo.activity import SKILL_LOAD_TOOL
 from ufo.ambient_reply import AMBIENT_REPLY_JOB, AmbientReplyClassifier
 from ufo.bearer import LOGIN_PATH
 from ufo.blob import (
@@ -97,7 +96,6 @@ from ufo.ext.manifest import (
 from ufo.ext.surface import (
     DeployExtensionView,
     MidTurnReplyPoller,
-    SubagentDetail,
     SurfaceAuth,
     SurfaceContext,
     SurfaceIdentityContext,
@@ -121,7 +119,7 @@ from ufo.jobs import (
 from ufo.loop.delivery import DeliverySweep
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
-from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
+from ufo.loop.subagents import SubagentRegistry
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.interface import AUTO_MODEL
@@ -349,7 +347,6 @@ def run() -> None:
         sandbox_sizes=carrier_spec.sizes,
         skills=skills,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
-        subagents=runtime.subagents,
         memory=memory,
         objects=member_object_registry(
             manifests,
@@ -903,7 +900,6 @@ def _mount_shared_surfaces(
     ambient_reply: AmbientReplyClassifier,
     skills: SkillRegistry,
     user_skills: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
-    subagents: SubagentRegistry,
     sandbox_sizes: tuple[str, ...] = (),
     memory: MemorySearch | None = None,
     objects: "Mapping[str, BoundKind] | None" = None,
@@ -957,17 +953,6 @@ def _mount_shared_surfaces(
         )
         for manifest, provider in conversation_slot_declarations(manifests)
     )
-    subagent_roster = tuple(
-        SubagentDetail(
-            name=profile.name,
-            model=profile.model,
-            prompt=subagent_system_prompt(profile, skills=skills.index()),
-            max_rounds=profile.max_rounds,
-            untrusted_output=profile.untrusted_output,
-            loads_skills=SKILL_LOAD_TOOL in profile.tool_names,
-        )
-        for profile in sorted(subagents.profiles, key=lambda profile: profile.name)
-    )
     kind_schemas = {
         bound.kind.name: bound.kind.spec_model.model_json_schema()
         for bound in (*CORE_OBJECT_KINDS, *core_object_kinds(manifests, credentials))
@@ -998,7 +983,6 @@ def _mount_shared_surfaces(
             _sandbox_sizes=sandbox_sizes,
             _skills=skills,
             _user_skills=user_skills,
-            _subagents=subagent_roster,
             _declared_slots=slots,
             _ambient_reply=ambient_reply,
             _object_schemas=kind_schemas,

@@ -57,7 +57,7 @@ const RESEARCH = { id: SECOND_ID, name: "research", model: "claude-opus-4-8", ma
 const PROMPT = "Answer with sources.";
 
 function boot(agents: unknown[], member: unknown, newAgent: unknown) {
-  return json({ member, agents, subagents: [], new_agent: newAgent });
+  return json({ member, agents, new_agent: newAgent });
 }
 
 async function openCreate() {
@@ -186,7 +186,7 @@ test("the form draws the kind's schema and never the prose written for the agent
 test("a member the kind admits no create from is offered no act", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(
-    <App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+    <App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
 
   await userEvent.click(screen.getByRole("button", { name: "Apps" }));
@@ -202,7 +202,6 @@ test("the spotlight narrows the apps, and says so when it matches none of them",
   render(
     <App
       agents={[AGENT, RESEARCH]}
-      subagents={[]}
       member={ADMIN}
       newAgent={NEW_AGENT}
       onAgents={() => {}}
@@ -226,7 +225,6 @@ test("the spotlight opens the app it names and shuts behind it", async () => {
   render(
     <App
       agents={[AGENT, RESEARCH]}
-      subagents={[]}
       member={ADMIN}
       newAgent={NEW_AGENT}
       onAgents={() => {}}

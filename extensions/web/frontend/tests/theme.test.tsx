@@ -373,7 +373,7 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "mine" }),
   });
   location.hash = "#/c/" + CONVO_ID;
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const agentSaid = (await screen.findByText("reply")).closest("[data-slot=bubble-content]")!;
   expect(agentSaid.className).toContain("leading-reading");
@@ -413,7 +413,7 @@ test("both notice tones keep the chrome type size", () => {
 
 test("the wordmark is the drawn ufo mark in the top bar", async () => {
   wire({});
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const brand = await screen.findByRole("img", { name: "ufo" });
   expect(brand.getAttribute("class")).not.toContain("tracking");

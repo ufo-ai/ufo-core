@@ -25,7 +25,7 @@ const NO_COMMUNITY = { "/skills/community": () => json({ skills: [] }) };
 /** The skills stand on a tab of the app's own settings dialog, which the index's gear opens. */
 async function renderSkills() {
   location.hash = "#/agents/" + AGENT.id;
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings();
   await userEvent.click(await screen.findByRole("tab", { name: "Skills" }));
 }

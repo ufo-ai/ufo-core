@@ -29,7 +29,6 @@ from ufo_ext_web.surface import SESSION_COOKIE
 from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
-    NO_SUBAGENTS,
     UNREACHED_AMBIENT_REPLY,
     no_user_skills,
 )
@@ -230,7 +229,6 @@ async def memory_web(
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
-        subagents=NO_SUBAGENTS,
         memory=memory_search(manifests, None, index, embed),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
