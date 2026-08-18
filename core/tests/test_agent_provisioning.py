@@ -186,6 +186,19 @@ async def test_the_shipped_sandbox_size_reaches_the_created_row(
     assert created.sandbox_size == "large"
 
 
+async def test_the_shipped_visibility_reaches_the_created_row(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    manifest = _manifest(OTHER_EXTENSION, _provision(visibility="workspace"))
+    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert [outcome.result for outcome in outcomes] == [CREATED]
+    assert created is not None
+    assert created.visibility == "workspace"
+
+
 async def test_a_member_edit_survives_the_next_application(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -221,6 +234,23 @@ async def test_an_identical_row_is_adopted(
         PROVISIONED_AGENT_NAME,
         "0.1.0",
     )
+
+
+async def test_a_visibility_difference_does_not_adopt_a_standing_row(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    await _insert_agent(workspace_id, PROVISIONED_AGENT_NAME, tools=["sample_echo", *SETUP_TOOLS])
+    outcomes = await AgentProvisioning(
+        (_manifest(OTHER_EXTENSION, _provision(visibility="workspace")),)
+    ).apply(workspace_id)
+    assert [outcome.result for outcome in outcomes] == [CREATED]
+    assert [outcome.name for outcome in outcomes] == [f"{PROVISIONED_AGENT_NAME}-{OTHER_EXTENSION}"]
+    kept = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    landed = await _row(workspace_id, f"{PROVISIONED_AGENT_NAME}-{OTHER_EXTENSION}")
+    assert kept is not None and kept.visibility == "private"
+    assert landed is not None and landed.visibility == "workspace"
 
 
 async def test_a_name_the_workspace_already_uses_leaves_that_row_alone(
@@ -277,12 +307,19 @@ async def test_a_later_version_never_rewrites_the_row_it_already_shipped(
     await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision(), version="1.0.0"),)).apply(
         workspace_id
     )
-    later = _manifest(OTHER_EXTENSION, _provision(prompt="A prompt the next release ships."))
+    later = _manifest(
+        OTHER_EXTENSION,
+        _provision(prompt="A prompt the next release ships.", visibility="workspace"),
+    )
     outcomes = await AgentProvisioning((later,)).apply(workspace_id)
     row = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert [outcome.result for outcome in outcomes] == [PRESENT]
     assert row is not None
-    assert (row.prompt, row.provisioned_version) == (PROVISIONED_AGENT_PROMPT, "1.0.0")
+    assert (row.prompt, row.visibility, row.provisioned_version) == (
+        PROVISIONED_AGENT_PROMPT,
+        "private",
+        "1.0.0",
+    )
 
 
 async def test_a_workspace_that_predates_the_extension_gets_the_agent_on_its_next_turn(

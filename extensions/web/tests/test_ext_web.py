@@ -43,6 +43,8 @@ from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
 from ufo_ext_sources.manifest import manifest as sources_manifest
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT
+from ufo_ext_sweep.manifest import AGENT_NAME as SWEEP_AGENT_NAME
+from ufo_ext_sweep.manifest import manifest as sweep_manifest
 from ufo_ext_web import community as web_community
 from ufo_ext_web import panels as web_panels
 from ufo_ext_web import surface as web_surface
@@ -135,6 +137,7 @@ from ufo.models.interface import (
 from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef
 from ufo.objects import OBJECT_LIST_PAGE
+from ufo.provisioning import AgentProvisioning
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
@@ -7967,6 +7970,49 @@ async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools
         f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}" for agent_id in (main_agent, walled)
     )
     assert workspace_id not in await candidates()
+    async with workspace_tx() as connection:
+        seeded = (
+            await connection.execute(
+                sa.select(tables.conversation.c.agent_id).where(
+                    tables.conversation.c.queue_key.startswith("homepage/")
+                )
+            )
+        ).scalars()
+        assert list(seeded) == [main_agent]
+
+
+async def test_homepage_seed_skips_the_daily_brief_agent(db: None) -> None:
+    workspace_id, main_agent = await _seed_workspace()
+    await _seed_member(workspace_id, "seed-brief-admin@example.com", admin=True)
+    await AgentProvisioning((sweep_manifest(),)).apply(workspace_id)
+    async with workspace_tx() as connection:
+        daily_brief = (
+            await connection.execute(
+                sa.select(
+                    tables.agent.c.id,
+                    tables.agent.c.tools,
+                    tables.agent.c.visibility,
+                ).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.provisioned_by == "sweep",
+                    tables.agent.c.provisioned_name == SWEEP_AGENT_NAME,
+                )
+            )
+        ).one()
+    assert "set_homepage" in daily_brief.tools
+    assert "deploy_website" not in daily_brief.tools
+    assert daily_brief.visibility == "workspace"
+
+    dbos = _SeedDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx)
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
+    assert markers[f"{web_surface.HOMEPAGE_SEED_PREFIX}{daily_brief.id}"] == "withheld-tools"
+    assert len(dbos.enqueued) == 1
     async with workspace_tx() as connection:
         seeded = (
             await connection.execute(

@@ -38,7 +38,7 @@ One Manifest point:
 @dataclass(frozen=True)
 class AgentProvision:
     name: str
-    spec: AgentSpec          # prompt, model, reasoning, internet policy, sandbox size
+    spec: AgentSpec          # prompt, model, reasoning, internet policy, sandbox size, visibility
     tools: tuple[str, ...] | None = None
 ```
 
@@ -174,4 +174,3 @@ every workspace.
   one.
 - Whether a shipped agent can bind to a surface of its own, which needs an admin-gated chat verb
   and its own OAuth semantics.
-

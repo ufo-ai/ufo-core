@@ -35,6 +35,7 @@ AGENT_NAME = "daily-brief"
 TOOL_NAME = "sweep_newspaper"
 TASK_TOOL_NAME = "update_todo_list"
 MEMORY_TOOL_NAME = "memory_update"
+HOMEPAGE_TOOL_NAME = "set_homepage"
 JOB_NAME = "daily_brief"
 JOB_SCHEDULE = "0 0 * * * *"
 FINAL_MODEL = "claude-sonnet-5"
@@ -473,6 +474,13 @@ async def _draft_only(ctx: HookContext) -> HookOutcome:
         ).one_or_none()
     if scheduled is None:
         return None
+    if ctx.payload.tool_name == HOMEPAGE_TOOL_NAME:
+        return Deny(
+            reason=(
+                "A scheduled daily brief can only propose drafts: binding a homepage is a "
+                "member-facing turn."
+            )
+        )
     return Deny(reason="A scheduled daily brief can only propose drafts for member approval.")
 
 
@@ -588,9 +596,16 @@ def manifest() -> Manifest:
                     reasoning="high",
                     internet_access_allowed=False,
                     sandbox_size="small",
+                    visibility="workspace",
                     prompt=AGENT_PROMPT,
                 ),
-                tools=("load_skill", TOOL_NAME, TASK_TOOL_NAME, MEMORY_TOOL_NAME),
+                tools=(
+                    "load_skill",
+                    TOOL_NAME,
+                    TASK_TOOL_NAME,
+                    MEMORY_TOOL_NAME,
+                    HOMEPAGE_TOOL_NAME,
+                ),
             ),
         ),
         tools=(
@@ -617,7 +632,7 @@ def manifest() -> Manifest:
             HookSpec(
                 event="pre_tool_use",
                 handler=_draft_only,
-                tools=(TASK_TOOL_NAME, MEMORY_TOOL_NAME),
+                tools=(TASK_TOOL_NAME, MEMORY_TOOL_NAME, HOMEPAGE_TOOL_NAME),
             ),
         ),
         subagents=tuple(_profile(name) for name in SCOUTS),

@@ -11,6 +11,7 @@ from ufo_ext_sweep.manifest import (
     AGENT_NAME,
     AGENT_PROMPT,
     FINAL_MODEL,
+    HOMEPAGE_TOOL_NAME,
     MAX_COVERAGE_CHARS,
     MAX_EDITION_ATTEMPTS,
     REFERENCE_COVERAGE,
@@ -81,11 +82,13 @@ def test_manifest_pins_four_luna_scouts() -> None:
     assert provision.spec.reasoning == "high"
     assert not provision.spec.internet_access_allowed
     assert provision.spec.sandbox_size == "small"
+    assert provision.spec.visibility == "workspace"
     assert provision.tools == (
         "load_skill",
         "sweep_newspaper",
         "update_todo_list",
         "memory_update",
+        "set_homepage",
     )
     assert len(declared.subagents) == 4
     assert {profile.model for profile in declared.subagents} == {SCOUT_MODEL}
@@ -96,7 +99,7 @@ def test_manifest_pins_four_luna_scouts() -> None:
     )
     assert declared.member_context_read
     assert [(hook.event, hook.tools) for hook in declared.hooks] == [
-        ("pre_tool_use", ("update_todo_list", "memory_update"))
+        ("pre_tool_use", ("update_todo_list", "memory_update", "set_homepage"))
     ]
 
     skill = skill_registry((declared,)).named("daily-brief")
@@ -583,6 +586,45 @@ async def test_only_the_scheduled_edition_turn_is_refused_mutation_tools(db: Non
             member_id,
         )
     assert approved.denied is None
+
+
+async def test_the_scheduled_edition_cannot_bind_a_homepage(db: None) -> None:
+    workspace_id, member_id, agent_id, turn_id = await _seed()
+    with ws(workspace_id):
+        chain = turn_hooks(
+            (manifest(),),
+            CredentialStore(Fernet(Fernet.generate_key())),
+            audience=conversation_audience(member_id),
+        )
+        scheduled = Turn(
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=uuid4(),
+            agent_id=agent_id,
+            seq=1,
+            status="running",
+            inbound="Prepare the brief.",
+            admission_source="scheduled",
+            on_behalf_of_member_id=member_id,
+            created_at=datetime.now(UTC),
+        )
+        member_facing = scheduled.model_copy(
+            update={
+                "id": uuid4(),
+                "admission_source": "member",
+                "inbound": "Make the brief page your homepage.",
+                "speaker_member_id": member_id,
+            }
+        )
+        agent_record = AgentRecord(prompt="Brief.", model=FINAL_MODEL)
+        call = PreToolUse(
+            tool_name=HOMEPAGE_TOOL_NAME,
+            tool_input=SweepInput(user_description="Binding the brief page."),
+        )
+        refused = await chain.fire("pre_tool_use", call, scheduled, agent_record, member_id)
+        allowed = await chain.fire("pre_tool_use", call, member_facing, agent_record, member_id)
+    assert refused.denied is not None and "member-facing turn" in refused.denied
+    assert allowed.denied is None
 
 
 async def test_one_member_admission_refusal_does_not_stop_later_members(db: None) -> None:

@@ -81,6 +81,7 @@ class AgentProvisioning:
                         tables.agent.c.reasoning,
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.sandbox_size,
+                        tables.agent.c.visibility,
                         tables.agent.c.tools,
                     ).where(
                         tables.agent.c.workspace_id == workspace_id,
@@ -174,6 +175,7 @@ class AgentProvisioning:
                 is_main=False,
                 internet_access_allowed=spec.internet_access_allowed,
                 sandbox_size=spec.sandbox_size,
+                visibility=spec.visibility,
                 tools=list(provision.tools) if provision.tools is not None else None,
                 provisioned_by=manifest.name,
                 provisioned_name=provision.name,
@@ -196,5 +198,6 @@ class AgentProvisioning:
             and row.reasoning == spec.reasoning
             and row.internet_access_allowed == spec.internet_access_allowed
             and row.sandbox_size == spec.sandbox_size
+            and row.visibility == spec.visibility
             and stored == provision.tools
         )
