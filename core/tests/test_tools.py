@@ -791,6 +791,7 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         dedup_key: str | None = None,
         delivers_result: bool = False,
         name: str = "",
+        detach_on_arrival: bool = False,
     ) -> SpawnResult:
         recorded.append((dedup_key, delivers_result))
         return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)

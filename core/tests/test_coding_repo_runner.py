@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import NoReturn
+from uuid import uuid4
 
 import pytest
 from coding_repo_history import pinned_history, reference_diff  # noqa: F401
@@ -51,6 +52,7 @@ from evals.harness.registry import EvalTask
 from evals.harness.scorers import delegation_only_scorer
 from evals.harness.target import TargetResult
 from ufo.config import BlobConfig, Config, DatabaseConfig, PackConfig
+from ufo.tools.builtins import _spawn_handles
 
 SURVEY_CASE = next(case for case in CASES if case.deliverable == "document")
 CAPTURED_DOCUMENT = b"- ufo/<deploy>/api-keys\n"
@@ -103,6 +105,7 @@ def output(
     *,
     lane: str = CODING_LANE,
     delegated: bool = True,
+    spawn_result: str = '{"result": "done"}',
     commands: tuple[str, ...] = (),
     artifacts: tuple[SharedArtifact, ...] = (),
     shared_names: tuple[str, ...] = (),
@@ -114,7 +117,7 @@ def output(
             ToolInvocation(
                 name="spawn",
                 input={"target": lane, "payload": {"objective": "work"}},
-                result='{"result": "done"}',
+                result=spawn_result,
                 has_result=True,
             )
         )
@@ -254,6 +257,23 @@ async def test_the_lane_gate_requires_a_coding_child_at_the_pin() -> None:
     unpinned = await grader(output(commands=("ls /workspace",)))
     assert not unpinned.passed
     assert "no call fetches" in unpinned.reason
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["detached", "moved"])
+async def test_the_lane_gate_reads_a_background_spawn_as_no_result(moved: bool) -> None:
+    """The acknowledgement the spawn tool itself writes, for a child asked into the background and
+    for one an arriving message moved there: both name a running child and carry no output, so
+    neither counts as a delegation that returned a result."""
+    case = PATCH_CASES[0]
+    grader = LaneAndRoute(case.base_sha)
+    verdict = await grader(
+        output(
+            spawn_result=_spawn_handles(CODING_LANE, uuid4(), moved),
+            commands=(f"git fetch --depth 1 origin {case.base_sha}",),
+        )
+    )
+    assert not verdict.passed
+    assert "no coding delegation returned a result" in verdict.reason
 
 
 async def test_the_lane_gate_refuses_a_historyless_route() -> None:

@@ -45,6 +45,7 @@ from evals.harness.harness import EvalReport, JsonObject
 from evals.harness.registry import EvalRunner, EvalTask, capability_task
 from evals.harness.scorers import delegation_only_scorer
 from evals.harness.target import CapabilityTarget
+from ufo.tools.builtins import SPAWN_DETACHED_LEAD, SPAWN_MOVED_LEAD
 
 REPO_SLUG = "metalcraftai/ufo"
 REPO_URL = f"https://github.com/{REPO_SLUG}.git"
@@ -58,7 +59,7 @@ CODING_REPO_PACKS = ("assistant", "assistant_hosted")
 ANSWERS_TASK = "coding_repo_answers"
 DELIVERABLES_TASK = "coding_repo_deliverables"
 CODING_LANE = "coding"
-BACKGROUND_ACK = "spawned "
+BACKGROUND_ACKS = (SPAWN_DETACHED_LEAD, SPAWN_MOVED_LEAD)
 WORKFLOW_WAIT_SECONDS = 7_200.0
 TEST_TIMEOUT_SECONDS = 900.0
 ENVELOPE_REVISION = "pinned-fetch-share-held-out-tests"
@@ -319,8 +320,9 @@ class LaneAndRoute:
     carries every commit after the pin; a clone from a local path carries only what that path holds,
     which is the pinned checkout the coding skill copies for a second child. A refusal reads what a
     call attempted; the fetch is credited only to a call that succeeded. Any coding spawn may be the
-    one that delivered, since a first child can fail and a second succeed, and a background spawn
-    returns an acknowledgement naming the turn it started rather than anything the child did."""
+    one that delivered, since a first child can fail and a second succeed, and a spawn that runs in
+    the background — asked for or moved there by an arriving message — returns an acknowledgement
+    naming the spawn it reaches rather than anything the child did."""
 
     base_sha: str
 
@@ -347,7 +349,9 @@ class LaneAndRoute:
             call for call, lane in zip(spawns, lanes, strict=True) if lane == CODING_LANE
         )
         delivered = tuple(
-            call for call in coding if call.succeeded and not call.result.startswith(BACKGROUND_ACK)
+            call
+            for call in coding
+            if call.succeeded and not call.result.startswith(BACKGROUND_ACKS)
         )
         if not delivered:
             last = coding[-1]

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -28,6 +29,7 @@ from ufo.loop.queue import _commit_failed_terminal, _load_turn, _subagent_tools
 from ufo.loop.subagents import (
     FINISH_CONTRACT,
     PRELOAD_PROMPT_CHAR_BOUND,
+    SUBAGENT_POLL_SECONDS,
     SubagentParked,
     SubagentRegistry,
     SubagentResult,
@@ -39,7 +41,7 @@ from ufo.schema import tables
 from ufo.schema.records import AskQuestion, AskUserInput, TerminalFrame, Turn, turn_id_for
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill
 from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.builtins import BUILTIN_TOOLS, SPAWN_BACKGROUND_DIRECTIVE, _spawn_handles
 from ufo.tools.context import (
     AmbiguousSpawnTarget,
     UnknownSpawnTarget,
@@ -2603,3 +2605,230 @@ async def test_a_foreground_child_that_parks_does_not_hold_its_parent_open(
             )
         ).scalar_one()
     assert status == "cancelled"
+
+
+DETACH_WAIT_SECONDS = 10
+DETACH_POLL_MARGIN_SECONDS = SUBAGENT_POLL_SECONDS * 5
+
+
+async def _member_founded_parent(
+    workspace_id: UUID, agent_id: UUID
+) -> tuple[Turn, UUID, Admission]:
+    """A parent turn a member founded through real admission, so a later message from that member
+    lands on the conversation exactly as it does in production — the row the interruptible wait
+    watches for is admission's own, never one the test wrote."""
+    member_id, conversation_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id.hex[:8]}@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="cli",
+                queue_key=str(conversation_id),
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    admission = Admission(dbos=_RecordingClient(), durable_surfaces=frozenset())
+    admitted = await admission.admit_member(
+        workspace_id, conversation_id, "look into acme", member_id, "C:1"
+    )
+    parent, _, _ = await _load_turn(admitted.turn_id)
+    return parent, member_id, admission
+
+
+async def _finish_child(turn_id: UUID, text: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text=text).model_dump(mode="json"),
+                updated_at=sa.func.now(),
+            )
+            .where(tables.turn.c.id == turn_id)
+        )
+
+
+async def _child_state(turn_id: UUID) -> tuple[str, str | None]:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.result_delivery).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    return row.status, row.result_delivery
+
+
+async def test_a_foreground_spawn_answers_inline_while_no_member_speaks(
+    db: None, dbos_launched: Config
+) -> None:
+    """The common case is untouched: the wait ends on the child's terminal and the parent reads the
+    validated output inline. An internally admitted arrival is not a member speaking — a sibling
+    child's delivered result would otherwise detach the very spawn the parent is waiting on — so it
+    leaves the wait running."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent, member_id, admission = await _member_founded_parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    ).authorize(member_id)
+    child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
+    awaiting = asyncio.create_task(
+        subagents.spawn("research", {"task": "acme"}, dedup_key="acme", detach_on_arrival=True)
+    )
+    await admission.invoke(
+        workspace_id, parent.conversation_id, agent_id, "a sibling finished", "internal:1"
+    )
+    await asyncio.sleep(DETACH_POLL_MARGIN_SECONDS)
+    assert not awaiting.done()
+
+    await _finish_child(child.turn_id, '{"finding": "acme ships"}')
+    async with asyncio.timeout(DETACH_WAIT_SECONDS):
+        result = await awaiting
+
+    assert not result.detached_on_arrival
+    assert result.output is not None
+    assert result.output.model_dump()["finding"] == "acme ships"
+    assert await _child_state(child.turn_id) == ("done", None)
+
+
+async def test_an_arriving_member_message_moves_the_wait_to_the_background(
+    db: None, dbos_launched: Config
+) -> None:
+    """The member gets their turn back. The wait ends on the message, the child is neither cancelled
+    nor forgotten — it is stamped to deliver its own result, the way a spawn asked for in the
+    background is — and the caller is handed the child's identity in place of an output that is no
+    longer coming."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent, member_id, admission = await _member_founded_parent(workspace_id, agent_id)
+    client = _RecordingClient()
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    ).authorize(member_id)
+    child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
+    awaiting = asyncio.create_task(
+        subagents.spawn("research", {"task": "acme"}, dedup_key="acme", detach_on_arrival=True)
+    )
+    await asyncio.sleep(DETACH_POLL_MARGIN_SECONDS)
+    assert not awaiting.done()
+
+    folded = await admission.admit_member(
+        workspace_id, parent.conversation_id, "stop, do the other thing first", member_id, "C:2"
+    )
+    async with asyncio.timeout(DETACH_WAIT_SECONDS):
+        result = await awaiting
+
+    assert folded.arrival_id is not None
+    assert result.turn_id == child.turn_id
+    assert result.detached_on_arrival
+    assert (result.output, result.terminal) == (None, None)
+    assert await _child_state(child.turn_id) == ("queued", "pending")
+    assert client.cancelled == []
+
+
+async def test_a_child_that_finished_as_the_message_arrived_answers_inline(
+    db: None, dbos_launched: Config
+) -> None:
+    """The genuinely simultaneous race resolves to the child's result. Both facts hold before the
+    wait looks: a member message sits on the conversation and the child has committed its terminal.
+    The terminal wins — the caller reads the answer it waited for, and the child is left
+    undelivered, so the parent cannot read that same answer twice. The move itself carries the same
+    resolution against the tighter interleaving, where the child commits between the terminal read
+    and the move: it is refused past a committed terminal, whatever the wait saw."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent, member_id, admission = await _member_founded_parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    ).authorize(member_id)
+    child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
+    await admission.admit_member(
+        workspace_id, parent.conversation_id, "one more thing", member_id, "C:2"
+    )
+    await _finish_child(child.turn_id, '{"finding": "acme ships"}')
+
+    async with asyncio.timeout(DETACH_WAIT_SECONDS):
+        result = await subagents.spawn(
+            "research", {"task": "acme"}, dedup_key="acme", detach_on_arrival=True
+        )
+
+    assert not result.detached_on_arrival
+    assert result.output is not None
+    assert result.output.model_dump()["finding"] == "acme ships"
+    assert await _child_state(child.turn_id) == ("done", None)
+    assert not await subagents._detach(child.turn_id)
+    assert await _child_state(child.turn_id) == ("done", None)
+
+
+async def test_a_background_spawn_is_unaffected_by_a_waiting_member_message(
+    db: None, dbos_launched: Config
+) -> None:
+    """A spawn asked to run in the background never waits, so there is nothing for a message to
+    interrupt: it answers with the child's identity, unmarked, and the delivery it carries is the
+    one it was admitted with."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent, member_id, admission = await _member_founded_parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    ).authorize(member_id)
+    await admission.admit_member(
+        workspace_id, parent.conversation_id, "and this too", member_id, "C:2"
+    )
+
+    async with asyncio.timeout(DETACH_WAIT_SECONDS):
+        result = await subagents.spawn(
+            "research",
+            {"task": "acme"},
+            background=True,
+            dedup_key="acme",
+            delivers_result=True,
+            detach_on_arrival=True,
+        )
+
+    assert not result.detached_on_arrival
+    assert (result.output, result.terminal) == (None, None)
+    assert await _child_state(result.turn_id) == ("queued", "pending")
+
+
+def test_a_moved_spawn_is_reported_as_any_background_one() -> None:
+    """A spawn backgrounded on request and one an arriving message moved are the same thing by the
+    time they are reported: the same handles under the same names and the same standing directive,
+    with only the lead sentence differing — the marker that says the output is not coming."""
+    turn_id = uuid4()
+
+    asked = _spawn_handles("profile:research", turn_id, moved=False)
+    moved = _spawn_handles("profile:research", turn_id, moved=True)
+
+    payload = json.dumps(
+        {"spawn_id": str(turn_id), "target": "profile:research", "status": "running"}
+    )
+    assert asked.endswith(payload)
+    assert moved.endswith(payload)
+    assert SPAWN_BACKGROUND_DIRECTIVE in asked
+    assert SPAWN_BACKGROUND_DIRECTIVE in moved
+    assert "A message arrived on this conversation" in moved
+    assert "A message arrived on this conversation" not in asked

@@ -7,10 +7,14 @@ child turn linked to its parent (`parent_turn_id`) on its own conversation, and 
 turn queue — a distinct partition, so the parent may await it without the queue serializing them
 into a deadlock. Foreground awaits the child's terminal and returns its contract-validated output;
 background returns the child turn id at once and the child delivers its own result through
-`SubagentResult` when it finishes. An agent child is a fully async peer: it runs as the target
-agent — its identity, its sandbox, its whole tool set — the spawn returns its identity at once
-whatever the caller asked, and the spawning conversation is where its messages arrive; a profile
-child runs under the spawning turn's agent, as it always has."""
+`SubagentResult` when it finishes. A foreground wait is interruptible: a member message arriving on
+the parent's conversation moves the child to the background — it keeps running and delivers its own
+result — exactly as a bash command still running at its foreground budget keeps running detached,
+so the parent is never held away from its own conversation by work it can read later. An agent child
+is a fully async peer: it runs as the target agent — its identity, its sandbox, its whole tool
+set — the spawn returns its identity at once whatever the caller asked, and the spawning
+conversation is where its messages arrive; a profile child runs under the spawning turn's agent, as
+it always has."""
 
 import asyncio
 from collections.abc import Callable, Sequence
@@ -51,6 +55,7 @@ from ufo.schema.records import (
     DELIVERY_DELIVERED,
     DELIVERY_PENDING,
     INTERNAL_ADMISSION,
+    MEMBER_ADMISSION,
     PARKED,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
@@ -233,6 +238,7 @@ class Subagents:
         dedup_key: str | None = None,
         delivers_result: bool = False,
         name: str = "",
+        detach_on_arrival: bool = False,
     ) -> SpawnResult:
         """Admit and enqueue a child turn. With `dedup_key`, the child's conversation (and so its
         turn id, the DBOS workflow id) is derived from the parent turn and the key, so a re-run of
@@ -241,7 +247,13 @@ class Subagents:
         completed branches are memoized by their own durable terminal, never respawned or rebilled.
         Without a key, each call mints a fresh random child. An agent target always runs
         background and always delivers: it is an independent peer nobody blocks on, and its
-        answers reach this conversation as arrivals."""
+        answers reach this conversation as arrivals.
+
+        `detach_on_arrival` gives the foreground wait the shape a bash command's foreground budget
+        has: a member message arriving on the parent's conversation ends the wait, the child is
+        moved to the background rather than cancelled, and the result says so instead of carrying
+        an output — so the parent can answer the message while the work it already paid for runs
+        on and delivers itself."""
         resolved = await self._resolve(target)
         match resolved:
             case SubagentProfile():
@@ -283,7 +295,18 @@ class Subagents:
             await self._enqueue(turn_id, conversation_id)
         if background:
             return SpawnResult(turn_id=turn_id, conversation_id=conversation_id, output=None)
-        terminal = await self._await_terminal(turn_id)
+        if detach_on_arrival:
+            awaited = await self._await_terminal_or_detach(turn_id)
+            if awaited is None:
+                return SpawnResult(
+                    turn_id=turn_id,
+                    conversation_id=conversation_id,
+                    output=None,
+                    detached_on_arrival=True,
+                )
+            terminal = awaited
+        else:
+            terminal = await self._await_terminal(turn_id)
         if terminal.status != "done":
             diagnostic = ": ".join(
                 part
@@ -821,23 +844,99 @@ class Subagents:
         no stored reason, so the parent reports that the child stopped without finishing rather
         than guessing which line stopped it."""
         while True:
-            async with workspace_tx() as connection:
-                row = (
-                    await connection.execute(
-                        sa.select(tables.turn.c.terminal, tables.turn.c.status).where(
-                            tables.turn.c.id == turn_id
-                        )
-                    )
-                ).one()
-            if row.terminal is not None:
-                return TerminalFrame.model_validate(row.terminal)
-            if row.status == PARKED:
-                await cancel_one_turn(self.client, turn_id)
-                raise SubagentParked(
-                    "subagent stopped before it finished and was cancelled; "
-                    "it held on a spend limit"
-                )
+            terminal = await self._terminal_or_park(turn_id)
+            if terminal is not None:
+                return terminal
             await asyncio.sleep(SUBAGENT_POLL_SECONDS)
+
+    async def _await_terminal_or_detach(self, turn_id: UUID) -> TerminalFrame | None:
+        """The same wait, ended early by a member message waiting on the parent's conversation:
+        None says the child was moved to the background, where it keeps running and hands back its
+        own result, so the parent can answer the member now.
+
+        The signal is the engine's own — an admitted `inbound_message` row no turn has drained is
+        exactly what the parent's next arrival drain would fold — so the wait ends on the message
+        the parent is about to read rather than on a clock, and one poll of the child's terminal
+        carries the question.
+
+        The child's terminal is read first, and the move is refused for a child that already
+        committed one, so a message landing in the same instant the child finishes resolves to the
+        child's result: the caller gets the answer it waited for, and the conversation is not woken
+        by a result the parent already holds."""
+        detachable = not self.parent.spawned
+        while True:
+            terminal = await self._terminal_or_park(turn_id)
+            if terminal is not None:
+                return terminal
+            if detachable and await self._member_waiting() and await self._detach(turn_id):
+                log(
+                    "subagent.detached_on_arrival",
+                    turn_id=str(turn_id),
+                    parent_turn_id=str(self.parent.id),
+                )
+                return None
+            await asyncio.sleep(SUBAGENT_POLL_SECONDS)
+
+    async def _terminal_or_park(self, turn_id: UUID) -> TerminalFrame | None:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal, tables.turn.c.status).where(
+                        tables.turn.c.id == turn_id
+                    )
+                )
+            ).one()
+        if row.terminal is not None:
+            return TerminalFrame.model_validate(row.terminal)
+        if row.status == PARKED:
+            await cancel_one_turn(self.client, turn_id)
+            raise SubagentParked(
+                "subagent stopped before it finished and was cancelled; it held on a spend limit"
+            )
+        return None
+
+    async def _member_waiting(self) -> bool:
+        """Whether a member has spoken into the parent's conversation and nothing has read it yet.
+        Only member rows count: a child's own delivered result and an extension's prompt are work
+        the system posted to itself, and a wait ended by its own child's arrival would detach the
+        very spawn it is waiting on. A subagent's conversation is its parent's private channel that
+        no member speaks into, which is why a spawned parent never asks."""
+        async with workspace_tx() as connection:
+            waiting = (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.id)
+                    .where(
+                        tables.inbound_message.c.workspace_id == self.parent.workspace_id,
+                        tables.inbound_message.c.conversation_id == self.parent.conversation_id,
+                        tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                        tables.inbound_message.c.consumed_turn_id.is_(None),
+                    )
+                    .limit(1)
+                )
+            ).first()
+        return waiting is not None
+
+    async def _detach(self, turn_id: UUID) -> bool:
+        """Hand the child the delivery its awaiting parent will no longer perform, so a child nobody
+        blocks on still reaches the conversation — the same `DELIVERY_PENDING` stamp a spawn asked
+        for in the background carries from admission.
+
+        False says the child committed its terminal first: the guard is the whole race resolution,
+        since a stamp landing on a finished child would post an arrival for a result this call is
+        about to return inline. A stamp that does land is read by `_deliver_to_parent`, which loads
+        the child's row after the terminal commits, so exactly one of the two paths carries the
+        result."""
+        async with workspace_tx() as connection:
+            moved = await connection.execute(
+                sa.update(tables.turn)
+                .values(result_delivery=DELIVERY_PENDING, updated_at=sa.func.now())
+                .where(
+                    tables.turn.c.id == turn_id,
+                    tables.turn.c.terminal.is_(None),
+                    tables.turn.c.result_delivery.is_(None),
+                )
+            )
+        return moved.rowcount == 1
 
 
 @dataclass(frozen=True)

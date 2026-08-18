@@ -134,13 +134,18 @@ class SpawnResult:
     pydantic model, or an agent child's contract-validated JSON. A background spawn has neither
     terminal nor output yet; a child that ended asking has a terminal carrying its question and no
     output. `untrusted` carries a profile's `untrusted_output` declaration, so the returning tool
-    result is walled as data."""
+    result is walled as data.
+
+    `detached_on_arrival` marks a wait a member message ended: the child was moved to the
+    background and keeps running, so this result carries its identity in place of the output the
+    caller waited for, and the child delivers that output to the conversation itself."""
 
     turn_id: UUID
     conversation_id: UUID
     output: BaseModel | ValidatedJson | None
     terminal: TerminalFrame | None = None
     untrusted: bool = False
+    detached_on_arrival: bool = False
 
 
 @dataclass(frozen=True)
@@ -173,7 +178,12 @@ class Spawn(Protocol):
 
     `delivers_result` says nobody will await this child: it hands its own output to the parent's
     conversation when it finishes. A caller that awaits — foreground, or background bounded by its
-    own timeout — leaves it false, or the parent reads the same answer twice."""
+    own timeout — leaves it false, or the parent reads the same answer twice.
+
+    `detach_on_arrival` makes a foreground wait interruptible by a member message arriving on the
+    parent's conversation: the child moves to the background and the result says so instead of
+    carrying an output. A caller that assembles its own answer out of the output leaves it false —
+    it has no way to represent a child that is still running."""
 
     async def __call__(
         self,
@@ -183,6 +193,7 @@ class Spawn(Protocol):
         dedup_key: str | None = None,
         delivers_result: bool = False,
         name: str = "",
+        detach_on_arrival: bool = False,
     ) -> SpawnResult: ...
 
 

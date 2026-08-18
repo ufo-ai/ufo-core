@@ -111,7 +111,13 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   spawning agent, in its sandbox: foreground awaits its validated output; background returns its
   identity at once and may deliver that same validated output to the parent's conversation when
   it finishes — an arrival folded into the live turn or admitted as the next turn, so no parent
-  holds a turn open waiting on a child; the caller records whether anyone will await. A workspace
+  holds a turn open waiting on a child; the caller records whether anyone will await. A member
+  message waiting on the parent's conversation ends a foreground wait: the child moves to the
+  background — not cancelled, stamped to deliver its own result — and the tool answers with its
+  identity, so the parent answers the member while the work runs on, exactly as a bash command
+  still running at its foreground budget continues detached. The child's own terminal is read
+  first and the move is refused past it, so a message landing as the child finishes resolves to
+  the child's result. A workspace
   agent target is a fully async peer: it runs as itself — its prompt, model, whole tool set, own
   sandbox, memory, and grants, under the declared (or default task/result) contract its row
   carries — spawnable by its owner or a workspace admin, an ownerless row (the main agent, a

@@ -16,7 +16,9 @@ sha256 a preflight measured — and returns a TTL-token URL per file that core's
 serves: the only path that hands a file back outside the sandbox, with no read cap and no
 whole-file buffer.
 `spawn` delegates a typed subtask to a child turn through `ctx.spawn` — a subagent profile or a
-workspace agent, one verb over both. `ask_user` is
+workspace agent, one verb over both. It blocks on the child, and a message arriving on the
+conversation ends that wait the way a foreground budget ends bash's: the child keeps running in the
+background and delivers its own result, so the turn is free to answer the member. `ask_user` is
 chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
 next message — no out-of-band prompt. `request_credentials` is its secret-collecting sibling: it
@@ -311,7 +313,9 @@ class SpawnInput(BaseModel):
     background: bool = Field(
         default=False,
         description="Run in the background and return the child turn id immediately instead of "
-        "waiting for its validated output.",
+        "waiting for its validated output. Waiting is safe either way: a spawn still running when "
+        "a message arrives on this conversation is not stopped — it keeps running in the "
+        "background and the result hands back its spawn id.",
     )
     user_description: str = Field(
         description="What you are handing off, in plain language for the activity timeline — the "
@@ -888,7 +892,33 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     )
 
 
+SPAWN_DETACHED_LEAD = "The spawn runs in the background."
+SPAWN_MOVED_LEAD = (
+    "A message arrived on this conversation, so the spawn did not answer in front of you and "
+    "continues in the background. Its output is not coming back here: answer the message rather "
+    "than waiting on the spawn again."
+)
+SPAWN_BACKGROUND_DIRECTIVE = (
+    "Its validated output — or the question it ends asking — arrives on this conversation as a "
+    "message when it finishes. `message_spawn` sends it a follow-up and `cancel_spawn` ends it."
+)
+
+
+def _spawn_handles(target: str, turn_id: UUID, moved: bool) -> str:
+    """The handles a background spawn is reached by, whichever way it got there — one text for a
+    spawn backgrounded on request and one an arriving message moved, so the two can never drift
+    apart, the way `task_handles` holds bash's two."""
+    lead = SPAWN_MOVED_LEAD if moved else SPAWN_DETACHED_LEAD
+    payload = {"spawn_id": str(turn_id), "target": target, "status": "running"}
+    return f"{lead} {SPAWN_BACKGROUND_DIRECTIVE}\n{json.dumps(payload)}"
+
+
 async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
+    """Run the target as a child turn and report what ended the call. A foreground spawn returns the
+    child's validated output, unless a message arrives on this conversation first: the child is then
+    not cancelled — it keeps running in the background and delivers its own result — and the result
+    hands back the id it is reached by, so the parent answers the member instead of waiting. That is
+    what `bash` does with a command still running at its foreground budget."""
     try:
         result = await ctx.spawn(
             args.target,
@@ -897,6 +927,7 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
             dedup_key=ctx.idempotency_key,
             delivers_result=args.background,
             name=args.name,
+            detach_on_arrival=True,
         )
     except (AmbiguousSpawnTarget, UnknownSpawnTarget) as error:
         return ToolResult(content=(TextContent(text=str(error)),), is_error=True)
@@ -917,7 +948,11 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
         )
     if result.output is None:
         return ToolResult(
-            content=(TextContent(text=f"spawned {args.target} (turn {result.turn_id})"),)
+            content=(
+                TextContent(
+                    text=_spawn_handles(args.target, result.turn_id, result.detached_on_arrival)
+                ),
+            )
         )
     return ToolResult(
         content=(TextContent(text=result.output.model_dump_json()),), untrusted=result.untrusted
@@ -1174,6 +1209,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "Delegate a subtask to a named target — a subagent profile or a workspace agent. "
             "`payload` must match the target's input schema; foreground (default) returns the "
             "target's validated JSON output, background returns the child turn id at once. A "
+            "foreground spawn still running when a message arrives on this conversation is not "
+            "cancelled: it keeps running in the background, the result names the spawn id, and its "
+            "output arrives on this conversation as a message when it finishes. A "
             "spawn that ends asking returns its structured question with status 'question' — "
             "answer it yourself with message_spawn, or ask the member with ask_user and relay "
             "their answer."
