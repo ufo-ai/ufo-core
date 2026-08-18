@@ -36,7 +36,7 @@ from ufo.ext.context import ConversationProbes, ExtensionContext, TurnInvoker, c
 from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChangeBatch
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import log, log_error, warn
+from ufo.o11y import emit_metric, formatted_stack, log, log_error, warn
 from ufo.provisioning import AgentProvisioning
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.schema import tables
@@ -455,7 +455,15 @@ class PageChangeRunner:
         enumerates the fleet itself. The cursor advances by compare-and-set against the value this
         tick read, so an overlapping tick or an external writer that already moved it on is never
         rewound to an older place: losing that write means another writer owns the cursor, and this
-        tick stops having only redone work a handler is idempotent under."""
+        tick stops having only redone work a handler is idempotent under.
+
+        A handler that raises leaves the cursor where it was, so the same batch is replayed on the
+        next tick. That is right for a fault that passes and wrong for one that does not: a batch
+        the handler can never accept holds every later page in the workspace behind it, and the
+        replay is silent — one `jobs.failed` a minute reads exactly like a stream of unrelated
+        blips. So each failure states which consumer stopped and where, and counts, and the counter
+        is what a monitor reads: a fault that passes shows up once or twice, and one that does not
+        keeps the count at the tick rate until somebody looks."""
         context = self._context_for(consumer)
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         stored = await context.store.get(cursor_key)
@@ -466,9 +474,27 @@ class PageChangeRunner:
             batch = await self.pages.pages_changed_since(cursor, PAGE_CHANGE_BATCH)
             if not batch.changes:
                 return
-            await consumer.spec.handler(
-                HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
-            )
+            try:
+                await consumer.spec.handler(
+                    HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
+                )
+            except Exception as error:
+                emit_metric(
+                    "page_change_stalled_total",
+                    extension=consumer.extension,
+                    discriminator=consumer.discriminator,
+                )
+                log_error(
+                    "jobs.page_change_stalled",
+                    workspace_id=str(ws_current().workspace_id),
+                    extension=consumer.extension,
+                    discriminator=consumer.discriminator,
+                    cursor=cursor or "",
+                    pages=len(batch.changes),
+                    error_class=type(error).__name__,
+                    stack=formatted_stack(error),
+                )
+                raise
             if not await context.store.put_if(cursor_key, batch.next_cursor, expected=cursor):
                 return
             cursor = batch.next_cursor

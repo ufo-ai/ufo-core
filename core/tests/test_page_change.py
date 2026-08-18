@@ -15,6 +15,7 @@ instead of rewinding the cursor and replaying the batch. No mock call-log — a 
 through its capability APIs."""
 
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -348,6 +349,58 @@ async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another
         )
     assert record == {"page_ids": [str(page)], "model_wired": False}
     assert isinstance(sample_cursor, str) and sample_cursor != boom_cursor
+
+
+async def test_a_stalled_consumer_says_which_one_stopped_and_counts_every_replay(
+    db: None, tmp_path: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A handler that raises leaves the cursor where it was, so the same batch returns on the next
+    tick. For a fault that passes that is the recovery; for one that does not, every later page in
+    the workspace waits behind it and nothing says so — a `jobs.failed` a minute reads exactly like
+    unrelated blips.
+
+    So each replay states which consumer stopped, at which cursor, and counts. The count is what a
+    monitor separates the two faults by: a blip lands once or twice, a batch that can never be
+    accepted lands at the tick rate until somebody looks."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await _seed_page(blob, workspace_id, "a page the handler will never accept")
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    boom = Manifest(
+        name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)
+    )
+    runner = _runner(blob, manifests=(boom,))
+    (consumer,) = runner.consumers()
+
+    with caplog.at_level(logging.ERROR, logger="ufo"):
+        for _ in range(3):
+            with pytest.raises(RuntimeError), ws(workspace_id):
+                await runner.drive(consumer)
+
+    stalled = [
+        record.ufo for record in caplog.records if record.getMessage() == "jobs.page_change_stalled"
+    ]
+    assert len(stalled) == 3
+    assert stalled[0]["extension"] == "boom_ext"
+    assert stalled[0]["workspace_id"] == str(workspace_id)
+    assert stalled[0]["error_class"] == "RuntimeError"
+    assert stalled[0]["pages"] == 1
+
+    data = reader.get_metrics_data()
+    assert data is not None
+    counted = [
+        point
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "ufo.page_change_stalled_total"
+        for point in metric.data.data_points
+    ]
+    assert sum(point.value for point in counted) == 3
+    assert {point.attributes["extension"] for point in counted} == {"boom_ext"}
 
 
 @dataclass(frozen=True)

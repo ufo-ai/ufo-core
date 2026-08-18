@@ -91,6 +91,26 @@ resource "datadog_monitor" "source_sync_failed" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
+# A page-change consumer advances its cursor only after its handler returns, so a batch the handler
+# cannot accept is replayed every tick and holds every later page in that workspace behind it. The
+# threshold is what separates the two faults this counts: a provider blip fails once or twice and
+# then passes, while a batch that can never be accepted keeps failing at the tick rate. Ten in
+# fifteen minutes is only reachable by the second.
+resource "datadog_monitor" "page_change_stalled" {
+  name    = "ufo prod page change consumer stalled"
+  type    = "query alert"
+  query   = "sum(last_15m):sum:ufo.page_change_stalled_total{env:prod} by {extension,discriminator}.as_count() >= 10"
+  message = "{{extension.name}} {{discriminator.name}} has replayed the same page batch {{value}} times in 15 minutes and advanced no cursor. Every later page in that workspace is held behind it. Search jobs.page_change_stalled for the workspace, cursor, and error class. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 10
+  }
+
+  require_full_window = false
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
 resource "datadog_monitor" "surface_listener_parked" {
   name    = "ufo prod surface listener parked"
   type    = "query alert"

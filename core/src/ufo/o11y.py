@@ -73,6 +73,7 @@ METRICS = (
     "model_provider_retry_total",
     "model_round_tokens_total",
     "tool_call_total",
+    "page_change_stalled_total",
     "source_sync_failed_total",
     "surface_listener_parked_total",
     "repl_run_total",
