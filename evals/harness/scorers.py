@@ -40,6 +40,62 @@ ANSWER_TOLERANCE = 0.05
 WEB_TOOLS = ("search_web", "fetch_url")
 LOCAL_FS_TOOLS = frozenset({"read", "write", "edit", "bash", "grep", "glob"})
 
+SHELL_SEPARATORS = frozenset({";", ";;", "&", "&&", "|", "||", "|&"})
+SHELL_GROUPING = frozenset({"{", "}", "(", ")"})
+DISCARDED_REDIRECT = re.compile(r"^(?:/dev/null|\d+)$")
+ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+GIT_READ_SUBCOMMANDS = frozenset(
+    {
+        "blame",
+        "cat-file",
+        "describe",
+        "diff",
+        "for-each-ref",
+        "grep",
+        "log",
+        "ls-files",
+        "ls-remote",
+        "ls-tree",
+        "merge-base",
+        "request-pull",
+        "rev-list",
+        "rev-parse",
+        "shortlog",
+        "show",
+        "show-ref",
+        "status",
+    }
+)
+GIT_LISTING_SUBCOMMANDS = frozenset({"branch", "config", "remote", "tag"})
+GIT_LISTING_WORDS = frozenset(
+    {"--get", "--get-all", "--get-regexp", "--list", "-l", "get-url", "list", "show"}
+)
+WRITER_COMMANDS = frozenset(
+    {
+        "bash",
+        "cp",
+        "dd",
+        "install",
+        "ln",
+        "mkdir",
+        "mv",
+        "node",
+        "patch",
+        "perl",
+        "python",
+        "python3",
+        "rm",
+        "rmdir",
+        "ruby",
+        "sh",
+        "tee",
+        "touch",
+        "truncate",
+        "zsh",
+    }
+)
+
 
 def answer_text(text: str) -> str:
     marked = re.search(r"ANSWER:\s*(.+)", text, re.IGNORECASE)
@@ -387,7 +443,7 @@ def _touches_checkout(call: ToolInvocation, checkouts: tuple[str, ...]) -> bool:
                         return False
                 case _:
                     return False
-        case "edit":
+        case "edit" | "write":
             values = tuple(
                 value
                 for key in ("path", "file_path")
@@ -415,7 +471,76 @@ def _touches_checkout(call: ToolInvocation, checkouts: tuple[str, ...]) -> bool:
     return False
 
 
-def delegation_only_scorer(forbidden: tuple[str, ...]) -> Grader:
+def _git_reads_only(argv: tuple[str, ...]) -> bool:
+    index = 0
+    while index < len(argv) and argv[index].startswith("-"):
+        index += 2 if argv[index] in GIT_VALUE_OPTIONS else 1
+    if index >= len(argv):
+        return True
+    subcommand, operands = argv[index], argv[index + 1 :]
+    if subcommand in GIT_READ_SUBCOMMANDS:
+        return True
+    if subcommand not in GIT_LISTING_SUBCOMMANDS:
+        return False
+    named = tuple(operand for operand in operands if not operand.startswith("-"))
+    return not named or any(operand in GIT_LISTING_WORDS for operand in operands)
+
+
+def _stage_reads_only(argv: tuple[str, ...]) -> bool:
+    words = list(argv)
+    while words and (ENV_ASSIGNMENT.match(words[0]) or words[0] in SHELL_GROUPING):
+        words.pop(0)
+    for index, word in enumerate(words):
+        if ">" in word:
+            target = words[index + 1] if index + 1 < len(words) else ""
+            if not DISCARDED_REDIRECT.match(target):
+                return False
+    if not words:
+        return True
+    program, arguments = PurePosixPath(words[0]).name, words[1:]
+    if program == "git":
+        return _git_reads_only(tuple(arguments))
+    if program == "sed":
+        return not any(argument.startswith("-i") for argument in arguments)
+    return program not in WRITER_COMMANDS
+
+
+def _reads_only(call: ToolInvocation) -> bool:
+    """True when a call changes nothing it reaches. `grep` and `glob` read by construction; a `bash`
+    call reads when every stage of its command line does.
+
+    git is the tool that lands a change, so its read subcommands are named one by one and anything
+    else it is asked to do counts as work. Off git, the named programs are the ones that write a
+    file — an interpreter, an in-place editor, a copy — plus any redirect to a real path. A program
+    neither list names inspects: a turn that probes for a forge, or pages a file, has not touched
+    the repository, and failing it there is the false report this guard exists to avoid."""
+
+    if call.name in ("grep", "glob"):
+        return True
+    if call.name != "bash" or not isinstance(command := call.input.get("command"), str):
+        return False
+    # shlex consumes a newline as whitespace and emits no token for it, so a newline-separated
+    # command line would read as one stage. Keep the newline — an unquoted `#` comment still has to
+    # end there — and add the `;` the lexer does emit. Inside quotes the added character is part of
+    # the word, so it splits nothing.
+    lexer = shlex.shlex(command.replace("\n", "\n;"), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        words = tuple(lexer)
+    except ValueError:
+        return False
+    stage: list[str] = []
+    stages = [stage]
+    for word in words:
+        if word in SHELL_SEPARATORS:
+            stage = []
+            stages.append(stage)
+        else:
+            stage.append(word)
+    return all(_stage_reads_only(tuple(stage)) for stage in stages)
+
+
+def delegation_only_scorer(forbidden: tuple[str, ...], *, reads_allowed: bool = False) -> Grader:
     """Pass iff the evaluated turn did the delegating and none of the repository work itself.
 
     Reads `own_calls` — the evaluated turn's own calls, before a child's are merged in — because a
@@ -427,14 +552,23 @@ def delegation_only_scorer(forbidden: tuple[str, ...]) -> Grader:
     a checkout. The same tools over the notes and patches a child left in the workspace are how the
     parent reads a handoff at all — the coding skill directs it to those files, and the child's
     finish result is an index of them — so forbidding the tool rather than the target would fail
-    every case that handed off correctly."""
+    every case that handed off correctly.
+
+    `reads_allowed` narrows the rule once more, to the turn that authors or lands the change: a
+    parent that reads the checkout to write the objective, or to check the child's claim afterwards,
+    has still delegated the work. A case that wants the stricter rule — the parent stays out of the
+    checkout altogether — leaves it unset."""
+
+    acted, acting = ("changed", "changing") if reads_allowed else ("worked", "working")
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         checkouts = _checkout_names(output.workspace_dir)
         offending = tuple(
             call
             for call in output.own_calls
-            if call.name in forbidden and _touches_checkout(call, checkouts)
+            if call.name in forbidden
+            and _touches_checkout(call, checkouts)
+            and not (reads_allowed and _reads_only(call))
         )
         evidence: JsonObject = {
             "ownTools": list(output.own_tools),
@@ -445,15 +579,16 @@ def delegation_only_scorer(forbidden: tuple[str, ...]) -> Grader:
             used = sorted({call.name for call in offending})
             return CapabilityVerdict(
                 False,
-                f"the evaluated turn worked the repository itself with {', '.join(used)} instead "
+                f"the evaluated turn {acted} the repository itself with {', '.join(used)} instead "
                 "of delegating it",
                 evidence,
             )
-        return CapabilityVerdict(True, "delegated without working the repository itself", evidence)
+        return CapabilityVerdict(
+            True, f"delegated without {acting} the repository itself", evidence
+        )
 
-    return DescribedGrader(
-        f"the evaluated turn reaches no checkout with {', '.join(forbidden)} itself", grade
-    )
+    reach = "changes no checkout" if reads_allowed else "reaches no checkout"
+    return DescribedGrader(f"the evaluated turn {reach} with {', '.join(forbidden)} itself", grade)
 
 
 def combine(*graders: Grader) -> Grader:
