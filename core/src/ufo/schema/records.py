@@ -58,9 +58,17 @@ class ToolIntent(BaseModel):
         "memory_update",
         "request_credentials",
         "read_private_transcript",
+        "manage_billing",
     ]
     input: dict[str, JsonValue]
 
+
+# The one prepared intent a spent balance still admits. Arranging a refill is what lifts the
+# refusal, so a gate that refused it would refuse the only act that ends the refusal — the shape
+# this system has built three times and had to unbuild. It is safe to admit because a prepared
+# intent runs no model round: the turn dispatches this verb verbatim and terminates, so an
+# overdrawn workspace cannot spend against it, and the tool's own admin gate still decides who may.
+BILLING_INTENT_TOOL = "manage_billing"
 
 ProposalStatus = Literal["pending", "approved", "rejected"]
 PENDING: ProposalStatus = "pending"

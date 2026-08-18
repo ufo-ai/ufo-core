@@ -3,7 +3,18 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
+import {
+  type NoticeState,
+  OutcomeNotice,
+  Panel,
+  PanelBlank,
+  QUIET,
+  Section,
+  outcomeNotice,
+  usePanelRead,
+} from "@/kernel/panel";
+import { postIntent } from "@/lib/api";
+import { useMainAgent } from "@/lib/mainAgent";
 import { money } from "@/lib/money";
 import { workspaceHash } from "@/lib/route";
 
@@ -306,6 +317,9 @@ function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
 
 const BILLING_PATH = "/ext/metronome/billing";
 
+const REFILL_DOLLARS = 100;
+const REFILL_BELOW_DOLLARS = 25;
+
 type BillingReport =
   | { limited: false }
   | {
@@ -313,6 +327,8 @@ type BillingReport =
       balance_micro_usd: number;
       refused_below_micro_usd: number;
       card_on_file: boolean;
+      autopay_micro_usd?: number | null;
+      autopay_below_micro_usd?: number | null;
     };
 
 type BillingState = { phase: "unanswered" } | { phase: "ready"; report: BillingReport };
@@ -323,11 +339,19 @@ function dollars(micro: number): string {
   return (micro < 0 ? "-" : "") + "$" + (Math.abs(micro) / 1e6).toFixed(2);
 }
 
+function refillRule(amountMicro: number, belowMicro: number): string {
+  return dollars(amountMicro) + " when the balance falls below " + dollars(belowMicro);
+}
+
 /** The workspace's prepaid balance, read from the metronome extension's own endpoint rather than
  *  the panel API. The route authenticates the session itself and answers admins only, so the
  *  section is drawn exactly when it answers and any refusal draws nothing. */
 function Billing() {
+  const mainAgent = useMainAgent();
   const [state, setState] = useState<BillingState>({ phase: "unanswered" });
+  const [reloads, setReloads] = useState(0);
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     let live = true;
     fetch(BILLING_PATH, { credentials: "same-origin" })
@@ -340,22 +364,63 @@ function Billing() {
     return () => {
       live = false;
     };
-  }, []);
+  }, [reloads]);
   if (state.phase !== "ready") return null;
   const report = state.report;
+  const rule =
+    report.limited &&
+    typeof report.autopay_micro_usd === "number" &&
+    typeof report.autopay_below_micro_usd === "number"
+      ? refillRule(report.autopay_micro_usd, report.autopay_below_micro_usd)
+      : null;
+
+  async function refill(amountDollars: number | null, belowDollars: number | null) {
+    if (busy || !mainAgent) return;
+    setBusy(true);
+    const outcome = await postIntent(mainAgent.id, {
+      verb: "refill",
+      kind: "billing",
+      amount_dollars: amountDollars,
+      below_dollars: belowDollars,
+    });
+    setBusy(false);
+    setNotice(outcomeNotice(outcome));
+    if (outcome.applied) setReloads((count) => count + 1);
+  }
+
   return (
     <Section title="Billing">
       {report.limited ? (
-        <Facts
-          rows={[
-            {
-              label: "Turns are refused below",
-              value: dollars(report.refused_below_micro_usd),
-            },
-            { label: "Balance", value: dollars(report.balance_micro_usd) },
-            { label: "Card on file", value: report.card_on_file ? "Yes" : "No" },
-          ]}
-        />
+        <>
+          <Facts
+            rows={[
+              {
+                label: "Turns are refused below",
+                value: dollars(report.refused_below_micro_usd),
+              },
+              { label: "Balance", value: dollars(report.balance_micro_usd) },
+              { label: "Card on file", value: report.card_on_file ? "Yes" : "No" },
+              { label: "Automatic refills", value: rule ?? "Off" },
+            ]}
+          />
+          <OutcomeNotice state={notice} />
+          {mainAgent ? (
+            <div className="mt-lg">
+              {rule ? (
+                <Button busy={busy} onClick={() => refill(null, null)}>
+                  Stop automatic refills
+                </Button>
+              ) : (
+                <Button
+                  busy={busy}
+                  onClick={() => refill(REFILL_DOLLARS, REFILL_BELOW_DOLLARS)}
+                >
+                  {"Refill " + refillRule(REFILL_DOLLARS * 1e6, REFILL_BELOW_DOLLARS * 1e6)}
+                </Button>
+              )}
+            </div>
+          ) : null}
+        </>
       ) : (
         <PanelBlank body="This workspace has no spending limit." />
       )}

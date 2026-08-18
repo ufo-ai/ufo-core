@@ -22,7 +22,7 @@ from ufo.balance import (
 )
 from ufo.db import workspace_tx
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, Usage
+from ufo.schema.records import BILLING_INTENT_TOOL, TerminalFrame, ToolIntent, Usage
 from ufo.surfaces.admission import Admission
 
 DOLLAR = 1_000_000
@@ -393,3 +393,51 @@ async def test_entry_stays_the_stricter_line_once_the_grace_applies(db: None) ->
         continuing = await gate.sustains(connection, pending_micro_usd=DOLLAR)
     assert entering.outcome != ALLOW
     assert continuing.outcome == ALLOW
+
+
+def _billing_intent() -> ToolIntent:
+    return ToolIntent(
+        tool=BILLING_INTENT_TOOL,
+        input={"action": "autopay", "user_description": "Set automatic refills from the portal."},
+    )
+
+
+async def test_a_spent_balance_still_admits_the_act_that_ends_the_refusal(db: None) -> None:
+    """The refusal exists to stop a workspace spending money it does not have, and arranging a
+    refill is how it gets money. Gating that act refuses the only thing that lifts the gate, which
+    is the deadlock this system built three times before it was named. Safe to admit because a
+    prepared intent runs no model round: the turn dispatches the verb and ends, so the workspace
+    cannot spend against it, and the tool's own admin gate still decides who may."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, _agent_id, conversation_id = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=1)
+        await debit(connection, workspace_id, 5 * DOLLAR)
+    dbos = StubDbos()
+    admitted = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+        workspace_id,
+        conversation_id,
+        _billing_intent().model_dump_json(),
+        member_id,
+        intent=_billing_intent(),
+    )
+    assert await _status(admitted.turn_id) != "cancelled"
+
+
+async def test_the_exemption_is_the_billing_verb_and_nothing_else(db: None) -> None:
+    """A prepared intent is cheap, but cheap is not a reason to admit every panel act on an
+    overdrawn workspace — an agent edit or a member add would then ride past the balance the same
+    way. Only the verb that ends the refusal is exempt."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, _agent_id, conversation_id = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=1)
+        await debit(connection, workspace_id, 5 * DOLLAR)
+    other = ToolIntent(
+        tool="memory_update",
+        input={"body": "note", "user_description": "Correct a memory from the portal."},
+    )
+    dbos = StubDbos()
+    admitted = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+        workspace_id, conversation_id, other.model_dump_json(), member_id, intent=other
+    )
+    assert await _status(admitted.turn_id) == "cancelled"
+    assert (await _terminal(admitted.turn_id)).text == BALANCE_REFUSAL_MESSAGE

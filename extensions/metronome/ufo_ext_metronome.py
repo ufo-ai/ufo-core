@@ -56,6 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.sdk.accounting import UsageExport, metered_workspaces
 from ufo.sdk.balance import (
     AutoTopup,
+    configured_auto_topup,
     credit,
     mark_topup_verified,
     read_auto_topup,
@@ -912,6 +913,7 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
             return JSONResponse({"error": "only a workspace admin can read billing"}, 403)
         headroom = await read_headroom(connection, ext.store.workspace_id)
         balance = await read_balance(connection, ext.store.workspace_id)
+        arranged = await configured_auto_topup(connection, ext.store.workspace_id)
     if headroom is None or balance is None:
         return JSONResponse({"limited": False})
     config = BillingConfig.from_env()
@@ -930,6 +932,8 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
             "granted_micro_usd": balance.granted_micro_usd,
             "charged_micro_usd": balance.charged_micro_usd,
             "card_on_file": card,
+            "autopay_micro_usd": None if arranged is None else arranged.amount_micro_usd,
+            "autopay_below_micro_usd": None if arranged is None else arranged.threshold_micro_usd,
         }
     )
 

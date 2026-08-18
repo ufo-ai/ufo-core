@@ -156,6 +156,30 @@ class Headroom:
     grace_micro_usd: int
 
 
+async def configured_auto_topup(
+    connection: AsyncConnection, workspace_id: UUID
+) -> AutoTopup | None:
+    """The refill this workspace has arranged, whether or not it has reached it.
+
+    `read_auto_topup` answers the refill job's question — is this workspace short — so it is silent
+    about a rule that exists and has not been reached yet. A caller reporting the terms back to the
+    admin who set them cannot tell that silence from having no rule at all."""
+    row = (
+        await connection.execute(
+            sa.select(
+                tables.workspace_balance.c.auto_topup_micro_usd,
+                tables.workspace_balance.c.auto_topup_threshold_micro_usd,
+            ).where(tables.workspace_balance.c.workspace_id == workspace_id)
+        )
+    ).one_or_none()
+    if row is None or row.auto_topup_micro_usd is None:
+        return None
+    return AutoTopup(
+        amount_micro_usd=row.auto_topup_micro_usd,
+        threshold_micro_usd=row.auto_topup_threshold_micro_usd,
+    )
+
+
 async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Headroom | None:
     """What is left and what must stay, without the lifetime aggregate `read_balance` pays for —
     this read runs before every model round."""

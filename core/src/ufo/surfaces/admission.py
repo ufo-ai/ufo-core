@@ -50,12 +50,13 @@ import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
 from opentelemetry.trace import SpanKind
 
-from ufo.accounting import ALLOW, BalanceGate, SpendEvaluator
+from ufo.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
 from ufo.db import workspace_tx
 from ufo.ext.surface import Admitted, conversation_name
 from ufo.o11y import current_traceparent, log, span
 from ufo.schema import tables
 from ufo.schema.records import (
+    BILLING_INTENT_TOOL,
     DBOS_APP_VERSION,
     DELIVERY_PENDING,
     INTENT_ADMISSION,
@@ -597,8 +598,12 @@ class Admission:
                     decision = await SpendEvaluator(
                         workspace_id, conversation.member_id, agent_id
                     ).decide(connection, 0)
-                    balance = await BalanceGate(workspace_id).admits(
-                        connection, agent_id, self.key_slot_for
+                    balance = (
+                        SpendDecision(outcome=ALLOW, message="")
+                        if intent is not None and intent.tool == BILLING_INTENT_TOOL
+                        else await BalanceGate(workspace_id).admits(
+                            connection, agent_id, self.key_slot_for
+                        )
                     )
                     match decision.outcome:
                         case _ if balance.outcome != ALLOW:

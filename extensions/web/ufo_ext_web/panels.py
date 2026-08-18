@@ -137,6 +137,21 @@ class TranscriptIntent(BaseModel):
     conversation_id: UUID
 
 
+class RefillIntent(BaseModel):
+    """An admin's standing authority to charge the card on file, given from the billing screen.
+
+    This is the one mutation that screen carries, and it is here rather than only in chat because
+    the workspace that most needs it is the one whose balance refuses every turn. Both figures
+    together arrange a refill and neither stops it, which is the shape `manage_billing` action
+    'autopay' already takes — the intent dispatches verbatim to that same verb, so the tool's own
+    admin gate and its refusals answer, and nothing about who may do this is decided twice."""
+
+    verb: Literal["refill"]
+    kind: Literal["billing"]
+    amount_dollars: int | None = None
+    below_dollars: int | None = None
+
+
 class CorrectionIntent(BaseModel):
     """One memory correction from the workspace memory view: a corrective memory recorded through
     `memory_update`, exactly the write chat performs — a new item under the correcting member's own
@@ -170,6 +185,7 @@ class PanelIntent(BaseModel):
         | AudienceIntent
         | CorrectionIntent
         | CredentialIntent
+        | RefillIntent
         | TranscriptIntent
     ) = Field(discriminator="verb")
 
@@ -181,11 +197,22 @@ def _tool_intent(
         | AudienceIntent
         | CorrectionIntent
         | CredentialIntent
+        | RefillIntent
         | TranscriptIntent
     ),
     slot: CredentialSlotView | None,
 ) -> ToolIntent:
     match submitted:
+        case RefillIntent():
+            return ToolIntent(
+                tool="manage_billing",
+                input={
+                    "action": "autopay",
+                    "autopay_dollars": submitted.amount_dollars,
+                    "autopay_below_dollars": submitted.below_dollars,
+                    "user_description": "Set automatic refills from the billing screen.",
+                },
+            )
         case TranscriptIntent():
             return ToolIntent(
                 tool="read_private_transcript",

@@ -14,6 +14,9 @@ from ufo.balance import (
     Headroom as Headroom,
 )
 from ufo.balance import (
+    configured_auto_topup as configured_auto_topup,
+)
+from ufo.balance import (
     credit as credit,
 )
 from ufo.balance import (
