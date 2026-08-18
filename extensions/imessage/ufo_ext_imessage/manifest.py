@@ -25,7 +25,10 @@ def manifest() -> Manifest:
                 description=(
                     "Connect the requesting member's iMessage phone. An admin connects the "
                     "provider; each member proves that the phone can send to the assigned line "
-                    "by replying YES in the direct conversation."
+                    "by replying YES in the direct conversation. The shared line cannot message a "
+                    "phone that has not texted it first, so a not_connected result carries the "
+                    "assigned line and an sms: link the member taps to send that first message. "
+                    "Relay both to the member exactly, then run this tool again."
                 ),
                 input_model=ImessageConnectInput,
                 handler=connect.run,

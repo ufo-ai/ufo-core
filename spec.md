@@ -735,10 +735,14 @@ the identity. **Alternative — bring-your-own app** (`slack_connect method="man
 identity with `auth.test`.
 
 iMessage setup is one chat tool. An admin binds the deploy's Spectrum project to the workspace;
-each signed-in member claims an E.164 phone number. Spectrum returns the shared line to message,
-and a direct `YES` from the claimed phone and provider conversation proves that the phone can send
-to the assigned line. It does not prove that the phone received the confirmation, especially when
-iMessage falls back to SMS. That reply links the phone and is not admitted as a turn.
+each signed-in member claims an E.164 phone number. Spectrum's shared line refuses every phone that
+has not texted it first, so a refused claim returns the assigned line, an `sms:` opt-in link to that
+line, and one action: text the line once, then claim the number again. The refusal deletes the claim
+it staged, so no dead claim outlives it, and every claim result names the assigned line. A direct
+`YES` from the claimed phone and provider conversation proves that the phone can send to the
+assigned line. It does not prove that the phone received the confirmation, especially when iMessage
+falls back to SMS. That reply links the phone and is not admitted as a turn, and a vCard for the
+assigned line follows it, so the member saves the line as a known contact.
 The listener opens the live stream, buffers it while it replays from its extension-store sequence
 cursor, then drains the buffer; each provider message GUID is the admission idempotency key.
 

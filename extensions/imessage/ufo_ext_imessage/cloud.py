@@ -31,6 +31,7 @@ from ufo_ext_imessage.provider import (
     ProviderEvent,
     ProviderNotConfigured,
     RegisteredPhone,
+    TargetNotOptedIn,
 )
 
 SPECTRUM_PROJECT_ID_ENV = "SPECTRUM_PROJECT_ID"
@@ -178,11 +179,16 @@ class SpectrumProject:
             client_message_id=f"{idempotency_key}:conversation",
         )
         async with self.channel() as channel:
-            response = await chat_service_pb2_grpc.ChatServiceStub(channel).CreateChat(
-                request,
-                metadata=rpc_metadata(line.token, f"{idempotency_key}:conversation"),
-                timeout=RPC_TIMEOUT_SECONDS,
-            )
+            try:
+                response = await chat_service_pb2_grpc.ChatServiceStub(channel).CreateChat(
+                    request,
+                    metadata=rpc_metadata(line.token, f"{idempotency_key}:conversation"),
+                    timeout=RPC_TIMEOUT_SECONDS,
+                )
+            except grpc.aio.AioRpcError as error:
+                if error.code() != grpc.StatusCode.PERMISSION_DENIED:
+                    raise
+                raise TargetNotOptedIn(existing.assigned_phone_number) from error
         if not response.chat.guid:
             raise SpectrumCloudError("Spectrum returned a direct chat without an id")
         return RegisteredPhone(
@@ -230,7 +236,9 @@ class SpectrumProject:
         )
 
     def external_error(self, error: Exception) -> bool:
-        return isinstance(error, (grpc.aio.AioRpcError, SpectrumCloudError, httpx.HTTPError))
+        return isinstance(
+            error, (grpc.aio.AioRpcError, SpectrumCloudError, TargetNotOptedIn, httpx.HTTPError)
+        )
 
     def error_code(self, error: Exception) -> str:
         if isinstance(error, grpc.aio.AioRpcError):
@@ -297,11 +305,18 @@ class SpectrumProject:
             client_message_id=idempotency_key,
         )
         async with self.channel() as channel:
-            response = await message_service_pb2_grpc.MessageServiceStub(channel).SendTextMessage(
-                request,
-                metadata=rpc_metadata(line.token, idempotency_key),
-                timeout=RPC_TIMEOUT_SECONDS,
-            )
+            try:
+                response = await message_service_pb2_grpc.MessageServiceStub(
+                    channel
+                ).SendTextMessage(
+                    request,
+                    metadata=rpc_metadata(line.token, idempotency_key),
+                    timeout=RPC_TIMEOUT_SECONDS,
+                )
+            except grpc.aio.AioRpcError as error:
+                if error.code() != grpc.StatusCode.PERMISSION_DENIED:
+                    raise
+                raise TargetNotOptedIn from error
         return response.message.guid
 
     async def send_attachment(

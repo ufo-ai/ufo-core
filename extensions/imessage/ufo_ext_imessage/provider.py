@@ -42,6 +42,16 @@ class PhoneNotAllowed(RuntimeError):
     pass
 
 
+class TargetNotOptedIn(RuntimeError):
+    """The provider refused an outbound message because the target phone has not texted the
+    assigned line yet, so the member must send the first message. `assigned_phone_number` carries
+    the line when the refused call knows it."""
+
+    def __init__(self, assigned_phone_number: str = "") -> None:
+        self.assigned_phone_number = assigned_phone_number
+        super().__init__(assigned_phone_number)
+
+
 class MessageProvider(Protocol):
     @property
     def installation_id(self) -> str: ...

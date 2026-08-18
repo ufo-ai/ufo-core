@@ -40,6 +40,8 @@ RECONNECT_SECONDS = 2.0
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 LIVE_BUFFER_FRAMES = 1_000
 CONNECTED_TEXT = "Connected. Send your request."
+CONTACT_CARD_NAME = "ufo"
+CONTACT_CARD_FILENAME = "ufo.vcf"
 CONFIRMATION_REPLY_TEXT = "yes"
 OPT_OUT_REPLIES = frozenset(
     {"cancel", "end", "optout", "quit", "revoke", "stop", "stopall", "unsubscribe"}
@@ -50,6 +52,8 @@ class PendingClaim(BaseModel):
     member_id: UUID
     phone_number: str
     conversation_id: str
+    # A claim written before this field existed must still validate for the rest of its 10 minutes.
+    assigned_phone_number: str = ""
     confirmation_idempotency_key: str
     expires_at: datetime
 
@@ -85,6 +89,21 @@ class MessageProviderStreamEnded(RuntimeError):
 class ConversationAddress:
     id: str
     direct: bool
+
+
+def contact_card(assigned_phone_number: str) -> bytes:
+    """A vCard for the assigned line. The member saves it as a known contact, which is what drops
+    the Report Junk banner from the conversation."""
+    lines = (
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        f"N:{CONTACT_CARD_NAME};;;;",
+        f"FN:{CONTACT_CARD_NAME}",
+        f"TEL;TYPE=CELL:{assigned_phone_number}",
+        "END:VCARD",
+        "",
+    )
+    return "\r\n".join(lines).encode()
 
 
 def phone_key(phone_number: str) -> str:
@@ -334,6 +353,13 @@ class ImessageSurface:
             CONNECTED_TEXT,
             f"imessage-connected:{message.id}",
         )
+        if claim.assigned_phone_number:
+            await provider.send_attachment(
+                message.conversation_id,
+                CONTACT_CARD_FILENAME,
+                contact_card(claim.assigned_phone_number),
+                f"imessage-contact-card:{message.id}",
+            )
         await store.delete(key)
         return MemberLink(member_id=linked, confirmation_receipt_key=receipt_key)
 

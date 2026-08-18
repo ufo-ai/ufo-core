@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 import threading
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast, get_type_hints
 from uuid import UUID, uuid4
 
+import grpc
 import httpx
 import pytest
 import sqlalchemy as sa
@@ -31,15 +32,18 @@ from ufo_ext_imessage.provider import (
     ProviderEvent,
     ProviderNotConfigured,
     RegisteredPhone,
+    TargetNotOptedIn,
 )
 from ufo_ext_imessage.surface import (
     CONFIRMATION_REPLY_PREFIX,
+    CONTACT_CARD_FILENAME,
     IMESSAGE_EXTENSION,
     OPT_OUT_REPLIES,
     SURFACE_IMESSAGE,
     ImessageSurface,
     MessageStreamDisconnected,
     PendingClaim,
+    contact_card,
     conversation_from_queue,
     phone_key,
     queue_key,
@@ -47,9 +51,11 @@ from ufo_ext_imessage.surface import (
 from ufo_ext_imessage.tools import (
     CONFIRMATION_INSTRUCTION,
     CONFIRMATION_TEXT,
+    OPT_IN_TEXT,
     PROJECT_KEY,
     ImessageConnect,
     ImessageConnectInput,
+    opt_in_link,
 )
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
@@ -92,6 +98,7 @@ class RecordingProvider:
     sends: list[tuple[str, str, str]] = field(default_factory=list)
     delivered: list[tuple[str, str]] = field(default_factory=list)
     claim_present_when_sent: list[bool] = field(default_factory=list)
+    attachments: list[tuple[str, str, bytes, str]] = field(default_factory=list)
     sent_keys: set[str] = field(default_factory=set)
     fail_once: set[str] = field(default_factory=set)
     downloads: dict[str, tuple[bytes, ...] | Exception] = field(default_factory=dict)
@@ -118,6 +125,12 @@ class RecordingProvider:
             self.sent_keys.add(idempotency_key)
             self.delivered.append((conversation_id, text))
         return f"sent-{len(self.delivered)}"
+
+    async def send_attachment(
+        self, conversation_id: str, filename: str, data: bytes, idempotency_key: str
+    ) -> str:
+        self.attachments.append((conversation_id, filename, data, idempotency_key))
+        return f"attachment-{len(self.attachments)}"
 
     async def download_attachment(self, attachment_id: str) -> AsyncGenerator[bytes, None]:
         value = self.downloads[attachment_id]
@@ -496,6 +509,100 @@ async def test_spectrum_phone_scope_blocks_registration_and_inbound_messages() -
         await project.client.aclose()
 
 
+def test_opt_in_link_and_contact_card_carry_the_assigned_line() -> None:
+    assert OPT_IN_TEXT == "Connect my ufo account"
+    assert opt_in_link("+14085550123") == "sms:+14085550123?&body=Connect%20my%20ufo%20account"
+    assert contact_card("+14085550123") == (
+        b"BEGIN:VCARD\r\nVERSION:3.0\r\nN:ufo;;;;\r\nFN:ufo\r\n"
+        b"TEL;TYPE=CELL:+14085550123\r\nEND:VCARD\r\n"
+    )
+
+
+async def test_spectrum_maps_a_refused_target_onto_the_opt_in_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "succeed": True,
+                    "data": {
+                        "users": [
+                            {
+                                "id": "user",
+                                "phoneNumber": "+14155550123",
+                                "assignedPhoneNumber": "+14085550123",
+                            }
+                        ],
+                        "total": 1,
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "succeed": True,
+                "data": {"type": "shared", "token": "bearer", "expiresIn": 900},
+            },
+        )
+
+    class Channel:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    def refusing(code: grpc.StatusCode) -> Callable[..., Awaitable[object]]:
+        async def call(_request: object, **_options: object) -> object:
+            raise grpc.aio.AioRpcError(
+                code,
+                grpc.aio.Metadata(),
+                grpc.aio.Metadata(),
+                details="[spectrum-imessage] Target not allowed for this project",
+            )
+
+        return call
+
+    class RefusingChatStub:
+        def __init__(self, _channel: object) -> None:
+            self.CreateChat = refusing(grpc.StatusCode.PERMISSION_DENIED)
+
+    class UnavailableChatStub:
+        def __init__(self, _channel: object) -> None:
+            self.CreateChat = refusing(grpc.StatusCode.UNAVAILABLE)
+
+    class RefusingMessageStub:
+        def __init__(self, _channel: object) -> None:
+            self.SendTextMessage = refusing(grpc.StatusCode.PERMISSION_DENIED)
+
+    monkeypatch.setattr(SpectrumProject, "channel", lambda _self: Channel())
+    monkeypatch.setattr(cloud.chat_service_pb2_grpc, "ChatServiceStub", RefusingChatStub)
+    monkeypatch.setattr(cloud.message_service_pb2_grpc, "MessageServiceStub", RefusingMessageStub)
+
+    project = SpectrumProject(
+        project_id="project",
+        project_secret="secret",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        lock=asyncio.Lock(),
+        token_state={},
+    )
+    try:
+        with pytest.raises(TargetNotOptedIn) as chat_refusal:
+            await project.register_phone("+14155550123", "confirm-1")
+        assert chat_refusal.value.assigned_phone_number == "+14085550123"
+        assert project.external_error(chat_refusal.value)
+        with pytest.raises(TargetNotOptedIn) as send_refusal:
+            await project.send_text("iMessage;-;+14155550123", CONFIRMATION_TEXT, "confirm-1")
+        assert send_refusal.value.assigned_phone_number == ""
+        monkeypatch.setattr(cloud.chat_service_pb2_grpc, "ChatServiceStub", UnavailableChatStub)
+        with pytest.raises(grpc.aio.AioRpcError):
+            await project.register_phone("+14155550123", "confirm-2")
+    finally:
+        await project.client.aclose()
+
+
 async def test_replay_head_filters_the_buffered_live_overlap() -> None:
     processed: list[int] = []
 
@@ -632,12 +739,14 @@ async def test_reply_confirmation_survives_restart_then_the_next_message_gets_wr
     assert json.loads(first.content[0].text) == {
         "state": "pending",
         "instruction": CONFIRMATION_INSTRUCTION,
+        "assigned_phone_number": "+14085550123",
     }
     assert second == first
     claim = PendingClaim.model_validate(stored)
     assert claim.member_id == member_id
     assert claim.phone_number == phone
     assert claim.conversation_id == f"iMessage;-;{phone}"
+    assert claim.assigned_phone_number == "+14085550123"
     assert provider.registrations == [(phone, claim.confirmation_idempotency_key)]
     assert provider.sends[:2] == [
         (claim.conversation_id, CONFIRMATION_TEXT, claim.confirmation_idempotency_key),
@@ -716,6 +825,14 @@ async def test_reply_confirmation_survives_restart_then_the_next_message_gets_wr
         (claim.conversation_id, "Agent reply."),
     ]
     assert provider.sends[2][2] == "imessage-connected:confirmation-reply"
+    assert provider.attachments == [
+        (
+            claim.conversation_id,
+            CONTACT_CARD_FILENAME,
+            contact_card("+14085550123"),
+            "imessage-contact-card:confirmation-reply",
+        )
+    ]
 
 
 async def test_an_expired_claim_can_move_to_another_member(db: None) -> None:
@@ -754,6 +871,7 @@ async def test_an_expired_claim_can_move_to_another_member(db: None) -> None:
     assert json.loads(result.content[0].text) == {
         "state": "pending",
         "instruction": CONFIRMATION_INSTRUCTION,
+        "assigned_phone_number": "+14085550123",
     }
     replaced = PendingClaim.model_validate(stored)
     assert replaced.member_id == second_member_id
@@ -819,6 +937,89 @@ async def test_an_expired_claim_takeover_cannot_overwrite_a_concurrent_claim(db:
     }
     assert PendingClaim.model_validate(stored) == concurrent_claim
     assert provider.sends == []
+
+
+@pytest.mark.parametrize(
+    "refuse_registration", (True, False), ids=("chat-create", "confirmation-send")
+)
+async def test_a_refused_target_returns_the_opt_in_line_and_leaves_no_claim(
+    db: None, refuse_registration: bool
+) -> None:
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+
+    class RefusingProvider(RecordingProvider):
+        async def register_phone(self, phone_number: str, idempotency_key: str) -> RegisteredPhone:
+            user = await super().register_phone(phone_number, idempotency_key)
+            if refuse_registration:
+                raise TargetNotOptedIn(user.assigned_phone_number)
+            return user
+
+        async def send_text(self, conversation_id: str, text: str, idempotency_key: str) -> str:
+            await super().send_text(conversation_id, text, idempotency_key)
+            raise TargetNotOptedIn
+
+    provider = RefusingProvider()
+    tool_context = _tool_context(workspace_id, member_id)
+    with ws(workspace_id):
+        assert tool_context.ext is not None
+        await tool_context.ext.store.put(PROJECT_KEY, provider.installation_id)
+        result = await ImessageConnect(provider=lambda: provider).run(
+            tool_context,
+            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+        )
+        stored = await tool_context.ext.store.get(phone_key(phone))
+    assert json.loads(result.content[0].text) == {
+        "state": "not_connected",
+        "instruction": (
+            'Text "Connect my ufo account" to +14085550123 from that phone, then ask again. '
+            "The assigned line cannot message a phone that has not texted it first."
+        ),
+        "assigned_phone_number": "+14085550123",
+        "opt_in_text": OPT_IN_TEXT,
+        "opt_in_link": "sms:+14085550123?&body=Connect%20my%20ufo%20account",
+    }
+    assert stored is None
+    assert provider.claim_present_when_sent == ([] if refuse_registration else [True])
+
+
+async def test_a_refused_resend_clears_the_claim_the_next_try_would_reuse(db: None) -> None:
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    claim = PendingClaim(
+        member_id=member_id,
+        phone_number=phone,
+        conversation_id=f"iMessage;-;{phone}",
+        assigned_phone_number="+14085550123",
+        confirmation_idempotency_key="confirmation-1",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+
+    class RefusingProvider(RecordingProvider):
+        async def send_text(self, conversation_id: str, text: str, idempotency_key: str) -> str:
+            await super().send_text(conversation_id, text, idempotency_key)
+            raise TargetNotOptedIn
+
+    provider = RefusingProvider()
+    tool_context = _tool_context(workspace_id, member_id)
+    with ws(workspace_id):
+        assert tool_context.ext is not None
+        await tool_context.ext.store.put(PROJECT_KEY, provider.installation_id)
+        await tool_context.ext.store.put(phone_key(phone), claim.model_dump(mode="json"))
+        result = await ImessageConnect(provider=lambda: provider).run(
+            tool_context,
+            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+        )
+        stored = await tool_context.ext.store.get(phone_key(phone))
+    payload = json.loads(result.content[0].text)
+    assert payload["state"] == "not_connected"
+    assert payload["assigned_phone_number"] == "+14085550123"
+    assert payload["opt_in_link"] == opt_in_link("+14085550123")
+    assert stored is None
+    assert provider.registrations == []
+    assert provider.sends == [
+        (claim.conversation_id, CONFIRMATION_TEXT, claim.confirmation_idempotency_key)
+    ]
 
 
 async def test_only_a_plain_yes_confirms_and_opt_out_cancels_the_claim(
