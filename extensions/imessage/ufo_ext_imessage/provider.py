@@ -38,10 +38,6 @@ class ProviderNotConfigured(RuntimeError):
     pass
 
 
-class PhoneNotAllowed(RuntimeError):
-    pass
-
-
 class TargetNotOptedIn(RuntimeError):
     """The provider refused an outbound message because the target phone has not texted the
     assigned line yet, so the member must send the first message. `assigned_phone_number` carries

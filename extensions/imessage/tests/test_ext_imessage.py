@@ -21,14 +21,12 @@ from ufo_ext_imessage.cloud import (
     SpectrumCloudError,
     SpectrumProject,
     _inbound_message,
-    _phone_scope,
 )
 from ufo_ext_imessage.manifest import manifest
 from ufo_ext_imessage.proto.photon.imessage.v1 import message_types_pb2
 from ufo_ext_imessage.provider import (
     InboundMessage,
     MessageAttachment,
-    PhoneNotAllowed,
     ProviderEvent,
     ProviderNotConfigured,
     RegisteredPhone,
@@ -471,42 +469,6 @@ def test_spectrum_provider_normalizes_a_photon_message() -> None:
     event.message_received.message.content.text = "Please summarize this."
 
     assert _inbound_message(event) == _message("+14155550123")
-
-
-def test_spectrum_phone_scope_is_explicit_and_e164() -> None:
-    assert _phone_scope("allow:+14155550123,+16505550123") == (
-        frozenset({"+14155550123", "+16505550123"}),
-        frozenset(),
-    )
-    assert _phone_scope("block:+14155550123") == (
-        None,
-        frozenset({"+14155550123"}),
-    )
-    with pytest.raises(RuntimeError, match="allow: or block:"):
-        _phone_scope("+14155550123")
-    with pytest.raises(RuntimeError, match=r"E\.164"):
-        _phone_scope("allow:4155550123")
-
-
-async def test_spectrum_phone_scope_blocks_registration_and_inbound_messages() -> None:
-    project = SpectrumProject(
-        project_id="project",
-        project_secret="secret",
-        client=httpx.AsyncClient(),
-        lock=asyncio.Lock(),
-        token_state={},
-        allowed_phone_numbers=frozenset({"+14155550123"}),
-    )
-    event = message_types_pb2.MessageChangeEvent(chat_guid="iMessage;-;+16505550123")
-    event.actor.address = "+16505550123"
-    event.message_received.message.guid = "message-1"
-    event.message_received.message.content.text = "Request"
-    try:
-        with pytest.raises(PhoneNotAllowed):
-            await project.register_phone("+16505550123", "confirm-1")
-        assert project._scoped_message(event) is None
-    finally:
-        await project.client.aclose()
 
 
 def test_opt_in_link_and_contact_card_carry_the_assigned_line() -> None:

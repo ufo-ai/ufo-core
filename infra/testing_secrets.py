@@ -11,8 +11,11 @@ from hashlib import sha256
 AWS_REGION = "us-east-1"
 DEPLOYMENT_ID_ENV = "TESTING_DEPLOYMENT_ID"
 SECRET_ID_ENV = "TESTING_API_KEYS_SECRET_ID"
-PERPLEXITY_INPUT = "PERPLEXITY_API_KEY"
-PERPLEXITY_PROPERTY = "perplexity-api-key"
+SECRET_INPUTS = {
+    "perplexity-api-key": "PERPLEXITY_API_KEY",
+    "spectrum-project-id": "SPECTRUM_PROJECT_ID",
+    "spectrum-project-secret": "SPECTRUM_PROJECT_SECRET",
+}
 
 
 @dataclass(frozen=True)
@@ -47,7 +50,7 @@ def _required(environment: Mapping[str, str], name: str) -> str:
 
 
 def testing_secret_write(environment: Mapping[str, str], raw: bytes) -> SecretWrite:
-    """Set the testing Perplexity key and preserve every other runtime secret property."""
+    """Set the testing provider keys and preserve every other runtime secret property."""
     secret_id = _required(environment, SECRET_ID_ENV)
     try:
         value = json.loads(raw)
@@ -55,7 +58,9 @@ def testing_secret_write(environment: Mapping[str, str], raw: bytes) -> SecretWr
         raise RuntimeError(f"{secret_id} must contain valid JSON") from error
     if not isinstance(value, dict) or any(not isinstance(item, str) for item in value.values()):
         raise RuntimeError(f"{secret_id} must contain string properties")
-    value[PERPLEXITY_PROPERTY] = _required(environment, PERPLEXITY_INPUT)
+    value.update(
+        {name: _required(environment, input_name) for name, input_name in SECRET_INPUTS.items()}
+    )
     return SecretWrite(
         secret_id=secret_id,
         payload=json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),
@@ -64,7 +69,9 @@ def testing_secret_write(environment: Mapping[str, str], raw: bytes) -> SecretWr
 
 
 def _aws_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    return {name: value for name, value in environment.items() if name != PERPLEXITY_INPUT}
+    return {
+        name: value for name, value in environment.items() if name not in SECRET_INPUTS.values()
+    }
 
 
 def main(arguments: Sequence[str] = ()) -> None:

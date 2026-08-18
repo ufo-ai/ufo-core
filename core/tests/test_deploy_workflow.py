@@ -583,12 +583,13 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     assert "exit 0" not in script
 
 
-def test_testing_deploy_writes_the_search_credential_before_apply() -> None:
+def test_testing_deploy_writes_provider_credentials_before_apply() -> None:
     workflow = _workflow(WORKFLOWS / "deploy.yml")
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
     rollout = jobs["rollout"]
     assert isinstance(rollout, dict)
+    assert "environment" not in rollout
     steps = rollout["steps"]
     assert isinstance(steps, list)
     names = [step.get("name") for step in steps if isinstance(step, dict)]
@@ -598,6 +599,8 @@ def test_testing_deploy_writes_the_search_credential_before_apply() -> None:
         "if": "github.event_name != 'pull_request'",
         "env": {
             "PERPLEXITY_API_KEY": "${{ secrets.PERPLEXITY_API_KEY }}",
+            "SPECTRUM_PROJECT_ID": "${{ secrets.TESTING_SPECTRUM_PROJECT_ID }}",
+            "SPECTRUM_PROJECT_SECRET": "${{ secrets.TESTING_SPECTRUM_PROJECT_SECRET }}",
             "TESTING_API_KEYS_SECRET_ID": "ufo/ufo-testing/api-keys",
             "TESTING_DEPLOYMENT_ID": "${{ github.run_id }}-${{ github.run_attempt }}",
         },

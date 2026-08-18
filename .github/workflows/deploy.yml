@@ -257,6 +257,8 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          SPECTRUM_PROJECT_ID: ${{ secrets.TESTING_SPECTRUM_PROJECT_ID }}
+          SPECTRUM_PROJECT_SECRET: ${{ secrets.TESTING_SPECTRUM_PROJECT_SECRET }}
           TESTING_API_KEYS_SECRET_ID: ufo/ufo-testing/api-keys
           TESTING_DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: uv run python infra/testing_secrets.py

@@ -12,7 +12,6 @@ from ufo.sdk.surfaces import SurfaceInstallationConflict
 from ufo.sdk.tools import TextContent, ToolContext, ToolResult
 from ufo_ext_imessage.provider import (
     MessageProvider,
-    PhoneNotAllowed,
     ProviderNotConfigured,
     TargetNotOptedIn,
 )
@@ -129,8 +128,6 @@ class ImessageConnect:
         confirmation_idempotency_key = f"imessage-confirmation:{ctx.idempotency_key or uuid4()}"
         try:
             user = await provider.register_phone(args.phone_number, confirmation_idempotency_key)
-        except PhoneNotAllowed:
-            return _result("not_connected", "This deploy does not allow that phone number.")
         except TargetNotOptedIn as refusal:
             return _opt_in_result(refusal.assigned_phone_number)
         claim = PendingClaim(

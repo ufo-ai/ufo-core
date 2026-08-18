@@ -8,7 +8,6 @@ import pytest
 import infra.testing_secrets as testing_secrets
 from infra.testing_secrets import (
     DEPLOYMENT_ID_ENV,
-    PERPLEXITY_INPUT,
     SECRET_ID_ENV,
     main,
 )
@@ -17,8 +16,10 @@ from infra.testing_secrets import (
 def _environment() -> dict[str, str]:
     return {
         DEPLOYMENT_ID_ENV: "run-1-attempt-1",
-        PERPLEXITY_INPUT: "perplexity-value",
         SECRET_ID_ENV: "ufo/ufo-testing/api-keys",
+        "PERPLEXITY_API_KEY": "perplexity-value",
+        "SPECTRUM_PROJECT_ID": "spectrum-project-id-value",
+        "SPECTRUM_PROJECT_SECRET": "spectrum-project-secret-value",
     }
 
 
@@ -31,6 +32,8 @@ def test_testing_secret_write_preserves_the_live_document() -> None:
         "anthropic-api-key": "anthropic-value",
         "existing-api-key": "existing-value",
         "perplexity-api-key": "perplexity-value",
+        "spectrum-project-id": "spectrum-project-id-value",
+        "spectrum-project-secret": "spectrum-project-secret-value",
     }
     assert "file:///dev/stdin" in write.command
     assert "perplexity-value" not in write.command
@@ -44,7 +47,13 @@ def test_testing_secret_write_preserves_the_live_document() -> None:
     ("environment", "raw", "error"),
     (
         (_environment() | {DEPLOYMENT_ID_ENV: ""}, b"{}", DEPLOYMENT_ID_ENV),
-        (_environment() | {PERPLEXITY_INPUT: ""}, b"{}", PERPLEXITY_INPUT),
+        (_environment() | {"PERPLEXITY_API_KEY": ""}, b"{}", "PERPLEXITY_API_KEY"),
+        (_environment() | {"SPECTRUM_PROJECT_ID": ""}, b"{}", "SPECTRUM_PROJECT_ID"),
+        (
+            _environment() | {"SPECTRUM_PROJECT_SECRET": ""},
+            b"{}",
+            "SPECTRUM_PROJECT_SECRET",
+        ),
         (_environment() | {SECRET_ID_ENV: ""}, b"{}", SECRET_ID_ENV),
         (_environment(), b"not-json", "must contain valid JSON"),
         (_environment(), b"[]", "must contain string properties"),
@@ -68,7 +77,9 @@ def test_main_reads_and_writes_through_stdin(
         "import json, os, sys\n"
         "from pathlib import Path\n"
         "record = {'argv': sys.argv[1:], 'stdin': sys.stdin.read(), "
-        "'key': os.environ.get('PERPLEXITY_API_KEY')}\n"
+        "'keys': [name for name in "
+        "('PERPLEXITY_API_KEY', 'SPECTRUM_PROJECT_ID', 'SPECTRUM_PROJECT_SECRET') "
+        "if name in os.environ]}\n"
         "with Path(os.environ['AWS_STUB_OUTPUT']).open('a') as stream:\n"
         "    stream.write(json.dumps(record) + '\\n')\n"
         "if sys.argv[2] == 'get-secret-value':\n"
@@ -94,8 +105,10 @@ def test_main_reads_and_writes_through_stdin(
     assert json.loads(calls[1]["stdin"]) == {
         "existing-api-key": "existing-value",
         "perplexity-api-key": "perplexity-value",
+        "spectrum-project-id": "spectrum-project-id-value",
+        "spectrum-project-secret": "spectrum-project-secret-value",
     }
-    assert all(call["key"] is None for call in calls)
+    assert all(call["keys"] == [] for call in calls)
 
 
 def test_main_rejects_arguments() -> None:
