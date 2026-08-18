@@ -12,10 +12,14 @@ import { IconChevronRight } from "@tabler/icons-react";
 
 import {
   Attachment,
+  AttachmentBadge,
   AttachmentContent,
   AttachmentDescription,
   AttachmentGroup,
+  AttachmentThumbnail,
   AttachmentTitle,
+  PickedThumbnail,
+  attachmentBadge,
 } from "@/components/ui/attachment";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Marker, MarkerContent } from "@/components/ui/marker";
@@ -272,26 +276,33 @@ export function MessageLog({
           {message.role === "user" && message.speaker ? (
             <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
           ) : null}
+          {message.role === "user" ? (
+            <Attached files={message.files ?? []} picked={message.attached ?? []} />
+          ) : null}
           {message.role === "user" ? null : (
             <Activity events={message.events ?? []} runs={message.subagents ?? []} live={false} />
           )}
-          <Said mine={message.role === "user"}>
-            {message.role === "user" && message.asked ? (
-              <div className="text-small text-ink-soft">{message.asked}</div>
-            ) : null}
-            {message.role !== "user" ? (
-              <Markdown text={message.text} />
-            ) : message.arrival_id ? (
-              <span className="italic text-ink-soft">
+          {/* A message of files alone says everything it says in the files: a bubble over them
+              would be an empty surface where words never were. */}
+          {message.role === "user" && !message.text && !message.asked ? null : (
+            <Said mine={message.role === "user"}>
+              {message.role === "user" && message.asked ? (
+                <div className="text-small text-ink-soft">{message.asked}</div>
+              ) : null}
+              {message.role !== "user" ? (
+                <Markdown text={message.text} />
+              ) : message.arrival_id ? (
+                <span className="italic text-ink-soft">
+                  <Linked text={message.text} />
+                </span>
+              ) : (
                 <Linked text={message.text} />
-              </span>
-            ) : (
-              <Linked text={message.text} />
-            )}
-          </Said>
-          {message.files?.length ? (
+              )}
+            </Said>
+          )}
+          {message.role === "user" || !message.files?.length ? null : (
             <Files files={message.files} onOpen={onOpenArtifacts} />
-          ) : null}
+          )}
           {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
           {message.meta ? <Meta>{message.meta}</Meta> : null}
           {message.question && question ? question(message.question) : null}
@@ -417,7 +428,9 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
                     file.filename
                   )}
                 </AttachmentTitle>
-                <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
+                {file.size_bytes === undefined ? null : (
+                  <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
+                )}
               </AttachmentContent>
             </Attachment>
           ))}
@@ -427,16 +440,46 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
   );
 }
 
-/** One shared picture, named by its filename. A pane with no sidebar to open draws it as a link to
- *  the file itself. */
+/** What the member attached to their own words, above them and ending on the same edge as the
+ *  bubble: the message reads as the things and then the words, which is the order they were sent in.
+ *  A file this page is still sending is drawn off the file in hand — the conversation's workspace,
+ *  which every later read draws it from, does not hold it yet — and one a read stated is drawn off
+ *  the link that read carried. */
+function Attached({ files, picked }: { files: ChatFile[]; picked: File[] }) {
+  if (!picked.length && !files.length) return null;
+  return (
+    <AttachmentGroup className="mb-2xs justify-end">
+      {picked.length
+        ? picked.map((file, at) => <PickedThumbnail key={file.name + String(at)} file={file} />)
+        : files.map((file) => (
+            <AttachmentThumbnail
+              key={file.filename}
+              filename={file.filename}
+              previewUrl={file.preview_url}
+              mediaType={file.media_type}
+            />
+          ))}
+    </AttachmentGroup>
+  );
+}
+
+/** One shared picture, named by its filename — a file that is itself a picture, or the first page a
+ *  document was rendered to, which wears a badge naming the kind of document it came from. A pane
+ *  with no sidebar to open draws it as a link to the file itself. */
 function Picture({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
+  const badge = attachmentBadge(file.media_type);
   const drawn = (
-    <img
-      loading="lazy"
-      alt={file.filename}
-      src={file.preview_url ?? undefined}
-      className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
-    />
+    <span className="relative block w-fit">
+      <img
+        loading="lazy"
+        alt={file.filename}
+        src={file.preview_url ?? undefined}
+        className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
+      />
+      {badge === null ? null : (
+        <AttachmentBadge className="absolute bottom-0 left-0 m-sm">{badge}</AttachmentBadge>
+      )}
+    </span>
   );
   if (onOpen) {
     return (

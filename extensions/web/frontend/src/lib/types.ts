@@ -75,14 +75,16 @@ export type AdminPayload = {
   deploy: { sandbox_internet: boolean; extensions: DeployExtension[] };
 };
 
-/** A file a turn shared. `preview_url` is a same-origin picture of it, carried only when the file
- *  is itself an image — the chat draws those inline in the reply instead of as a card.
- *  `media_type` says which cards the artifacts sidebar can draw as a document, so pressing one
- *  opens it there instead of downloading. */
+/** A file a message carries — one a turn shared, or one the member attached to their own words.
+ *  `preview_url` is a same-origin picture of it: the file itself when it is an image, or the first
+ *  page a document was rendered to. `media_type` says which cards the artifacts sidebar can draw as
+ *  a document, so pressing one opens it there instead of downloading, and which picture wears a
+ *  badge naming the document it came from. A file the member attached lives in the conversation's
+ *  workspace rather than the artifact store, so it carries neither a download `url` nor a size. */
 export type ChatFile = {
   filename: string;
   url: string | null;
-  size_bytes: number;
+  size_bytes?: number;
   preview_url: string | null;
   media_type: string;
 };
@@ -161,8 +163,8 @@ export type Message = {
   subagents?: SubagentRun[];
   /** What this reply asked the member, carried by the reply that asked it. */
   question?: ChatQuestion;
-  /** What this reply's turn shared, carried by the reply so the files stay where the words
-   *  that shared them are. */
+  /** What this reply's turn shared, or what the member attached to their own words: carried by the
+   *  message so the files stay where the words that carried them are. */
   files?: ChatFile[];
 };
 

@@ -217,7 +217,16 @@ from ufo.image_previews import (
     IMAGE_PREVIEW_MAX_BYTES as IMAGE_PREVIEW_MAX_BYTES,
 )
 from ufo.image_previews import (
+    ImagePreviewGrant as ImagePreviewGrant,
+)
+from ufo.image_previews import (
+    InvalidImagePreview as InvalidImagePreview,
+)
+from ufo.image_previews import (
     raster_image_media_type as raster_image_media_type,
+)
+from ufo.image_previews import (
+    validated_image_preview as validated_image_preview,
 )
 from ufo.workspace_changes import (
     WORKSPACE_CHANGE_PATCH_MAX_CHARS as WORKSPACE_CHANGE_PATCH_MAX_CHARS,

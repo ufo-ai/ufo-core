@@ -496,7 +496,6 @@ function Composer({
     if ((!trimmed && !attached.length) || disabled) return false;
     setText("");
     clearDraft(draftKey);
-    const shown = trimmed || attached.map((file) => file.name).join(", ");
     let body: string | FormData = trimmed;
     if (attached.length) {
       const form = new FormData();
@@ -506,7 +505,9 @@ function Composer({
     }
     input.current?.focus();
     toTheFoot();
-    void sendMessage(target, body, shown);
+    // The bubble states the words and draws the files over them, so a send of files alone shows the
+    // files rather than a line of their names.
+    void sendMessage(target, body, trimmed, attached);
     return true;
   }
 

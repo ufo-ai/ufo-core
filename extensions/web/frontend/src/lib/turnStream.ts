@@ -663,6 +663,7 @@ export async function sendMessage(
   target: ChatTarget,
   body: string | FormData,
   shown: string,
+  attached: File[] = [],
 ): Promise<void> {
   const chatKey = target.key;
   // The one send that cannot be repeated: the `new` sentinel opens a conversation per request, so a
@@ -679,6 +680,9 @@ export async function sendMessage(
       role: "user",
       text: shown,
       sending: token,
+      // The bubble draws the attached files themselves: they reach the conversation's workspace with
+      // this send, and only a read taken after that can link to them.
+      ...(attached.length ? { attached } : {}),
       // A turn is already running, so this message waits for it rather than opening one: it belongs
       // under the reply that turn is streaming, which is where its drain will settle it. A send with
       // nothing running is the prompt a reply answers and stands above it.

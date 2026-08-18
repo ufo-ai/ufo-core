@@ -2431,6 +2431,100 @@ test("a send the composer cannot answer leaves the attachment where the member p
   expect(chips().length).toBe(1);
 });
 
+test("the composer draws a picked image as itself and a picked PDF as a badged card", async () => {
+  wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  const composer = document.querySelector("form[data-field-card]") as HTMLElement;
+  fireEvent.drop(composer, {
+    dataTransfer: {
+      types: ["Files"],
+      files: [
+        new File(["gif-bytes"], "lights.gif", { type: "image/gif" }),
+        new File(["pdf-bytes"], "paper.pdf", { type: "application/pdf" }),
+      ],
+    },
+  });
+
+  const picked = await within(composer).findByRole("img", { name: "lights.gif" });
+  expect(picked.getAttribute("src")).toMatch(/^data:image\/gif;base64,/);
+  expect(within(composer).getByText("PDF")).toBeTruthy();
+  expect(within(composer).getByText("paper.pdf")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  const sent = await within(screen.getByTestId("log")).findByRole("img", { name: "lights.gif" });
+  expect(sent.getAttribute("src")).toMatch(/^data:image\/gif;base64,/);
+});
+
+/** The other half of the same message, read back: the transcript states what the member attached as
+ *  files with a picture each, and the note admission wrote at the foot of their words never reads as
+ *  words. */
+test("a reloaded message draws what the member attached rather than naming where it landed", async () => {
+  const preview =
+    "/surface/web/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/attachments/web-inbox/lights.gif";
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "user",
+          text: "what are these",
+          files: [
+            {
+              filename: "lights.gif",
+              url: null,
+              preview_url: preview,
+              media_type: "image/gif",
+            },
+            { filename: "paper.pdf", url: null, preview_url: null, media_type: "application/pdf" },
+          ],
+        },
+      ],
+    }),
+  );
+  open();
+
+  const said = (await screen.findByText("what are these")).closest(
+    "[data-slot=message]",
+  ) as HTMLElement;
+  expect(within(said).getByRole("img", { name: "lights.gif" }).getAttribute("src")).toBe(preview);
+  expect(within(said).getByText("PDF")).toBeTruthy();
+  expect(within(said).getByText("paper.pdf")).toBeTruthy();
+  expect(screen.queryByText(/Attached files/)).toBeNull();
+});
+
+/** A preview link is answered off the conversation's live workspace, so it can stop answering while
+ *  the message stays on the page. The card names the file then, rather than leaving a broken
+ *  frame. */
+test("an attachment whose picture will not load falls back to naming the file", async () => {
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "user",
+          text: "look",
+          files: [
+            {
+              filename: "lights.gif",
+              url: null,
+              preview_url: "/surface/web/attachments/gone.gif",
+              media_type: "image/gif",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  open();
+
+  fireEvent.error(await screen.findByRole("img", { name: "lights.gif" }));
+  await waitFor(() => expect(screen.queryByRole("img", { name: "lights.gif" })).toBeNull());
+  expect(screen.getByText("lights.gif")).toBeTruthy();
+});
+
 test("a file pasted into the message box is attached rather than typed", async () => {
   wire({ ...transcript() });
   open();

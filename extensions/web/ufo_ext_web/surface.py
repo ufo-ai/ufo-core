@@ -25,13 +25,14 @@ import asyncio
 import json
 import re
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -72,6 +73,7 @@ from ufo.sdk.manifest import (
     CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_AUTOMATIONS_MAX,
     CONVERSATION_SITES_MAX,
+    IMAGE_PREVIEW_MAX_BYTES,
     ArtifactsSlotPayload,
     AutomationsSlotPayload,
     ConversationArtifact,
@@ -80,9 +82,12 @@ from ufo.sdk.manifest import (
     ConversationSlotPayload,
     ConversationSlotProvider,
     ImagePreview,
+    ImagePreviewGrant,
+    InvalidImagePreview,
     SitesSlotPayload,
     WorkspaceChanges,
     raster_image_media_type,
+    validated_image_preview,
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
@@ -125,6 +130,14 @@ MAX_FORM_BYTES = 64 * 1024
 MAX_SECRET_BYTES = 4_096
 UPLOAD_CHUNK_BYTES = 65_536
 WEB_INBOX_DIR = "web-inbox"
+FILES_NOTE = "[Attached files, saved in the workspace: {paths}]"
+FILES_NOTE_RE = re.compile(r"\[Attached files, saved in the workspace: (?P<paths>[^]\n]+)\]\Z")
+ATTACHMENT_MEDIA_TYPES = {".pdf": "application/pdf"}
+ATTACHMENT_FALLBACK_MEDIA_TYPE = "application/octet-stream"
+ATTACHMENT_PREVIEW_HEADERS = {
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, no-store",
+}
 ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
 TIMEZONE_HEADER = "x-ufo-timezone"
@@ -853,8 +866,62 @@ async def _deliver_uploads(
 
 def _files_note(text: str, paths: tuple[str, ...]) -> str:
     """The admitted text naming the saved paths it carries."""
-    note = f"[Attached files, saved in the workspace: {', '.join(paths)}]"
+    note = FILES_NOTE.format(paths=", ".join(paths))
     return f"{text}\n\n{note}" if text.strip() else note
+
+
+Attach = Callable[[str], str | None]
+"""Where a projection gets the picture of one attached workspace path, or None for a file the
+portal has no picture of."""
+
+
+def _member_attachments(said: str) -> tuple[str, tuple[str, ...]]:
+    """The member's own words and the workspace paths the note at their foot names — the reader of
+    `_files_note`, so a bubble draws what was attached as the files themselves rather than as the
+    sentence naming where they landed. Words carrying no note are their own."""
+    found = FILES_NOTE_RE.search(said)
+    if found is None:
+        return said, ()
+    paths = tuple(path for path in (part.strip() for part in found["paths"].split(",")) if path)
+    return said[: found.start()].rstrip(), paths
+
+
+def _attachment_preview(agent_id: UUID, conversation_id: UUID, path: str) -> str | None:
+    """The same-origin link the portal draws one attached file's picture from, or None for a type
+    the attachment route does not serve. The page's own CSP loads images from its origin alone, so
+    the link travels without a base."""
+    if raster_image_media_type(path) is None:
+        return None
+    return (
+        f"{PORTAL_PATH}/agents/{agent_id}/conversations/{conversation_id}/attachments/{quote(path)}"
+    )
+
+
+def _attachment_payload(path: str, preview_url: str | None) -> dict[str, object]:
+    """One file the member attached, as the chat draws it. The bytes live in the conversation's
+    workspace rather than the artifact store, so the payload names no download link — a member's own
+    attachment is a file they already hold — and a type with no picture of its own draws as a card
+    naming it. `media_type` is how the portal knows a PDF card wears a PDF badge."""
+    media_type = raster_image_media_type(path) or ATTACHMENT_MEDIA_TYPES.get(
+        PurePosixPath(path).suffix.lower(), ATTACHMENT_FALLBACK_MEDIA_TYPE
+    )
+    return {
+        "filename": PurePosixPath(path).name,
+        "url": None,
+        "media_type": media_type,
+        "preview_url": preview_url,
+    }
+
+
+def _member_bubble(said: str, attach: Attach | None) -> dict[str, object]:
+    """One bubble of the member's own words, carrying what they attached to them as files."""
+    words, paths = _member_attachments(said)
+    bubble: dict[str, object] = {"role": "user", "text": words}
+    if paths:
+        bubble["files"] = [
+            _attachment_payload(path, None if attach is None else attach(path)) for path in paths
+        ]
+    return bubble
 
 
 async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]:
@@ -1172,6 +1239,7 @@ def _rendered_messages(
     questions: Mapping[str, dict[str, object]] | None = None,
     asked: Mapping[str, str] | None = None,
     files: Mapping[str, list[dict[str, object]]] | None = None,
+    attach: Attach | None = None,
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
@@ -1197,6 +1265,10 @@ def _rendered_messages(
     `files` names what each turn shared, keyed like `questions`: the reply carries its own, so a
     file stands on the words that shared it and stays there when later turns run. A turn that
     shared and wrote nothing still renders its reply — the file needs the reply it belongs to.
+
+    A member's own bubble carries what they attached the same way, off the note admission wrote at
+    the foot of their words: `attach` turns each saved path into the file the bubble draws, so the
+    portal shows the picture rather than the sentence naming where it landed.
 
     A round that called a tool still narrated, and that narration is a step of the work: every
     assistant text but the turn's last becomes a `note` event in the place it was written — before
@@ -1283,7 +1355,7 @@ def _rendered_messages(
             flush_reply(False)
         if turn_id in agent_origin:
             continue
-        bubble: dict[str, object] = {"role": "user", "text": member_message_text(text)}
+        bubble = _member_bubble(member_message_text(text), attach)
         label = None if speakers is None or turn_id is None else speakers.get(turn_id)
         if label is not None:
             bubble["speaker"] = label
@@ -1298,8 +1370,9 @@ def _rendered_messages(
 @dataclass(frozen=True)
 class _TranscriptAids:
     """Everything the transcript renderer needs beside the messages themselves — subagent runs,
-    speaker and question attribution, shared files, and whether the conversation ran a profile —
-    gathered once so the live window and an earlier page render one message identically."""
+    speaker and question attribution, shared files, where a member's own attachment is drawn from,
+    and whether the conversation ran a profile — gathered once so the live window and an earlier
+    page render one message identically."""
 
     subagents: SubagentRuns
     turn_ids: frozenset[str]
@@ -1307,6 +1380,7 @@ class _TranscriptAids:
     speakers: dict[str, str]
     asked: dict[str, str]
     files: dict[str, list[dict[str, object]]]
+    attach: Attach
     run_conversation: bool
 
     def render(
@@ -1323,6 +1397,7 @@ class _TranscriptAids:
             asking,
             self.asked,
             self.files,
+            self.attach,
         )
         if self.run_conversation:
             for reply in rendered:
@@ -1333,6 +1408,7 @@ class _TranscriptAids:
 
 async def _transcript_aids(
     ctx: SurfaceContext,
+    agent_id: UUID,
     conversation_id: UUID,
     viewer: UUID,
     agent_origin: frozenset[str],
@@ -1366,12 +1442,13 @@ async def _transcript_aids(
             if turn.context is not None and turn.context.question is not None
         },
         files=files,
+        attach=partial(_attachment_preview, agent_id, conversation_id),
         run_conversation=any(turn.subagent_profile is not None for turn in turns),
     )
 
 
 async def _conversation_messages(
-    ctx: SurfaceContext, conversation_id: UUID, viewer: UUID
+    ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID
 ) -> tuple[list[dict[str, object]], Turn | None, int]:
     """One conversation as every portal surface renders it — the live chat, the read-only
     transcript an agent's conversations open, and a subagent run's own page: the engine's
@@ -1444,20 +1521,20 @@ async def _conversation_messages(
                 "turn_id": str(detail.turn.id),
                 **question.model_dump(mode="json"),
             }
+    attach = partial(_attachment_preview, agent_id, conversation_id)
     if recorded is None:
         rendered: list[dict[str, object]] = []
         earlier = 0
     else:
-        aids = await _transcript_aids(ctx, conversation_id, viewer, agent_origin, speakers, asked)
+        aids = await _transcript_aids(
+            ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked
+        )
         rendered = aids.render(recorded.messages, asking)
         earlier = await _verified_earlier(ctx, conversation_id, compactions, recorded.messages)
     if detail is None:
         return rendered, None, earlier
     if detail.turn.terminal is None and str(detail.turn.id) not in agent_origin:
-        prompt: dict[str, object] = {
-            "role": "user",
-            "text": member_message_text(detail.turn.inbound),
-        }
+        prompt = _member_bubble(member_message_text(detail.turn.inbound), attach)
         if (
             detail.turn.context is not None
             and detail.turn.context.sender is not None
@@ -1471,10 +1548,7 @@ async def _conversation_messages(
     for arrival in await ctx.queued_arrivals(conversation_id, draining):
         if str(arrival.id) in agent_origin:
             continue
-        bubble: dict[str, object] = {
-            "role": "user",
-            "text": member_message_text(arrival.inbound),
-        }
+        bubble = _member_bubble(member_message_text(arrival.inbound), attach)
         label = speakers.get(str(arrival.id))
         if label is not None:
             bubble["speaker"] = label
@@ -1512,7 +1586,7 @@ async def _verified_earlier(
 
 
 async def _history_messages(
-    ctx: SurfaceContext, conversation_id: UUID, viewer: UUID, index: int
+    ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID, index: int
 ) -> tuple[list[dict[str, object]], int] | None:
     """One earlier page of a compacted conversation and the index of the page above it (0 when
     none), or None when this index holds no record.
@@ -1542,7 +1616,9 @@ async def _history_messages(
     asked = {
         str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
     }
-    aids = await _transcript_aids(ctx, conversation_id, viewer, agent_origin, speakers, asked)
+    aids = await _transcript_aids(
+        ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked
+    )
     above = await _verified_earlier(ctx, conversation_id, tuple(range(1, index)), record.before)
     return aids.render(window), above
 
@@ -1572,7 +1648,9 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         is None
     ):
         return Response("no such conversation", status_code=404)
-    rendered, turn, earlier = await _conversation_messages(ctx, conversation_id, member_id)
+    rendered, turn, earlier = await _conversation_messages(
+        ctx, agent_id, conversation_id, member_id
+    )
     payload: dict[str, object] = {"messages": rendered}
     if earlier:
         payload["earlier"] = earlier
@@ -2117,8 +2195,10 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     authorized = await _readable_conversation(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    _agent_id, conversation_id, viewer = authorized
-    rendered, _turn, earlier = await _conversation_messages(ctx, conversation_id, viewer.member_id)
+    agent_id, conversation_id, viewer = authorized
+    rendered, _turn, earlier = await _conversation_messages(
+        ctx, agent_id, conversation_id, viewer.member_id
+    )
     payload: dict[str, object] = {"messages": rendered}
     if earlier:
         payload["earlier"] = earlier
@@ -2162,11 +2242,11 @@ async def conversation_history(ctx: SurfaceContext, request: Request) -> Respons
         authorized = await _member_chat_page(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    _agent_id, conversation_id, viewer = authorized
+    agent_id, conversation_id, viewer = authorized
     index = request.path_params["index"]
     if not index.isdigit() or int(index) < 1:
         return Response("no such page", status_code=404)
-    page = await _history_messages(ctx, conversation_id, viewer.member_id, int(index))
+    page = await _history_messages(ctx, agent_id, conversation_id, viewer.member_id, int(index))
     if page is None:
         return Response("no such page", status_code=404)
     rendered, above = page
@@ -2174,6 +2254,63 @@ async def conversation_history(ctx: SurfaceContext, request: Request) -> Respons
     if above:
         payload["earlier"] = above
     return JSONResponse(payload)
+
+
+def _inbox_attachment(path: str) -> bool:
+    """Whether a path names one file the composer saved — a plain name directly under the inbox
+    directory. Nothing else is addressable: the route serves what a member attached to their own
+    message, never the rest of the conversation's workspace."""
+    directory, separator, name = path.partition("/")
+    return (
+        directory == WEB_INBOX_DIR
+        and bool(separator)
+        and bool(name)
+        and "/" not in name
+        and name not in (".", "..")
+    )
+
+
+async def conversation_attachment(ctx: SurfaceContext, request: Request) -> Response:
+    """One file the member attached to a message, served as the picture the bubble draws it as.
+
+    Gated as exactly the union of the two reads that advertise the bubble — the conversation content
+    read, or the member's own chat transcript — so a picture answers precisely where the message
+    naming it answers. The bytes come from the conversation's live workspace, where the composer put
+    them and the agent reads them, and they serve inline only after proving to be the raster type
+    the filename declares at the size the workspace lists: the same validated-preview shape the
+    signed artifact preview serves member bytes under. A type that is no raster — a PDF, an SVG,
+    anything HTML-ish — is never served here, so nothing that could execute reaches the page; the
+    bubble cards those by name. A conversation whose sandbox is asleep or whose file has moved
+    answers 404, and the bubble falls back to that same card."""
+    authorized = await _readable_conversation(ctx, request)
+    if isinstance(authorized, Response):
+        authorized = await _member_chat_page(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    _agent_id, conversation_id, _viewer = authorized
+    path = request.path_params["path"]
+    media_type = raster_image_media_type(path)
+    if media_type is None or not _inbox_attachment(path):
+        return Response("no such attachment", status_code=404)
+    listed = {
+        entry.path: entry.size_bytes for entry in await ctx.list_workspace_files(conversation_id)
+    }
+    size_bytes = listed.get(path)
+    if size_bytes is None:
+        return Response("no such attachment", status_code=404)
+    if size_bytes > IMAGE_PREVIEW_MAX_BYTES:
+        return Response("attachment is too large to draw", status_code=415)
+    stream = await ctx.read_workspace_file(conversation_id, path)
+    if stream is None:
+        return Response("no such attachment", status_code=404)
+    try:
+        drawn = await validated_image_preview(
+            stream, ImagePreviewGrant(media_type=media_type, size_bytes=size_bytes)
+        )
+    except InvalidImagePreview as invalid:
+        log("web.attachment_preview_refused", path=path, detail=str(invalid))
+        return Response("attachment is not the picture its name claims", status_code=415)
+    return Response(content=drawn, media_type=media_type, headers=ATTACHMENT_PREVIEW_HEADERS)
 
 
 @dataclass(frozen=True)
@@ -3319,6 +3456,11 @@ ROUTES = (
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/transcript/{index}",
         handler=conversation_history,
+    ),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/attachments/{path:path}",
+        handler=conversation_attachment,
     ),
     SurfaceRoute(
         method="GET",

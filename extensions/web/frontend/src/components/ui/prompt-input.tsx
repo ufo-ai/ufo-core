@@ -10,10 +10,10 @@ import {
   type ReactNode,
 } from "react";
 
+import { PickedThumbnail } from "@/components/ui/attachment";
 import { Button } from "@/components/ui/button";
 import { CONTROL, GrowingTextarea } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
-import { formatSize } from "@/lib/size";
 
 type Attached = { id: string; file: File };
 
@@ -106,36 +106,35 @@ export function PromptInput({
   );
 }
 
-/** What is attached, above the words it will be sent with. Drawn only when the member has attached
- *  something: an empty row is a band of nothing over the box they are writing in. */
+/** What is attached, above the words it will be sent with — each file drawn as the picture it is,
+ *  so the member reads what they picked rather than a filename they have to trust. Drawn only when
+ *  the member has attached something: an empty row is a band of nothing over the box they are
+ *  writing in. */
 export function PromptInputAttachments() {
   const { attached, drop } = useAttached();
   if (!attached.length) return null;
   return (
-    <ul role="list" aria-label="Attached files" className="m-0 flex list-none flex-wrap gap-xs p-0">
+    <ul role="list" aria-label="Attached files" className="m-0 flex list-none flex-wrap gap-sm p-0">
       {attached.map(({ id, file }) => (
-        <li
-          key={id}
-          className="flex max-w-control-row items-center gap-xs rounded-control border border-edge px-sm py-2xs text-label"
-        >
-          <span className="truncate">{file.name}</span>
-          <span className="tabular-nums text-ink-soft">{formatSize(file.size)}</span>
-          <Button
-            variant="row"
-            aria-label={"Remove " + file.name}
-            onClick={() => drop(id)}
-            className="border-0 p-0 text-ink-soft hover:bg-transparent hover:text-ink"
-          >
-            <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
-              <path
-                d="m4.5 4.5 7 7m0-7-7 7"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-              />
-            </svg>
-          </Button>
+        <li key={id} className="flex">
+          <PickedThumbnail file={file}>
+            <Button
+              variant="row"
+              aria-label={"Remove " + file.name}
+              onClick={() => drop(id)}
+              className="absolute top-0 right-0 m-xs border-edge bg-card p-2xs text-ink-soft hover:text-ink"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
+                <path
+                  d="m4.5 4.5 7 7m0-7-7 7"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </Button>
+          </PickedThumbnail>
         </li>
       ))}
     </ul>

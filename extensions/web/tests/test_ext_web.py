@@ -6160,6 +6160,136 @@ async def test_composer_files_land_in_the_workspace_before_the_turn(
     assert (inbox / "notes-1.txt").read_bytes() == b"again"
 
 
+def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> None:
+    """The note admission writes at the foot of a member's words says where their files landed; the
+    bubble states the files themselves, so the words read as the words they typed. A raster carries
+    the link the attachment route serves its picture from and every other type carries none."""
+    agent_id, conversation_id = uuid4(), uuid4()
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=(
+                    "<context>source: web</context>\nwhat are these\n\n"
+                    "[Attached files, saved in the workspace: web-inbox/lights.gif, "
+                    "web-inbox/paper.pdf]"
+                ),
+            ),
+            Message(role="assistant", content="a lamp and a paper"),
+        ),
+        attach=lambda path: web_surface._attachment_preview(agent_id, conversation_id, path),
+    )
+    assert rendered[0] == {
+        "role": "user",
+        "text": "what are these",
+        "files": [
+            {
+                "filename": "lights.gif",
+                "url": None,
+                "media_type": "image/gif",
+                "preview_url": (
+                    f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
+                    "/attachments/web-inbox/lights.gif"
+                ),
+            },
+            {
+                "filename": "paper.pdf",
+                "url": None,
+                "media_type": "application/pdf",
+                "preview_url": None,
+            },
+        ],
+    }
+    assert rendered[1] == {"role": "assistant", "text": "a lamp and a paper"}
+
+
+def test_words_of_their_own_carry_no_attachments() -> None:
+    """Only the note admission wrote is read as one: words that merely mention files stay words."""
+    assert web_surface._member_attachments("read web-inbox/notes.txt for me") == (
+        "read web-inbox/notes.txt for me",
+        (),
+    )
+
+
+async def test_an_attached_picture_is_drawn_from_the_conversations_own_workspace(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The member's own bubble names the attachment route for the picture it draws, and that route
+    serves the workspace bytes inline once they prove to be the raster the filename declares — never
+    as a download, and never for a path outside the inbox the composer wrote to."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    picture = _png()
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        data={"message": "what are these"},
+        files=[
+            ("file", ("lights.png", picture, "image/png")),
+            ("file", ("paper.pdf", b"%PDF-1.7 not really", "application/pdf")),
+        ],
+        headers=cookie,
+    )
+    assert admitted.status_code == 200
+    conversation_id = admitted.json()["conversation_id"]
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+    (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
+    assert said["text"] == "what are these"
+    drawn, carded = said["files"]
+    assert carded == {
+        "filename": "paper.pdf",
+        "url": None,
+        "media_type": "application/pdf",
+        "preview_url": None,
+    }
+    assert drawn["filename"] == "lights.png"
+    served = await client.get(str(drawn["preview_url"]), headers=cookie)
+    assert served.status_code == 200
+    assert served.content == picture
+    assert served.headers["content-type"] == "image/png"
+    assert "content-disposition" not in served.headers
+    assert served.headers["x-content-type-options"] == "nosniff"
+    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/attachments"
+    for refused in (
+        f"{base}/web-inbox/paper.pdf",
+        f"{base}/web-inbox/nothing.png",
+        f"{base}/notes/lights.png",
+        f"{base}/web-inbox/deeper/lights.png",
+    ):
+        assert (await client.get(refused, headers=cookie)).status_code == 404
+    await _consume(client, token, admitted.json()["turn_id"])
+
+
+async def test_an_attachment_answers_no_other_member(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A picture answers exactly where the message naming it answers: another member's chat is not
+    theirs to read, so the attachment route refuses them as the transcript does."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "guest@example.com")
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        data={"message": "mine"},
+        files=[("file", ("lights.png", _png(), "image/png"))],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert admitted.status_code == 200
+    conversation_id = admitted.json()["conversation_id"]
+    refused = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
+        "/attachments/web-inbox/lights.png",
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+    )
+    assert refused.status_code == 404
+    await _consume(client, token, admitted.json()["turn_id"])
+
+
 async def test_an_oversize_request_is_refused_at_the_door(
     web: tuple[AsyncClient, UUID, UUID],
     monkeypatch: pytest.MonkeyPatch,

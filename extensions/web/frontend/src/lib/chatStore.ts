@@ -19,6 +19,10 @@ export type Bubble = Message & {
    *  settles its own bubble however the log has shifted around it, since an index recorded at send
    *  time stops naming the bubble the moment a drain inserts a reply ahead of it. */
   sending?: string;
+  /** The files this page attached to a message it sent, held as the files themselves: the bubble
+   *  draws its own pictures off them, because the conversation's workspace — which every later read
+   *  draws them from — holds them only once the send has landed. */
+  attached?: File[];
   /** Sent into a turn already running, so it waits for that turn to take it up: it is drawn under
    *  the stream, and while its POST is in flight it is the fold's target for a drain that names a
    *  row no bubble carries an `arrival_id` for yet. A send that opens a turn carries neither — it

@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/cn";
@@ -86,9 +86,138 @@ export function AttachmentGroup({ className, ...props }: ComponentProps<"div">) 
         "-mx-sm flex min-w-0 gap-lg overflow-x-auto overscroll-x-contain px-sm py-2xs",
         "scroll-fade-x scrollbar-none snap-x snap-mandatory scroll-px-sm",
         "*:data-[slot=attachment]:flex-none *:data-[slot=attachment]:snap-start",
+        "*:data-[slot=attachment-thumbnail]:snap-start",
         className,
       )}
       {...props}
     />
+  );
+}
+
+const PDF_MEDIA_TYPE = "application/pdf";
+
+/** What a card says it is a picture of, or nothing for a file that is its own picture. A rendered
+ *  page is a picture of a document and reads as one only while something names the document type it
+ *  came from; an image needs no label, because the label would be the picture. */
+export function attachmentBadge(mediaType: string): string | null {
+  return mediaType === PDF_MEDIA_TYPE ? "PDF" : null;
+}
+
+/** One file drawn as the thing it is rather than as its name: a thumbnail card holding the picture,
+ *  cover-cropped, so a row of files reads as a row of pictures whatever shape each file is. A file
+ *  with no picture — a type nothing renders, a picture the browser could not load — keeps the card
+ *  and names itself inside it, so a member always sees one thing per file they attached and the row
+ *  never collapses to nothing.
+ *
+ *  A preview link is answered off the conversation's live workspace, so it can stop answering while
+ *  the bubble stays on the page: a failed load falls back to the named card in place, never to a
+ *  broken frame. The fallback is held against the link that failed, so a fresh link drawn later
+ *  draws again. */
+export function AttachmentThumbnail({
+  filename,
+  previewUrl,
+  mediaType,
+  className,
+  children,
+}: {
+  filename: string;
+  previewUrl: string | null;
+  mediaType: string;
+  className?: string;
+  /** What the card carries over its picture beside the badge — the act that takes the file back
+   *  off the message being written. */
+  children?: ReactNode;
+}) {
+  const [failed, setFailed] = useState<string | null>(null);
+  const drawn = previewUrl !== null && failed !== previewUrl ? previewUrl : null;
+  const badge = attachmentBadge(mediaType);
+  return (
+    <div
+      data-slot="attachment-thumbnail"
+      className={cn(
+        "relative flex size-(--size-thumbnail) shrink-0 items-end",
+        "overflow-hidden rounded-panel border border-edge bg-card text-card-foreground",
+        className,
+      )}
+    >
+      {drawn === null ? null : (
+        <img
+          loading="lazy"
+          alt={filename}
+          src={drawn}
+          onError={() => setFailed(drawn)}
+          className="absolute inset-0 size-full object-cover"
+        />
+      )}
+      <div className="relative flex min-w-0 flex-1 items-end gap-xs p-sm">
+        {badge === null ? null : <AttachmentBadge>{badge}</AttachmentBadge>}
+        {drawn === null ? (
+          <span className="min-w-0 flex-1 truncate text-small leading-chrome">{filename}</span>
+        ) : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** The chip over a card's lower-left corner naming the kind of file its picture came from. It keeps
+ *  the card's own surface under it, so it reads against a page of text as well as against a
+ *  photograph. */
+export function AttachmentBadge({ className, ...props }: ComponentProps<"span">) {
+  return (
+    <span
+      data-slot="attachment-badge"
+      className={cn(
+        "rounded-control border border-edge bg-card px-xs py-hair",
+        "text-small leading-chrome font-medium text-card-foreground",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+const PICKED_PICTURE_MAX_BYTES = 10 * 1024 * 1024;
+const PICKED_PICTURE_TYPES = /^image\/(gif|jpeg|png|webp)$/;
+
+/** The picture of a file the member has picked but not sent yet, read off the file itself — nothing
+ *  on the server holds it while they are still writing the message.
+ *
+ *  It is read as a `data:` URL because the page's own policy admits those images and no `blob:` at
+ *  all, and only for the raster types a browser draws: an SVG is a document that can carry script,
+ *  and this page never draws one off bytes it was handed. A file over the ceiling is left as a named
+ *  card rather than held in the page a second time as text. */
+function usePickedPicture(file: File): string | null {
+  const [picture, setPicture] = useState<string | null>(null);
+  useEffect(() => {
+    setPicture(null);
+    if (!PICKED_PICTURE_TYPES.test(file.type) || file.size > PICKED_PICTURE_MAX_BYTES) return;
+    const reader = new FileReader();
+    reader.onload = () => setPicture(typeof reader.result === "string" ? reader.result : null);
+    reader.readAsDataURL(file);
+    return () => reader.abort();
+  }, [file]);
+  return picture;
+}
+
+/** One file in the member's hand, drawn as the card it will be drawn as once it is sent. */
+export function PickedThumbnail({
+  file,
+  className,
+  children,
+}: {
+  file: File;
+  className?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <AttachmentThumbnail
+      filename={file.name}
+      previewUrl={usePickedPicture(file)}
+      mediaType={file.type}
+      className={className}
+    >
+      {children}
+    </AttachmentThumbnail>
   );
 }

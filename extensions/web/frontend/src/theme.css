@@ -232,6 +232,10 @@
 
   --media-tall: 60vh;
   --media-card: 20rem;
+  /* The square one attached file is drawn in, in the composer and on the message it was sent with.
+     Large enough that a rendered document page reads as that page and not as a grey square, and
+     small enough that three of them stand across the reading column. */
+  --size-thumbnail: 132px;
   --grid-slot: minmax(0, 1fr) var(--container-record);
   --size-avatar: 24px;
   --size-band: 128px;
