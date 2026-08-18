@@ -3647,6 +3647,21 @@ class SurfaceInstallationAccess:
 
     declared: frozenset[str]
 
+    async def installation(self, surface: str) -> str | None:
+        """Return this workspace's installation identity for one declared surface."""
+        if surface not in self.declared:
+            raise UndeclaredSurface(surface)
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.surface_installation.c.installation_id).where(
+                        tables.surface_installation.c.workspace_id == ws_current().workspace_id,
+                        tables.surface_installation.c.surface == surface,
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else row.installation_id
+
     async def bind(self, surface: str, installation_id: str) -> None:
         """Bind one declared surface's installation to this workspace. Reconfiguration replaces
         this workspace's binding; the fleet-wide identity constraint rejects another workspace."""

@@ -18,7 +18,6 @@ from ufo_ext_imessage.provider import (
 from ufo_ext_imessage.surface import SURFACE_IMESSAGE, PendingClaim, phone_key
 
 E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
-PROJECT_KEY = "project"
 PHONE_CLAIM_TTL = timedelta(minutes=10)
 CONFIRMATION_TEXT = (
     "Reply YES to connect this number to your ufo account. Reply STOP to stop messages."
@@ -86,8 +85,8 @@ class ImessageConnect:
             provider = self.provider()
         except ProviderNotConfigured:
             return _result("not_connected", "This deploy has no iMessage provider credentials.")
-        configured = await ctx.ext.store.get(PROJECT_KEY)
-        if configured is None:
+        configured = await ctx.ext.installations.installation(SURFACE_IMESSAGE)
+        if configured != provider.installation_id:
             if not await ctx.speaker_is_admin():
                 return _result(
                     "not_connected", "Ask a workspace admin to connect the iMessage provider."
@@ -98,9 +97,6 @@ class ImessageConnect:
                 return _result(
                     "not_connected", "This iMessage provider is connected to another workspace."
                 )
-            await ctx.ext.store.put(PROJECT_KEY, provider.installation_id)
-        elif configured != provider.installation_id:
-            raise RuntimeError("The configured iMessage provider does not match this deploy")
         key = phone_key(args.phone_number)
         stored = await ctx.ext.store.get(key)
         now = datetime.now(UTC)

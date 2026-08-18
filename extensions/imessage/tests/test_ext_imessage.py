@@ -50,7 +50,6 @@ from ufo_ext_imessage.tools import (
     CONFIRMATION_INSTRUCTION,
     CONFIRMATION_TEXT,
     OPT_IN_TEXT,
-    PROJECT_KEY,
     ImessageConnect,
     ImessageConnectInput,
     opt_in_link,
@@ -266,6 +265,51 @@ def _tool_context(workspace_id: UUID, member_id: UUID) -> ToolContext:
             surfaces=frozenset({SURFACE_IMESSAGE}),
         ),
     )
+
+
+async def test_a_project_change_requires_an_admin_then_rebinds(db: None) -> None:
+    workspace_id, admin_id = await _seed()
+    member_id = uuid4()
+
+    class NewProjectProvider(RecordingProvider):
+        @property
+        def installation_id(self) -> str:
+            return "project:new"
+
+    provider = NewProjectProvider()
+    admin = _tool_context(workspace_id, admin_id)
+    member = _tool_context(workspace_id, member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="other@example.com",
+                is_admin=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        assert admin.ext is not None
+        await admin.ext.installations.bind(SURFACE_IMESSAGE, "project:old")
+        refused = await ImessageConnect(provider=lambda: provider).run(
+            member,
+            ImessageConnectInput(phone_number="+14155550123", user_description="Connect my phone."),
+        )
+        before = await admin.ext.installations.installation(SURFACE_IMESSAGE)
+        connected = await ImessageConnect(provider=lambda: provider).run(
+            admin,
+            ImessageConnectInput(phone_number="+14155550123", user_description="Connect my phone."),
+        )
+        after = await admin.ext.installations.installation(SURFACE_IMESSAGE)
+    assert json.loads(refused.content[0].text) == {
+        "state": "not_connected",
+        "instruction": "Ask a workspace admin to connect the iMessage provider.",
+    }
+    assert before == "project:old"
+    assert json.loads(connected.content[0].text)["state"] == "pending"
+    assert after == "project:new"
 
 
 def test_manifest_declares_complete_durable_surface() -> None:
@@ -823,7 +867,7 @@ async def test_an_expired_claim_can_move_to_another_member(db: None) -> None:
         )
     with ws(workspace_id):
         assert tool_context.ext is not None
-        await tool_context.ext.store.put(PROJECT_KEY, provider.installation_id)
+        await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         await tool_context.ext.store.put(phone_key(phone), claim.model_dump(mode="json"))
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
@@ -886,7 +930,7 @@ async def test_an_expired_claim_takeover_cannot_overwrite_a_concurrent_claim(db:
         )
     with ws(workspace_id):
         assert tool_context.ext is not None
-        await tool_context.ext.store.put(PROJECT_KEY, provider.installation_id)
+        await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         await tool_context.ext.store.put(phone_key(phone), old_claim.model_dump(mode="json"))
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
@@ -925,7 +969,7 @@ async def test_a_refused_target_returns_the_opt_in_line_and_leaves_no_claim(
     tool_context = _tool_context(workspace_id, member_id)
     with ws(workspace_id):
         assert tool_context.ext is not None
-        await tool_context.ext.store.put(PROJECT_KEY, provider.installation_id)
+        await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
             ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
@@ -966,7 +1010,7 @@ async def test_a_refused_resend_clears_the_claim_the_next_try_would_reuse(db: No
     tool_context = _tool_context(workspace_id, member_id)
     with ws(workspace_id):
         assert tool_context.ext is not None
-        await tool_context.ext.store.put(PROJECT_KEY, provider.installation_id)
+        await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         await tool_context.ext.store.put(phone_key(phone), claim.model_dump(mode="json"))
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,

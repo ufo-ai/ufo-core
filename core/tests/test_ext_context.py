@@ -583,22 +583,29 @@ async def test_core_context_builds_and_is_usable(db: None) -> None:
         assert await context.store.get("tick") == {"count": 1}
 
 
-async def test_installation_access_rejects_a_surface_the_manifest_did_not_declare(
+async def test_installation_access_rejects_operations_for_an_undeclared_surface(
     db: None,
 ) -> None:
     context = context_for("slack", frozenset())
-    with ws(await _workspace()), pytest.raises(UndeclaredSurface, match="slack"):
-        await context.installations.bind("slack", "team-a")
+    with ws(await _workspace()):
+        with pytest.raises(UndeclaredSurface, match="slack"):
+            await context.installations.installation("slack")
+        with pytest.raises(UndeclaredSurface, match="slack"):
+            await context.installations.bind("slack", "team-a")
 
 
 async def test_installation_access_preserves_fleet_wide_uniqueness(db: None) -> None:
     first, second = await _workspace(), await _workspace()
     context = context_for("slack", frozenset(), surfaces=frozenset({"slack"}))
     with ws(first):
+        assert await context.installations.installation("slack") is None
         await context.installations.bind("slack", "team-a")
+        assert await context.installations.installation("slack") == "team-a"
         await context.installations.bind("slack", "team-a")
+        await context.installations.bind("slack", "team-b")
+        assert await context.installations.installation("slack") == "team-b"
     with ws(second), pytest.raises(SurfaceInstallationConflict, match="slack"):
-        await context.installations.bind("slack", "team-a")
+        await context.installations.bind("slack", "team-b")
 
 
 async def test_set_source_subject_flips_the_row_and_restamps_live_pages(
