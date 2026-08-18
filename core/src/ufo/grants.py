@@ -12,7 +12,7 @@ boundary."""
 import hashlib
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -35,6 +35,9 @@ from ufo.workspace import ws, ws_current
 
 CONNECT_STATE_TTL_SECONDS = 600
 GRANT_SENTINEL_PREFIX = "UFO_SENTINEL_GRANT_"
+CONNECTED_MESSAGE = "Connected {provider}: {account}."
+CONNECTED_KEY_PREFIX = "connect:"
+CONNECTED_KEY_DIGEST_LENGTH = 32
 
 
 def grant_sentinel(account_id: str) -> str:
@@ -170,11 +173,22 @@ class MainAgentConnection:
 
 @dataclass(frozen=True)
 class GrantRecorded:
-    """What `complete` returns once the handoff lands durably: the provider account now bound."""
+    """What `complete` returns once the handoff lands durably: the provider account now bound, and
+    whether the conversation that asked for it was told. `resumed` is false where this deploy wires
+    no resumption, and where the message did not reach the queue — the callback page states what is
+    true rather than promising work the agent was never asked to do.
+
+    `label` and `account_label` are the member-facing halves of the same two facts `provider` and
+    `account_id` carry internally: the connector's declared display name, and whatever the broker
+    calls this account. A page that showed a member `composio_github` and `ca_9x2QpLm4` would be
+    naming the wiring instead of the thing they just connected."""
 
     provider: str
     account_id: str
     agent_id: UUID
+    label: str = ""
+    account_label: str = ""
+    resumed: bool = False
 
 
 @dataclass(frozen=True)
@@ -200,6 +214,44 @@ class ConnectionHooks(Protocol):
     connection is recorded whatever an extension makes of it."""
 
     async def fire(self, connection: ConnectionRecorded) -> None: ...
+
+
+class ConnectResumption(Protocol):
+    """Where a landed connection reaches the conversation that asked for it. The turn that began
+    the connect is the one blocked on it, and it cannot learn the grant arrived — the member left
+    for a browser and comes back to a thread that has said nothing since. Admitting the outcome
+    there is what lets the agent carry on without the member asking it to.
+
+    Structural and injected for the same reason as `ConnectionHooks`: this module is imported by
+    the surface layer that admits, so it may not import back. `resume` swallows its own failure —
+    the grant is recorded and the member is owed that answer whatever the queue does with it."""
+
+    async def resume(
+        self,
+        conversation_id: UUID,
+        message: str,
+        *,
+        speaker_member_id: UUID,
+        idempotency_key: str,
+    ) -> bool: ...
+
+
+def _resume_key(state: str) -> str:
+    """The idempotency key for one connect act, taken from the sealed state that act carries.
+
+    The connection is the wrong identity here. `GrantStore.record` settles every connect of one
+    account onto a single connection row, so a re-consent, a reconnect that shares the account, or a
+    connect for a second agent all read back the id the first connect wrote. A key built from it
+    would repeat, and admission — which matches on (workspace, key) — would drop the later resume
+    or refuse it as a key reused for a different turn. The member would sit in a conversation that
+    was never told, behind a page saying the agent has the connection.
+
+    A state is minted once per authorization and memoized for the turn that asked, so a member who
+    refreshes the callback replays the same one and rejoins the message it already sent, while a
+    later connect carries a state of its own. Digested rather than carried whole: the key is a
+    stored column, and the state is a credential-sealed token that has no business being one."""
+    digest = hashlib.sha256(state.encode()).hexdigest()
+    return CONNECTED_KEY_PREFIX + digest[:CONNECTED_KEY_DIGEST_LENGTH]
 
 
 class ConnectState(BaseModel):
@@ -623,6 +675,8 @@ class ConnectFlow:
     redirect_uri: str
     resolver: OAuthProviderResolver | None = None
     connections: ConnectionHooks | None = None
+    resumption: ConnectResumption | None = None
+    labels: Mapping[str, str] = field(default_factory=dict)
 
     def authorize(
         self,
@@ -671,7 +725,11 @@ class ConnectFlow:
     async def complete(self, *, state: str, code: str) -> GrantRecorded:
         """Land the handoff, then publish the connection to the extensions that derive state from
         it: what a connected account implies — the feeds it syncs — exists by the time the member
-        reads the callback, rather than at the next sweep of whatever job would notice later."""
+        reads the callback, rather than at the next sweep of whatever job would notice later.
+
+        The conversation that began the connect is told last, once the grant and everything derived
+        from it stand — so the turn it wakes reads a workspace where the account is already usable,
+        rather than racing the feeds its own answer is about."""
         claims = self._open(state)
         descriptor = self._provider(claims.provider)
         with ws(claims.workspace_id), agent(claims.agent_id):
@@ -695,9 +753,31 @@ class ConnectFlow:
                         agent_id=claims.agent_id,
                     )
                 )
+            label = self.label_for(descriptor.provider)
+            named = account.account_label or account.account_id
+            resumed = False
+            if self.resumption is not None:
+                resumed = await self.resumption.resume(
+                    claims.conversation_id,
+                    CONNECTED_MESSAGE.format(provider=label, account=named),
+                    speaker_member_id=claims.grantor_member_id,
+                    idempotency_key=_resume_key(state),
+                )
         return GrantRecorded(
-            provider=descriptor.provider, account_id=account.account_id, agent_id=claims.agent_id
+            provider=descriptor.provider,
+            account_id=account.account_id,
+            agent_id=claims.agent_id,
+            label=label,
+            account_label=account.account_label or "",
+            resumed=resumed,
         )
+
+    def label_for(self, provider: str) -> str:
+        """The connector's member-facing name. Declared on the manifest entry rather than on the
+        OAuth descriptor, so it is handed in beside the providers; an open-namespace slug the broker
+        serves without a declaration falls back to the slug read as words, which is the same
+        rendering the catalog gives it."""
+        return self.labels.get(provider) or provider.replace("_", " ").title()
 
     def _provider(self, name: str) -> OAuthProvider:
         descriptor = self.providers.get(name)

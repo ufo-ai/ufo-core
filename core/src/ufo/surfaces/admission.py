@@ -77,6 +77,7 @@ from ufo.schema.records import (
     turn_id_for,
 )
 from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats, gate_member
+from ufo.workspace import ws_current
 
 QUEUED: TurnStatus = "queued"
 CANCELLED: TerminalStatus = "cancelled"
@@ -810,3 +811,66 @@ class MemberAdmission:
             context=context,
             intent=intent,
         )
+
+
+@dataclass(frozen=True)
+class ConnectResume:
+    """The connect callback's write back into the conversation that asked for the account. The
+    member left that conversation for a browser and the turn there cannot learn the grant landed,
+    so the outcome is admitted as the granting member's own message: a turn still waiting folds it
+    in and carries on, and one that already ended is founded again by it.
+
+    The workspace is the one the callback bound before it opened the sealed state, so this reads it
+    rather than carrying it — the same way `GrantStore` does, and for the same reason.
+
+    A failure here is logged and swallowed, and answered as False. The grant is committed by the
+    time this runs, so a member who completed consent is owed that answer whether or not the queue
+    took the message — but the page that tells them must not also promise work that never started,
+    so the outcome rides back rather than being assumed.
+
+    The prepared-intent lane takes nothing. A connect begun from a portal panel seals that panel's
+    own conversation, and that lane dispatches one typed verb per turn with no model round: a
+    free-text message admitted there would run a whole turn nothing reads (the surface declares no
+    writeback and the chat index skips the lane), while holding the lane's single partition until
+    it ended — so the member's next panel submit would wait behind it and time out. Left alone, the
+    grant still lands and the page tells them to ask for the work in the conversation they can
+    actually read."""
+
+    admission: Admission
+
+    async def resume(
+        self,
+        conversation_id: UUID,
+        message: str,
+        *,
+        speaker_member_id: UUID,
+        idempotency_key: str,
+    ) -> bool:
+        async with workspace_tx() as connection:
+            lane = (
+                await connection.execute(
+                    sa.select(tables.turn.c.admission_source)
+                    .where(tables.turn.c.conversation_id == conversation_id)
+                    .order_by(tables.turn.c.seq.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if lane == INTENT_ADMISSION:
+            log("connect.resume_declined", conversation_id=str(conversation_id), lane=lane)
+            return False
+        try:
+            await self.admission.admit_member(
+                ws_current().workspace_id,
+                conversation_id,
+                message,
+                speaker_member_id,
+                idempotency_key=idempotency_key,
+            )
+        except Exception as error:
+            log(
+                "connect.resume_failed",
+                conversation_id=str(conversation_id),
+                error_class=type(error).__name__,
+            )
+            return False
+        return True

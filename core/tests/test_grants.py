@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
@@ -50,7 +50,16 @@ from ufo.grants import (
 from ufo.sandbox.session import RunToken
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
-from ufo.surfaces.cli import callback_router
+from ufo.surfaces.admission import Admission, ConnectResume
+from ufo.surfaces.cli import (
+    CLOSE_THIS_PAGE,
+    CONNECT_LOGO_CACHE,
+    CONNECT_LOGO_FILE,
+    CONNECT_LOGO_PATH,
+    CONNECT_PAGE,
+    CONNECT_PAGE_MAX_BYTES,
+    callback_router,
+)
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
@@ -812,17 +821,237 @@ def _turn_context(
     )
 
 
+@dataclass(frozen=True)
+class _ResumeCall:
+    conversation_id: UUID
+    message: str
+    speaker_member_id: UUID
+    idempotency_key: str
+
+
+@dataclass
+class _RecordingResumption:
+    """Stands in for the admitter the callback resumes through — the seam, not the queue. What is
+    asserted is which conversation the flow tells, as whom, and under which key."""
+
+    calls: list[_ResumeCall] = field(default_factory=list)
+
+    async def resume(
+        self,
+        conversation_id: UUID,
+        message: str,
+        *,
+        speaker_member_id: UUID,
+        idempotency_key: str,
+    ) -> bool:
+        self.calls.append(
+            _ResumeCall(
+                conversation_id=conversation_id,
+                message=message,
+                speaker_member_id=speaker_member_id,
+                idempotency_key=idempotency_key,
+            )
+        )
+        return True
+
+
+@dataclass
+class _QueueDbos:
+    """Stands in for the DBOS client at the admission seam alone — the rows admission writes are
+    real, and they are what this asserts."""
+
+    enqueued: list[str] = field(default_factory=list)
+
+    async def enqueue_async(self, options: dict[str, str], workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
+
+
+async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(db: None) -> None:
+    """The seam proven against the queue itself rather than a recorder: the callback runs the real
+    `ConnectResume` over the real `Admission`, and what is read back is the durable turn in the
+    conversation the member left to authorize, carrying the words the agent will act on.
+
+    A recorder can only show that the flow called something. It cannot show that admission accepted
+    the message, that the turn landed in the right conversation, or that it reached the queue — and
+    those are the failure the member sees."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    dbos = _QueueDbos()
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+        resumption=ConnectResume(
+            Admission(dbos=dbos, durable_surfaces=frozenset())  # type: ignore[arg-type]
+        ),
+    )
+    state = parse_qs(
+        urlparse(
+            flow.authorize(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                provider="stub",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
+        ).query
+    )["state"][0]
+
+    recorded = await flow.complete(state=state, code="the-code")
+
+    assert recorded.resumed is True
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            turns = (
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.id, tables.turn.c.inbound).where(
+                            tables.turn.c.conversation_id == conversation_id
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+    assert len(turns) == 1
+    # The member-facing name, not the slug and not the broker's id.
+    assert turns[0]["inbound"] == "Connected Stub: Work account."
+    assert dbos.enqueued == [str(turns[0]["id"])]
+
+    # The member refreshes the callback. The same state carries the same key, so they rejoin the
+    # turn already running rather than founding a second one on the same account.
+    await flow.complete(state=state, code="the-code")
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            after = (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.turn)
+                    .where(tables.turn.c.conversation_id == conversation_id)
+                )
+            ).scalar_one()
+    assert after == 1
+
+
+def test_the_connect_page_is_small_and_fetches_only_its_own_mark() -> None:
+    """A member waits on this page in a browser they opened for one moment, often on a phone off a
+    Slack thread, and no session or cache stands behind it. So the document carries its own styling
+    and asks for exactly one thing more: the mark, from this same origin on the connection already
+    open. A stylesheet, a font, or a script added later would each cost another round trip on that
+    connection, and the cap plus these two assertions are what keep them out.
+
+    Inlining the mark instead would put 16 KB on a 600-byte page, and nothing in front of this
+    deploy compresses a response — so it is served once and cached for good."""
+    page = CONNECT_PAGE.substitute(headline="GitHub connected.", detail=CLOSE_THIS_PAGE)
+
+    assert len(page.encode()) < CONNECT_PAGE_MAX_BYTES
+    assert "<script" not in page
+    # Same origin, so no host to resolve and no second connection to open.
+    assert "://" not in page
+    assert page.count("src=") == 1 and CONNECT_LOGO_PATH in page
+    # It answers in the reader's own theme without a media query, which is the cheapest way to.
+    assert "color-scheme:light dark" in page
+
+
+def test_the_connect_mark_is_served_immutably_from_core() -> None:
+    """The page is reached with no session and no frontend build behind it, so the mark cannot be
+    the portal's copy: that one is fingerprinted by its bundler and its name changes every build.
+    Core serves its own, and says it never changes, so a member who connects a second account pays
+    for it once."""
+    assert CONNECT_LOGO_FILE.is_file()
+    assert CONNECT_LOGO_FILE.read_bytes().startswith(b"<svg")
+    assert "immutable" in CONNECT_LOGO_CACHE
+
+
+async def test_a_connect_from_a_portal_panel_leaves_the_intent_lane_alone(db: None) -> None:
+    """A connect begun from a portal panel seals that panel's own conversation, and that lane
+    dispatches one typed verb per turn with no model round. A free-text message admitted there
+    would run a whole turn nothing reads — the surface declares no writeback and the chat index
+    skips the lane — while holding the lane's single partition until it ended, so the member's next
+    panel submit would wait behind it and time out.
+
+    The grant still lands. Only the resume is declined, and the page then tells the member to ask
+    for the work in a conversation they can actually read."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="queued",
+                inbound="{}",
+                admission_source="intent",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    dbos = _QueueDbos()
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+        resumption=ConnectResume(
+            Admission(dbos=dbos, durable_surfaces=frozenset())  # type: ignore[arg-type]
+        ),
+    )
+    state = parse_qs(
+        urlparse(
+            flow.authorize(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                provider="stub",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
+        ).query
+    )["state"][0]
+
+    recorded = await flow.complete(state=state, code="the-code")
+
+    assert recorded.resumed is False
+    assert dbos.enqueued == []
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            turns = (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.turn)
+                    .where(tables.turn.c.conversation_id == conversation_id)
+                )
+            ).scalar_one()
+            granted = (
+                await connection.execute(sa.select(sa.func.count()).select_from(tables.connection))
+            ).scalar_one()
+    # The seeded intent turn and nothing else, and the grant landed all the same.
+    assert turns == 1
+    assert granted == 1
+
+
 async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker(
     db: None,
 ) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
+    resumed = _RecordingResumption()
     flow = ConnectFlow(
         providers={"stub": StubProvider()},
         fernet=Fernet(Fernet.generate_key()),
         store=GrantStore(),
         redirect_uri=REDIRECT_URI,
+        resumption=resumed,
     )
     install_connect_flow(flow)
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
@@ -870,7 +1099,45 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
                 "/v1/connect/callback", params={"state": state, "code": "the-code"}
             )
             assert done.status_code == 200
-            assert "return to chat and ask me to continue" in done.text
+            # No session stands behind this page — a Slack member finishes consent in a browser
+            # that has never signed in — so it addresses them by what just happened and names the
+            # one thing left to do.
+            assert CLOSE_THIS_PAGE in done.text
+
+    # The conversation that asked for the account is told, as the granting member, so the turn
+    # waiting there carries on without them asking it to. Both callbacks carry the one key the
+    # connection settled on, so a refreshed browser rejoins that message rather than sending a
+    # second one.
+    assert [(call.conversation_id, call.speaker_member_id) for call in resumed.calls] == [
+        (conversation_id, member_id),
+        (conversation_id, member_id),
+    ]
+    assert len({call.idempotency_key for call in resumed.calls}) == 1
+    assert resumed.calls[0].message == "Connected Stub: Work account."
+
+    # A later connect of the same account is a second act and must reach the conversation too — a
+    # re-consent after the provider revoked the token, or a connect for another agent. The handoff
+    # memoizes one state per asking turn, so a second act is a second authorization.
+    # `GrantStore.record` settles it onto the connection row the first one wrote, so a key built
+    # from the connection would repeat here — and admission, which matches on (workspace, key),
+    # would drop this message while the page told the member the agent was carrying on.
+    later = parse_qs(
+        urlparse(
+            flow.authorize(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                provider="stub",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
+        ).query
+    )["state"][0]
+    await flow.complete(state=later, code="the-code")
+
+    assert len(resumed.calls) == 3
+    assert resumed.calls[2].idempotency_key != resumed.calls[0].idempotency_key
+    assert resumed.calls[2].conversation_id == conversation_id
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(

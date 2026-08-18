@@ -162,7 +162,12 @@ from ufo.sources.sync import (
     SourceIdentityResolver,
     SyncDriver,
 )
-from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
+from ufo.surfaces.admission import (
+    Admission,
+    AdmissionInvoker,
+    ConnectResume,
+    MemberAdmission,
+)
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router
 from ufo.surfaces.hub_tail import HubTailer
@@ -275,7 +280,9 @@ def run() -> None:
         tailer=HubTailer(hub=hub),
     )
     init_runtime(runtime)
-    install_connect_flow(_connect_flow(credentials, config, manifests, index, embed))
+    install_connect_flow(
+        _connect_flow(credentials, config, manifests, index, embed, ConnectResume(admission))
+    )
     install_credential_requests(
         None
         if credentials is None
@@ -1245,6 +1252,7 @@ def _connect_flow(
     manifests: tuple[Manifest, ...],
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    resumption: ConnectResume | None = None,
 ) -> ConnectFlow | None:
     """The process's connect flow — the tool validates against it, a surface privately authorizes
     through it, and the OAuth callback completes through it — sharing the credential key that seals
@@ -1270,6 +1278,12 @@ def _connect_flow(
         redirect_uri=_connect_redirect_uri(config, providers),
         resolver=open_connector_namespace(manifests),
         connections=connection_hooks(manifests, credentials, index, embed),
+        resumption=resumption,
+        labels={
+            connector.oauth.provider: connector.label
+            for manifest in manifests
+            for connector in manifest.connectors
+        },
     )
 
 
