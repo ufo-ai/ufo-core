@@ -81,6 +81,18 @@ VERSION = "0.1.0"
 JOB_NAME = "usage_shipper"
 JOB_SCHEDULE = "0 * * * * *"
 MICRO_USD_PER_USD = 1_000_000
+TOPUP_CARDLESS_KEY = "topup_cardless_at"
+# How long the refill leaves a workspace alone after finding no card on it. A refill is arranged
+# against a card, but nothing holds the card there — an admin can remove it in the portal — so an
+# armed workspace can be cardless, and the tick is every minute. Without this it reads the provider
+# 1440 times a day for a workspace it can do nothing for, and cannot be told to stop: the balance
+# that made it short is the balance refusing the turn that would clear the rule.
+#
+# It is minutes and not the day a decline waits, because the two answers cost different things. A
+# decline spends an authorization against a card the issuer is already refusing. Finding no card
+# spends one read, and it stops being true the moment a card is saved, so the wait is short enough
+# that a member who saves one is served without having to come back and ask.
+TOPUP_CARDLESS_RETRY_AFTER = timedelta(minutes=5)
 TOPUP_REFUSED_AT_KEY = "topup_refused_at"
 TOPUP_ATTEMPT_KEY = "topup_attempt"
 # An off-session decline is a standing answer — an expired card, a spent limit, a block — and none
@@ -707,6 +719,12 @@ class BalanceTopup:
             wanted = await read_auto_topup(connection, workspace_id)
         if wanted is None:
             return
+        cardless = await self.ctx.store.get(TOPUP_CARDLESS_KEY)
+        if (
+            isinstance(cardless, str)
+            and datetime.now(UTC) - datetime.fromisoformat(cardless) < TOPUP_CARDLESS_RETRY_AFTER
+        ):
+            return
         config = BillingConfig.from_env()
         record = await _billing_record(self.ctx)
         if record is None:
@@ -715,7 +733,9 @@ class BalanceTopup:
         method = await _default_payment_method(config, record.stripe_customer_id, self.transport)
         if method is None:
             warn("metronome.topup_without_card", workspace_id=str(workspace_id))
+            await self.ctx.store.put(TOPUP_CARDLESS_KEY, datetime.now(UTC).isoformat())
             return
+        await self.ctx.store.delete(TOPUP_CARDLESS_KEY)
         async with self.ctx.transaction() as connection:
             settled = await read_balance(connection, workspace_id)
         charged_so_far = 0 if settled is None else settled.charged_micro_usd

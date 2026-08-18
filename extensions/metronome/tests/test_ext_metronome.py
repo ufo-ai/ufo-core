@@ -1971,3 +1971,93 @@ async def test_a_deploy_with_no_public_base_still_saves_a_card(
     (session,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
     assert "return_url" not in _form(session)
     assert str(answer["portal_url"]).startswith("https://billing.stripe.com/")
+
+
+def _customer_reads(providers: _Providers) -> int:
+    return len(
+        [r for r in providers.requests if r.method == "GET" and "/v1/customers/" in r.url.path]
+    )
+
+
+async def _cardless_mark(workspace_id: UUID) -> object:
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        return await ctx.store.get(metronome.TOPUP_CARDLESS_KEY)
+
+
+async def test_an_armed_workspace_whose_card_is_gone_is_not_read_every_minute(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refill is arranged against a card, and nothing holds the card there — an admin can remove
+    it. The tick is every minute, so an armed cardless workspace read the provider 1440 times a day
+    for work it cannot do, and could not be told to stop: the balance that made it short is the one
+    refusing the turn that would clear the rule."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+    providers.default_payment_method = None
+    before = _customer_reads(providers)
+
+    for _ in range(6):
+        await _run_topup(workspace_id, providers)
+
+    assert _customer_reads(providers) - before == 1
+    assert await _cardless_mark(workspace_id) is not None
+
+
+async def test_a_card_saved_again_is_served_without_the_member_asking(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wait is minutes, not the day a decline holds, because finding no card stops being true
+    the moment one is saved. Nothing a member does releases it — the workspace it applies to is the
+    one whose turns are refused — so the lapse has to be short enough to serve them on its own."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_1"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "autopay",
+        autopay_dollars=20,
+        autopay_below_dollars=10,
+    )
+    providers.default_payment_method = None
+    await _run_topup(workspace_id, providers)
+    assert await _balance_of(workspace_id) == 5 * DOLLAR
+
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        stamped = await ctx.store.get(metronome.TOPUP_CARDLESS_KEY)
+        assert isinstance(stamped, str)
+        await ctx.store.put(
+            metronome.TOPUP_CARDLESS_KEY,
+            (datetime.fromisoformat(stamped) - metronome.TOPUP_CARDLESS_RETRY_AFTER).isoformat(),
+        )
+    providers.default_payment_method = "pm_1"
+    await _run_topup(workspace_id, providers)
+
+    assert await _balance_of(workspace_id) == 25 * DOLLAR
+    assert await _cardless_mark(workspace_id) is None
