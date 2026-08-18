@@ -58,6 +58,8 @@ import {
   type RailSort,
 } from "@/lib/rail";
 import {
+  AGENTS_HASH,
+  HOME_HASH,
   SECTIONS,
   WORKSPACE_TABS,
   agentHash,
@@ -157,7 +159,7 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
     setRoute(next);
   }, []);
 
-  const openHome = useCallback(() => go("#/", { kind: "home" }), [go]);
+  const openHome = useCallback(() => go(HOME_HASH, { kind: "home" }), [go]);
 
   const openChat = useCallback(
     (conversationId: string) => go(chatHash(conversationId), { kind: "chat", conversationId }),
@@ -169,7 +171,7 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
     [go],
   );
 
-  const openAgents = useCallback(() => go("#/agents", { kind: "agents" }), [go]);
+  const openAgents = useCallback(() => go(AGENTS_HASH, { kind: "agents" }), [go]);
 
   const openAgent = useCallback(
     (agentId: string, tab: AgentTab = "home") =>

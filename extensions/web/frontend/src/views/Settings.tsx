@@ -134,7 +134,7 @@ export function Settings({ agent }: { agent: Agent }) {
         // one. Founding it here would leave an id nothing else holds: no rail row, a read-only
         // conversation tab, and a connect link that lives only on the live tail.
         function startSetup() {
-          setPendingAsk(agent.id, SETUP_ASK);
+          setPendingAsk(agent.id, SETUP_ASK, false);
           window.location.hash = newChatHash(agent.id);
         }
 

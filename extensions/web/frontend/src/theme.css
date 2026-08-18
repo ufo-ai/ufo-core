@@ -210,7 +210,7 @@
   /* An app's whole settings form, read in one dialog rather than a page: wider than a dialog that
      asks one question, and the width the spotlight search opens at. */
   --container-settings: min(880px, calc(100vw - 32px));
-  --container-spotlight: min(50vw, calc(100vw - 32px));
+  --container-spotlight: min(640px, calc(100vw - 32px));
   --container-bubble: 70ch;
   --container-section: 728px;
   --container-page: calc(var(--container-section) + 2 * var(--spacing-2xl));
@@ -268,6 +268,9 @@
      Larger than the glyph a rail row carries: a row states the surface beside a title the member is
      scanning past, a header states it about the one conversation on the screen. */
   --size-surface-mark: 24px;
+  /* The command palette's list. Fixed rather than capped: the panel is centred, and a list that
+     grew as reads landed would walk the rows out from under the member's cursor. */
+  --size-palette: 360px;
   --size-reveal: 280px;
   --size-row: 32px;
   --size-textarea: 12em;

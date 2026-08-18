@@ -7,13 +7,16 @@ import { App } from "@/App";
 import {
   AGENT,
   AGENT_ID,
+  CHAT_ROW,
   CONVO_ID,
   MEMBER,
   SECOND,
   SECOND_ID,
   SITE_KIND,
+  StreamFake,
   TASK_KIND,
   TRIGGER_KIND,
+  TURN_ID,
   json,
   objectIndex,
   owned,
@@ -25,6 +28,8 @@ beforeEach(() => {
   location.hash = "";
   useStreamFake();
 });
+
+const FOUNDED_ID = "77777777-7777-4777-8777-777777777777";
 
 const FOUND_CONVERSATION = {
   id: CONVO_ID,
@@ -90,6 +95,7 @@ const FOUND_TASK_DETAIL = {
 function everything() {
   return wire({
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
+    "/slots": () => json({ slots: [] }),
     "/conversations": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/workspace/artifacts": () => json({ artifacts: [FOUND_FILE] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }),
@@ -100,15 +106,38 @@ function everything() {
   });
 }
 
-function open() {
+function nothing() {
+  return wire({
+    "/slots": () => json({ slots: [] }),
+    "/conversations": () => json({ conversations: [] }),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
+    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
+    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
+    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+  });
+}
+
+function portal() {
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+}
+
+function open() {
+  portal();
   return userEvent.click(screen.getByRole("button", { name: "Search" }));
 }
 
 async function type(term: string) {
-  const box = await screen.findByRole("searchbox", { name: "Search" });
+  const box = await screen.findByRole("combobox", { name: "Search" });
   await userEvent.type(box, term);
   return box;
+}
+
+/** The heading over each run of rows. cmdk hides the heading element itself and points the group's
+ *  label at it, so the order they stand in is read off the elements rather than off a role. */
+function headings() {
+  return [...document.querySelectorAll("[cmdk-group-heading]")].map((head) => head.textContent);
 }
 
 test("one term reaches every kind the workspace holds, each hit under its own heading", async () => {
@@ -117,16 +146,11 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("button", { name: /Rename the deploy job/ })).toBeTruthy();
-  expect(found.getByRole("button", { name: /deploy-plan.md/ })).toBeTruthy();
-  expect(found.getByRole("button", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
-  expect(found.getByRole("button", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(found.getAllByRole("heading", { level: 3 }).map((head) => head.textContent)).toEqual([
-    "Conversations",
-    "Artifacts",
-    "Memory",
-    "Radar",
-  ]);
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
+  expect(found.getByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
+  expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
+  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Radar"]);
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
   expect(asked.some((url) => url.includes("/workspace/artifacts"))).toBe(true);
@@ -143,8 +167,8 @@ test("an agent matches from the payload the shell holds, under its own heading",
   await type("second");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("button", { name: /second/ })).toBeTruthy();
-  expect(found.getAllByRole("heading", { level: 3 })[0].textContent).toBe("Apps");
+  expect(await found.findByRole("option", { name: "second opus" })).toBeTruthy();
+  expect(headings().slice(0, 2)).toEqual(["Actions", "Apps"]);
   expect(calls.some((url) => url.includes("/api/agents?q="))).toBe(false);
 });
 
@@ -153,6 +177,7 @@ test("an agent matches from the payload the shell holds, under its own heading",
 test("every memory match stands, though they all open the one memory screen", async () => {
   const second = { ...FOUND_MEMORY, text: "deploys are announced in #ops", ref: "memory/2" };
   wire({
+    "/slots": () => json({ slots: [] }),
     "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () =>
@@ -166,8 +191,8 @@ test("every memory match stands, though they all open the one memory screen", as
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("button", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
-  expect(found.getByRole("button", { name: /deploys are announced in #ops/ })).toBeTruthy();
+  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
+  expect(found.getByRole("option", { name: /deploys are announced in #ops/ })).toBeTruthy();
 });
 
 test("a hit opens the place that holds it", async () => {
@@ -176,7 +201,7 @@ test("a hit opens the place that holds it", async () => {
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(await found.findByRole("button", { name: /Rename the deploy job/ }));
+  await userEvent.click(await found.findByRole("option", { name: /Rename the deploy job/ }));
 
   expect(location.hash).toBe("#/c/" + CONVO_ID);
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -188,7 +213,7 @@ test("an artifact hit opens the artifacts screen on that file", async () => {
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(await found.findByRole("button", { name: /deploy-plan.md/ }));
+  await userEvent.click(await found.findByRole("option", { name: /deploy-plan.md/ }));
 
   expect(location.hash).toContain("#/artifacts?");
   expect(decodeURIComponent(location.hash)).toContain("q=deploy");
@@ -212,6 +237,7 @@ test("a hosted site stands once, under artifacts, and opens there", async () => 
   };
   const { calls } = wire({
     ["/objects/" + SITE_KIND.kind + "/deploy-notes"]: () => json(record),
+    "/slots": () => json({ slots: [] }),
     "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
@@ -224,15 +250,13 @@ test("a hosted site stands once, under artifacts, and opens there", async () => 
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  const rows = await found.findAllByRole("button", { name: /deploy-notes/ });
+  const rows = await found.findAllByRole("option", { name: /deploy-notes/ });
   expect(rows).toHaveLength(1);
   const siteReads = calls.filter((url) => url.includes("/objects/" + SITE_KIND.kind));
   expect(siteReads).toHaveLength(1);
   expect(siteReads[0]).toContain("agent=" + AGENT_ID);
   // Sites are listed where sites live: the artifacts screen, whose filter holds a Sites family.
-  expect(found.getAllByRole("heading", { level: 3 }).map((head) => head.textContent)).toEqual([
-    "Artifacts",
-  ]);
+  expect(headings()).toEqual(["Actions", "Artifacts"]);
 
   await userEvent.click(rows[0]);
 
@@ -249,6 +273,7 @@ test("two agents' same-named records both stand, each opening its own", async ()
   const second = owned({ ...FOUND_TASK, mine: false }, SECOND);
   wire({
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
+    "/slots": () => json({ slots: [] }),
     "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
@@ -261,7 +286,7 @@ test("two agents' same-named records both stand, each opening its own", async ()
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  const rows = await found.findAllByRole("button", { name: /nightly-deploy/ });
+  const rows = await found.findAllByRole("option", { name: /nightly-deploy/ });
   expect(rows).toHaveLength(2);
 
   await userEvent.click(rows[1]);
@@ -274,7 +299,7 @@ test("a radar hit opens that record in the radar feed", async () => {
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(await found.findByRole("button", { name: /nightly-deploy/ }));
+  await userEvent.click(await found.findByRole("option", { name: /nightly-deploy/ }));
 
   const opened = decodeURIComponent(location.hash);
   expect(opened).toContain("#/radar?");
@@ -287,6 +312,7 @@ test("a radar hit opens that record in the radar feed", async () => {
  *  never reads a searched workspace as an empty one. */
 test("a read that fails states so under its own heading, and the others still answer", async () => {
   wire({
+    "/slots": () => json({ slots: [] }),
     "/conversations": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/workspace/artifacts": () => new Response("nope", { status: 503 }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
@@ -300,12 +326,98 @@ test("a read that fails states so under its own heading, and the others still an
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByText("Error 503 — reload to retry.")).toBeTruthy();
-  expect(found.getByRole("button", { name: /Rename the deploy job/ })).toBeTruthy();
+  expect(found.getByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
 });
 
 test("a term nothing answers says so once, not once per kind", async () => {
+  nothing();
+  await open();
+  await type("nothing matches this");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByText("Nothing matches this search.")).toBeTruthy();
+  expect(headings()).toEqual(["Actions"]);
+});
+
+/** The fan-out rests before it fires, so a term states that it is being read rather than standing
+ *  under an empty list that reads as a workspace holding nothing. */
+test("a term states that it is being read until the reads answer", async () => {
+  everything();
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(found.getByText("Searching…")).toBeTruthy();
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  expect(found.queryByText("Searching…")).toBeNull();
+});
+
+test("an empty box reads nothing at all", async () => {
+  const { calls } = everything();
+  await open();
+  await type("  ");
+
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Search" })).toBeTruthy());
+  expect(calls.some((url) => url.includes("q="))).toBe(false);
+});
+
+test("the chord opens the palette from anywhere, and closes it again", async () => {
+  everything();
+  portal();
+
+  await userEvent.keyboard("{Meta>}k{/Meta}");
+  expect(await screen.findByRole("combobox", { name: "Search" })).toBeTruthy();
+
+  await userEvent.keyboard("{Meta>}k{/Meta}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+/** Opened on nothing, the palette is still worth reading: it states what the member can do and
+ *  every place the bar reaches, and it reads nothing until there is a term to read for. */
+test("an unopened term lists what to do and where to go, and reads nothing", async () => {
+  const { calls } = everything();
+  await open();
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(found.getByRole("option", { name: "New chat" })).toBeTruthy();
+  expect(headings()).toEqual(["Actions", "Places"]);
+  expect(
+    found.getAllByRole("option").map((row) => row.textContent),
+  ).toEqual(["New chat", "Chat", "Apps", "Artifacts", "Radar", "Workspace"]);
+  expect(calls.some((url) => url.includes("q="))).toBe(false);
+});
+
+test("the arrow keys move the cursor and Enter takes the row under it", async () => {
+  everything();
+  await open();
+
+  await screen.findByRole("dialog");
+  await userEvent.keyboard("{ArrowDown}");
+  await userEvent.keyboard("{Enter}");
+
+  expect(location.hash).toBe("#/");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("a place opens the screen it names", async () => {
+  everything();
+  await open();
+  await type("radar");
+
+  const found = within(await screen.findByRole("dialog"));
+  await userEvent.click(found.getByRole("option", { name: "Radar" }));
+
+  expect(location.hash).toBe("#/radar");
+});
+
+/** The words are the member's own and they pressed Enter on them, so the row says them: it lands on
+ *  a new chat with the term already sent, not with the box filled and waiting for a second press.
+ *  The conversation is founded by the composer on the screen, so it is theirs like any other. */
+test("the term is said to the agent, by the composer on the screen it lands on", async () => {
   wire({
-    "/conversations": () => json({ conversations: [] }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "deploy" }),
+    "/slots": () => json({ slots: [] }),
+    "/conversations": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
@@ -314,18 +426,46 @@ test("a term nothing answers says so once, not once per kind", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   await open();
-  await type("nothing matches this");
+  await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByText("Nothing matches this search.")).toBeTruthy();
-  expect(found.queryAllByRole("heading", { level: 3 })).toEqual([]);
+  await userEvent.click(found.getByRole("option", { name: "assistant: deploy" }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
+  const composer = (await screen.findByLabelText("Message the agent")) as HTMLTextAreaElement;
+  expect(composer.value).toBe("");
 });
 
-test("an empty box reads nothing at all", async () => {
-  const { calls } = everything();
-  await open();
-  await type("  ");
+/** The words go to the agent's new chat. A conversation the member is reading belongs to that same
+ *  agent and its composer is the one mounted, so an ask taken by the agent alone would be said
+ *  there — into the thread they were leaving, over the draft they left in it. */
+test("the term founds a new conversation, though the member was reading another", async () => {
+  const { calls } = wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    "/slots": () => json({ slots: [] }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
+    "/conversations": () => json({ conversations: [] }),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
+    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
+    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
+    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/c/" + CONVO_ID;
+  portal();
+  await screen.findByLabelText("Message the agent");
+  await userEvent.click(screen.getByRole("button", { name: "Search" }));
+  await type("deploy");
 
-  await waitFor(() => expect(screen.getByRole("searchbox", { name: "Search" })).toBeTruthy());
-  expect(calls.some((url) => url.includes("q="))).toBe(false);
+  const found = within(await screen.findByRole("dialog"));
+  await userEvent.click(found.getByRole("option", { name: "assistant: deploy" }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  const said = calls.filter((url) => url.includes("/chat?conversation="));
+  expect(said).toHaveLength(1);
+  expect(said[0]).toContain("conversation=new");
+  expect(said[0]).not.toContain(CONVO_ID);
+  expect(location.hash).toBe("#/c/" + FOUNDED_ID);
 });

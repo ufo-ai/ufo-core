@@ -1,3 +1,12 @@
+import {
+  IconApps,
+  IconFile,
+  IconMessage,
+  IconNote,
+  IconRadar,
+  type TablerIcon,
+} from "@tabler/icons-react";
+
 import { getJson } from "@/lib/api";
 import { chatHash, sectionHash, workspaceHash, agentHash } from "@/lib/route";
 import { SITE_FAMILY } from "@/views/Artifacts";
@@ -21,6 +30,9 @@ export type Hit = {
 
 export type Group = {
   label: string;
+  /** The glyph the kind is drawn with wherever it stands — the same one the place it opens takes,
+   *  so a hit and the screen it lands on are the one thing to the eye. */
+  icon: TablerIcon;
   hits: Hit[];
   /** What the read said when it refused. A group that failed states it rather than reading as a
    *  kind holding nothing. */
@@ -65,6 +77,7 @@ function query(term: string, extra: Record<string, string> = {}): string {
  *  they are, the way the memory read unions its own per-agent searches. */
 async function group<K extends keyof Found>(
   label: string,
+  icon: TablerIcon,
   paths: string[],
   hits: (payload: Found[K], path: string) => Hit[],
   signal: AbortSignal,
@@ -75,6 +88,7 @@ async function group<K extends keyof Found>(
   const held = new Map(found.map((hit) => [hit.key, hit]));
   return {
     label,
+    icon,
     hits: [...held.values()],
     failed: failed && !failed.ok ? failed.message : null,
   };
@@ -99,6 +113,7 @@ export async function searchEverywhere(
   const [conversations, files, sites, memory, radar] = await Promise.all([
     group<"conversations">(
       "Conversations",
+      IconMessage,
       agents.map((agent) => "/agents/" + agent.id + "/conversations" + query(wanted)),
       (payload) =>
         payload.conversations.map((entry) => ({
@@ -111,6 +126,7 @@ export async function searchEverywhere(
     ),
     group<"artifacts">(
       "Artifacts",
+      IconFile,
       ["/workspace/artifacts" + query(wanted)],
       (payload) =>
         payload.artifacts.map((entry) => ({
@@ -126,6 +142,7 @@ export async function searchEverywhere(
     ),
     group<"objects">(
       "Artifacts",
+      IconFile,
       ["/objects/" + SITE_KIND + query(wanted, { agent: named?.id ?? "" })],
       (payload) =>
         payload.objects.map((row) => ({
@@ -141,6 +158,7 @@ export async function searchEverywhere(
     ),
     group<"memory">(
       "Memory",
+      IconNote,
       ["/workspace/memory" + query(wanted)],
       (payload) =>
         payload.matches.map((match) => ({
@@ -153,6 +171,7 @@ export async function searchEverywhere(
     ),
     group<"objects">(
       "Radar",
+      IconRadar,
       RADAR_KINDS.map((entry) => "/objects/" + entry.kind + query(wanted)),
       (payload, path) => {
         const kind = path.slice("/objects/".length).split("?")[0];
@@ -174,12 +193,14 @@ export async function searchEverywhere(
    *  screen is what a member opens either from. */
   const artifacts: Group = {
     label: "Artifacts",
+    icon: IconFile,
     hits: [...files.hits, ...sites.hits],
     failed: files.failed ?? sites.failed,
   };
   return [
     {
       label: "Apps",
+      icon: IconApps,
       hits: matched.map((agent) => ({
         key: agent.id,
         hash: agentHash(agent.id, "home"),

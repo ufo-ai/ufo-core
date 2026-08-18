@@ -41,7 +41,7 @@ import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
-import { takePendingAsk } from "@/lib/pendingAsk";
+import { takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 import {
   answerQuestions,
   refreshTranscript,
@@ -433,9 +433,20 @@ function Composer({
 }) {
   const state = useChat(target.key);
   const toTheFoot = useTakeMeToTheFoot();
-  // A panel may hand the composer the message it would have typed. It wins over a draft for
-  // this open only: the member reads it and presses send, so the conversation is theirs.
-  const [text, setText] = useState(() => takePendingAsk(target.agentId) || readDraft(draftKey));
+  // A panel hands its words to the agent's *new* chat, and only a composer founding one takes
+  // them. A conversation the member is already reading belongs to that same agent and its composer
+  // is the one on the screen, so a take keyed by the agent alone would say them there — into the
+  // conversation they were leaving, over the draft they left in it.
+  const founding = target.conversationId === null;
+  // The words win over a draft for this open only. Words the member already committed carry
+  // `send`, and wait here until the composer can carry them — a new chat has no transcript to add
+  // to on its first render.
+  const committed = useRef<string | null>(null);
+  const [text, setText] = useState(() => {
+    const handed = founding ? takePendingAsk(target.agentId) : null;
+    if (handed?.send) committed.current = handed.text;
+    return handed?.text ?? readDraft(draftKey);
+  });
   const [stopping, setStopping] = useState(false);
   // The turn the page is tailing, and so the one a stop can name. A send holds the chat busy before
   // admission answers with a turn id, and a stop of a turn nobody has named yet reaches nothing.
@@ -444,6 +455,24 @@ function Composer({
   // founds a conversation: until it answers there is no conversation for a second message to join,
   // and these words stay in the box rather than opening a conversation of their own.
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
+
+  // An ask handed over while this composer is already mounted — the palette hands one from the
+  // chat screen itself — reaches the box here rather than waiting for a mount that never comes.
+  useEffect(() => {
+    if (!founding) return;
+    return watchPendingAsk(() => {
+      const handed = takePendingAsk(target.agentId);
+      if (!handed) return;
+      if (handed.send) committed.current = handed.text;
+      setText(handed.text);
+    });
+  }, [founding, target.agentId]);
+
+  useEffect(() => {
+    if (committed.current === null || committed.current !== text || disabled) return;
+    committed.current = null;
+    send([]);
+  }, [disabled, text]);
 
   useEffect(() => {
     input.current?.focus();

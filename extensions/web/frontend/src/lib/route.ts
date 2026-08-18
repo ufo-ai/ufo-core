@@ -92,9 +92,13 @@ function isSection(name: string): name is Section {
   return SECTIONS.includes(name as Section);
 }
 
+export const HOME_HASH = "#/";
+
+export const AGENTS_HASH = "#/agents";
+
 export function parseHash(hash: string): Route {
   if (hash === "#/admin") return { kind: "admin" };
-  if (hash === "#/agents") return { kind: "agents" };
+  if (hash === AGENTS_HASH) return { kind: "agents" };
   const chat = hash.match(CHAT_HASH);
   if (chat) {
     const slot = new URLSearchParams(chat[2]).get("slot");

@@ -1,10 +1,38 @@
-import { useEffect, useState } from "react";
-import { IconSearch } from "@tabler/icons-react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  IconApps,
+  IconFile,
+  IconMessage,
+  IconPlus,
+  IconRadar,
+  IconSearch,
+  IconUsers,
+  type TablerIcon,
+} from "@tabler/icons-react";
 
+import {
+  Command,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandNote,
+} from "@/components/ui/command";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { cn } from "@/lib/cn";
+import { setPendingAsk } from "@/lib/pendingAsk";
+import {
+  AGENTS_HASH,
+  HOME_HASH,
+  SECTIONS,
+  newChatHash,
+  sectionHash,
+  workspaceHash,
+  type Section,
+} from "@/lib/route";
 import { searchEverywhere, type Group } from "@/lib/search";
 import type { Agent } from "@/lib/types";
+import { SECTION_VIEWS } from "@/views/registry";
 
 /** How long a term rests before it is read. A search that fired on every keystroke would run one
  *  fan-out per letter, and the member is still typing the word the last one answered. */
@@ -12,9 +40,34 @@ const REST_MS = 200;
 
 const BLANK = "Nothing matches this search.";
 
-/** Search over the whole workspace, opened from the bar rather than standing in a column: one box
- *  and the hits under it, grouped by the kind that answered, so the reach is the same from every
- *  category. Picking a hit opens the place holding it and shuts the dialog. */
+const WORKING = "Searching…";
+
+/** The chord that opens the palette from anywhere, and closes it again. */
+const CHORD = "k";
+
+const SECTION_ICONS: Record<Section, TablerIcon> = { artifacts: IconFile, radar: IconRadar };
+
+/** Where the bar reaches, in the order it lists them. These rows are the same destinations as the
+ *  buttons beside the search glyph — the palette adds no place the nav does not already carry —
+ *  and each takes the glyph its kind is drawn with wherever a hit of that kind stands. */
+const PLACES: { label: string; hash: string; icon: TablerIcon }[] = [
+  { label: "Chat", hash: HOME_HASH, icon: IconMessage },
+  { label: "Apps", hash: AGENTS_HASH, icon: IconApps },
+  ...SECTIONS.map((section) => ({
+    label: SECTION_VIEWS[section].label,
+    hash: sectionHash(section),
+    icon: SECTION_ICONS[section],
+  })),
+  { label: "Workspace", hash: workspaceHash("team"), icon: IconUsers },
+];
+
+/** Search over the whole workspace, opened from the bar or by `⌘K`: one box, and under it what the
+ *  member can do with the term, where they can go, and what the workspace holds — grouped by the
+ *  kind that answered, so the reach is the same from every category. Arrow keys move the cursor
+ *  and Enter takes the row under it; picking a hit opens the place holding it and shuts the dialog.
+ *
+ *  Only the acts a member can express as a route or a message stand here: the palette lands them in
+ *  a chat with their words already in the composer, and the sending is theirs. */
 export function Spotlight({
   agents,
   className,
@@ -28,6 +81,24 @@ export function Spotlight({
   const [typed, setTyped] = useState("");
   const [groups, setGroups] = useState<Group[] | null>(null);
   const wanted = typed.trim();
+  /** The agent a workspace-owned act is expressed to — the main one, as the artifacts screen does. */
+  const named = agents.find((agent) => agent.main) ?? agents[0];
+
+  const show = useCallback((next: boolean) => {
+    setOpen(next);
+    if (!next) setTyped("");
+  }, []);
+
+  useEffect(() => {
+    const chord = (event: KeyboardEvent) => {
+      if (event.key !== CHORD || event.altKey || event.shiftKey) return;
+      if (!event.metaKey && !event.ctrlKey) return;
+      event.preventDefault();
+      show(!open);
+    };
+    document.addEventListener("keydown", chord);
+    return () => document.removeEventListener("keydown", chord);
+  }, [open, show]);
 
   useEffect(() => {
     if (!open || !wanted) {
@@ -44,7 +115,7 @@ export function Spotlight({
          *  workspace holding nothing, which is the one answer it must never give by accident. */
         .catch((error: unknown) => {
           if (held.signal.aborted) return;
-          setGroups([{ label: "Search", hits: [], failed: String(error) }]);
+          setGroups([{ label: "Search", icon: IconSearch, hits: [], failed: String(error) }]);
         });
     }, REST_MS);
     return () => {
@@ -53,62 +124,106 @@ export function Spotlight({
     };
   }, [open, wanted, agents]);
 
+  const take = (hash: string) => {
+    show(false);
+    onOpen(hash);
+  };
+
+  const started = named
+    ? {
+        value: "new-chat",
+        primary: "New chat",
+        icon: IconPlus,
+        run: () => take(newChatHash(named.id)),
+      }
+    : null;
+  /** The term as something to say rather than something to find: the agent it is said to, then
+   *  the words themselves, the way a chat row names its own subject. It lands in the composer of a
+   *  new chat, so the member reads what will be sent and sends it themselves. */
+  const asked =
+    named && wanted
+      ? {
+          value: "ask",
+          primary: named.name + ": " + wanted,
+          icon: IconMessage,
+          run: () => {
+            setPendingAsk(named.id, wanted, true);
+            take(newChatHash(named.id));
+          },
+        }
+      : null;
+  const lowered = wanted.toLowerCase();
+  const actions = [asked, !wanted || "new chat".includes(lowered) ? started : null].filter(
+    (action) => action !== null,
+  );
+  const places = PLACES.filter((place) => place.label.toLowerCase().includes(lowered));
+
   const answered = groups !== null;
+  const status = !wanted ? null : !answered ? WORKING : groups.length ? null : BLANK;
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (!next) setTyped("");
-      }}
-    >
+    <Dialog open={open} onOpenChange={show}>
       <DialogTrigger asChild>
-        <button type="button" aria-label="Search" className={cn(className, open && "bg-fill")}>
+        <button
+          type="button"
+          aria-label="Search"
+          aria-keyshortcuts="Meta+K Control+K"
+          className={cn(className, open && "bg-fill")}
+        >
           <IconSearch className="size-(--size-glyph)" aria-hidden />
         </button>
       </DialogTrigger>
-      <DialogContent className="w-spotlight top-1/4 gap-2xl p-2xl" aria-describedby={undefined}>
+      <DialogContent
+        className="w-spotlight gap-0 overflow-y-hidden p-0"
+        aria-describedby={undefined}
+      >
         <DialogTitle className="sr-only">Search</DialogTitle>
-        <input
-          autoFocus
-          type="search"
-          aria-label="Search"
-          placeholder="Search"
-          value={typed}
-          onChange={(event) => setTyped(event.target.value)}
-          className="w-full border-0 bg-transparent p-0 text-title text-inherit outline-none placeholder:text-ink-soft"
-        />
-        {answered && !groups.length ? (
-          <p className="m-0 text-label text-ink-soft">{BLANK}</p>
-        ) : null}
-        {(groups ?? []).map((group) => (
-          <section key={group.label} className="flex flex-col gap-2xs">
-            <h3 className="m-0 text-label font-medium text-ink-soft">{group.label}</h3>
-            {group.failed ? (
-              <p className="m-0 px-sm text-label text-ink-soft">{group.failed}</p>
+        <Command label="Search" shouldFilter={false} loop>
+          <CommandInput autoFocus placeholder="Search" value={typed} onValueChange={setTyped} />
+          <CommandList label="Results">
+            {actions.length ? (
+              <CommandGroup heading="Actions">
+                {actions.map((action) => (
+                  <CommandItem
+                    key={action.value}
+                    value={action.value}
+                    icon={action.icon}
+                    primary={action.primary}
+                    onSelect={action.run}
+                  />
+                ))}
+              </CommandGroup>
             ) : null}
-            <ul className="m-0 flex list-none flex-col gap-px p-0">
-              {group.hits.map((hit) => (
-                <li key={hit.key}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpen(false);
-                      setTyped("");
-                      onOpen(hit.hash);
-                    }}
-                    className="flex w-full items-baseline gap-sm rounded-control border-0 bg-transparent px-sm py-xs text-left text-label text-inherit hover:bg-fill"
-                  >
-                    <span className="min-w-0 truncate">{hit.primary}</span>
-                    <span className="ml-auto shrink-0 truncate font-mono text-small text-ink-soft">
-                      {hit.fact}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ))}
+            {places.length ? (
+              <CommandGroup heading="Places">
+                {places.map((place) => (
+                  <CommandItem
+                    key={place.hash}
+                    value={"place " + place.hash}
+                    icon={place.icon}
+                    primary={place.label}
+                    onSelect={() => take(place.hash)}
+                  />
+                ))}
+              </CommandGroup>
+            ) : null}
+            {(groups ?? []).map((group) => (
+              <CommandGroup key={group.label} heading={group.label}>
+                {group.failed ? <CommandNote>{group.failed}</CommandNote> : null}
+                {group.hits.map((hit) => (
+                  <CommandItem
+                    key={hit.key}
+                    value={group.label + " " + hit.key}
+                    icon={group.icon}
+                    primary={hit.primary}
+                    fact={hit.fact}
+                    onSelect={() => take(hit.hash)}
+                  />
+                ))}
+              </CommandGroup>
+            ))}
+            {status ? <CommandNote>{status}</CommandNote> : null}
+          </CommandList>
+        </Command>
       </DialogContent>
     </Dialog>
   );
