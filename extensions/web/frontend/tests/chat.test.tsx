@@ -233,22 +233,22 @@ test("a conversation reloaded while its turn runs shows the prompt, says so, and
   expect(StreamFake.last().closed).toBe(true);
 });
 
-test("the working mark is not taken down when the turn's first step lands", async () => {
+test("the working line is not taken down when the turn's first step lands", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   const opening = await screen.findByText("Thinking…");
-  const mark = opening.closest("[data-slot=marker]")!.querySelector("[data-slot=orbit]");
-  expect(mark).toBeTruthy();
+  const line = opening.closest("[data-slot=marker]")!.querySelector("[data-slot=decode-text]");
+  expect(line).toBeTruthy();
   // Nothing stands behind the line yet, so it offers no disclosure to open.
   expect(opening.closest("[data-slot=marker]")!.querySelector("svg")).toBeNull();
 
   StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
   expect(await screen.findAllByText("bash gh pr view")).toHaveLength(2);
 
-  // The same element, not one that replaced it: a remount here restarts the orbit mid-turn.
-  expect(document.querySelector("[data-slot=orbit]")).toBe(mark);
+  // The same element, not one that replaced it: a remount here cuts the glyphing short.
+  expect(document.querySelector("[data-slot=decode-text]")).toBe(line);
   expect(document.querySelector("[data-slot=marker] svg")).toBeTruthy();
 });
 

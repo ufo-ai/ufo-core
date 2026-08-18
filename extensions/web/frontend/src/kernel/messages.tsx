@@ -519,9 +519,9 @@ export function Meta({ children }: { children: ReactNode }) {
  *
  *  A turn opens on this line with nothing yet behind it, and the first tool call arrives into the
  *  same line rather than replacing it. That is why the disclosure is drawn whether or not it has
- *  steps to disclose: swapping the element the moment the first step lands would take the mark and
- *  the words down with it, restarting an orbit mid-turn and cutting the glyphing short. With
- *  nothing behind it the line carries no chevron and does not open.
+ *  steps to disclose: swapping the element the moment the first step lands would take the words
+ *  down with it and cut the glyphing short. With nothing behind it the line carries no chevron and
+ *  does not open.
  *
  *  It is not a live region: the log it stands in already announces what is added to it, and a
  *  marker that replaced its own words on every tool call would read the whole run of a turn out
@@ -567,7 +567,6 @@ function Activity({
           />
         }
       >
-        {live ? <OrbitMark /> : null}
         <MarkerContent>{live ? <DecodeLine text={summary} /> : summary}</MarkerContent>
         {steps ? (
           <IconChevronRight
@@ -674,20 +673,6 @@ function ConnectLink({ url }: { url: string }) {
     <a href={url} target="_blank" rel="noopener">
       Connect account
     </a>
-  );
-}
-
-/** The mark the portal draws while the agent is working: three lights turning on one ellipse seen
- *  nearly edge-on. They spread out of the ∵ triangle, gather back onto its vertices, hold a beat,
- *  and set off again; under reduced motion they sit parked on the triangle. `theme.css` holds the
- *  motion, the palette composites, and `--s`, the one length every dimension is a fraction of. */
-export function OrbitMark({ className }: { className?: string }) {
-  return (
-    <span aria-hidden data-slot="orbit" className={cn("shrink-0", className)}>
-      <span />
-      <span />
-      <span />
-    </span>
   );
 }
 

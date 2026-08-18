@@ -266,36 +266,6 @@ test("the reading plane's tokens survive into the built sheet", () => {
   );
 });
 
-test("the orbit mark's motion and palette composites survive into the built sheet", () => {
-  const css = builtStyles().replace(/\s+/g, "");
-  // The three lights' travel is precomputed keyframes, and each frame is a fraction of `--s`.
-  for (const name of ["ufo-orbit-0", "ufo-orbit-1", "ufo-orbit-2"]) {
-    expect(css).toContain(`@keyframes${name}{0%{transform:translate(calc(var(--s)*`);
-  }
-  expect(css).toContain("--s:var(--size-glyph)");
-  // The lights are the warm accent laid over the primary text tone, which flips with the scheme.
-  expect(css).toContain(
-    "--orbit-core:color-mix(insrgb,var(--accent-secondary)20%,var(--text-primary))",
-  );
-  expect(css).toContain(
-    "--orbit-mid:color-mix(insrgb,var(--accent-secondary)40%,var(--text-primary))",
-  );
-  // The static pose is the keyframes' 0% — the lights parked on the ∵ triangle — and the travel
-  // is granted by name only where motion is welcome, so reduced motion keeps the parked triangle.
-  expect(css).toContain(
-    "[data-slot=orbit]>span:first-child{transform:translate(calc(var(--s)*-.28),calc(var(--s)*-.15))}",
-  );
-  expect(css).toMatch(
-    /@media\(prefers-reduced-motion:no-preference\)\{\[data-slot=orbit\]>span:first-child\{animation-name:ufo-orbit-0\}/,
-  );
-  // The name alone does not move anything. A shorthand carrying every part but the name *is*
-  // `animation:none`, which a minifier is right to collapse to exactly that — taking the duration
-  // with it and leaving the mark parked in the built sheet while it still turned under the dev
-  // server. Only the longhand survives that, so the duration is asserted where it ships.
-  expect(css).toContain("animation-duration:11s");
-  expect(css).not.toMatch(/\[data-slot=orbit\]>span\{[^}]*animation:none/);
-});
-
 test("the bundled faces are Inter for the chrome and Roboto Mono for the code", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(css).toContain('--font-sans:"Inter",system-ui,sans-serif');
