@@ -931,7 +931,7 @@ extension involved is the Redis hub.
 | Concern | Multi-instance behavior |
 |---|---|
 | Database | Postgres required; SQLite is single-instance-only. |
-| Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls. Each process's DBOS executor id is its instance id, so in-flight work is attributable to a heartbeat: the executor-recovery sweep re-dispatches workflows whose executor has no fresh `runtime_instance` row, and never touches a live peer's — recovering a live workflow would double-execute it. |
+| Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls. Each process's DBOS executor id is its instance id, so in-flight work is attributable to a heartbeat: the executor-recovery sweep re-dispatches workflows whose executor has no fresh `runtime_instance` row, and never touches a live peer's — recovering a live workflow would double-execute it. A turn's claim admits only the workflow that took it, so once that workflow ends or leaves the store no dispatch reaches the row and recovery has nothing to resume: the stranded-turn reconciler cancels it. Its DBOS status is the only signal that separates it from live work — a spawned agent outlives its spawner, and a stepping turn goes minutes between row writes. |
 | Live deltas | Shared hub required (Redis hub extension); terminal frames stay durable in Postgres. |
 | Blobs | S3 backend required; the filesystem backend is single-instance-only. |
 | Sandboxes | Per-conversation, resumed across instances from the durable `sandbox_handle`; an in-cluster carrier needs its workspace root on storage every instance reaches. |

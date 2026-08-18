@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,9 +11,11 @@ from ufo import runtime_instance
 from ufo.db import workspace_tx
 from ufo.runtime_instance import (
     STALE_AFTER_SECONDS,
+    STRANDED_TURN_GRACE_SECONDS,
     CancelReconciler,
     ExecutorRecovery,
     Heartbeat,
+    StrandedTurnReconciler,
     record_fleet_seat,
 )
 from ufo.schema import tables
@@ -154,10 +157,30 @@ async def test_fleet_seat_has_no_workspace_and_counts_as_a_live_executor(db: Non
 
 @dataclass
 class _RecordingClient:
+    """Stands in for the DBOS store: `carries` maps a workflow id to the status DBOS holds for it,
+    and an id absent from it is absent from the store."""
+
     cancelled: list[str] = field(default_factory=list)
+    carries: dict[str, str] = field(default_factory=dict)
+    asked: list[list[str]] = field(default_factory=list)
 
     async def cancel_workflow_async(self, workflow_id: str) -> None:
         self.cancelled.append(workflow_id)
+
+    async def list_workflows_async(
+        self,
+        *,
+        workflow_ids: list[str],
+        status: list[str],
+        load_input: bool,
+        load_output: bool,
+    ) -> list[SimpleNamespace]:
+        self.asked.append(workflow_ids)
+        return [
+            SimpleNamespace(workflow_id=workflow_id)
+            for workflow_id in workflow_ids
+            if self.carries.get(workflow_id) in status
+        ]
 
 
 async def _agent(workspace_id: UUID) -> UUID:
@@ -183,6 +206,8 @@ async def _turn(
     status: str,
     parent_id: UUID | None,
     profile: str | None = "general_purpose",
+    attempt: str | None = None,
+    idle_seconds: float = 0,
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     terminal = None if status in ("queued", "running", "parked") else TerminalFrame(status=status)
@@ -211,8 +236,9 @@ async def _turn(
                 inbound="x",
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 parent_turn_id=parent_id,
+                running_attempt=attempt,
                 created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+                updated_at=datetime.now(UTC) - timedelta(seconds=idle_seconds),
             )
         )
     return turn_id
@@ -290,3 +316,102 @@ async def test_cancel_never_crosses_an_agent_child_boundary(db: None) -> None:
     assert await _turn_status(tied) == "cancelled"
     assert await _turn_status(peer) == "running"
     assert set(client.cancelled) == {str(tied)}
+
+
+_AGED = STRANDED_TURN_GRACE_SECONDS + 60
+
+
+async def test_stranded_reconciler_cancels_a_turn_whose_workflow_cannot_reach_it(db: None) -> None:
+    """The strand: a claimed turn whose attempt DBOS has ended or lost. Both shapes seen in the
+    wild — a workflow cancelled under it, and a workflow absent from the store — leave a row no
+    dispatch can reach, and both are terminalized."""
+    workspace_id = await _workspace()
+    agent_id = await _agent(workspace_id)
+    ended = await _turn(
+        workspace_id, agent_id, "running", None, attempt="wf-ended", idle_seconds=_AGED
+    )
+    absent = await _turn(
+        workspace_id, agent_id, "running", None, attempt="wf-absent", idle_seconds=_AGED
+    )
+    client = _RecordingClient(carries={"wf-ended": "CANCELLED"})
+    await StrandedTurnReconciler(client=client).sweep()
+    assert await _turn_status(ended) == "cancelled"
+    assert await _turn_status(absent) == "cancelled"
+    assert set(client.cancelled) == {str(ended), str(absent)}
+
+
+async def test_stranded_reconciler_spares_a_live_turn_under_a_terminal_parent(db: None) -> None:
+    """A spawned agent outlives its spawner, so a live child under a `done` parent is ordinary
+    work. Only the attempt's DBOS status decides: the child here is PENDING and survives a sweep
+    that cancels its stranded sibling."""
+    workspace_id = await _workspace()
+    agent_id = await _agent(workspace_id)
+    done_parent = await _turn(workspace_id, agent_id, "done", None)
+    live = await _turn(
+        workspace_id, agent_id, "running", done_parent, attempt="wf-live", idle_seconds=_AGED
+    )
+    sibling = await _turn(
+        workspace_id, agent_id, "running", done_parent, attempt="wf-dead", idle_seconds=_AGED
+    )
+    client = _RecordingClient(carries={"wf-live": "PENDING", "wf-dead": "SUCCESS"})
+    await StrandedTurnReconciler(client=client).sweep()
+    assert await _turn_status(live) == "running"
+    assert await _turn_status(sibling) == "cancelled"
+    assert client.cancelled == [str(sibling)]
+
+
+async def test_stranded_reconciler_spares_a_turn_that_is_merely_idle(db: None) -> None:
+    """Row freshness is not liveness: a turn stepping normally goes minutes between writes. An
+    ENQUEUED or DELAYED attempt still carries its turn, however long the row has sat."""
+    workspace_id = await _workspace()
+    agent_id = await _agent(workspace_id)
+    queued_behind = await _turn(
+        workspace_id, agent_id, "running", None, attempt="wf-enqueued", idle_seconds=_AGED * 100
+    )
+    waiting = await _turn(
+        workspace_id, agent_id, "running", None, attempt="wf-delayed", idle_seconds=_AGED * 100
+    )
+    client = _RecordingClient(carries={"wf-enqueued": "ENQUEUED", "wf-delayed": "DELAYED"})
+    await StrandedTurnReconciler(client=client).sweep()
+    assert await _turn_status(queued_behind) == "running"
+    assert await _turn_status(waiting) == "running"
+    assert client.cancelled == []
+
+
+async def test_stranded_reconciler_holds_off_inside_the_grace_window(db: None) -> None:
+    """A claim landing beside the sweep's own reads is not a strand. The row is left for a later
+    tick, and once the window passes the same row is taken."""
+    workspace_id = await _workspace()
+    agent_id = await _agent(workspace_id)
+    fresh = await _turn(workspace_id, agent_id, "running", None, attempt="wf-fresh", idle_seconds=0)
+    client = _RecordingClient()
+    await StrandedTurnReconciler(client=client).sweep()
+    assert await _turn_status(fresh) == "running"
+    assert client.asked == []
+    await StrandedTurnReconciler(client=client, grace_seconds=0).sweep()
+    assert await _turn_status(fresh) == "cancelled"
+
+
+async def test_stranded_reconciler_leaves_undispatched_turns_to_the_dispatch_sweep(
+    db: None,
+) -> None:
+    """A QUEUED or PARKED turn is re-offered under a fresh workflow id, so its current id going
+    missing is that sweep's ordinary path. Neither is a candidate, however old, and a RUNNING row
+    that never recorded a claim is not one either."""
+    workspace_id = await _workspace()
+    agent_id = await _agent(workspace_id)
+    queued = await _turn(
+        workspace_id, agent_id, "queued", None, attempt="wf-queued", idle_seconds=_AGED
+    )
+    parked = await _turn(
+        workspace_id, agent_id, "parked", None, attempt="wf-parked", idle_seconds=_AGED
+    )
+    unclaimed = await _turn(
+        workspace_id, agent_id, "running", None, attempt=None, idle_seconds=_AGED
+    )
+    client = _RecordingClient()
+    await StrandedTurnReconciler(client=client).sweep()
+    assert await _turn_status(queued) == "queued"
+    assert await _turn_status(parked) == "parked"
+    assert await _turn_status(unclaimed) == "running"
+    assert client.asked == []

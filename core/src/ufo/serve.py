@@ -133,6 +133,7 @@ from ufo.runtime_instance import (
     CancelReconciler,
     ExecutorRecovery,
     Heartbeat,
+    StrandedTurnReconciler,
     record_fleet_seat,
 )
 from ufo.sandbox.cache import (
@@ -1097,10 +1098,11 @@ def _mount_home(app: FastAPI, manifests: tuple[Manifest, ...]) -> None:
 async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run this instance's app-loop background work: the executor-recovery sweep that re-dispatches
     workflows stranded by dead peers, the cancel reconciler that cascades a cancel to the descendant
-    turns it spawned (cancelling any turn left live under a cancelled ancestor), and, when a durable
-    surface is installed, the writeback poller, the durable half of surface delivery off the hub and
-    off the turn loop. The shared poller binds each selected workspace before delivery. The
-    heartbeat is NOT here: liveness must
+    turns it spawned (cancelling any turn left live under a cancelled ancestor), the stranded-turn
+    reconciler that cancels a claimed turn whose workflow can no longer reach it, and, when a
+    durable surface is installed, the writeback poller, the durable half of surface delivery off
+    the hub and off the turn loop. The shared poller binds each selected workspace before
+    delivery. The heartbeat is NOT here: liveness must
     span the whole boot (jobs enqueue under this executor id before uvicorn starts) and survive an
     app-loop stall, so `run` drives it on a dedicated thread from the moment the seat exists, and
     retires the seat only after `DBOS.destroy` has stopped all execution — a seat freed while
@@ -1109,6 +1111,7 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
         tasks = [
             group.create_task(ExecutorRecovery().run()),
             group.create_task(CancelReconciler(client=app.state.dbos).run()),
+            group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
         ]
         for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
             if poller is not None:

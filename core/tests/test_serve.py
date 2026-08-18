@@ -258,11 +258,13 @@ async def test_serve_lifespan_waits_for_background_shutdown(
 ) -> None:
     recovery = ShutdownProbe()
     reconciler = ShutdownProbe()
+    stranded = ShutdownProbe()
     poller = ShutdownProbe()
     speaker = ShutdownProbe()
     listener = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
     monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
             dbos=object(),
@@ -274,11 +276,13 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     async with serve._serve_lifespan(app):
         await recovery.started.wait()
         await reconciler.started.wait()
+        await stranded.started.wait()
         await poller.started.wait()
         await speaker.started.wait()
         await listener.started.wait()
     assert recovery.stopped.is_set()
     assert reconciler.stopped.is_set()
+    assert stranded.stopped.is_set()
     assert poller.stopped.is_set()
     assert speaker.stopped.is_set()
     assert listener.stopped.is_set()
@@ -289,8 +293,10 @@ async def test_serve_lifespan_propagates_a_background_failure(
 ) -> None:
     recovery = FailureProbe()
     reconciler = ShutdownProbe()
+    stranded = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
     monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
             dbos=object(),

@@ -1,5 +1,5 @@
-"""The shared fleet's seat, its heartbeat, the executor-recovery sweep, and the cancel reconciler —
-the fleet-wide background sweeps every serve process runs.
+"""The shared fleet's seat, its heartbeat, the executor-recovery sweep, the cancel reconciler,
+and the stranded-turn reconciler — the fleet-wide background sweeps every serve process runs.
 
 Every live serve process holds a bare `runtime_instance` seat it heartbeats — the shared fleet has
 no single workspace to pin. The heartbeat is a per-process loop, not a shared job, so each instance
@@ -25,14 +25,18 @@ from ufo.cancellation import cancel_one_turn
 from ufo.db import owner_tx
 from ufo.o11y import log
 from ufo.schema import tables
-from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES
+from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, RUNNING
 from ufo.workspace import ws
 
 HEARTBEAT_INTERVAL_SECONDS = 2
 STALE_AFTER_SECONDS = 10
 EXECUTOR_RECOVERY_INTERVAL_SECONDS = 5
 CANCEL_RECONCILE_INTERVAL_SECONDS = 5
+STRANDED_RECONCILE_INTERVAL_SECONDS = 60
+STRANDED_TURN_GRACE_SECONDS = 300
 PENDING_WORKFLOW_SCAN_LIMIT = 1000
+CLAIMED_TURN_SCAN_LIMIT = 1000
+ADVANCING_WORKFLOW_STATUSES = ("PENDING", "ENQUEUED", "DELAYED")
 
 
 async def record_fleet_seat(instance_id: UUID) -> None:
@@ -240,3 +244,93 @@ class CancelReconciler:
 
     def _profile_child_parent(self, turn: sa.Table | sa.FromClause) -> sa.ColumnElement:
         return sa.case((turn.c.subagent_profile.is_(None), sa.null()), else_=turn.c.parent_turn_id)
+
+
+@dataclass(frozen=True)
+class StrandedTurnReconciler:
+    """Terminalize a claimed turn whose workflow can no longer advance it. A turn goes RUNNING from
+    inside its own workflow, stamping that workflow's id as `running_attempt`, and the claim admits
+    only that same attempt — so once the attempt's workflow reaches a terminal DBOS status or
+    leaves the store, no dispatch can ever reach the row again and it holds `running` forever. The
+    conversation reads it as live work, and admission folds a member's next message into a turn
+    nothing will run.
+
+    The DBOS status of the claimed attempt is the only signal that separates a stranded row from
+    live work. A turn's own family cannot: a spawned agent outlives its spawner by design, so a
+    live child under a `done` parent is ordinary. Neither can row freshness: a turn stepping
+    normally goes minutes between writes, so an idle row is not an absent one. PENDING, ENQUEUED
+    and DELAYED all mean something still carries the turn; every other status, and absence, mean
+    nothing does.
+
+    Only RUNNING rows are candidates. A QUEUED or PARKED turn belongs to the dispatch sweep, which
+    re-offers it under a fresh workflow id — its current id going missing is that sweep's ordinary
+    path, not a strand. The grace window keeps a row that has just been written out of the scan,
+    so a claim landing beside the sweep's own reads is never mistaken for one.
+
+    Cancel, not recovery: DBOS recovery re-dispatches PENDING work whose executor died, which is
+    the executor sweep's job and is already covered. A workflow that ended or vanished has nothing
+    to resume, so the turn's only remaining terminal is cancelled. `cancel_one_turn` re-reads the
+    row under its own transaction and no-ops on a turn that reached a terminal in the meantime, so
+    a sweep racing a turn's own commit cannot disturb it."""
+
+    client: DBOSClient
+    interval_seconds: float = STRANDED_RECONCILE_INTERVAL_SECONDS
+    grace_seconds: float = STRANDED_TURN_GRACE_SECONDS
+
+    async def run(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval_seconds)
+            try:
+                await self.sweep()
+            except (sa.exc.SQLAlchemyError, dbos_error.DBOSException) as error:
+                log("instance.stranded_reconcile_failed", error_class=type(error).__name__)
+
+    async def sweep(self) -> None:
+        async with owner_tx() as connection:
+            claimed = (await connection.execute(self._claimed_query())).all()
+        if len(claimed) == CLAIMED_TURN_SCAN_LIMIT:
+            log("instance.claimed_scan_at_limit", limit=CLAIMED_TURN_SCAN_LIMIT)
+        advancing = await self._advancing_attempts([row.running_attempt for row in claimed])
+        for row in claimed:
+            if row.running_attempt in advancing:
+                continue
+            with ws(row.workspace_id):
+                cancelled = await cancel_one_turn(self.client, row.id)
+            if cancelled:
+                log(
+                    "instance.stranded_turn_reconciled",
+                    turn_id=str(row.id),
+                    attempt=row.running_attempt,
+                )
+
+    def _claimed_query(self) -> sa.Select:
+        """Every RUNNING turn holding a claim the grace window has aged past, oldest first so a
+        scan that hits the limit still reaches the longest-stranded row."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=self.grace_seconds)
+        return (
+            sa.select(
+                tables.turn.c.id,
+                tables.turn.c.workspace_id,
+                tables.turn.c.running_attempt,
+            )
+            .where(
+                tables.turn.c.status == RUNNING,
+                tables.turn.c.running_attempt.is_not(None),
+                tables.turn.c.updated_at < cutoff,
+            )
+            .order_by(tables.turn.c.updated_at)
+            .limit(CLAIMED_TURN_SCAN_LIMIT)
+        )
+
+    async def _advancing_attempts(self, attempts: list[str]) -> set[str]:
+        """The subset of `attempts` DBOS still carries. An empty scan asks nothing: a workflow id
+        filter that is given no ids selects the whole store."""
+        if not attempts:
+            return set()
+        carried = await self.client.list_workflows_async(
+            workflow_ids=attempts,
+            status=list(ADVANCING_WORKFLOW_STATUSES),
+            load_input=False,
+            load_output=False,
+        )
+        return {status.workflow_id for status in carried}
