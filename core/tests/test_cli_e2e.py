@@ -166,6 +166,18 @@ def test_init_names_a_declared_deploy_key_the_environment_lacks(
     assert "OPENAI_API_KEY is unset" in result.output
 
 
+def test_init_names_an_empty_deploy_key_in_dotenv(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Path(".env").write_text("OPENAI_API_KEY=\n")
+    monkeypatch.setenv("OPENAI_API_KEY", "outer-openai")
+
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+
+    assert result.exit_code == 0, result.output
+    assert "OPENAI_API_KEY is unset" in result.output
+
+
 def test_init_stays_quiet_about_a_deploy_key_already_set(
     cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

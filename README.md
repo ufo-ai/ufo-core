@@ -16,10 +16,12 @@ system for everything else (connectors, data sources, tools, subagents, onboardi
 `make` lists every target below and the rest of the working set (`check`, `test`, `fmt`,
 `reinstall`).
 
+`make setup` creates `.env` once and leaves an existing file unchanged. Set
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` there before starting either topology.
+
 **Zero services** — SQLite, filesystem blobs, in-process hub; one process, no Docker:
 
 ```bash
-export ANTHROPIC_API_KEY=...
 make install                          # uv sync, both npm trees, git hooks
 make init EMAIL=you@example.com       # writes ufo.toml; SQLite — zero services
 make build                            # the web portal is the local client
@@ -36,8 +38,6 @@ sign-in card does. Nothing is typed or pasted, and the bearer never rides a URL.
 the standalone **ufo-egress** data plane (the Rust egress proxy, sharing serve's network namespace):
 
 ```bash
-export ANTHROPIC_API_KEY=...   # required for serve to boot; the gateway/login needs no key
-export OPENAI_API_KEY=...      # the embed backend; memory indexing and recall raise without it
 make stack STACK=1             # http://ufo-1.localhost:18080/login
 make stack STACK=2             # http://ufo-2.localhost:18180/login
 ```
@@ -52,17 +52,14 @@ carrier). `STACK` accepts 1 through 5. Each slot has its own Compose project, im
 workspace directory under `.local/ufo-N/workspaces`, volumes, ports, and `ufo-N.localhost` browser
 origin. The origin keeps session cookies separate.
 Slot 1 uses gateway :18080, serve :18710, Postgres :15541, and Redis :15543. Each next slot adds 100
-to each port. Use `make stack-logs STACK=N` for its sign-in code. Stop it with
-`make stack-down STACK=N`, which keeps the slot's image, volumes, and local workspaces: pointing a
-slot at different code — another branch, a worktree — needs
-`docker compose --project-name ufo-N up --build` to rebuild the image and
-`docker volume rm ufo-N_pgdata ufo-N_blobs && rm -rf .local/ufo-N` to clear the schema and data the
-last branch left,
-since `up` alone reuses an existing `ufo-N-dev` and serves the previous build. A worktree also
-needs the repo root's `.env` copied in, or serve boots without a model provider key and exits.
-The portal is built by npm and not tracked in git, which is why `make
-stack` builds it first; reach for `docker compose up` directly and the portal route fails with the
-command in the serve log. Host ports override via
+to each port. `make stack STACK=N` rebuilds the selected slot's image from the current code. Use
+`make stack-logs STACK=N` for its sign-in code. `make stack-down STACK=N` keeps the slot's image,
+volumes, and local workspaces. Pointing a slot at different code and clearing the prior branch's
+schema and data requires
+`docker volume rm ufo-N_pgdata ufo-N_blobs && rm -rf .local/ufo-N`.
+A worktree also needs the repo root's `.env` copied in. The portal is built by npm and not tracked
+in git, which is why `make stack` builds it first; raw `docker compose up` bypasses that build and
+the validated local-secret boundary. Host ports override via
 `UFO_PG_PORT` / `UFO_GATEWAY_PORT_HOST` /
 `UFO_SERVE_PORT_HOST` / `UFO_REDIS_PORT`, and `UFO_DEV_PACK` selects the pack the serve config names
 (`assistant_billing` adds Metronome, so the owner's billing choice can be driven locally — see

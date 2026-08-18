@@ -121,15 +121,11 @@ def _dotenv_pairs(text: str) -> list[tuple[str, str]]:
 
 
 def _load_dotenv() -> None:
-    """Load the `.env` beside the config file into the environment before any verb reads a key, so
-    exported secrets and `ufoctl init`'s minted dev secrets both arrive with no manual `export` —
-    the smooth local default. An already-set var wins (an explicit `export` overrides the file), so
-    this only fills what is unset."""
     dotenv = _dotenv_path()
     if not dotenv.exists():
         return
     for name, value in _dotenv_pairs(dotenv.read_text()):
-        os.environ.setdefault(name, value)
+        os.environ[name] = value
 
 
 @click.group()
@@ -194,7 +190,7 @@ def _missing_deploy_keys(config: Config) -> tuple[str, ...]:
         key for manifest in load_manifests(config.pack.name) for key in manifest.deploy_keys
     }
     present = (
-        {name for name, _ in _dotenv_pairs(_dotenv_path().read_text())}
+        {name for name, value in _dotenv_pairs(_dotenv_path().read_text()) if value}
         if _dotenv_path().exists()
         else set()
     )

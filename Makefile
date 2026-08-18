@@ -25,7 +25,7 @@ STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
 	UFO_SERVE_PORT_HOST=$(UFO_SERVE_PORT_HOST)
 COMPOSE := $(STACK_ENV) docker compose --project-name $(STACK_NAME)
 
-.PHONY: help install reinstall build init serve portal stack stack-down stack-logs db \
+.PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs db \
 	check fmt test test-one test-control test-web test-integration
 
 help: ## List targets
@@ -61,9 +61,29 @@ serve: ## Run surfaces + workers, no sandbox egress (needs ANTHROPIC_API_KEY; `m
 portal: ## Open the portal in a browser, signed in with this machine's CLI token
 	uv run ufoctl portal
 
-stack: build ## Bring up stack 1-5 in Docker (STACK=1)
-	@echo "Gateway: http://$(STACK_HOST):$(UFO_GATEWAY_PORT_HOST)/login"
-	$(COMPOSE) up
+setup: ## Set up local developer env
+	@set -e; if test -e .env || test -L .env; then \
+		echo ".env already exists; left unchanged."; \
+	else \
+		umask 077; \
+		set -C; \
+		cat .env.template > .env; \
+		echo "Created .env. Set API keys, then run make stack."; \
+	fi
+
+stack: ## Bring up stack 1-5 in Docker (STACK=1)
+	@test -f .env || { echo ".env is required: configure it before running make stack, with 'make setup'" >&2; exit 1; }
+	@set -e; \
+		names="$$(cut -d= -f1 .env.template)"; \
+		for name in $$names; do unset "$$name"; done; \
+		set -a; . ./.env; set +a; \
+		for name in $$names; do \
+			value="$$(printenv "$$name" || true)"; \
+			test -n "$$value" || { echo "$$name is empty in .env." >&2; exit 1; }; \
+		done; \
+		$(MAKE) build; \
+		echo "Gateway: http://$(STACK_HOST):$(UFO_GATEWAY_PORT_HOST)/login"; \
+		$(COMPOSE) up --build
 
 stack-down: ## Stop stack 1-5 (STACK=1)
 	$(COMPOSE) down

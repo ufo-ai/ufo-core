@@ -29,14 +29,12 @@ from ufo.serve import _connect_redirect_uri, _validate_requires
 BROWSER_JOIN_SECONDS = 5.0
 
 
-def test_load_dotenv_fills_unset_vars_without_overriding(
+def test_load_dotenv_makes_file_authoritative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`.env` is the smooth default: it fills what the environment leaves unset — an exported var
-    wins, a `#` comment and blank line are skipped, and a leading `export` and surrounding quotes on
-    the value are stripped — so a developer's exports and the file both work."""
     (tmp_path / ".env").write_text(
         "# a comment\n"
+        "UFO_TEST_EMPTY=\n"
         "UFO_TEST_SET=from-file\n"
         'UFO_TEST_QUOTED="quoted value"\n'
         "export UFO_TEST_EXPORTED=exported\n"
@@ -44,10 +42,14 @@ def test_load_dotenv_fills_unset_vars_without_overriding(
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("UFO_TEST_SET", "from-env")
+    monkeypatch.setenv("UFO_TEST_EMPTY", "from-env")
     monkeypatch.delenv("UFO_TEST_QUOTED", raising=False)
     monkeypatch.delenv("UFO_TEST_EXPORTED", raising=False)
+
     _load_dotenv()
-    assert os.environ["UFO_TEST_SET"] == "from-env"
+
+    assert os.environ["UFO_TEST_SET"] == "from-file"
+    assert os.environ["UFO_TEST_EMPTY"] == ""
     assert os.environ["UFO_TEST_QUOTED"] == "quoted value"
     assert os.environ["UFO_TEST_EXPORTED"] == "exported"
 

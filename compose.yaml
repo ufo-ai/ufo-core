@@ -1,4 +1,4 @@
-# The whole local stack, one command: `docker compose up`.
+# The whole local stack, one command: `make stack`.
 #
 #   postgres ─┐
 #   redis ────┤
@@ -83,13 +83,12 @@ services:
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}
       UFO_WORKSPACE_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
       # WorkOS is off locally: WORKOS_MODE=console runs a credential-free dev verifier, so
-      # `docker compose up` needs nothing. Browser and terminal both collect the email on the
+      # `make stack` needs no WorkOS secret. Browser and terminal both collect the email on the
       # gateway's own pages; in console mode the Continue-with-Google hop lands on a local form
-      # standing in for the WorkOS page, and codes are logged to `docker compose logs gateway` (the
-      # dev code is 000000). To exercise the real path (Magic Auth + Google OAuth), set
-      # WORKOS_MODE=workos and export a
-      # staging key and its client id; the redirect is the gateway's own origin, since locally
-      # nothing routes /v1/onboard from serve's port to this container.
+      # standing in for the WorkOS page, and codes are logged to `make stack-logs` (the dev code is
+      # 000000). To exercise the real path (Magic Auth + Google OAuth), set WORKOS_MODE=workos,
+      # WORKOS_API_KEY, and WORKOS_CLIENT_ID in `.env`; the redirect is the gateway's own origin,
+      # since locally nothing routes /v1/onboard from serve's port to this container.
       WORKOS_MODE: ${WORKOS_MODE:-console}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
@@ -121,7 +120,7 @@ services:
       # Shared serve enumerates every workspace for job sweeps through the RLS-bypass owner role.
       UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
       # A model provider key is REQUIRED for serve to boot — the egress-control RPC's model base
-      # needs one. Set it in your shell (export ANTHROPIC_API_KEY=…) before `docker compose up`.
+      # needs one. `make stack` loads the repository `.env` as the authoritative local source.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # The base-pinned embed backend reads this on every embed call, so memory indexing and recall
       # raise without it while the rest of the deploy runs. `ufoctl init` names it when it is unset.
