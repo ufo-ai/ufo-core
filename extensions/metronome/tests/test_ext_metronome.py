@@ -134,18 +134,14 @@ def _registry() -> ModelRegistry:
     return model_registry(config, (bedrock.manifest(),))
 
 
-def _shipper_context() -> ExtensionContext:
-    return context_for(
-        metronome.NAME,
-        frozenset((metronome.ANTHROPIC_KEY_SLOT,)),
-        model_resolver=_registry(),
-        model_job=f"{metronome.NAME}:{metronome.JOB_NAME}",
-    )
-
-
 def _shipper(recorder: _Recorder) -> metronome.UsageShipper:
     return metronome.UsageShipper(
-        ctx=_shipper_context(),
+        ctx=context_for(
+            metronome.NAME,
+            frozenset((metronome.ANTHROPIC_KEY_SLOT,)),
+            model_resolver=_registry(),
+            model_job=f"{metronome.NAME}:{metronome.JOB_NAME}",
+        ),
         transport=httpx.MockTransport(recorder.handle),
     )
 
@@ -251,16 +247,13 @@ async def _acked() -> set[tuple[UUID, int]]:
 def test_manifest_declares_two_cron_jobs_one_tool_one_section() -> None:
     declared = metronome.manifest()
     assert declared.name == "metronome"
-    usage, topup, seats = declared.jobs
+    usage, topup = declared.jobs
     assert usage.name == "usage_shipper"
     assert usage.schedule == "0 * * * * *"
     assert usage.handler is metronome._ship
     assert topup.name == "balance_topup"
     assert topup.schedule == "0 * * * * *"
     assert topup.handler is metronome._top_up
-    assert seats.name == "seat_shipper"
-    assert seats.schedule == "0 0 * * * *"
-    assert seats.handler is metronome._ship_seats
     assert [tool.name for tool in declared.tools] == ["manage_billing"]
     assert all(tool.side_effecting for tool in declared.tools)
     assert [section.name for section in declared.prompt_sections] == ["billing"]
@@ -555,107 +548,6 @@ def _tool_context(
         artifact_token_secret="",
         ext=ext,
     )
-
-
-def _seat_shipper(recorder: _Recorder) -> metronome.SeatShipper:
-    return metronome.SeatShipper(
-        ctx=_shipper_context(),
-        transport=httpx.MockTransport(recorder.handle),
-    )
-
-
-async def test_seat_job_ships_one_daily_member_count_and_establishes_no_bound(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    recorder = _Recorder()
-    monkeypatch.setattr(metronome, "INGEST_TRANSPORT", httpx.MockTransport(recorder.handle))
-    workspace_id, _, _ = await _seed()
-    runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()), registry=_registry())
-    for workspace_id in await runner.candidates(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}"):
-        await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}", workspace_id)
-    (request,) = recorder.ingests()
-    (event,) = _events(request)
-    today = datetime.now(UTC).date().isoformat()
-    assert event["transaction_id"] == f"seats:{workspace_id}:{today}"
-    assert event["customer_id"] == str(workspace_id)
-    assert event["event_type"] == "ufo_seats"
-    assert event["properties"] == {"seat_count": "1"}
-    assert all(isinstance(value, str) for value in event["properties"].values())
-    for workspace_id in await runner.candidates(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}"):
-        await runner.fire(f"{metronome.NAME}:{metronome.SEAT_JOB_NAME}", workspace_id)
-    assert len(recorder.ingests()) == 1
-
-
-async def test_the_member_count_counts_an_unseated_member(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The count is the roster, not the seated subset: nothing bounds seats on this plan, so a
-    member left unseated by an older deploy is still a member the count reports."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, _, _ = await _seed()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                email="late@example.com",
-                is_admin=False,
-                seated_at=None,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    recorder = _Recorder()
-    with ws(workspace_id):
-        await _seat_shipper(recorder).run()
-    (event,) = _events(recorder.ingests()[0])
-    assert event["properties"] == {"seat_count": "2"}
-
-
-async def test_seat_job_reships_after_a_stale_mark(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, _, _ = await _seed()
-    recorder = _Recorder()
-    shipper = _seat_shipper(recorder)
-    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
-    with ws(workspace_id):
-        await shipper.ctx.store.put(metronome.SEAT_SHIPPED_KEY, yesterday)
-        await shipper.run()
-    (event,) = _events(recorder.ingests()[0])
-    today = datetime.now(UTC).date().isoformat()
-    assert event["transaction_id"] == f"seats:{workspace_id}:{today}"
-    assert event["properties"] == {"seat_count": "1"}
-
-
-async def test_seat_job_failed_post_leaves_no_mark_then_reships_the_same_id(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, _, _ = await _seed()
-    failing = _Recorder(status=500)
-    with ws(workspace_id), pytest.raises(metronome.MetronomeError):
-        await _seat_shipper(failing).run()
-    recorder = _Recorder()
-    with ws(workspace_id):
-        await _seat_shipper(recorder).run()
-    (failed_event,) = _events(failing.ingests()[0])
-    (event,) = _events(recorder.ingests()[0])
-    assert event["transaction_id"] == failed_event["transaction_id"]
-    with ws(workspace_id):
-        await _seat_shipper(recorder).run()
-    assert len(recorder.ingests()) == 1
-
-
-async def test_seat_job_missing_token_fails_loud(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(metronome.METRONOME_BEARER_TOKEN_ENV, raising=False)
-    workspace_id, _, _ = await _seed()
-    recorder = _Recorder()
-    with ws(workspace_id), pytest.raises(RuntimeError, match="METRONOME_BEARER_TOKEN"):
-        await _seat_shipper(recorder).run()
-    assert recorder.ingests() == []
 
 
 async def test_byok_label_flips_with_the_stored_key_and_stays_per_workspace(
@@ -1666,26 +1558,6 @@ async def test_autopay_refuses_to_promise_a_refill_without_a_card(
             autopay_dollars=50,
             autopay_below_dollars=10,
         )
-
-
-async def test_the_seat_job_asks_for_the_token_only_when_a_snapshot_is_due(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A deploy that meters usage without selling a plan has no bearer token. Reading it before the
-    day's mark would fail this job every hour instead of once a day, for a tick with nothing to do.
-    The usage job cannot defer the same way, because its work check mints."""
-    monkeypatch.delenv(metronome.METRONOME_BEARER_TOKEN_ENV, raising=False)
-    workspace_id, _agent_id, _conversation_id = await _seed()
-    recorder = _Recorder()
-    shipper = metronome.SeatShipper(
-        ctx=_shipper_context(), transport=httpx.MockTransport(recorder.handle)
-    )
-    with ws(workspace_id):
-        await shipper.ctx.store.put(
-            metronome.SEAT_SHIPPED_KEY, datetime.now(UTC).date().isoformat()
-        )
-        await shipper.run()
-    assert recorder.requests == []
 
 
 async def test_a_second_refill_the_workspace_needs_is_not_replayed(

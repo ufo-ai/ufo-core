@@ -9,12 +9,6 @@ undercounting. Intents are acknowledged only after Metronome accepts the batch. 
 floor recorded on the first run bounds the initial backfill to `BACKFILL_WINDOW_DAYS`; it never
 moves after, so a settled row ships however long it waited.
 
-The seat job ships one member-count snapshot per day under `transaction_id =
-"seats:<workspace>:<date>"` — snapshots self-correct on the next day's event, so a lost mark can
-never accumulate an undercount. Nothing is gated on the count: the plan is one flat fee per
-workspace with unlimited members, so nothing here bounds who the agent answers and the count is
-reported for outreach, never enforcement.
-
 Every usage event is labelled `byok`: a workspace holding its own key for the provider serving
 the model — `anthropic_api_key` (declared here so the standard `request_credentials` chat handoff
 can fill it), `bedrock_api_key`, whatever a provider extension declares — pays that provider
@@ -76,8 +70,6 @@ from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection, RouteSpec
 from ufo.sdk.o11y import log, warn
 from ufo.sdk.seats import (
-    Seats,
-    SeatSnapshot,
     member_by_email,
     member_is_admin,
     member_workspaces,
@@ -88,8 +80,6 @@ NAME = "metronome"
 VERSION = "0.1.0"
 JOB_NAME = "usage_shipper"
 JOB_SCHEDULE = "0 * * * * *"
-SEAT_JOB_NAME = "seat_shipper"
-SEAT_JOB_SCHEDULE = "0 0 * * * *"
 MICRO_USD_PER_USD = 1_000_000
 TOPUP_REFUSED_AT_KEY = "topup_refused_at"
 TOPUP_ATTEMPT_KEY = "topup_attempt"
@@ -112,8 +102,6 @@ STRIPE_SECRET_KEY_ENV = "STRIPE_SECRET_KEY"
 STRIPE_PORTAL_CONFIGURATION_ENV = "STRIPE_BILLING_PORTAL_CONFIGURATION_ID"
 EVENT_TYPE = "ufo_usage"
 ANTHROPIC_KEY_SLOT = "anthropic_api_key"
-SEAT_EVENT_TYPE = "ufo_seats"
-SEAT_SHIPPED_KEY = "seats_shipped_date"
 BATCH_EVENTS = 100
 INGEST_TIMEOUT_SECONDS = 30
 BACKFILL_WINDOW_DAYS = 7
@@ -290,57 +278,11 @@ async def _ship(ctx: ExtensionContext) -> None:
     await UsageShipper(ctx=ctx, transport=INGEST_TRANSPORT).run()
 
 
-@dataclass(frozen=True)
-class SeatShipper:
-    """Ship one member-count snapshot per day. The transaction_id is the workspace-day, so a retry
-    after a failed POST re-sends within Metronome's keep-first dedup, and the next day's snapshot
-    corrects whatever a stale first event froze — snapshots never accumulate an undercount. The
-    count is the roster core owns; this establishes no bound, because the plan gates nothing on it.
-    """
-
-    ctx: ExtensionContext
-    transport: httpx.AsyncBaseTransport | None = None
-
-    async def run(self) -> None:
-        """The token is read only once the day's snapshot is actually due, so a deploy that meters
-        usage without selling a plan fails one tick a day rather than one an hour. The usage job
-        cannot do the same: its work check is the export seam, and that seam mints."""
-        today = datetime.now(UTC).date().isoformat()
-        if await self.ctx.store.get(SEAT_SHIPPED_KEY) == today:
-            return
-        token = _require_env(METRONOME_BEARER_TOKEN_ENV)
-        workspace_id = self.ctx.store.workspace_id
-        async with self.ctx.transaction() as connection:
-            snapshot = await Seats(workspace_id).snapshot(connection)
-        await _ensure_metronome_customer(self.ctx, token, self.transport)
-        await _ingest(token, [self._event(snapshot, today)], self.transport)
-        log(
-            "metronome.seats_shipped",
-            workspace_id=str(workspace_id),
-            seat_count=len(snapshot.members),
-        )
-        await self.ctx.store.put(SEAT_SHIPPED_KEY, today)
-
-    def _event(self, snapshot: SeatSnapshot, today: str) -> dict[str, object]:
-        workspace_id = str(self.ctx.store.workspace_id)
-        return {
-            "transaction_id": f"seats:{workspace_id}:{today}",
-            "customer_id": workspace_id,
-            "event_type": SEAT_EVENT_TYPE,
-            "timestamp": _rfc3339(datetime.now(UTC)),
-            "properties": {"seat_count": str(len(snapshot.members))},
-        }
-
-
-async def _ship_seats(ctx: ExtensionContext) -> None:
-    await SeatShipper(ctx=ctx, transport=INGEST_TRANSPORT).run()
-
-
 class BillingConfig(BaseModel):
     """The three settings the billing workflow cannot run without, read and validated once at the
     entry to a tool call or a tick — before any provider object exists, so a half-configured deploy
     can never leave a Stripe Customer behind and then fail on the portal configuration. Every
-    missing name is reported at once rather than one per attempt. The usage and seat shippers read
+    missing name is reported at once rather than one per attempt. The usage shipper reads
     only the bearer token directly: a deploy that meters usage without selling a plan must keep
     shipping, so they never depend on this."""
 
@@ -641,7 +583,7 @@ async def _ensure_metronome_customer(
 ) -> None:
     """Make sure a live Metronome customer carries this workspace's UUID as an ingest alias.
 
-    Every usage and seat event is stamped `customer_id = <workspace uuid>`, and Metronome resolves
+    Every usage event is stamped `customer_id = <workspace uuid>`, and Metronome resolves
     that through the alias — with no customer holding it, each event is accepted and attributed to
     nobody, so metering stops with nothing to see. The alias is read every tick rather than
     remembered: a customer archived, or a bearer token moved to another account, leaves a stored id
@@ -961,12 +903,6 @@ def manifest() -> Manifest:
                 name=TOPUP_JOB_NAME,
                 schedule=TOPUP_JOB_SCHEDULE,
                 handler=_top_up,
-                candidates=member_workspaces(),
-            ),
-            JobSpec(
-                name=SEAT_JOB_NAME,
-                schedule=SEAT_JOB_SCHEDULE,
-                handler=_ship_seats,
                 candidates=member_workspaces(),
             ),
         ),

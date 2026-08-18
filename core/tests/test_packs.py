@@ -81,9 +81,7 @@ def test_activating_the_assistant_billing_pack_brings_up_the_billing_surface() -
     assert [m.name for m in manifests] == [*assistant_billing.EXTENSIONS, assistant_billing.NAME]
     metronome = next(m for m in manifests if m.name == "metronome")
     assert "manage_billing" in {tool.name for tool in metronome.tools}
-    assert {"usage_shipper", "seat_shipper", "balance_topup"} <= {
-        job.name for job in metronome.jobs
-    }
+    assert {"usage_shipper", "balance_topup"} <= {job.name for job in metronome.jobs}
     assert "billing" in {section.name for section in metronome.prompt_sections}
 
 

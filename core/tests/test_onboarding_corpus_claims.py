@@ -199,11 +199,11 @@ CLAIMS = (
         pattern=(r'sa\.Column\(\s*\n?\s*"seated_at".*server_default=sa\.func\.now\(\)'),
     ),
     Claim(
-        claim="members are unlimited and the count is only ever reported",
+        claim="what a workspace is billed for is what it spent, never how many people it holds",
         corpus="references/billing-and-seats.md",
         phrase="members are unlimited",
         source=METRONOME,
-        pattern=r'"properties": \{"seat_count": str\(len\(snapshot\.members\)\)\}',
+        pattern=r'"priced_micro_usd": str\(export\.priced_micro_usd\)',
     ),
     Claim(
         claim="a spent balance refuses the turn rather than queueing it",

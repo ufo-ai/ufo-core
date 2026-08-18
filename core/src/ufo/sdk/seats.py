@@ -11,9 +11,6 @@ from ufo.seats import (
     Seats as Seats,
 )
 from ufo.seats import (
-    SeatSnapshot as SeatSnapshot,
-)
-from ufo.seats import (
     member_by_email as member_by_email,
 )
 from ufo.seats import (

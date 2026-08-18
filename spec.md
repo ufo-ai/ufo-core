@@ -810,10 +810,9 @@ spend reaches the ledger at park or terminal, so a request fanning out into help
 a round per helper. The reserve is the headroom that absorbs it, and it is sized by the deploy.
 
 Seats decide who the agent
-answers, and nothing bounds how many hold one: the plan is one flat fee per workspace with
-unlimited members, so the daily member count a billing extension ships is for outreach, never
-enforcement. A member holds a seat from creation and an admin revokes it — the `member` kind's
-admin-gated apply — to remove that person's access. Core owns the rules: refusal at admission,
+answers, and nothing bounds how many hold one: a workspace pays for what it spends, so no count of
+members is shipped, rated, or enforced anywhere. A member holds a seat from creation and an admin
+revokes it — the `member` kind's admin-gated apply — to remove that person's access. Core owns the rules: refusal at admission,
 per-round park on revocation, and the last seated admin's irrevocable seat.
 
 A member surface that could not resolve its speaker to a member is refused outright, on every
