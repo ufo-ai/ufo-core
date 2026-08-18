@@ -817,7 +817,7 @@ test("an app's Scheduled tab lists that app's tasks, and a row opens inside the 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const dialog = await openAgentSettings("assistant", "Scheduled");
 
