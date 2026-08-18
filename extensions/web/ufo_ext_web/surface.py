@@ -1614,6 +1614,12 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     prepared-intent lane. A colleague's row also names who spoke it, which is the one fact the
     member cannot get from the title.
 
+    A conversation this member cannot name is not listed. `title` is the member's own opening words,
+    so a conversation with none was opened by something other than a member speaking — a probe, a
+    provisioning run — and holds nothing they can read; and the listing answers the same empty title
+    for a conversation whose audience shuts them out. Both are a nameless row leading to a screen
+    that says only that it is empty.
+
     Every row carries `surface` and the surface's own name for it, never one string collapsing the
     two: the rail draws a glyph off the surface and reads the label as the words, and a Slack
     conversation in `#ops` would otherwise arrive as `#ops` with nothing saying it came from
@@ -1642,6 +1648,8 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
                 if bound is not None:
                     ChatRecord.model_validate(bound)
                 elif entry.summary.surface == SURFACE_WEB or not entry.readable:
+                    continue
+                if not entry.title:
                     continue
                 speakers = [who.sender or who.email for who in entry.speakers]
                 rows.append(

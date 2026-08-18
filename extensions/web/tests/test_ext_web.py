@@ -4608,6 +4608,41 @@ async def test_the_rail_groups_the_members_own_conversations_and_everyone_elses(
     assert peer_rows[str(mine_id)]["speaker"] == "owner@example.com"
 
 
+async def test_a_conversation_the_member_cannot_name_is_not_railed(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A conversation this member cannot name is not a row. `title` is their own opening words, so
+    one with none was opened by something other than a member speaking — a probe, a provisioning
+    run — and holds nothing to read: railed, it is a blank line leading to a screen that says only
+    that it is empty."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    named_id, _ = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="ok"),
+        title="Ship the release",
+    )
+    nameless_id, _ = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text=""),
+        title="",
+    )
+
+    rail = await client.get("/surface/web/api/chats", headers=cookie)
+    assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(named_id)]
+
+    # The row is hidden, never destroyed: its permalink still resolves the conversation it names.
+    reached = await client.get(f"/surface/web/api/chats?conversation={nameless_id}", headers=cookie)
+    assert reached.status_code == 200
+
+
 async def test_an_answer_into_a_fresh_conversation_is_refused(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
