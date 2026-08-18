@@ -1094,6 +1094,27 @@ async def test_recall_blend_promotes_the_semantically_closer_fact(db: None) -> N
     assert [item.memory_id for item in recalled] == [close, far]
 
 
+async def test_recall_keeps_a_row_worded_by_part_of_a_whole_sentence(db: None) -> None:
+    """What the cosine floor's lexical exemption rests on: a member types a sentence, and the row
+    that shares some of its words stands even though its embedding sits at right angles to the
+    query. A leg demanding every term words nothing a member ever asks, which leaves the floor
+    cutting on distance alone — the terse phrasings of the `issue_recall` corpus lost their whole
+    related set that way."""
+    workspace_id = await _workspace()
+    worded = await _seed_item(
+        workspace_id, SHARED_SUBJECT, "the refund window is thirty days", vec((1, 1.0))
+    )
+
+    recalled = await _store(StubEmbed(vec((0, 1.0))), workspace_id).recall(
+        "ok, file an issue for the refund window confusing people",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
+
+    assert [item.memory_id for item in recalled] == [worded]
+
+
 async def test_fresh_fact_recalls_before_indexing_then_via_the_index(db: None) -> None:
     """Immediacy: a just-committed fact is recallable before the index job derives its chunks — the
     un-embedded tail's lexical leg surfaces it. After the indexer stamps its digest, the index path

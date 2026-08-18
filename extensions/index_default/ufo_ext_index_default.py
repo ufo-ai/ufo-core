@@ -3,7 +3,11 @@
 Every deploy needs an index, so this extension is base-pinned and registers `IndexBackendSpec`
 name `"default"` — the backend core resolves when `memory.index_backend` is unset. One
 `DefaultIndex` selects its SQL by the connection dialect: Postgres tsvector/GIN + pgvector
-halfvec/HNSW, SQLite FTS5 + brute-force cosine. Dialect-only types (halfvec, tsvector, FTS5) never
+halfvec/HNSW, SQLite FTS5 + brute-force cosine. Both lexical legs score term overlap and rank by it
+— `plainto_tsquery` normalizes and stems, then its `&` becomes `|`; FTS5 gets the same terms joined
+by `OR` — so a member's sentence words the chunks that share its words rather than only a chunk
+holding every one of them, which is what a BM25 backend answers and what recall's cosine floor reads
+as evidence a row was matched by words. Dialect-only types (halfvec, tsvector, FTS5) never
 leave this module — `Chunk`/`Hit`/`IndexScope` stay dialect-neutral. It owns the `chunk`/`chunk_fts`
 tables (its migration), reached through the workspace-scoped `transaction()` core hands the
 factory, and prunes a scope's chunks outside a keep-set so a re-chunked owner leaves no orphan.
@@ -77,11 +81,13 @@ UPSERT_PG = sa.text(
 )
 LEXICAL_PG = sa.text(
     """
+    with ask as (
+      select replace(plainto_tsquery('english', :query)::text, ' & ', ' | ')::tsquery as terms
+    )
     select chunk_digest, owner_kind, owner_id, subject, ordinal, text,
-           ts_rank(tsv, plainto_tsquery('english', :query)) as score
-    from chunk
-    where subject = any(:subjects) and owner_kind = :owner_kind
-      and tsv @@ plainto_tsquery('english', :query)
+           ts_rank(tsv, ask.terms) as score
+    from chunk, ask
+    where subject = any(:subjects) and owner_kind = :owner_kind and tsv @@ ask.terms
     order by score desc
     limit :limit
     """
@@ -259,7 +265,7 @@ class DefaultIndex:
                 ).mappings()
                 return tuple(_hit(row, row["score"]) for row in rows)
             literal_terms = query.replace('"', " ").split()
-            match = " ".join(f'"{term}"' for term in literal_terms)
+            match = " OR ".join(f'"{term}"' for term in literal_terms)
             if not match:
                 return ()
             rows = (

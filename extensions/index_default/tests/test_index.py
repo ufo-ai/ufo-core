@@ -98,6 +98,45 @@ async def test_lexical_recalls_through_punctuated_queries(
         assert await backend.lexical(query, frozenset({SUBJECT}), "memory_item", 10) == (), query
 
 
+async def test_lexical_words_a_chunk_holding_only_some_of_the_query_terms(
+    ambient_workspace: None, database_url: str
+) -> None:
+    """Term overlap, not a conjunction. A member's sentence carries words no one chunk holds all of,
+    so a leg that demanded every term would word nothing a member ever asks — and recall's cosine
+    floor, which stands aside for a row some lexical leg matched, would then cut on distance alone.
+    The chunk sharing more of the query's terms leads the one sharing fewer, and a query sharing
+    none still matches nothing."""
+    backend = DefaultIndex(transaction=workspace_tx)
+    await backend.upsert(
+        (
+            Chunk(
+                "d-orders",
+                "memory_item",
+                "m1",
+                SUBJECT,
+                0,
+                "payment retries duplicate an order",
+                vec((0, 1.0)),
+            ),
+            Chunk("d-lookup", "memory_item", "m2", SUBJECT, 0, "order lookup", vec((0, 1.0))),
+            Chunk(
+                "d-export",
+                "memory_item",
+                "m3",
+                SUBJECT,
+                0,
+                "csv export truncates large accounts",
+                vec((0, 1.0)),
+            ),
+        )
+    )
+    hits = await backend.lexical(
+        "payment retries breaking order", frozenset({SUBJECT}), "memory_item", 10
+    )
+    assert [hit.chunk_digest for hit in hits] == ["d-orders", "d-lookup"]
+    assert await backend.lexical("qzxlv wkbrm", frozenset({SUBJECT}), "memory_item", 10) == ()
+
+
 async def test_foreign_subject_is_excluded(ambient_workspace: None, database_url: str) -> None:
     backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
