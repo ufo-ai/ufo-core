@@ -171,7 +171,7 @@ ceremonial.
 
 - **The model has no apply verb, and a click never becomes a turn.** A gated apply refuses with
   `{proposal, status: pending}`; approval is a surface interaction, `ConnectClick`-shaped (direct
-  non-turn side effect), never `AnswerClick`-shaped (which would re-admit the model into the
+  non-turn side effect), never `AnswerSubmit`-shaped (which would re-admit the model into the
   decision path). A gated act on a surface with no decision path refuses visibly; web parity
   ships with the ref.
 - **The diff is the resolved effect** — the values the apply will actually use, never the

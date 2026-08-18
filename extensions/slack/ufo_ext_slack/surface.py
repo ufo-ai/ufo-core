@@ -60,13 +60,20 @@ there from the turn's first message; no later one repeats it, and a reporter tha
 past its first checkpoint posts bare — the footer belongs to the turn's first message, which that
 reporter cannot be sending.
 
-A reply whose turn ended by asking the user (`Writeback.question`) renders the whole ask as Block
-Kit — the title, every question, and each single-choice question's options as a button row; a
-richer question (multi-select, free-text, attachments, too many options) lists its options as text
-and the member answers in the thread. The `interactive` route receives a click, admits the answer
-as the conversation's next turn (idempotent per question — the first click on a question's row
-wins), and rewrites that row into the chosen answer with who gave it via `chat.update`, echoing the
-message's own delivered blocks so the rewrite never re-renders content Slack already accepted.
+A reply whose turn ended by asking the user (`Writeback.question`) renders the whole ask as one
+Block Kit form — the title, a control per question (radio buttons for a single choice, checkboxes
+for a multi-select, a text box for free text), and one submit button for all of them. The controls
+sit in input blocks, which dispatch nothing as they change, so a selection is local to the member's
+own client: they switch a choice, tick and untick values, and retype until the answer reads right,
+and this surface hears none of it. Only the submit is a commit. The `interactive` route receives it,
+reads every control's held value out of the payload's `state` (each control's `block_id` names its
+question's index, its label is the question), admits them together as the conversation's next turn
+(idempotent per question message — the first submit wins), and rewrites the controls into the
+answers that were admitted, with who submitted them, via `chat.update`, echoing the message's own
+delivered blocks so the rewrite never re-renders content Slack already accepted. An ask holding one
+question the form cannot express — an attachment, an option group wider than Slack takes — renders
+whole as prose and the member answers by replying in the thread, which answers any question
+whatever controls the message shows.
 
 Install has two paths, both landing the same per-workspace bot token and identity record. The
 preferred one is OAuth on the deploy's own Slack app: its client id, client secret, and signing
@@ -137,6 +144,7 @@ from ufo.sdk.surfaces import (
     WORKSPACE_WRITE_MAX_BYTES,
     Admitted,
     AmbientMessage,
+    AskQuestion,
     AskUserInput,
     BlobStore,
     ConnectRequest,
@@ -145,6 +153,7 @@ from ufo.sdk.surfaces import (
     CredentialRequestState,
     CredentialSlotUnset,
     MidTurnReply,
+    QuestionOption,
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
@@ -733,11 +742,21 @@ RESUME_NOTICE_LINE = (
     "The service restarted during this turn. The work resumed from where it stopped."
 )
 
-ASK_ACTION_ID_PREFIX = "ask:"
+ASK_BLOCK_ID_PREFIX = "ask:"
+ASK_SUBMIT_ACTION_ID = "ask_submit"
+ASK_SUBMIT_TEXT = "Submit"
+ASK_PROSE_HINT = "_Answer by replying in this thread._"
+ASK_MULTI_SELECT_NOTE = "_Select all that apply._"
+ASK_EMPTY_SUBMIT_TEXT = "Choose an answer before you submit."
+ASK_SUBMITTED_LINE = "✅ *{question}* — {answer}"
+ASK_UNANSWERED_LINE = "*{question}* — no answer"
+ASK_SUBMITTED_BY_LINE = "Submitted by <@{user}>"
 CONNECT_ACTION_ID = "connect"
-MAX_ANSWER_BUTTONS = 10
+MAX_ANSWER_OPTIONS = 10
+"""Slack's own ceiling on a radio button or checkbox group; a wider question renders as prose."""
 SLACK_BUTTON_TEXT_LIMIT = 75
-SLACK_BUTTON_VALUE_LIMIT = 2_000
+SLACK_OPTION_TEXT_LIMIT = 75
+SLACK_INPUT_LABEL_LIMIT = 2_000
 
 SLACK_REPLAY_SECONDS = 300
 MAX_SLACK_EVENT_BYTES = 1024 * 1024
@@ -1183,55 +1202,109 @@ def _mrkdwn_section(text: str) -> dict[str, object]:
 
 
 def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] | None:
-    """The rendered ask for a reply whose turn ended on a question: the title, then every question
-    as its own section, each single-choice question followed by a button row — an option's
-    description, which a button cannot carry, joins the section. Each button's `value` carries the
-    answer and, on its own line beneath it, the question it answers — answer-first, so the value
-    cap cuts into the question and never the answer — and the interactive route never re-parses
-    the message. A richer question (multi-select, free-text, attachments, more options than a row
-    holds) lists its options in the section and the member answers by replying in the thread, the
-    flow every question supports regardless."""
+    """The rendered ask for a reply whose turn ended on a question: the title, then one input block
+    per question — radio buttons for a single choice, checkboxes for a multi-select, a text box for
+    a free-text answer — and one submit button for the whole ask.
+
+    The controls hold the member's selection in their own client. An input block dispatches nothing
+    as it changes, so a member switches a choice, ticks and unticks values, and types until the
+    answer reads right, and this surface hears none of it: only the submit arrives, carrying every
+    control's held value in Slack's `state.values`. Each control's `block_id` names its question's
+    index and its label is the question it asks, so the submit reads back what was answered and
+    which question each answer belongs to without any record of its own.
+
+    An ask holding one question the form cannot express — an attachment, an option group wider than
+    Slack takes, an option label past the option ceiling — renders whole as prose that lists every
+    question with its options, and the member answers by replying in the thread, the flow every
+    question supports regardless."""
     if question is None:
         return None
-    rendered: list[dict[str, object]] = [_mrkdwn_section(f"*{question.title}*")]
-    for q_index, ask in enumerate(question.questions):
-        lines = [f"*{ask.header}* — {ask.question}" if ask.header else ask.question]
-        described = [option for option in ask.options or () if option.description]
-        buttonable = bool(
-            ask.options
-            and len(ask.options) <= MAX_ANSWER_BUTTONS
-            and not ask.multi_select
-            and not ask.free_text_only
-            and not ask.allow_attachments
-        )
-        if buttonable:
-            lines.extend(f"• {option.label} — {option.description}" for option in described)
-            rendered.append(_mrkdwn_section("\n".join(lines)))
-            rendered.append(
+    controls = [_ask_control(index, ask) for index, ask in enumerate(question.questions)]
+    title = _mrkdwn_section(f"*{question.title}*")
+    if any(control is None for control in controls):
+        return [
+            title,
+            *(_ask_prose(ask) for ask in question.questions),
+            _mrkdwn_section(ASK_PROSE_HINT),
+        ]
+    return [
+        title,
+        *(control for control in controls if control is not None),
+        {
+            "type": "actions",
+            "elements": [
                 {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": option.label[:SLACK_BUTTON_TEXT_LIMIT],
-                            },
-                            "action_id": f"{ASK_ACTION_ID_PREFIX}{q_index}:{o_index}",
-                            "value": f"{option.label}\n{ask.question}"[:SLACK_BUTTON_VALUE_LIMIT],
-                        }
-                        for o_index, option in enumerate(ask.options or ())
-                    ],
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ASK_SUBMIT_TEXT},
+                    "action_id": ASK_SUBMIT_ACTION_ID,
                 }
+            ],
+        },
+    ]
+
+
+def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
+    """One question as an input block, or None where the form cannot carry it: an attachment has no
+    control, and an option group Slack will not take renders as prose rather than a truncated one.
+    An option's description, which a choice carries natively, rides the option; a free-text question
+    given options carries them as the box's hint, since they guide the answer rather than bound
+    it."""
+    if ask.allow_attachments:
+        return None
+    label = f"{ask.header} — {ask.question}" if ask.header else ask.question
+    block_id = f"{ASK_BLOCK_ID_PREFIX}{index}"
+    control: dict[str, object] = {
+        "type": "input",
+        "block_id": block_id,
+        "label": {"type": "plain_text", "text": label[:SLACK_INPUT_LABEL_LIMIT]},
+    }
+    if not ask.options or ask.free_text_only:
+        control["element"] = {
+            "type": "plain_text_input",
+            "action_id": block_id,
+            "multiline": True,
+        }
+        if ask.options:
+            suggested = "\n".join(
+                f"{option.label} — {option.description}" if option.description else option.label
+                for option in ask.options
             )
-            continue
-        for option in ask.options or ():
-            suffix = f" — {option.description}" if option.description else ""
-            lines.append(f"• {option.label}{suffix}")
-        if ask.multi_select:
-            lines.append("_Select all that apply — answer by replying in this thread._")
-        rendered.append(_mrkdwn_section("\n".join(lines)))
+            control["hint"] = {"type": "plain_text", "text": suggested[:SLACK_INPUT_LABEL_LIMIT]}
+        return control
+    if len(ask.options) > MAX_ANSWER_OPTIONS or any(
+        len(option.label) > SLACK_OPTION_TEXT_LIMIT for option in ask.options
+    ):
+        return None
+    control["element"] = {
+        "type": "checkboxes" if ask.multi_select else "radio_buttons",
+        "action_id": block_id,
+        "options": [_ask_option(option) for option in ask.options],
+    }
+    return control
+
+
+def _ask_option(option: QuestionOption) -> dict[str, object]:
+    rendered: dict[str, object] = {
+        "text": {"type": "plain_text", "text": option.label},
+        "value": option.label,
+    }
+    if option.description:
+        rendered["description"] = {
+            "type": "plain_text",
+            "text": option.description[:SLACK_OPTION_TEXT_LIMIT],
+        }
     return rendered
+
+
+def _ask_prose(ask: AskQuestion) -> dict[str, object]:
+    lines = [f"*{ask.header}* — {ask.question}" if ask.header else ask.question]
+    lines.extend(
+        f"• {option.label} — {option.description}" if option.description else f"• {option.label}"
+        for option in ask.options or ()
+    )
+    if ask.multi_select:
+        lines.append(ASK_MULTI_SELECT_NOTE)
+    return _mrkdwn_section("\n".join(lines))
 
 
 def slack_connect_blocks(
@@ -3161,16 +3234,25 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
 
 
 @dataclass(frozen=True)
-class AnswerClick:
-    """A verified button click on an ask_user question, reduced to what admission and the message
-    rewrite need. The button `value` rides the answer's label and, on the lines beneath it, the
-    question it answers — absent from a value that carries the label alone; the question's index
-    (from the `action_id`) keys admission per question, so each question's row takes its own first
-    answer. The message's delivered `blocks` and the clicked block's id let the rewrite swap
-    exactly the answered row while echoing everything else back unchanged. `reply_root` is the
-    message the answer's own replies thread under: the question message's thread root, since the
-    question message is itself a reply and Slack takes a thread's parent rather than a reply's
-    timestamp."""
+class SubmittedAnswer:
+    """One question of a submitted ask form: the control's block id, the question its label asked,
+    and what the member's own client held for it — empty where they left that question alone."""
+
+    block_id: str
+    question: str
+    answer: str
+
+
+@dataclass(frozen=True)
+class AnswerSubmit:
+    """A verified submit on an ask_user form, reduced to what admission and the message rewrite
+    need. Every question the message still carries arrives at once, in the order it was rendered,
+    because the submit payload brings the whole form's state — so one submit is one answer to the
+    whole ask and the selections that led to it cost nothing. The message's delivered `blocks` and
+    the submit row's own block id let the rewrite swap the controls for what was sent while echoing
+    everything else back unchanged. `reply_root` is the message the answer's own replies thread
+    under: the question message's thread root, since the question message is itself a reply and
+    Slack takes a thread's parent rather than a reply's timestamp."""
 
     slack_user_id: str
     channel: str
@@ -3179,10 +3261,8 @@ class AnswerClick:
     message_ts: str
     reply_root: str
     message_text: str
-    question_index: int
-    label: str
-    question: str | None
-    block_id: str
+    answers: tuple[SubmittedAnswer, ...]
+    submit_block_id: str
     blocks: tuple[Mapping[str, object], ...]
 
 
@@ -3198,16 +3278,18 @@ class ConnectClick:
 
 
 async def interactive(ctx: SurfaceContext, request: Request) -> Response:
-    """Slack interactivity ingest: verify the signed form payload, decode a click on an ask_user
-    answer button, admit the answer as the conversation's next turn — idempotent per question
-    message, so a double click or a second member's click joins the turn the first click won — and
-    rewrite the buttons into the winning answer with who answered. Only the click whose exact body
-    the answer key stored (`admitted_body` — the turn it opened or the queue row it landed as)
-    rewrites, so a losing click never displays an answer the agent won't see. The thread status
-    starts on a different line, the one admission draws: all clicks on a question row share its
-    answer key, so the click that resumed the parked turn opened its run and every other — a second
-    member's, a double tap, a retry of the winner — joins the run it opened, and only the opener
-    takes over the thread's status.
+    """Slack interactivity ingest: verify the signed form payload, decode a submit on an ask_user
+    form, admit every answer it carries as the conversation's next turn — idempotent per question
+    message, so a double press or a second member's submit joins the turn the first one won — and
+    rewrite the controls into the answers that were sent with who sent them. A selection reaches
+    here as nothing at all: the controls sit in input blocks, which dispatch no payload as they
+    change, so a member edits their answer as long as they like and only the submit is a commit.
+    Only the submit whose exact body the answer key stored (`admitted_body` — the turn it opened or
+    the queue row it landed as) rewrites, so a losing submit never displays an answer the agent
+    won't see. The thread status starts on a different line, the one admission draws: every submit
+    on a question message shares its answer key, so the submit that resumed the parked turn opened
+    its run and every other — a second member's, a double press, a retry of the winner — joins the
+    run it opened, and only the opener takes over the thread's status.
     The rewrite rides its own task so the ack beats Slack's three-second budget — Block Kit allows
     no message in the direct response, only the ack."""
     try:
@@ -3225,86 +3307,112 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     if identity is None:
         _prove_identity_in_background(ctx)
         return Response("Slack identity is being verified", status_code=503)
-    click = _to_click(raw, identity)
-    if click is None:
+    interaction = _to_interaction(raw, identity)
+    if interaction is None:
         return JSONResponse({"ok": True, "ignored": True})
     await _mark_url_verified(ctx, signing_secret)
-    member_id = await ctx.linked_member(click.slack_user_id)
-    match click:
+    member_id = await ctx.linked_member(interaction.slack_user_id)
+    match interaction:
         case ConnectClick():
             if member_id is None:
                 text = "This connection request is not available to you."
             else:
                 try:
-                    url = await ctx.connect_url(click.turn_id, member_id)
+                    url = await ctx.connect_url(interaction.turn_id, member_id)
                 except ConnectRequestInvalid:
                     text = (
                         "This connection request is no longer available. Ask me to connect again."
                     )
                 else:
                     text = f"Complete the connection privately: <{url}|Open authorization>"
-            _ephemeral_in_background(ctx, click, text)
-        case AnswerClick():
-            conversation_id = await ctx.find_conversation(click.queue_key)
+            _ephemeral_in_background(
+                ctx, interaction.channel, interaction.slack_user_id, interaction.thread_ts, text
+            )
+        case AnswerSubmit():
+            conversation_id = await ctx.find_conversation(interaction.queue_key)
             if conversation_id is None:
+                return JSONResponse({"ok": True, "ignored": True})
+            answered = tuple(answer for answer in interaction.answers if answer.answer)
+            if not answered:
+                _ephemeral_in_background(
+                    ctx,
+                    interaction.channel,
+                    interaction.slack_user_id,
+                    interaction.reply_root,
+                    ASK_EMPTY_SUBMIT_TEXT,
+                )
                 return JSONResponse({"ok": True, "ignored": True})
             bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
             sender, answered_at = await asyncio.gather(
-                _slack_user(bot_token, click.slack_user_id),
-                _slack_permalink(bot_token, click.channel, click.message_ts),
+                _slack_user(bot_token, interaction.slack_user_id),
+                _slack_permalink(bot_token, interaction.channel, interaction.message_ts),
             )
             if member_id is None:
-                member_id = await _resolve_member(ctx, click.slack_user_id, click.is_dm, sender)
-            if click.is_dm and member_id is not None:
-                conversation_id = await ctx.conversation_for(
-                    click.queue_key, conversation_audience(member_id)
+                member_id = await _resolve_member(
+                    ctx, interaction.slack_user_id, interaction.is_dm, sender
                 )
-            body = fence_member_message(mint_marker(), "", click.label, "")
-            thread = MirroredThread(queue_key=click.queue_key, message_ts=click.reply_root)
+            if interaction.is_dm and member_id is not None:
+                conversation_id = await ctx.conversation_for(
+                    interaction.queue_key, conversation_audience(member_id)
+                )
+            lone = len(interaction.answers) == 1
+            answered_text = (
+                answered[0].answer
+                if lone
+                else "\n".join(f"{answer.question}: {answer.answer}" for answer in answered)
+            )
+            body = fence_member_message(mint_marker(), "", answered_text, "")
+            thread = MirroredThread(
+                queue_key=interaction.queue_key, message_ts=interaction.reply_root
+            )
             await _mirror_thread(conversation_id, thread)
-            answer_key = f"{click.queue_key}:{click.message_ts}:answer:{click.question_index}"
+            answer_key = f"{interaction.queue_key}:{interaction.message_ts}:answer"
             admitted = await ctx.admit(
                 conversation_id,
                 body,
                 idempotency_key=answer_key,
-                context=_turn_context(sender, answered_at, click.question),
+                context=_turn_context(sender, answered_at, answered[0].question if lone else None),
                 speaker_member_id=member_id,
             )
-            if click.is_dm:
-                await _anchor_dm_thread(admitted, click.reply_root)
+            if interaction.is_dm:
+                await _anchor_dm_thread(admitted, interaction.reply_root)
             if admitted.opened_run:
                 _arm_followers(
                     ctx, FollowedTurn(id=admitted.turn_id, conversation_id=conversation_id), thread
                 )
             if await ctx.admitted_body(answer_key) == body:
-                _rewrite_in_background(bot_token, click)
+                _rewrite_in_background(bot_token, interaction)
     return JSONResponse({"ok": True})
 
 
 _REWRITE_TASKS: set[asyncio.Task[None]] = set()
 
 
-def _rewrite_in_background(bot_token: str, click: AnswerClick) -> None:
-    task = asyncio.create_task(_run_rewrite(bot_token, click))
+def _rewrite_in_background(bot_token: str, submit: AnswerSubmit) -> None:
+    task = asyncio.create_task(_run_rewrite(bot_token, submit))
     _REWRITE_TASKS.add(task)
     task.add_done_callback(_REWRITE_TASKS.discard)
 
 
-async def _run_rewrite(bot_token: str, click: AnswerClick) -> None:
+async def _run_rewrite(bot_token: str, submit: AnswerSubmit) -> None:
     try:
-        await _replace_buttons_with_answer(bot_token, click)
+        await _replace_controls_with_answers(bot_token, submit)
     except Exception as error:
-        _LOG.warning("slack answer rewrite failed for %s: %s", click.message_ts, error)
+        _LOG.warning("slack answer rewrite failed for %s: %s", submit.message_ts, error)
 
 
-def _ephemeral_in_background(ctx: SurfaceContext, click: ConnectClick, text: str) -> None:
-    task = asyncio.create_task(_post_ephemeral(ctx, click, text))
+def _ephemeral_in_background(
+    ctx: SurfaceContext, channel: str, slack_user_id: str, thread_ts: str | None, text: str
+) -> None:
+    task = asyncio.create_task(_post_ephemeral(ctx, channel, slack_user_id, thread_ts, text))
     _REWRITE_TASKS.add(task)
     task.add_done_callback(_REWRITE_TASKS.discard)
 
 
-async def _post_ephemeral(ctx: SurfaceContext, click: ConnectClick, text: str) -> None:
-    """Answer a connect click with `chat.postEphemeral` in the button message's own thread —
+async def _post_ephemeral(
+    ctx: SurfaceContext, channel: str, slack_user_id: str, thread_ts: str | None, text: str
+) -> None:
+    """Answer one member's click with `chat.postEphemeral` in the clicked message's own thread —
     a `response_url` ephemeral renders at channel level, where a threaded conversation never
     looks — visible only to the member who clicked."""
     try:
@@ -3319,19 +3427,22 @@ async def _post_ephemeral(ctx: SurfaceContext, click: ConnectClick, text: str) -
                     },
                     content=json.dumps(
                         {
-                            "channel": click.channel,
-                            "user": click.slack_user_id,
+                            "channel": channel,
+                            "user": slack_user_id,
                             "text": text,
-                            **({"thread_ts": click.thread_ts} if click.thread_ts else {}),
+                            **({"thread_ts": thread_ts} if thread_ts else {}),
                         }
                     ),
                 )
             )
     except Exception as error:
-        _LOG.warning("slack private connect response failed: %s", error)
+        _LOG.warning("slack private click response failed: %s", error)
 
 
-def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick | None:
+def _to_interaction(raw: bytes, identity: SlackIdentity) -> AnswerSubmit | ConnectClick | None:
+    """The verified payload as the one act it is, or None for anything this surface does not act on
+    — a selection inside an ask form among it, which arrives (if the client sends it at all) as an
+    action this route has nothing to do with."""
     form = parse_qs(raw.decode())
     encoded = form.get("payload")
     if not encoded:
@@ -3348,8 +3459,7 @@ def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick
     if not isinstance(action, dict):
         return None
     action_id = action.get("action_id")
-    value = action.get("value")
-    if not isinstance(action_id, str) or not isinstance(value, str) or not value:
+    if not isinstance(action_id, str):
         return None
     user_id = _string_field(_dict_field(payload, "user"), "id")
     channel_id = _string_field(_dict_field(payload, "channel"), "id")
@@ -3357,6 +3467,9 @@ def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick
     thread = message.get("thread_ts")
     thread_ts = thread if isinstance(thread, str) and thread else None
     if action_id == CONNECT_ACTION_ID:
+        value = action.get("value")
+        if not isinstance(value, str):
+            return None
         try:
             turn_id = UUID(value)
         except ValueError:
@@ -3364,17 +3477,20 @@ def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick
         return ConnectClick(
             slack_user_id=user_id, turn_id=turn_id, channel=channel_id, thread_ts=thread_ts
         )
-    if not action_id.startswith(ASK_ACTION_ID_PREFIX):
+    if action_id != ASK_SUBMIT_ACTION_ID:
         return None
-    question_index = action_id.removeprefix(ASK_ACTION_ID_PREFIX).split(":")[0]
-    if not question_index.isdecimal():
-        return None
-    block_id = action.get("block_id")
     raw_blocks = message.get("blocks")
-    label, _, asked = value.partition("\n")
+    blocks = tuple(
+        block
+        for block in (raw_blocks if isinstance(raw_blocks, list) else ())
+        if isinstance(block, dict)
+    )
+    answers = _submitted_answers(blocks, payload.get("state"))
+    if not answers:
+        return None
     message_ts = _string_field(message, "ts")
     is_dm = channel_id.startswith("D")
-    return AnswerClick(
+    return AnswerSubmit(
         slack_user_id=user_id,
         channel=channel_id,
         queue_key=slack_thread_key(channel_id, thread_ts or message_ts, is_dm),
@@ -3382,16 +3498,67 @@ def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick
         message_ts=message_ts,
         reply_root=thread_ts or message_ts,
         message_text=str(message.get("text") or ""),
-        question_index=int(question_index),
-        label=label,
-        question=asked or None,
-        block_id=block_id if isinstance(block_id, str) else "",
-        blocks=tuple(
-            block
-            for block in (raw_blocks if isinstance(raw_blocks, list) else ())
-            if isinstance(block, dict)
-        ),
+        answers=answers,
+        submit_block_id=str(action.get("block_id") or ""),
+        blocks=blocks,
     )
+
+
+def _submitted_answers(
+    blocks: tuple[Mapping[str, object], ...], state: object
+) -> tuple[SubmittedAnswer, ...]:
+    """Every question the submitted message still carries, in the order it was rendered, paired with
+    what the submitting member's client held for it. The questions come from the message's own
+    controls — one input block each, its label the question — and the values from the `state` Slack
+    sends with the submit, where each block holds its one control's entry."""
+    values = state.get("values") if isinstance(state, dict) else None
+    answers: list[SubmittedAnswer] = []
+    for block in blocks:
+        block_id = block.get("block_id")
+        if block.get("type") != "input" or not isinstance(block_id, str):
+            continue
+        if not block_id.startswith(ASK_BLOCK_ID_PREFIX):
+            continue
+        label = block.get("label")
+        held = values.get(block_id) if isinstance(values, dict) else None
+        answers.append(
+            SubmittedAnswer(
+                block_id=block_id,
+                question=str(label.get("text") or "") if isinstance(label, dict) else "",
+                answer=_held_answer(
+                    next(iter(held.values()), None) if isinstance(held, dict) else None
+                ),
+            )
+        )
+    return tuple(answers)
+
+
+def _held_answer(field: object) -> str:
+    """What one control held, as the answer text: a choice's own value (the option's label), every
+    ticked value of a multi-select, or the text typed into a box. Empty where the member left the
+    control alone — Slack sends the untouched ones too."""
+    if not isinstance(field, dict):
+        return ""
+    match field.get("type"):
+        case "radio_buttons":
+            chosen = field.get("selected_option")
+            return _option_value(chosen)
+        case "checkboxes":
+            chosen = field.get("selected_options")
+            if not isinstance(chosen, list):
+                return ""
+            return ", ".join(filter(None, (_option_value(option) for option in chosen)))
+        case "plain_text_input":
+            typed = field.get("value")
+            return typed.strip() if isinstance(typed, str) else ""
+    return ""
+
+
+def _option_value(option: object) -> str:
+    if not isinstance(option, dict):
+        return ""
+    value = option.get("value")
+    return value if isinstance(value, str) else ""
 
 
 def _dict_field(payload: Mapping[str, object], field: str) -> Mapping[str, object]:
@@ -3401,31 +3568,33 @@ def _dict_field(payload: Mapping[str, object], field: str) -> Mapping[str, objec
     return value
 
 
-async def _replace_buttons_with_answer(bot_token: str, click: AnswerClick) -> None:
-    """Rewrite the question message with `chat.update`: every delivered block echoes back exactly
-    as Slack accepted it, except the clicked button row, which becomes one small context line — the
-    chosen answer and who answered. Echoing the message's own blocks (rather than re-rendering the
-    fallback text through the `response_url` webhook, whose pipeline rejects blocks chat.postMessage
-    accepts) keeps a sibling question's live buttons and the reply prose untouched."""
-    answered_block: dict[str, object] = {
-        "type": "context",
-        "elements": [
-            {
-                "type": "mrkdwn",
-                "text": f"✅ *{click.label}* · Answered by <@{click.slack_user_id}>",
-            }
-        ],
-    }
-    blocks: list[dict[str, object]] = (
-        [dict(block) for block in click.blocks]
-        if click.blocks
-        else [{"type": "markdown", "text": click.message_text or click.label}]
-    )
-    clicked = [i for i, block in enumerate(blocks) if block.get("block_id") == click.block_id]
-    if clicked:
-        blocks[clicked[0]] = answered_block
-    else:
-        blocks.append(answered_block)
+async def _replace_controls_with_answers(bot_token: str, submit: AnswerSubmit) -> None:
+    """Rewrite the question message with `chat.update`: every delivered block echoes back exactly as
+    Slack accepted it, except each control, which becomes one small context line holding the
+    question and the answer that was sent for it, and the submit row, which becomes who sent them.
+    The answers rendered are the ones the answer key accepted — the caller reached here only after
+    `admitted_body` matched this submit's body — so the thread shows the agent's own answer and the
+    controls that could change it are gone. Echoing the message's own blocks (rather than
+    re-rendering the fallback text through the `response_url` webhook, whose pipeline rejects blocks
+    chat.postMessage accepts) keeps the reply prose above the form untouched."""
+    submitted = {answer.block_id: answer for answer in submit.answers}
+    blocks: list[dict[str, object]] = []
+    for block in submit.blocks:
+        block_id = block.get("block_id")
+        answer = submitted.get(block_id) if isinstance(block_id, str) else None
+        if answer is not None:
+            blocks.append(
+                _context_line(
+                    ASK_SUBMITTED_LINE.format(question=answer.question, answer=answer.answer)
+                    if answer.answer
+                    else ASK_UNANSWERED_LINE.format(question=answer.question)
+                )
+            )
+            continue
+        if block_id == submit.submit_block_id:
+            blocks.append(_context_line(ASK_SUBMITTED_BY_LINE.format(user=submit.slack_user_id)))
+            continue
+        blocks.append(dict(block))
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         await _slack_ok(
             client.post(
@@ -3436,14 +3605,21 @@ async def _replace_buttons_with_answer(bot_token: str, click: AnswerClick) -> No
                 },
                 content=json.dumps(
                     {
-                        "channel": click.channel,
-                        "ts": click.message_ts,
-                        "text": click.message_text or click.label,
+                        "channel": submit.channel,
+                        "ts": submit.message_ts,
+                        "text": submit.message_text or submit.answers[0].question,
                         "blocks": blocks,
                     }
                 ),
             )
         )
+
+
+def _context_line(text: str) -> dict[str, object]:
+    return {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": text[:SLACK_CONTEXT_TEXT_LIMIT]}],
+    }
 
 
 def _reply_text(writeback: Writeback) -> str:

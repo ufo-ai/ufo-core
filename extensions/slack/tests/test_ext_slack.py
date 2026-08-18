@@ -139,6 +139,23 @@ ASK_QUESTION = AskUserInput(
     ),
 )
 
+FORM_QUESTION = AskUserInput(
+    title="Need a decision",
+    questions=(
+        ASK_QUESTION.questions[0],
+        AskQuestion(
+            question="Who should review it?",
+            header="Reviewers",
+            multi_select=True,
+            options=(
+                QuestionOption(label="Priya", description="Owns the web surface."),
+                QuestionOption(label="Marco"),
+            ),
+        ),
+        AskQuestion(question="Anything to add?", free_text_only=True),
+    ),
+)
+
 REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
@@ -5747,9 +5764,9 @@ async def test_invalid_blocks_reposts_once(
             assert second["blocks"][-2]["elements"][0]["action_id"] == slack.CONNECT_ACTION_ID
         else:
             assert second["blocks"][1]["text"]["text"] == "*Need a decision*"
+            assert second["blocks"][2]["block_id"] == "ask:0"
             assert [b["action_id"] for b in second["blocks"][-2]["elements"]] == [
-                "ask:0:0",
-                "ask:0:1",
+                slack.ASK_SUBMIT_ACTION_ID
             ]
 
     async with workspace_tx() as connection:
@@ -8458,19 +8475,19 @@ async def test_a_revoked_bot_token_abandons_the_progress_task(
     assert turn == "queued"
 
 
-async def test_only_the_click_that_opened_the_run_starts_one_status_follower(
+async def test_only_the_submit_that_opened_the_run_starts_one_status_follower(
     db: None, tmp_path, monkeypatch
 ) -> None:
     """Interactivity is the second entry point, and its duplicates need no retry to appear: every
-    click on one question row shares an answer key, so a second member's click and a redelivery of
-    the first both dedupe to the turn that click opened. The process-local dict is cleared between
-    requests to reproduce a second replica's view, leaving admission's own line — which of the
-    three opened the run — as the only thing holding it."""
+    submit on one question message shares an answer key, so a second member's submit and a
+    redelivery of the first both dedupe to the turn that submit opened. The process-local dict is
+    cleared between requests to reproduce a second replica's view, leaving admission's own line —
+    which of the three opened the run — as the only thing holding it."""
     workspace_id, _ = await _seed()
     await _seed_answer_conversation(workspace_id)
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
-    winner = _click_body(user="U9")
-    loser = _click_body(user="U8")
+    winner = _submit_body(user="U9")
+    loser = _submit_body(user="U8")
 
     async with client:
         first = await client.post(INTERACTIVE_PATH, content=winner, headers=_signed_form(winner))
@@ -8500,11 +8517,11 @@ async def test_only_the_click_that_opened_the_run_starts_one_status_follower(
     assert list(follower) == list(turns)
 
 
-async def test_a_click_admitted_turn_posts_progress_in_the_clicked_thread(
+async def test_a_submit_admitted_turn_posts_progress_in_the_submitted_thread(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """The button-click route admits a turn the same way ingest does, so it wires the same progress
-    task — keyed to the clicked message's own thread, not the click's channel alone."""
+    """The submit route admits a turn the same way ingest does, so it wires the same progress
+    task — keyed to the question message's own thread, not the submit's channel alone."""
     workspace_id, _ = await _seed()
     await _seed_answer_conversation(workspace_id)
     monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
@@ -8512,7 +8529,7 @@ async def test_a_click_admitted_turn_posts_progress_in_the_clicked_thread(
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
-    click = _click_body()
+    click = _submit_body()
 
     async with client:
         response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
@@ -9079,33 +9096,61 @@ async def test_an_unreadable_thread_mirror_never_denies_the_turn(
     assert unarmed[0].ufo["turn"] == str(turn_id)
 
 
-def test_ask_blocks_render_title_every_question_and_choice_buttons() -> None:
+def test_ask_blocks_render_one_control_per_question_and_one_submit() -> None:
     assert slack.slack_ask_blocks(None) is None
-    single = ASK_QUESTION.questions[0]
 
     lone = slack.slack_ask_blocks(ASK_QUESTION)
     assert lone is not None
-    assert [block["type"] for block in lone] == ["section", "section", "actions"]
+    assert [block["type"] for block in lone] == ["section", "input", "actions"]
     assert lone[0]["text"]["text"] == "*Need a decision*"
-    assert lone[1]["text"]["text"] == "Ship it?"
-    buttons = lone[2]["elements"]
-    assert [b["text"]["text"] for b in buttons] == ["Ship", "Hold"]
-    assert [b["action_id"] for b in buttons] == ["ask:0:0", "ask:0:1"]
-    assert [b["value"] for b in buttons] == ["Ship\nShip it?", "Hold\nShip it?"]
+    assert lone[1]["block_id"] == "ask:0"
+    assert lone[1]["label"] == {"type": "plain_text", "text": "Ship it?"}
+    assert "dispatch_action" not in lone[1]
+    assert lone[1]["element"] == {
+        "type": "radio_buttons",
+        "action_id": "ask:0",
+        "options": [
+            {"text": {"type": "plain_text", "text": "Ship"}, "value": "Ship"},
+            {"text": {"type": "plain_text", "text": "Hold"}, "value": "Hold"},
+        ],
+    }
+    submit = lone[2]["elements"]
+    assert submit == [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": slack.ASK_SUBMIT_TEXT},
+            "action_id": slack.ASK_SUBMIT_ACTION_ID,
+        }
+    ]
 
-    pair = slack.slack_ask_blocks(
+    form = slack.slack_ask_blocks(FORM_QUESTION)
+    assert form is not None
+    assert [block["type"] for block in form] == ["section", "input", "input", "input", "actions"]
+    assert form[2]["label"]["text"] == "Reviewers — Who should review it?"
+    assert form[2]["element"] == {
+        "type": "checkboxes",
+        "action_id": "ask:1",
+        "options": [
+            {
+                "text": {"type": "plain_text", "text": "Priya"},
+                "value": "Priya",
+                "description": {"type": "plain_text", "text": "Owns the web surface."},
+            },
+            {"text": {"type": "plain_text", "text": "Marco"}, "value": "Marco"},
+        ],
+    }
+    assert form[3]["element"] == {
+        "type": "plain_text_input",
+        "action_id": "ask:2",
+        "multiline": True,
+    }
+    assert "hint" not in form[3]
+    assert [block["block_id"] for block in form[1:4]] == ["ask:0", "ask:1", "ask:2"]
+
+    suggested = slack.slack_ask_blocks(
         AskUserInput(
             title="t",
             questions=(
-                single.model_copy(
-                    update={
-                        "header": "Release",
-                        "options": (
-                            QuestionOption(label="Ship", description="cut it now"),
-                            QuestionOption(label="Hold"),
-                        ),
-                    }
-                ),
                 AskQuestion(
                     question="Name the tag?",
                     options=(QuestionOption(label="v1", description="the usual"),),
@@ -9114,25 +9159,14 @@ def test_ask_blocks_render_title_every_question_and_choice_buttons() -> None:
             ),
         )
     )
-    assert pair is not None
-    assert [block["type"] for block in pair] == ["section", "section", "actions", "section"]
-    assert pair[1]["text"]["text"] == "*Release* — Ship it?\n• Ship — cut it now"
-    assert [b["action_id"] for b in pair[2]["elements"]] == ["ask:0:0", "ask:0:1"]
-    assert [b["value"] for b in pair[2]["elements"]] == ["Ship\nShip it?", "Hold\nShip it?"]
-    assert pair[3]["text"]["text"] == "Name the tag?\n• v1 — the usual"
+    assert suggested is not None
+    assert suggested[1]["element"]["type"] == "plain_text_input"
+    assert suggested[1]["hint"] == {"type": "plain_text", "text": "v1 — the usual"}
 
-    multi = slack.slack_ask_blocks(
-        AskUserInput(title="t", questions=(single.model_copy(update={"multi_select": True}),))
-    )
-    assert multi is not None
-    assert [block["type"] for block in multi] == ["section", "section"]
-    assert (
-        multi[1]["text"]["text"]
-        == "Ship it?\n• Ship\n• Hold\n_Select all that apply — answer by replying in this thread._"
-    )
 
+def test_an_ask_the_form_cannot_express_renders_whole_as_prose() -> None:
+    single = ASK_QUESTION.questions[0]
     for richer in (
-        AskUserInput(title="t", questions=(AskQuestion(question="Ship it?"),)),
         AskUserInput(title="t", questions=(single.model_copy(update={"allow_attachments": True}),)),
         AskUserInput(
             title="t",
@@ -9140,18 +9174,55 @@ def test_ask_blocks_render_title_every_question_and_choice_buttons() -> None:
                 AskQuestion(
                     question="q",
                     options=tuple(
-                        QuestionOption(label=f"o{i}") for i in range(slack.MAX_ANSWER_BUTTONS + 1)
+                        QuestionOption(label=f"o{i}") for i in range(slack.MAX_ANSWER_OPTIONS + 1)
                     ),
+                ),
+            ),
+        ),
+        AskUserInput(
+            title="t",
+            questions=(
+                AskQuestion(
+                    question="q",
+                    options=(QuestionOption(label="o" * (slack.SLACK_OPTION_TEXT_LIMIT + 1)),),
                 ),
             ),
         ),
     ):
         rendered = slack.slack_ask_blocks(richer)
         assert rendered is not None
-        assert [block["type"] for block in rendered] == ["section", "section"]
+        assert [block["type"] for block in rendered] == ["section", "section", "section"]
+        assert rendered[-1]["text"]["text"] == slack.ASK_PROSE_HINT
+
+    mixed = slack.slack_ask_blocks(
+        AskUserInput(
+            title="t",
+            questions=(
+                single.model_copy(
+                    update={
+                        "header": "Release",
+                        "multi_select": True,
+                        "options": (
+                            QuestionOption(label="Ship", description="cut it now"),
+                            QuestionOption(label="Hold"),
+                        ),
+                    }
+                ),
+                AskQuestion(question="Send the log?", allow_attachments=True),
+            ),
+        )
+    )
+    assert mixed is not None
+    assert [block["type"] for block in mixed] == ["section", "section", "section", "section"]
+    assert mixed[1]["text"]["text"] == (
+        f"*Release* — Ship it?\n• Ship — cut it now\n• Hold\n{slack.ASK_MULTI_SELECT_NOTE}"
+    )
+    assert mixed[2]["text"]["text"] == "Send the log?"
 
 
-async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monkeypatch) -> None:
+async def test_question_writeback_posts_the_form_and_its_submit(
+    db: None, tmp_path, monkeypatch
+) -> None:
     workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
@@ -9169,12 +9240,13 @@ async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monke
     reply = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
     assert reply["blocks"][0] == {"type": "markdown", "text": "Ship it? (Ship / Hold)"}
     assert reply["blocks"][1]["text"]["text"] == "*Need a decision*"
-    assert reply["blocks"][2]["text"]["text"] == "Ship it?"
-    actions = reply["blocks"][3]
-    assert actions["type"] == "actions"
-    assert [b["text"]["text"] for b in actions["elements"]] == ["Ship", "Hold"]
-    assert [b["action_id"] for b in actions["elements"]] == ["ask:0:0", "ask:0:1"]
-    assert [b["value"] for b in actions["elements"]] == ["Ship\nShip it?", "Hold\nShip it?"]
+    assert reply["blocks"][2]["type"] == "input"
+    assert reply["blocks"][2]["block_id"] == "ask:0"
+    assert [option["value"] for option in reply["blocks"][2]["element"]["options"]] == [
+        "Ship",
+        "Hold",
+    ]
+    assert reply["blocks"][3]["elements"][0]["action_id"] == slack.ASK_SUBMIT_ACTION_ID
     assert reply["blocks"][-1]["type"] == "context"
 
 
@@ -9310,42 +9382,96 @@ async def test_dm_connect_click_posts_the_link_unthreaded(db: None, tmp_path, mo
     assert "thread_ts" not in private[0]
 
 
-CLICK_MESSAGE_BLOCKS: list[dict[str, object]] = [
-    {"type": "markdown", "text": "Ship it? (Ship / Hold)", "block_id": "b-md"},
-    {
-        "type": "actions",
-        "block_id": "b-ask-0",
-        "elements": [{"type": "button", "action_id": "ask:0:0", "value": "Ship"}],
-    },
-]
+SUBMIT_BLOCK_ID = "b-submit"
+MESSAGE_TEXT = "Ship it? (Ship / Hold)"
+
+
+def _form_blocks(question: AskUserInput = ASK_QUESTION) -> list[dict[str, object]]:
+    """The delivered question message as Slack echoes it back on an interaction: the reply's own
+    block, then the ask rendered by this surface, with a block id where the render sent none."""
+    blocks: list[dict[str, object]] = [
+        {"type": "markdown", "text": MESSAGE_TEXT, "block_id": "b-md"}
+    ]
+    for index, block in enumerate(slack.slack_ask_blocks(question) or ()):
+        assigned = SUBMIT_BLOCK_ID if block["type"] == "actions" else f"b-{index}"
+        blocks.append({**block, "block_id": block.get("block_id", assigned)})
+    return blocks
+
+
+def _chose(value: str | None) -> dict[str, object]:
+    option = {"text": {"type": "plain_text", "text": value}, "value": value}
+    return {"type": "radio_buttons", "selected_option": None if value is None else option}
+
+
+def _ticked(*values: str) -> dict[str, object]:
+    return {
+        "type": "checkboxes",
+        "selected_options": [
+            {"text": {"type": "plain_text", "text": value}, "value": value} for value in values
+        ],
+    }
+
+
+def _typed(text: str | None) -> dict[str, object]:
+    return {"type": "plain_text_input", "value": text}
+
+
+def _held(*controls: dict[str, object]) -> dict[str, object]:
+    """The form state Slack sends with a submit: one entry per control, under its own block id."""
+    return {
+        "values": {f"ask:{index}": {f"ask:{index}": held} for index, held in enumerate(controls)}
+    }
 
 
 def _click_body(
-    action_id: str = "ask:0:0",
-    value: str = "Ship",
+    action_id: str,
+    value: str | None = None,
     user: str = "U9",
     channel: str = "C5",
     thread: str | None = "200.0",
     blocks: list[dict[str, object]] | None = None,
-    block_id: str = "b-ask-0",
+    block_id: str = SUBMIT_BLOCK_ID,
+    state: dict[str, object] | None = None,
 ) -> bytes:
     message: dict[str, object] = {
         "ts": "999.100",
-        "text": "Ship it? (Ship / Hold)",
-        "blocks": CLICK_MESSAGE_BLOCKS if blocks is None else blocks,
+        "text": MESSAGE_TEXT,
+        "blocks": _form_blocks() if blocks is None else blocks,
     }
     if thread is not None:
         message["thread_ts"] = thread
-    payload = {
+    action: dict[str, object] = {"action_id": action_id, "block_id": block_id}
+    if value is not None:
+        action["value"] = value
+    payload: dict[str, object] = {
         "type": "block_actions",
         "team": {"id": TEAM_ID},
         "user": {"id": user},
         "channel": {"id": channel},
         "message": message,
-        "actions": [{"action_id": action_id, "value": value, "block_id": block_id}],
+        "actions": [action],
         "response_url": RESPONSE_URL,
     }
+    if state is not None:
+        payload["state"] = state
     return urlencode({"payload": json.dumps(payload)}).encode()
+
+
+def _submit_body(
+    *controls: dict[str, object],
+    user: str = "U9",
+    channel: str = "C5",
+    thread: str | None = "200.0",
+    blocks: list[dict[str, object]] | None = None,
+) -> bytes:
+    return _click_body(
+        action_id=slack.ASK_SUBMIT_ACTION_ID,
+        user=user,
+        channel=channel,
+        thread=thread,
+        blocks=blocks,
+        state=_held(*(controls or (_chose("Ship"),))),
+    )
 
 
 def _signed_form(body: bytes) -> dict[str, str]:
@@ -9377,7 +9503,7 @@ async def _seed_answer_conversation(workspace_id: UUID, queue_key: str = "C5:200
     return conversation_id
 
 
-async def test_a_click_on_a_conversation_this_workspace_has_none_of_reads_nothing(
+async def test_a_submit_on_a_conversation_this_workspace_has_none_of_reads_nothing(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, _ = await _seed(member_email="bee@example.com")
@@ -9385,7 +9511,7 @@ async def test_a_click_on_a_conversation_this_workspace_has_none_of_reads_nothin
     _, client, _ = await _mount(
         monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
     )
-    click = _click_body()
+    click = _submit_body()
     async with client:
         response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
     assert response.json() == {"ok": True, "ignored": True}
@@ -9393,7 +9519,7 @@ async def test_a_click_on_a_conversation_this_workspace_has_none_of_reads_nothin
     assert _fetches(recorder, slack.SLACK_GET_PERMALINK_URL) == []
 
 
-async def test_a_click_whose_member_is_linked_names_its_sender_and_sources_its_answer(
+async def test_a_submit_whose_member_is_linked_names_its_sender_and_sources_its_answer(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, member_id = await _seed(member_email="bee@example.com")
@@ -9413,7 +9539,7 @@ async def test_a_click_whose_member_is_linked_names_its_sender_and_sources_its_a
     _, client, _ = await _mount(
         monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
     )
-    click = _click_body(value="Ship\nShip it?")
+    click = _submit_body()
     async with client:
         await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
         await asyncio.gather(*slack._REWRITE_TASKS)
@@ -9436,7 +9562,9 @@ async def test_a_click_whose_member_is_linked_names_its_sender_and_sources_its_a
     assert len(_fetches(recorder, slack.SLACK_GET_PERMALINK_URL)) == 1
 
 
-async def test_an_unlinked_clickers_two_reads_run_together(db: None, tmp_path, monkeypatch) -> None:
+async def test_an_unlinked_submitters_two_reads_run_together(
+    db: None, tmp_path, monkeypatch
+) -> None:
     workspace_id, _ = await _seed(member_email="bee@example.com")
     await _seed_answer_conversation(workspace_id)
     recorder: list[httpx.Request] = []
@@ -9455,7 +9583,7 @@ async def test_an_unlinked_clickers_two_reads_run_together(db: None, tmp_path, m
     _, client, _ = await _mount_transport(
         monkeypatch, workspace_id, tmp_path, httpx.MockTransport(gated)
     )
-    click = _click_body()
+    click = _submit_body()
     async with client:
         await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
         await asyncio.gather(*slack._REWRITE_TASKS)
@@ -9470,7 +9598,7 @@ async def test_an_unlinked_clickers_two_reads_run_together(db: None, tmp_path, m
     assert linked is not None and linked.member_id is not None
 
 
-async def test_dm_answer_click_claims_the_conversation_for_its_resolved_member(
+async def test_dm_answer_submit_claims_the_conversation_for_its_resolved_member(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, member_id = await _seed(member_email="bee@example.com")
@@ -9480,7 +9608,7 @@ async def test_dm_answer_click_claims_the_conversation_for_its_resolved_member(
     _, client, _ = await _mount(
         monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
     )
-    click = _click_body(channel="D5", thread=None)
+    click = _submit_body(channel="D5", thread=None)
 
     async with client:
         response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
@@ -9507,10 +9635,10 @@ async def test_dm_answer_click_claims_the_conversation_for_its_resolved_member(
     assert len(_fetches(recorder, slack.SLACK_USERS_INFO_URL)) == 1
 
 
-async def test_a_click_on_a_threaded_dm_question_answers_the_dm_conversation(
+async def test_a_submit_on_a_threaded_dm_question_answers_the_dm_conversation(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """A DM's question message is itself a threaded reply, so the click arrives carrying a thread.
+    """A DM's question message is itself a threaded reply, so the submit arrives carrying a thread.
     A DM is keyed by its channel however deep the thread runs, so the answer lands on that one
     conversation — and the turn it founds answers in the thread the question was asked in."""
     workspace_id, member_id = await _seed(member_email="bee@example.com")
@@ -9520,7 +9648,7 @@ async def test_a_click_on_a_threaded_dm_question_answers_the_dm_conversation(
     _, client, _ = await _mount(
         monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
     )
-    click = _click_body(channel="D5", thread="100.5")
+    click = _submit_body(channel="D5", thread="100.5")
 
     async with client:
         response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
@@ -9564,7 +9692,7 @@ async def test_shared_interactive_routes_by_registered_team(
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
-    click = _click_body()
+    click = _submit_body()
     unknown = urlencode(
         {"payload": json.dumps({"type": "view_submission", "team": {"id": "TUNKNOWN"}})}
     ).encode()
@@ -9633,7 +9761,7 @@ async def test_interactive_before_install_is_refused(db: None, tmp_path, monkeyp
         _mock_transport(recorder, {}),
         identity=False,
     )
-    click = _click_body()
+    click = _submit_body()
     async with client:
         response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
     assert response.status_code == 503
@@ -9648,25 +9776,119 @@ async def test_interactive_before_install_is_refused(db: None, tmp_path, monkeyp
         ).scalar_one() == 0
 
 
-async def test_first_click_wins_and_alone_rewrites_the_message(
+async def test_a_selection_costs_nothing_and_the_submit_carries_the_last_one(
     db: None, tmp_path, monkeypatch
 ) -> None:
+    """A member changes their mind twice before submitting. Every selection reaches this route as an
+    action it does not act on, so nothing is admitted and the message is left alone; the submit that
+    follows carries the choice the member had settled on, which is the only one the agent sees."""
     workspace_id, _ = await _seed()
     await _seed_answer_conversation(workspace_id)
     recorder: list[httpx.Request] = []
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
-    winner = _click_body()
+    selections = [
+        _click_body(action_id="ask:0", block_id="ask:0", value=chosen, state=_held(_chose(chosen)))
+        for chosen in ("Ship", "Hold")
+    ]
+
+    async with client:
+        for selection in selections:
+            changed = await client.post(
+                INTERACTIVE_PATH, content=selection, headers=_signed_form(selection)
+            )
+            assert changed.json() == {"ok": True, "ignored": True}
+        async with workspace_tx() as connection:
+            assert (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.turn)
+                    .where(tables.turn.c.workspace_id == workspace_id)
+                )
+            ).scalar_one() == 0
+        assert _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL) == []
+        submitted = _submit_body(_chose("Hold"))
+        await client.post(INTERACTIVE_PATH, content=submitted, headers=_signed_form(submitted))
+        await asyncio.gather(*slack._REWRITE_TASKS)
+
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.idempotency_key).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    assert [(turn.idempotency_key, member_message_text(turn.inbound)) for turn in turns] == [
+        ("C5:200.0:999.100:answer", "Hold")
+    ]
+    rewrite = json.loads(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)[0].content)
+    assert "Hold" in rewrite["blocks"][2]["elements"][0]["text"]
+
+
+async def test_the_form_holds_no_control_open_after_it_is_submitted(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The submitted message is the record of the answer: every control becomes the question with
+    the answer that was sent for it, the submit row becomes who sent it, and the reply prose above
+    them is echoed back untouched. Nothing left in the message can admit anything else."""
+    workspace_id, _ = await _seed()
+    await _seed_answer_conversation(workspace_id)
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    submitted = _submit_body(_chose("Ship"))
+
+    async with client:
+        await client.post(INTERACTIVE_PATH, content=submitted, headers=_signed_form(submitted))
+        await asyncio.gather(*slack._REWRITE_TASKS)
+
+    async with workspace_tx() as connection:
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    rewrite = json.loads(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)[0].content)
+    assert rewrite["ts"] == "999.100"
+    assert [block["type"] for block in rewrite["blocks"]] == [
+        "markdown",
+        "section",
+        "context",
+        "context",
+    ]
+    assert rewrite["blocks"][0] == {
+        "type": "markdown",
+        "text": MESSAGE_TEXT,
+        "block_id": "b-md",
+    }
+    assert rewrite["blocks"][1]["text"]["text"] == "*Need a decision*"
+    answered, attribution = (block["elements"][0]["text"] for block in rewrite["blocks"][2:])
+    assert answered == "✅ *Ship it?* — Ship"
+    assert member_message_text(inbound) in answered
+    assert attribution == "Submitted by <@U9>"
+
+
+async def test_first_submit_wins_and_alone_rewrites_the_message(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Two members submit different answers on one question message. The answer key admits once, so
+    the loser founds nothing, and only the submit whose body admission stored rewrites — the message
+    can never show an answer the agent was not given."""
+    workspace_id, _ = await _seed()
+    await _seed_answer_conversation(workspace_id)
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    winner = _submit_body(_chose("Ship"))
+    loser = _submit_body(_chose("Hold"), user="U8")
     async with client:
         unsigned = await client.post(INTERACTIVE_PATH, content=winner)
         assert unsigned.status_code == 401
-        first = await client.post(INTERACTIVE_PATH, content=winner, headers=_signed_form(winner))
-        assert first.status_code == 200
+        first, second = await asyncio.gather(
+            client.post(INTERACTIVE_PATH, content=winner, headers=_signed_form(winner)),
+            client.post(INTERACTIVE_PATH, content=loser, headers=_signed_form(loser)),
+        )
+        assert (first.status_code, second.status_code) == (200, 200)
         await asyncio.gather(*slack._REWRITE_TASKS)
-        loser = _click_body(value="Hold", user="U8")
-        second = await client.post(INTERACTIVE_PATH, content=loser, headers=_signed_form(loser))
-        assert second.status_code == 200
-        await asyncio.gather(*slack._REWRITE_TASKS)
-        foreign = _click_body(action_id="other:0")
+        foreign = _click_body(action_id="other:0", value="Ship")
         ignored = await client.post(
             INTERACTIVE_PATH, content=foreign, headers=_signed_form(foreign)
         )
@@ -9690,53 +9912,34 @@ async def test_first_click_wins_and_alone_rewrites_the_message(
             )
         ).scalar_one()
     assert len(turns) == 1
-    assert member_message_text(turns[0].inbound) == "Ship"
-    assert turns[0].context["question"] is None
-    assert turns[0].idempotency_key == "C5:200.0:999.100:answer:0"
+    admitted = member_message_text(turns[0].inbound)
+    assert admitted in ("Ship", "Hold")
+    assert turns[0].context["question"] == "Ship it?"
+    assert turns[0].idempotency_key == "C5:200.0:999.100:answer"
     assert queue_key == "C5:200.0"
 
     rewrites = _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
     assert len(rewrites) == 1
     rewrite = json.loads(rewrites[0].content)
     assert rewrite["channel"] == "C5"
-    assert rewrite["ts"] == "999.100"
-    assert rewrite["blocks"][0] == {
-        "type": "markdown",
-        "text": "Ship it? (Ship / Hold)",
-        "block_id": "b-md",
-    }
-    answered = rewrite["blocks"][1]
-    assert answered["type"] == "context"
-    assert "Answered by <@U9>" in answered["elements"][0]["text"]
-    assert "Ship" in answered["elements"][0]["text"]
+    assert rewrite["blocks"][2]["elements"][0]["text"] == f"✅ *Ship it?* — {admitted}"
 
 
-async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkeypatch) -> None:
+async def test_one_submit_answers_every_question_the_form_asked(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A three-question ask is one form and one commit: the choice, the ticked values, and the typed
+    text arrive together and admit one turn naming each question with its answer. A question the
+    member left alone is left out of the answer and shown as unanswered."""
     workspace_id, _ = await _seed()
     await _seed_answer_conversation(workspace_id)
     recorder: list[httpx.Request] = []
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
-    two_rows: list[dict[str, object]] = [
-        {"type": "markdown", "text": "Two questions", "block_id": "b-md"},
-        {
-            "type": "actions",
-            "block_id": "b-ask-0",
-            "elements": [{"type": "button", "action_id": "ask:0:0", "value": "Ship\nShip it?"}],
-        },
-        {
-            "type": "actions",
-            "block_id": "b-ask-1",
-            "elements": [{"type": "button", "action_id": "ask:1:0", "value": "v2\nTag?"}],
-        },
-    ]
-    second = _click_body(action_id="ask:1:0", value="v2\nTag?", blocks=two_rows, block_id="b-ask-1")
-    first = _click_body(
-        action_id="ask:0:0", value="Ship\nShip it?", blocks=two_rows, block_id="b-ask-0"
-    )
+    blocks = _form_blocks(FORM_QUESTION)
+    submitted = _submit_body(_chose("Ship"), _ticked("Priya", "Marco"), _typed(None), blocks=blocks)
+
     async with client:
-        await client.post(INTERACTIVE_PATH, content=second, headers=_signed_form(second))
-        await asyncio.gather(*slack._REWRITE_TASKS)
-        await client.post(INTERACTIVE_PATH, content=first, headers=_signed_form(first))
+        await client.post(INTERACTIVE_PATH, content=submitted, headers=_signed_form(submitted))
         await asyncio.gather(*slack._REWRITE_TASKS)
 
     async with workspace_tx() as connection:
@@ -9749,37 +9952,153 @@ async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkey
                 ).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).all()
-        arrivals = (
+    assert len(turns) == 1
+    assert member_message_text(turns[0].inbound) == (
+        "Ship it?: Ship\nReviewers — Who should review it?: Priya, Marco"
+    )
+    assert turns[0].context["question"] is None
+    assert turns[0].idempotency_key == "C5:200.0:999.100:answer"
+
+    rewrite = json.loads(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)[0].content)
+    assert [block["type"] for block in rewrite["blocks"]] == [
+        "markdown",
+        "section",
+        "context",
+        "context",
+        "context",
+        "context",
+    ]
+    assert [block["elements"][0]["text"] for block in rewrite["blocks"][2:]] == [
+        "✅ *Ship it?* — Ship",
+        "✅ *Reviewers — Who should review it?* — Priya, Marco",
+        "*Anything to add?* — no answer",
+        "Submitted by <@U9>",
+    ]
+
+
+async def test_a_typed_answer_travels_with_the_submit_it_was_typed_into(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Free text is held by the box, not sent as it is written: the words the member typed reach the
+    agent once, whole, on the submit that carried them, beside the values they ticked."""
+    workspace_id, _ = await _seed()
+    await _seed_answer_conversation(workspace_id)
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    written = AskUserInput(
+        title="Need a decision",
+        questions=(
+            AskQuestion(question="Anything to add?", free_text_only=True),
+            FORM_QUESTION.questions[1],
+        ),
+    )
+    submitted = _submit_body(
+        _typed("  Hold it until the demo lands.  "),
+        _ticked("Priya"),
+        blocks=_form_blocks(written),
+    )
+
+    async with client:
+        await client.post(INTERACTIVE_PATH, content=submitted, headers=_signed_form(submitted))
+        await asyncio.gather(*slack._REWRITE_TASKS)
+
+    async with workspace_tx() as connection:
+        inbound = (
             await connection.execute(
-                sa.select(
-                    tables.inbound_message.c.body,
-                    tables.inbound_message.c.idempotency_key,
-                    tables.inbound_message.c.context,
-                ).where(tables.inbound_message.c.workspace_id == workspace_id)
+                sa.select(tables.turn.c.inbound).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert member_message_text(inbound) == (
+        "Anything to add?: Hold it until the demo lands.\nReviewers — Who should review it?: Priya"
+    )
+    rewrite = json.loads(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)[0].content)
+    assert [block["elements"][0]["text"] for block in rewrite["blocks"][2:]] == [
+        "✅ *Anything to add?* — Hold it until the demo lands.",
+        "✅ *Reviewers — Who should review it?* — Priya",
+        "Submitted by <@U9>",
+    ]
+
+
+async def test_a_submit_holding_no_answer_admits_nothing_and_says_so(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Slack validates no message form, so an empty submit reaches here. It founds no turn and
+    rewrites nothing — the member is told privately, in the question's own thread, and the controls
+    stay open for the answer they meant to give."""
+    workspace_id, _ = await _seed()
+    await _seed_answer_conversation(workspace_id)
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    empty = _submit_body(_chose(None))
+
+    async with client:
+        response = await client.post(INTERACTIVE_PATH, content=empty, headers=_signed_form(empty))
+        await asyncio.gather(*slack._REWRITE_TASKS)
+
+    assert response.json() == {"ok": True, "ignored": True}
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one() == 0
+    assert _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL) == []
+    private = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_EPHEMERAL_URL)[0].content)
+    assert private == {
+        "channel": "C5",
+        "user": "U9",
+        "text": slack.ASK_EMPTY_SUBMIT_TEXT,
+        "thread_ts": "200.0",
+    }
+
+
+async def test_an_ask_no_form_can_carry_degrades_to_prose_a_thread_reply_answers(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A question wanting an attachment has no control, so the whole ask renders as prose that lists
+    every question and asks for a reply in the thread. That reply is an ordinary addressed message,
+    and it answers the question exactly as a form submit would."""
+    workspace_id, _ = await _seed()
+    await _seed_answer_conversation(workspace_id)
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    attachable = AskUserInput(
+        title="Need a decision",
+        questions=(
+            ASK_QUESTION.questions[0],
+            AskQuestion(question="Send the log?", allow_attachments=True),
+        ),
+    )
+
+    rendered = slack.slack_ask_blocks(attachable)
+
+    assert rendered is not None
+    assert [block["type"] for block in rendered] == ["section", "section", "section", "section"]
+    assert rendered[1]["text"]["text"] == "Ship it?\n• Ship\n• Hold"
+    assert rendered[-1]["text"]["text"] == slack.ASK_PROSE_HINT
+    reply = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C5",
+        ts="300.0",
+        thread_ts="200.0",
+        text=f"<@{BOT_USER_ID}> Ship",
+    )
+    async with client:
+        answered = await client.post(
+            EVENTS_PATH, content=reply, headers=_sign(reply, int(time.time()))
+        )
+    assert answered.json() == {"ok": True}
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.conversation_id).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
             )
         ).all()
-    assert [(turn.idempotency_key, member_message_text(turn.inbound)) for turn in turns] == [
-        ("C5:200.0:999.100:answer:1", "v2")
-    ]
-    assert [
-        (arrival.idempotency_key, member_message_text(arrival.body)) for arrival in arrivals
-    ] == [("C5:200.0:999.100:answer:0", "Ship")]
-    answered_at = "https://acme.slack.com/archives/C5/p999100?thread_ts=999.100&cid=C5"
-    assert [turn.context["source"] for turn in turns] == [answered_at]
-    assert [arrival.context["source"] for arrival in arrivals] == [answered_at]
-    assert [turn.context["question"] for turn in turns] == ["Tag?"]
-    assert [arrival.context["question"] for arrival in arrivals] == ["Ship it?"]
-
-    rewrites = [
-        json.loads(request.content)
-        for request in _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
-    ]
-    assert len(rewrites) == 2
-    assert [block["type"] for block in rewrites[0]["blocks"]] == ["markdown", "actions", "context"]
-    assert rewrites[0]["blocks"][1]["block_id"] == "b-ask-0"
-    assert "*v2*" in rewrites[0]["blocks"][2]["elements"][0]["text"]
-    assert [block["type"] for block in rewrites[1]["blocks"]] == ["markdown", "context", "actions"]
-    assert "Ship" in rewrites[1]["blocks"][1]["elements"][0]["text"]
+    assert [member_message_text(turn.inbound) for turn in turns] == [f"<@{BOT_USER_ID}> Ship"]
 
 
 async def test_a_mention_that_arrives_only_as_app_mention_is_still_answered(

@@ -451,9 +451,11 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   conversation, with rich rendering. Recovery resumes `attach` without re-posting; attachment
   delivery is at-least-once and may repeat after a crash between upload and the delivered commit.
   A turn that ended by asking (`ask_user` as its final act) rides the writeback as a structured
-  `question`, so the surface can render the options as its own answer
-  affordance (Slack buttons) whose use admits the answer as the conversation's next turn — the
-  first answer wins the idempotent admit, and `admitted_body` is how the surface confirms which
+  `question`, so the surface can render the questions as its own answer
+  affordance (Slack renders the whole ask as one form — a control per question and one submit
+  button, so a selection stays editable and costs nothing until the member submits) whose use
+  admits the answer as the conversation's next turn — the
+  first submit wins the idempotent admit, and `admitted_body` is how the surface confirms which
   landed before rewriting the affordance; a durable surface may also `tail` a turn for live feedback
   while it runs — Slack's native thread status, started by the admission that opened the run, and
   interim progress posts on an exponentially growing cadence once a turn outlives its first interval.
