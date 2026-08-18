@@ -137,7 +137,8 @@ services:
       - "127.0.0.1:${UFO_SERVE_PORT_HOST:-8710}:8710"
     volumes:
       - ./dev:/app/dev:ro
-      - blobs:/data
+      - blobs:/data/blobs
+      - ./.local/${COMPOSE_PROJECT_NAME:-ufo}/workspaces:/data/workspaces
       - egress-ca:/egress-ca:ro
     depends_on:
       postgres: {condition: service_healthy}

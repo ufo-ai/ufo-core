@@ -49,13 +49,15 @@ One image (`dev/Dockerfile`, the whole workspace via uv) runs as four roles (`de
 (`UFO_CONTROL_EMAIL_MODE=console` — read it with `make stack-logs STACK=N`); `serve` runs the shared fleet on :8710 over the
 `assistant` pack with local backends (filesystem blobs, in-process hub, the built-in `local` sandbox
 carrier). `STACK` accepts 1 through 5. Each slot has its own Compose project, image, network,
-volumes, ports, and `ufo-N.localhost` browser origin. The origin keeps session cookies separate.
+workspace directory under `.local/ufo-N/workspaces`, volumes, ports, and `ufo-N.localhost` browser
+origin. The origin keeps session cookies separate.
 Slot 1 uses gateway :18080, serve :18710, Postgres :15541, and Redis :15543. Each next slot adds 100
 to each port. Use `make stack-logs STACK=N` for its sign-in code. Stop it with
-`make stack-down STACK=N`, which keeps the slot's image and volumes: pointing a slot at different
-code — another branch, a worktree — needs
+`make stack-down STACK=N`, which keeps the slot's image, volumes, and local workspaces: pointing a
+slot at different code — another branch, a worktree — needs
 `docker compose --project-name ufo-N up --build` to rebuild the image and
-`docker volume rm ufo-N_pgdata ufo-N_blobs` to clear the schema and rows the last branch left,
+`docker volume rm ufo-N_pgdata ufo-N_blobs && rm -rf .local/ufo-N` to clear the schema and data the
+last branch left,
 since `up` alone reuses an existing `ufo-N-dev` and serves the previous build. A worktree also
 needs the repo root's `.env` copied in, or serve boots without a model provider key and exits.
 The portal is built by npm and not tracked in git, which is why `make

@@ -1,4 +1,8 @@
 .git
+.local
+**/.local
+.worktrees
+**/.worktrees
 .venv
 **/.venv
 .claude/worktrees

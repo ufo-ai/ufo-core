@@ -53,6 +53,17 @@ def test_stack_origin_reaches_every_browser_callback() -> None:
     assert "s#__PUBLIC_BASE_URL__#${PUBLIC_BASE_URL}#g" in (REPO / "dev/entrypoint.sh").read_text()
 
 
+def test_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> None:
+    ignored = set((REPO / ".dockerignore").read_text().splitlines())
+    assert {".local", "**/.local", ".worktrees", "**/.worktrees"} <= ignored
+
+    compose = yaml.safe_load((REPO / "compose.yaml").read_text())
+    volumes = compose["services"]["serve"]["volumes"]
+    assert "blobs:/data/blobs" in volumes
+    assert "./.local/${COMPOSE_PROJECT_NAME:-ufo}/workspaces:/data/workspaces" in volumes
+    assert "blobs" in compose["volumes"]
+
+
 def test_stack_refuses_a_slot_outside_its_closed_range() -> None:
     result = subprocess.run(
         ["make", "--no-print-directory", "-n", "stack", "STACK=6"],
