@@ -119,6 +119,8 @@ OPENING_PERMALINK = (
 )
 WRITEBACK_READ_INTERVAL_SECONDS = 0.01
 WEDGE_WATCHDOG_SECONDS = 30
+LISTENER_POLL_SECONDS = 0.05
+LISTENER_LEASE_SECONDS = LISTENER_POLL_SECONDS * 5
 
 
 @dataclass
@@ -1215,6 +1217,16 @@ async def test_surface_listener_resolves_only_a_bound_installation(db: None, tmp
 async def test_surface_listener_has_one_live_owner_and_parks_a_failure(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Two runners are symmetric, so starting both together leaves the lease to whichever upsert
+    commits first and either listener may be the one that runs. `first` claims it alone, and
+    `second` then meets a lease already held — the state this asserts about. A parked runner holds
+    that lease by renewing it every poll, so dropping the runner is what hands the surface on: the
+    claim lapses on its own and the next instance takes it.
+
+    The lease is renewed on every poll, which makes the poll rate a write rate. Both are scaled down
+    together so the runners keep the production ratio: scaling the poll alone spends a lease on a
+    hundred writes, and against SQLite's one writer slot they then starve every other transaction
+    past its busy timeout."""
     first_id = UUID(int=1)
     second_id = UUID(int=2)
     now = datetime.now(UTC)
@@ -1267,8 +1279,8 @@ async def test_surface_listener_has_one_live_owner_and_parks_a_failure(
         listener=fail,
         _auth=auth,
         _context_for=context_for,
-        poll_seconds=0.01,
-        lease_seconds=1,
+        poll_seconds=LISTENER_POLL_SECONDS,
+        lease_seconds=LISTENER_LEASE_SECONDS,
     )
     second = SurfaceListenerRunner(
         surface=SURFACE,
@@ -1276,31 +1288,26 @@ async def test_surface_listener_has_one_live_owner_and_parks_a_failure(
         listener=wait,
         _auth=auth,
         _context_for=context_for,
-        poll_seconds=0.01,
-        lease_seconds=1,
+        poll_seconds=LISTENER_POLL_SECONDS,
+        lease_seconds=LISTENER_LEASE_SECONDS,
     )
-    first_task = asyncio.create_task(first.run())
-    second_task = asyncio.create_task(second.run())
+    running = [asyncio.create_task(first.run())]
     try:
         await asyncio.wait_for(first_started.wait(), timeout=1)
         await asyncio.wait_for(parked.wait(), timeout=1)
         assert metrics == [("surface_listener_parked_total", {"surface": SURFACE})]
+        running.append(asyncio.create_task(second.run()))
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(second_started.wait(), timeout=0.05)
-        assert not first_task.done()
-        first_task.cancel()
-        await asyncio.gather(first_task, return_exceptions=True)
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.surface_listener_claim)
-                .where(tables.surface_listener_claim.c.surface == SURFACE)
-                .values(claim_expires_at=now - timedelta(seconds=1))
-            )
+            await asyncio.wait_for(second_started.wait(), timeout=LISTENER_LEASE_SECONDS)
+        assert not running[0].done()
+        stopped = running.pop(0)
+        stopped.cancel()
+        await asyncio.gather(stopped, return_exceptions=True)
         await asyncio.wait_for(second_started.wait(), timeout=1)
     finally:
-        first_task.cancel()
-        second_task.cancel()
-        await asyncio.gather(first_task, second_task, return_exceptions=True)
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
 
 
 async def test_surface_listener_survives_one_failed_claim_tick(
@@ -1347,8 +1354,8 @@ async def test_surface_listener_survives_one_failed_claim_tick(
         listener=wait,
         _auth=SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE),
         _context_for=context_for,
-        poll_seconds=0.01,
-        lease_seconds=1,
+        poll_seconds=LISTENER_POLL_SECONDS,
+        lease_seconds=LISTENER_LEASE_SECONDS,
     )
     task = asyncio.create_task(runner.run())
     try:
@@ -1394,8 +1401,8 @@ async def test_surface_listener_restarts_after_a_database_failure(db: None) -> N
         listener=listen,
         _auth=SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE),
         _context_for=context_for,
-        poll_seconds=0.01,
-        lease_seconds=1,
+        poll_seconds=LISTENER_POLL_SECONDS,
+        lease_seconds=LISTENER_LEASE_SECONDS,
     )
     task = asyncio.create_task(runner.run())
     try:
