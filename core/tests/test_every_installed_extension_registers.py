@@ -14,6 +14,7 @@ registration defect this test names precisely. Live construction of a key- or se
 route to the extension's spec, never fail loud that no extension registers the name."""
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from cryptography.fernet import Fernet
@@ -235,6 +236,7 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
     if not manifest.surfaces:
         return
     app = FastAPI()
+    app.state.instance_id = uuid4()
     _mount_shared_surfaces(
         app,
         (manifest,),

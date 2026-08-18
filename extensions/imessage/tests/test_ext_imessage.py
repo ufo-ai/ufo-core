@@ -1,0 +1,891 @@
+import asyncio
+import hashlib
+import json
+import threading
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import cast, get_type_hints
+from uuid import UUID, uuid4
+
+import httpx
+import pytest
+import sqlalchemy as sa
+import ufo_ext_imessage.cloud as cloud
+import ufo_ext_imessage.surface as surface_module
+from cryptography.fernet import Fernet
+from ufo_ext_imessage.cloud import SpectrumCloudError, SpectrumProject, _inbound_message
+from ufo_ext_imessage.manifest import manifest
+from ufo_ext_imessage.proto.photon.imessage.v1 import message_types_pb2
+from ufo_ext_imessage.provider import (
+    InboundMessage,
+    MessageAttachment,
+    ProviderEvent,
+    ProviderNotConfigured,
+    RegisteredPhone,
+)
+from ufo_ext_imessage.surface import (
+    CONFIRMATION_REPLY_PREFIX,
+    IMESSAGE_EXTENSION,
+    SURFACE_IMESSAGE,
+    ImessageSurface,
+    MessageStreamDisconnected,
+    PendingClaim,
+    conversation_from_queue,
+    phone_key,
+    queue_key,
+)
+from ufo_ext_imessage.tools import CONFIRMATION_TEXT, ImessageConnect, ImessageConnectInput
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    UNREACHED_AMBIENT_REPLY,
+    UNREACHED_STOPPER,
+    no_user_skills,
+)
+
+from ufo.ambient_reply import AmbientReplyClassifier
+from ufo.audience import conversation_audience
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ScopedStore, context_for
+from ufo.ext.surface import SurfaceContext, Writeback, member_message_text
+from ufo.hub import InProcessHub
+from ufo.models.interface import ModelRequest
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
+from ufo.schema import tables
+from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
+from ufo.surfaces.admission import Admission, MemberAdmission
+from ufo.surfaces.hub_tail import HubTailer
+from ufo.tools.context import ToolContext
+from ufo.workspace import ws
+
+
+@dataclass
+class StubDbos:
+    enqueued: list[str] = field(default_factory=list)
+
+    async def enqueue_async(self, _options: object, _workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
+
+
+@dataclass
+class RecordingProvider:
+    registrations: list[tuple[str, str]] = field(default_factory=list)
+    sends: list[tuple[str, str, str]] = field(default_factory=list)
+    delivered: list[tuple[str, str]] = field(default_factory=list)
+    claim_present_when_sent: list[bool] = field(default_factory=list)
+    sent_keys: set[str] = field(default_factory=set)
+    fail_once: set[str] = field(default_factory=set)
+    downloads: dict[str, tuple[bytes, ...] | Exception] = field(default_factory=dict)
+
+    @property
+    def installation_id(self) -> str:
+        return "project:project"
+
+    async def register_phone(self, phone_number: str, idempotency_key: str) -> RegisteredPhone:
+        self.registrations.append((phone_number, idempotency_key))
+        return RegisteredPhone(
+            assigned_phone_number="+14085550123",
+            conversation_id=f"iMessage;-;{phone_number}",
+        )
+
+    async def send_text(self, conversation_id: str, text: str, idempotency_key: str) -> str:
+        self.sends.append((conversation_id, text, idempotency_key))
+        claim = await ScopedStore(IMESSAGE_EXTENSION).get(phone_key("+14155550123"))
+        self.claim_present_when_sent.append(claim is not None)
+        if idempotency_key in self.fail_once:
+            self.fail_once.remove(idempotency_key)
+            raise httpx.ConnectError("send failed")
+        if idempotency_key not in self.sent_keys:
+            self.sent_keys.add(idempotency_key)
+            self.delivered.append((conversation_id, text))
+        return f"sent-{len(self.delivered)}"
+
+    async def download_attachment(self, attachment_id: str) -> AsyncGenerator[bytes, None]:
+        value = self.downloads[attachment_id]
+        if isinstance(value, Exception):
+            raise value
+        for chunk in value:
+            yield chunk
+
+    def external_error(self, error: Exception) -> bool:
+        return isinstance(error, httpx.HTTPError)
+
+
+@dataclass(frozen=True)
+class DecisionModel:
+    answer: str
+    model: str = "decision"
+
+    async def complete(self, _request: ModelRequest) -> str:
+        return self.answer
+
+
+async def _seed() -> tuple[UUID, UUID]:
+    workspace_id, agent_id, member_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="Be brief.",
+                model="claude-opus-4-8",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                is_admin=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, member_id
+
+
+def _sandboxes(root: Path) -> ConversationSandbox:
+    return ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
+        workspace_root=root,
+    )
+
+
+def _context(workspace_id: UUID, tmp_path: Path, dbos: StubDbos) -> SurfaceContext:
+    return SurfaceContext(
+        workspace_id=workspace_id,
+        surface=SURFACE_IMESSAGE,
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
+        _sandboxes=_sandboxes(tmp_path / "workspaces"),
+        _admitter=MemberAdmission(
+            workspace_id=workspace_id,
+            admission=Admission(dbos=dbos, durable_surfaces=frozenset({SURFACE_IMESSAGE})),
+        ),
+        _tailer=HubTailer(hub=InProcessHub()),
+        _stopper=UNREACHED_STOPPER,
+        _credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        _artifact_token_secret="artifact-secret",
+        _public_base_url="https://ufo.example.test",
+        _home_surface="web",
+        _ingress_public_url=None,
+        _deploy_sandbox_internet=False,
+        _models=("auto", "claude-opus-4-8"),
+        _skills=EMPTY_SKILL_REGISTRY,
+        _user_skills=no_user_skills,
+        _subagents=(),
+        _declared_slots=(),
+        _ambient_reply=UNREACHED_AMBIENT_REPLY,
+    )
+
+
+def _message(
+    phone: str,
+    text: str = "Please summarize this.",
+    *,
+    message_id: str = "message-1",
+    conversation_id: str | None = None,
+    direct: bool = True,
+    attachments: tuple[MessageAttachment, ...] = (),
+) -> InboundMessage:
+    return InboundMessage(
+        id=message_id,
+        conversation_id=conversation_id or f"iMessage;-;{phone}",
+        sender=phone,
+        text=text,
+        attachments=attachments,
+        direct=direct,
+    )
+
+
+def _tool_context(workspace_id: UUID, member_id: UUID) -> ToolContext:
+    return ToolContext(
+        sandbox=None,
+        blob=None,
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=1,
+            status="running",
+            inbound="Connect my phone.",
+            created_at=datetime.now(UTC),
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=None,
+        speaker_member_id=member_id,
+        audience=conversation_audience(member_id),
+        artifact_token_secret="",
+        ext=context_for(
+            IMESSAGE_EXTENSION,
+            frozenset(),
+            surfaces=frozenset({SURFACE_IMESSAGE}),
+        ),
+    )
+
+
+def test_manifest_declares_complete_durable_surface() -> None:
+    loaded = manifest()
+    assert loaded.deploy_keys == ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET")
+    assert tuple(tool.name for tool in loaded.tools) == ("imessage_connect",)
+    surface = loaded.surfaces[0]
+    assert surface.listen is not None
+    assert surface.post is not None
+    assert surface.attach is not None
+    assert surface.speak is not None
+    assert surface.routes == ()
+
+
+def test_phone_and_queue_boundaries() -> None:
+    parsed = ImessageConnectInput(
+        phone_number="+1 415 555 0123", user_description="Connect my phone."
+    )
+    assert parsed.phone_number == "+14155550123"
+    queue = queue_key("iMessage;-;+14155550123", direct=True)
+    assert conversation_from_queue(queue).id == "iMessage;-;+14155550123"
+    assert conversation_from_queue(queue).direct
+    with pytest.raises(ValueError, match=r"E\.164"):
+        ImessageConnectInput(phone_number="4155550123", user_description="Connect my phone.")
+    with pytest.raises(ValueError, match="queue key"):
+        conversation_from_queue('["other","chat"]')
+
+
+async def test_missing_provider_keeps_listener_inactive() -> None:
+    def missing_provider():
+        raise ProviderNotConfigured("Set provider keys")
+
+    task = asyncio.create_task(ImessageSurface(provider=missing_provider).listen(object()))
+    await asyncio.sleep(0)
+    assert not task.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_group_writeback_does_not_mint_a_connect_url() -> None:
+    sent: list[str] = []
+
+    class Provider:
+        async def send_text(self, _conversation_id: str, text: str, _idempotency_key: str) -> str:
+            sent.append(text)
+            return "message"
+
+    class Context:
+        async def connect_url(self, _turn_id: UUID, _member_id: UUID) -> str:
+            raise AssertionError("group writeback minted a connect URL")
+
+        def home_url(self) -> str:
+            return "https://ufo.example.test"
+
+    provider = Provider()
+    surface = ImessageSurface(provider=lambda: provider)
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        queue_key=queue_key("group-chat", direct=False),
+        terminal=TerminalFrame(
+            status="done",
+            connect_request=ConnectRequest(provider="github", requester_member_id=uuid4()),
+        ),
+        artifacts=(),
+    )
+
+    assert await surface.post(Context(), writeback) == "message"
+    assert sent == ["Continue in a direct message to connect the account."]
+
+
+async def test_direct_writeback_mints_the_requesting_members_connect_url() -> None:
+    sent: list[str] = []
+    requester = uuid4()
+
+    class Provider:
+        async def send_text(self, _conversation_id: str, text: str, _idempotency_key: str) -> str:
+            sent.append(text)
+            return "message"
+
+    class Context:
+        async def connect_url(self, _turn_id: UUID, member_id: UUID) -> str:
+            assert member_id == requester
+            return "https://ufo.example.test/connect"
+
+        def home_url(self) -> str:
+            return "https://ufo.example.test"
+
+    provider = Provider()
+    surface = ImessageSurface(provider=lambda: provider)
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        queue_key=queue_key("direct-chat", direct=True),
+        terminal=TerminalFrame(
+            status="done",
+            connect_request=ConnectRequest(provider="github", requester_member_id=requester),
+        ),
+        artifacts=(),
+    )
+
+    assert await surface.post(Context(), writeback) == "message"
+    assert sent == ["https://ufo.example.test/connect"]
+
+
+async def test_spectrum_cloud_mints_one_cached_shared_token() -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "succeed": True,
+                "data": {"type": "shared", "token": "bearer", "expiresIn": 900},
+            },
+        )
+
+    project = SpectrumProject(
+        project_id="project",
+        project_secret="secret",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        lock=asyncio.Lock(),
+        token_state={},
+    )
+    try:
+        assert (await project.line()).id == "shared"
+        assert (await project.line()).token == "bearer"
+        assert len(requests) == 1
+        assert requests[0].method == "POST"
+        assert requests[0].url.path == "/projects/project/imessage/tokens"
+        assert "authorization" in requests[0].headers
+    finally:
+        await project.client.aclose()
+
+
+async def test_spectrum_project_uses_one_client_per_event_loop() -> None:
+    project = SpectrumProject(
+        project_id="project",
+        project_secret="secret",
+        client=httpx.AsyncClient(),
+        lock=asyncio.Lock(),
+        token_state={},
+    )
+    main_state = project._loop()
+    foreign_states: list[cloud.SpectrumLoop] = []
+    done = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def capture() -> None:
+        async def read() -> None:
+            state = project._loop()
+            foreign_states.append(state)
+            await state.client.aclose()
+
+        try:
+            asyncio.run(read())
+        finally:
+            loop.call_soon_threadsafe(done.set)
+
+    threading.Thread(target=capture).start()
+    await asyncio.wait_for(done.wait(), timeout=5)
+    assert len(foreign_states) == 1
+    assert foreign_states[0].client is not main_state.client
+    assert foreign_states[0].lock is not main_state.lock
+    await main_state.client.aclose()
+
+
+async def test_spectrum_invalid_payload_is_an_external_provider_error() -> None:
+    project = SpectrumProject(
+        project_id="project",
+        project_secret="secret",
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json={
+                        "succeed": True,
+                        "data": {"type": "dedicated", "token": "bearer", "expiresIn": 900},
+                    },
+                )
+            )
+        ),
+        lock=asyncio.Lock(),
+        token_state={},
+    )
+    try:
+        with pytest.raises(SpectrumCloudError) as raised:
+            await project.line()
+        assert project.external_error(raised.value)
+    finally:
+        await project.client.aclose()
+
+
+def test_spectrum_provider_normalizes_a_photon_message() -> None:
+    event = message_types_pb2.MessageChangeEvent(chat_guid="iMessage;-;+14155550123")
+    event.actor.address = "+14155550123"
+    event.message_received.message.guid = "message-1"
+    event.message_received.message.content.text = "Please summarize this."
+
+    assert _inbound_message(event) == _message("+14155550123")
+
+
+async def test_replay_head_filters_the_buffered_live_overlap() -> None:
+    processed: list[int] = []
+
+    class ReplayProvider:
+        async def subscribe(self, ready: asyncio.Event):
+            ready.set()
+            for sequence in (6, 8):
+                yield ProviderEvent(sequence=sequence)
+
+    class ReplaySurface(ImessageSurface):
+        async def _catch_up(self, _context, _provider, _installation_id, cursor):
+            assert cursor == 5
+            return 7
+
+        async def _process_event(
+            self, _context, _provider, _installation_id, sequence, _message
+        ) -> None:
+            processed.append(sequence)
+
+    provider = ReplayProvider()
+    surface = ReplaySurface(provider=lambda: provider)
+    with pytest.raises(MessageStreamDisconnected) as raised:
+        await surface._consume_connected(object(), provider, "project:project", 5)
+    assert processed == [8]
+    assert raised.value.cursor == 8
+
+
+async def test_spectrum_cloud_registers_an_absent_phone_and_creates_its_direct_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    chat_requests: list[
+        tuple[
+            cloud.chat_service_pb2.CreateChatRequest,
+            tuple[tuple[str, str], ...],
+            float,
+        ]
+    ] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"succeed": True, "data": {"users": [], "total": 0}})
+        if request.url.path.endswith("/imessage/tokens"):
+            return httpx.Response(
+                200,
+                json={
+                    "succeed": True,
+                    "data": {"type": "shared", "token": "bearer", "expiresIn": 900},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "succeed": True,
+                "data": {
+                    "id": "user",
+                    "phoneNumber": "+14155550123",
+                    "assignedPhoneNumber": "+14085550123",
+                },
+            },
+        )
+
+    class Channel:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class ChatStub:
+        def __init__(self, _channel: object) -> None:
+            self.CreateChat = self.create_chat
+
+        async def create_chat(
+            self,
+            request: cloud.chat_service_pb2.CreateChatRequest,
+            **options: object,
+        ) -> cloud.chat_service_pb2.CreateChatResponse:
+            metadata = cast(tuple[tuple[str, str], ...], options["metadata"])
+            timeout = cast(float, options["timeout"])
+            chat_requests.append((request, metadata, timeout))
+            return cloud.chat_service_pb2.CreateChatResponse(
+                chat={"guid": "iMessage;-;+14155550123"}
+            )
+
+    monkeypatch.setattr(SpectrumProject, "channel", lambda _self: Channel())
+    monkeypatch.setattr(cloud.chat_service_pb2_grpc, "ChatServiceStub", ChatStub)
+
+    project = SpectrumProject(
+        project_id="project",
+        project_secret="secret",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        lock=asyncio.Lock(),
+        token_state={},
+    )
+    try:
+        user = await project.register_phone("+14155550123", "confirm-1")
+        assert user.assigned_phone_number == "+14085550123"
+        assert user.conversation_id == "iMessage;-;+14155550123"
+        assert [request.method for request in requests] == ["GET", "POST", "POST"]
+        assert requests[1].url.path == "/projects/project/users/"
+        assert requests[1].content == b'{"type":"shared","phoneNumber":"+14155550123"}'
+        assert requests[1].headers["x-idempotency-key"] == "confirm-1:user"
+        chat_request, metadata, timeout = chat_requests[0]
+        assert tuple(chat_request.addresses) == ("+14155550123",)
+        assert chat_request.service == cloud.address_types_pb2.CHAT_SERVICE_TYPE_IMESSAGE
+        assert chat_request.client_message_id == "confirm-1:conversation"
+        assert ("x-idempotency-key", "confirm-1:conversation") in metadata
+        assert timeout == cloud.RPC_TIMEOUT_SECONDS
+        assert get_type_hints(RegisteredPhone) == {
+            "assigned_phone_number": str,
+            "conversation_id": str,
+        }
+    finally:
+        await project.client.aclose()
+
+
+async def test_reply_confirmation_survives_restart_then_the_next_message_gets_writeback(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    provider = RecordingProvider()
+    tool = ImessageConnect(provider=lambda: provider)
+    tool_context = _tool_context(workspace_id, member_id)
+    dbos = StubDbos()
+    context = _context(workspace_id, tmp_path, dbos)
+    args = ImessageConnectInput(phone_number=phone, user_description="Connect my phone.")
+    with ws(workspace_id):
+        first = await tool.run(tool_context, args)
+        second = await tool.run(tool_context, args)
+        stored = await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone))
+    assert json.loads(first.content[0].text) == {
+        "state": "pending",
+        "instruction": "Check Messages and reply to the confirmation within 10 minutes.",
+    }
+    assert second == first
+    claim = PendingClaim.model_validate(stored)
+    assert claim.member_id == member_id
+    assert claim.phone_number == phone
+    assert claim.conversation_id == f"iMessage;-;{phone}"
+    assert provider.registrations == [(phone, claim.confirmation_idempotency_key)]
+    assert provider.sends[:2] == [
+        (claim.conversation_id, CONFIRMATION_TEXT, claim.confirmation_idempotency_key),
+        (claim.conversation_id, CONFIRMATION_TEXT, claim.confirmation_idempotency_key),
+    ]
+    assert provider.claim_present_when_sent[:2] == [True, True]
+    assert provider.delivered == [(claim.conversation_id, CONFIRMATION_TEXT)]
+
+    surface = ImessageSurface(provider=lambda: provider)
+    with ws(workspace_id):
+        await surface._admit_message(
+            context,
+            provider,
+            _message(phone, "Yes", message_id="confirmation-reply"),
+        )
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
+        await surface._admit_message(
+            context,
+            provider,
+            _message(phone, message_id="request-1"),
+        )
+    with ws(workspace_id):
+        await surface.post(
+            context,
+            Writeback(
+                turn_id=uuid4(),
+                conversation_id=uuid4(),
+                agent_id=uuid4(),
+                queue_key=queue_key(claim.conversation_id, direct=True),
+                terminal=TerminalFrame(status="done", text="Agent reply."),
+                artifacts=(),
+            ),
+        )
+    async with workspace_tx() as connection:
+        identity = (
+            await connection.execute(
+                sa.select(tables.surface_identity.c.member_id).where(
+                    tables.surface_identity.c.surface == SURFACE_IMESSAGE,
+                    tables.surface_identity.c.external_id == phone,
+                )
+            )
+        ).one()
+        conversation = (
+            await connection.execute(
+                sa.select(
+                    tables.conversation.c.member_id,
+                    tables.conversation.c.queue_key,
+                    tables.conversation.c.surface_label,
+                )
+            )
+        ).one()
+        turns = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.inbound,
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.context,
+                )
+            )
+        ).all()
+        writebacks = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.writeback))
+        ).scalar_one()
+    assert identity.member_id == member_id
+    assert conversation.member_id == member_id
+    assert conversation.queue_key == queue_key(claim.conversation_id, direct=True)
+    assert conversation.surface_label == "Direct message"
+    assert len(turns) == 1
+    assert member_message_text(turns[0].inbound) == "Please summarize this."
+    assert turns[0].speaker_member_id == member_id
+    assert turns[0].context["sender"] == phone
+    assert writebacks == 1
+    assert provider.delivered == [
+        (claim.conversation_id, CONFIRMATION_TEXT),
+        (claim.conversation_id, "Connected. Send your request."),
+        (claim.conversation_id, "Agent reply."),
+    ]
+    assert provider.sends[2][2] == "imessage-connected:confirmation-reply"
+
+
+@pytest.mark.parametrize(
+    ("message", "expired", "claim_remains"),
+    (
+        (_message("+16505550123"), False, True),
+        (
+            _message("+14155550123", conversation_id="iMessage;-;+16505550123"),
+            False,
+            True,
+        ),
+        (_message("+14155550123", direct=False), False, True),
+        (_message("+14155550123"), True, False),
+    ),
+    ids=("other-phone", "other-conversation", "group", "expired"),
+)
+async def test_only_the_exact_live_direct_reply_confirms(
+    db: None,
+    tmp_path: Path,
+    message: InboundMessage,
+    expired: bool,
+    claim_remains: bool,
+) -> None:
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    provider = RecordingProvider()
+    context = _context(workspace_id, tmp_path, StubDbos())
+    surface = ImessageSurface(provider=lambda: provider)
+    with ws(workspace_id):
+        await ScopedStore(IMESSAGE_EXTENSION).put(
+            phone_key(phone),
+            PendingClaim(
+                member_id=member_id,
+                phone_number=phone,
+                conversation_id=f"iMessage;-;{phone}",
+                confirmation_idempotency_key="confirmation-1",
+                expires_at=datetime.now(UTC)
+                + (timedelta(minutes=-1) if expired else timedelta(minutes=10)),
+            ).model_dump(mode="json"),
+        )
+        await surface._admit_message(context, provider, message)
+        stored = await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone))
+    async with workspace_tx() as connection:
+        identities = (
+            await connection.execute(
+                sa.select(sa.func.count()).select_from(tables.surface_identity)
+            )
+        ).scalar_one()
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert identities == 0
+    assert turns == 0
+    assert provider.sends == []
+    assert (stored is not None) is claim_remains
+
+
+@pytest.mark.parametrize(
+    "attachments",
+    [(), (MessageAttachment(id="attachment-1", filename="note.txt", size_bytes=4),)],
+    ids=("text", "attachment"),
+)
+async def test_group_message_uses_the_ambient_reply_gate(
+    db: None, tmp_path: Path, attachments: tuple[MessageAttachment, ...]
+) -> None:
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    provider = RecordingProvider()
+    context = _context(workspace_id, tmp_path, StubDbos())
+    context = dataclass_replace(
+        context,
+        _ambient_reply=AmbientReplyClassifier(model=DecisionModel("NO_REPLY")),
+    )
+    surface = ImessageSurface(provider=lambda: provider)
+    with ws(workspace_id):
+        assert await context.link_member_id(phone, member_id) == member_id
+        await surface._admit_message(
+            context,
+            provider,
+            _message(
+                phone,
+                "Thanks",
+                conversation_id="iMessage;+;group",
+                direct=False,
+                attachments=attachments,
+            ),
+        )
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_bad_attachments_do_not_block_the_inbound_message(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(surface_module, "MAX_ATTACHMENT_BYTES", 4)
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    provider = RecordingProvider(
+        downloads={
+            "oversize": (b"123", b"45"),
+            "missing": httpx.ConnectError("gone"),
+        }
+    )
+    context = _context(workspace_id, tmp_path, StubDbos())
+    surface = ImessageSurface(provider=lambda: provider)
+    attachments = (
+        MessageAttachment(id="oversize", filename="large.txt", size_bytes=0),
+        MessageAttachment(id="missing", filename="gone.txt", size_bytes=0),
+    )
+    with ws(workspace_id):
+        assert await context.link_member_id(phone, member_id) == member_id
+        await surface._admit_message(
+            context,
+            provider,
+            _message(phone, attachments=attachments),
+        )
+    async with workspace_tx() as connection:
+        turn = (await connection.execute(sa.select(tables.turn.c.inbound))).scalar_one()
+    assert "Skipped files, too large to download: large.txt" in turn
+    assert "Skipped files, unavailable to download: gone.txt" in turn
+
+
+async def test_confirmation_acknowledgement_replays_without_admitting_the_reply(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    message = _message(phone, "Yes", message_id="confirmation-reply")
+    acknowledgement_key = "imessage-connected:confirmation-reply"
+    provider = RecordingProvider(fail_once={acknowledgement_key})
+    context = _context(workspace_id, tmp_path, StubDbos())
+    surface = ImessageSurface(provider=lambda: provider)
+    with ws(workspace_id):
+        await ScopedStore(IMESSAGE_EXTENSION).put(
+            phone_key(phone),
+            PendingClaim(
+                member_id=member_id,
+                phone_number=phone,
+                conversation_id=message.conversation_id,
+                confirmation_idempotency_key="confirmation-1",
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            ).model_dump(mode="json"),
+        )
+        with pytest.raises(httpx.ConnectError, match="send failed"):
+            await surface._admit_message(context, provider, message)
+        await surface._admit_message(context, provider, message)
+        await surface._admit_message(context, provider, message)
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+    assert provider.delivered == [(message.conversation_id, "Connected. Send your request.")]
+    assert [key for _, _, key in provider.sends] == [acknowledgement_key] * 3
+
+
+async def test_confirmation_for_a_removed_member_is_discarded(db: None, tmp_path: Path) -> None:
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    message = _message(phone, "Yes", message_id="removed-member-reply")
+    receipt_key = f"{CONFIRMATION_REPLY_PREFIX}{hashlib.sha256(message.id.encode()).hexdigest()}"
+    provider = RecordingProvider()
+    context = _context(workspace_id, tmp_path, StubDbos())
+    surface = ImessageSurface(provider=lambda: provider)
+    with ws(workspace_id):
+        await ScopedStore(IMESSAGE_EXTENSION).put(
+            phone_key(phone),
+            PendingClaim(
+                member_id=member_id,
+                phone_number=phone,
+                conversation_id=message.conversation_id,
+                confirmation_idempotency_key="confirmation-1",
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            ).model_dump(mode="json"),
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.member).where(tables.member.c.id == member_id)
+            )
+        await surface._admit_message(context, provider, message)
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(receipt_key) is None
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+    assert provider.sends == []
+
+
+async def test_inbound_message_from_an_unclaimed_phone_is_ignored(db: None, tmp_path: Path) -> None:
+    workspace_id, _ = await _seed()
+    dbos = StubDbos()
+    context = _context(workspace_id, tmp_path, dbos)
+    project = SpectrumProject(
+        project_id="project",
+        project_secret="secret",
+        client=httpx.AsyncClient(),
+        lock=asyncio.Lock(),
+        token_state={},
+    )
+    surface = ImessageSurface(provider=lambda: project)
+    try:
+        with ws(workspace_id):
+            await surface._admit_message(context, project, _message("+14155550123"))
+        async with workspace_tx() as connection:
+            conversations = (
+                await connection.execute(
+                    sa.select(sa.func.count()).select_from(tables.conversation)
+                )
+            ).scalar_one()
+            turns = (
+                await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+            ).scalar_one()
+        assert conversations == 0
+        assert turns == 0
+        assert dbos.enqueued == []
+    finally:
+        await project.client.aclose()

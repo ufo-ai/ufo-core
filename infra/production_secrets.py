@@ -20,6 +20,8 @@ API_KEY_INPUTS = {
     "perplexity-api-key": "PERPLEXITY_API_KEY",
     "openai-api-key": "OPENAI_API_KEY",
     "openrouter-api-key": "OPENROUTER_API_KEY",
+    "spectrum-project-id": "SPECTRUM_PROJECT_ID",
+    "spectrum-project-secret": "SPECTRUM_PROJECT_SECRET",
     "turbopuffer-api-key": "TURBOPUFFER_API_KEY",
 }
 TESTING_VALUE_PREFIXES = ("sk_test_", "pk_test_", "rk_test_")
@@ -46,6 +48,8 @@ API_KEYS_PROPERTIES = frozenset(
         "slack-client-id",
         "slack-client-secret",
         "slack-signing-secret",
+        "spectrum-project-id",
+        "spectrum-project-secret",
         "stripe-billing-portal-configuration-id",
         "stripe-secret-key",
         "turbopuffer-api-key",

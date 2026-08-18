@@ -9,10 +9,10 @@ tasks, member-authored skills, the ufo terminal
 surface, the member web portal, and the operator session debugger, the Bedrock and OpenRouter
 model providers, Metronome plan provisioning, usage and seat metering, and the coding
 subagent — but over managed backends instead
-of core's own: the Turbopuffer index (in place of the local index), the Slack surface, the Redis
-live-frame hub, the E2B sandbox carrier, and a Browserbase-hosted Chrome per browser run (the
-browserbase cdp provider, in place of Chrome inside the conversation's own sandbox). Memory still
-retrieves through OpenAI embeddings
+of core's own: the Turbopuffer index (in place of the local index), Slack and iMessage surfaces,
+the Redis live-frame hub, the E2B sandbox carrier, and a Browserbase-hosted Chrome per browser run
+(the browserbase cdp provider, in place of Chrome inside the conversation's own sandbox). Memory
+still retrieves through OpenAI embeddings
 (Turbopuffer is the index seam, embeddings are separate). A workspace admin connects Slack in chat
 — the slack extension's setup tools drive it. Beyond its extensions it carries one pack-level
 skill, `customer-onboarding-help`: a curated, read-only corpus of this deploy's own onboarding facts
@@ -35,6 +35,7 @@ EXTENSIONS = (
     "web",
     "debugger",
     "slack",
+    "imessage",
     "sites",
     "scheduled_tasks",
     "sweep",

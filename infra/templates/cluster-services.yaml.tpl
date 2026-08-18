@@ -82,6 +82,8 @@ spec:
     - {secretKey: SLACK_CLIENT_ID, remoteRef: {key: ${secret_api_keys}, property: slack-client-id}}
     - {secretKey: SLACK_CLIENT_SECRET, remoteRef: {key: ${secret_api_keys}, property: slack-client-secret}}
     - {secretKey: SLACK_SIGNING_SECRET, remoteRef: {key: ${secret_api_keys}, property: slack-signing-secret}}
+    - {secretKey: SPECTRUM_PROJECT_ID, remoteRef: {key: ${secret_api_keys}, property: spectrum-project-id}}
+    - {secretKey: SPECTRUM_PROJECT_SECRET, remoteRef: {key: ${secret_api_keys}, property: spectrum-project-secret}}
     # This deploy's GitHub App: id and client id name it, the client secret completes the install
     # OAuth exchange, and the PEM signs the JWT that mints an installation token per turn. All four
     # or none — serve fails loud on a half-set registration. The PEM is the value, not a path, so it

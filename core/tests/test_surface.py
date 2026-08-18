@@ -55,8 +55,12 @@ from ufo.ext.surface import (
     WRITEBACK_WORKSPACE_BATCH,
     MidTurnReply,
     SharedArtifact,
+    SurfaceAuth,
     SurfaceContext,
     SurfaceDeliveryError,
+    SurfaceInstallationAccess,
+    SurfaceListenerContext,
+    SurfaceListenerRunner,
     SurfaceRoute,
     SurfaceSpec,
     Writeback,
@@ -1145,6 +1149,220 @@ async def test_link_member_provisions_a_surface_identity(db: None, tmp_path) -> 
         ).one()
     assert linked.member_id == member_id
     assert await context.link_member("UNOBODY", "nobody@example.com") is None
+
+
+async def test_link_member_id_requires_a_member_of_the_workspace(db: None, tmp_path) -> None:
+    workspace_id, _, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.link_member_id("UBEE", member_id) == member_id
+    assert await context.linked_member("UBEE") == member_id
+    assert await context.link_member_id("UOTHER", uuid4()) is None
+    assert await context.linked_member("UOTHER") is None
+
+
+async def test_surface_listener_resolves_only_a_bound_installation(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    surface_context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    async def owned() -> bool:
+        return True
+
+    listener = SurfaceListenerContext(
+        surface=SURFACE,
+        _auth=SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE),
+        _context_for=lambda _workspace_id, _surface: surface_context,
+        _owned=owned,
+    )
+    async with listener.workspace("installation") as unresolved:
+        assert unresolved is None
+    with ws(workspace_id):
+        await SurfaceInstallationAccess(declared=frozenset({SURFACE})).bind(SURFACE, "installation")
+    async with listener.workspace("installation") as resolved:
+        assert resolved is surface_context
+
+
+async def test_surface_listener_has_one_live_owner_and_parks_a_failure(db: None) -> None:
+    first_id = UUID(int=1)
+    second_id = UUID(int=2)
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.runtime_instance),
+            [
+                {
+                    "id": first_id,
+                    "workspace_id": None,
+                    "heartbeat_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": second_id,
+                    "workspace_id": None,
+                    "heartbeat_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def fail(_context: SurfaceListenerContext) -> None:
+        first_started.set()
+        raise RuntimeError("event failed")
+
+    async def wait(_context: SurfaceListenerContext) -> None:
+        second_started.set()
+        await asyncio.Event().wait()
+
+    def context_for(_workspace_id: UUID, _surface: str) -> SurfaceContext:
+        raise AssertionError("listener context was not requested")
+
+    auth = SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE)
+    first = SurfaceListenerRunner(
+        surface=SURFACE,
+        instance_id=first_id,
+        listener=fail,
+        _auth=auth,
+        _context_for=context_for,
+        poll_seconds=0.01,
+        lease_seconds=1,
+    )
+    second = SurfaceListenerRunner(
+        surface=SURFACE,
+        instance_id=second_id,
+        listener=wait,
+        _auth=auth,
+        _context_for=context_for,
+        poll_seconds=0.01,
+        lease_seconds=1,
+    )
+    first_task = asyncio.create_task(first.run())
+    second_task = asyncio.create_task(second.run())
+    try:
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(second_started.wait(), timeout=0.05)
+        assert not first_task.done()
+        first_task.cancel()
+        await asyncio.gather(first_task, return_exceptions=True)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.surface_listener_claim)
+                .where(tables.surface_listener_claim.c.surface == SURFACE)
+                .values(claim_expires_at=now - timedelta(seconds=1))
+            )
+        await asyncio.wait_for(second_started.wait(), timeout=1)
+    finally:
+        first_task.cancel()
+        second_task.cancel()
+        await asyncio.gather(first_task, second_task, return_exceptions=True)
+
+
+async def test_surface_listener_survives_one_failed_claim_tick(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance_id = UUID(int=1)
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.runtime_instance).values(
+                id=instance_id,
+                workspace_id=None,
+                heartbeat_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    listener_started = asyncio.Event()
+    claim_recovered = asyncio.Event()
+    claim_ticks = 0
+    owns = SurfaceListenerRunner._owns
+
+    async def wait(_context: SurfaceListenerContext) -> None:
+        listener_started.set()
+        await asyncio.Event().wait()
+
+    async def flaky_owns(runner: SurfaceListenerRunner) -> bool:
+        nonlocal claim_ticks
+        claim_ticks += 1
+        if claim_ticks == 2:
+            raise sa.exc.SQLAlchemyError("database unavailable")
+        owned = await owns(runner)
+        if claim_ticks >= 3:
+            claim_recovered.set()
+        return owned
+
+    def context_for(_workspace_id: UUID, _surface: str) -> SurfaceContext:
+        raise AssertionError("listener context was not requested")
+
+    monkeypatch.setattr(SurfaceListenerRunner, "_owns", flaky_owns)
+    runner = SurfaceListenerRunner(
+        surface=SURFACE,
+        instance_id=instance_id,
+        listener=wait,
+        _auth=SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE),
+        _context_for=context_for,
+        poll_seconds=0.01,
+        lease_seconds=1,
+    )
+    task = asyncio.create_task(runner.run())
+    try:
+        await asyncio.wait_for(listener_started.wait(), timeout=1)
+        await asyncio.wait_for(claim_recovered.wait(), timeout=1)
+        assert not task.done()
+        assert claim_ticks >= 3
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_surface_listener_restarts_after_a_database_failure(db: None) -> None:
+    instance_id = UUID(int=1)
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.runtime_instance).values(
+                id=instance_id,
+                workspace_id=None,
+                heartbeat_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    attempts = 0
+    restarted = asyncio.Event()
+
+    async def listen(_context: SurfaceListenerContext) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sa.exc.SQLAlchemyError("database unavailable")
+        restarted.set()
+        await asyncio.Event().wait()
+
+    def context_for(_workspace_id: UUID, _surface: str) -> SurfaceContext:
+        raise AssertionError("listener context was not requested")
+
+    runner = SurfaceListenerRunner(
+        surface=SURFACE,
+        instance_id=instance_id,
+        listener=listen,
+        _auth=SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE),
+        _context_for=context_for,
+        poll_seconds=0.01,
+        lease_seconds=1,
+    )
+    task = asyncio.create_task(runner.run())
+    try:
+        await asyncio.wait_for(restarted.wait(), timeout=1)
+        assert attempts == 2
+        assert not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_link_member_answers_the_oldest_of_two_cased_rows(db: None, tmp_path) -> None:

@@ -425,7 +425,14 @@ path), plus the reads a live view serves: `tail`/`turn_owner`, the admin-shaped
 `spend_rollup`, and the per-agent projections — `object_kind` with
 `list_member_objects`/`member_object`, `agent_skills`, `agent_spend`, and
 `memory_available`/`search_memory`. An extension registers a `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
-one context. The seam supports two delivery modes; a surface uses only the subset it needs:
+one context. A provider that sends events on a persistent stream declares `listen`; core starts and
+cancels it with the app because core alone owns process lifetime and the pre-workspace installation
+gate. One fenced fleet lease per surface admits one listener across all replicas. An external
+provider failure reconnects from its cursor. An internal listener fault parks its cursor and lease
+until shutdown without stopping unrelated server work. The listener resolves each exact
+installation through `SurfaceListenerContext.workspace`, which checks the lease fence before it
+reads or admits workspace data. The seam supports two delivery modes; a surface uses only the subset
+it needs:
 
 Jobs and evals receive the separate internal `invoke` capability, which never speaks as a member. It
 carries the admission meanings a fire needs — a scheduled stamp, the member a turn acts for, parking
@@ -434,7 +441,7 @@ an extension that waits or fires on a schedule keeps its own rows and needs no s
 admission. Both capabilities delegate to the same admission workflow, so spend enforcement, turn
 allocation, delivery registration, and enqueue recovery remain one implementation.
 
-- **Durable** (Slack) — the member is elsewhere; declaring `post` is what marks the surface
+- **Durable** (Slack, iMessage) — the member is elsewhere; declaring `post` is what marks the surface
   durable, and admission registers a writeback for every turn entering its conversations — a
   surface ingest, a scheduled fire, an extension invoke alike. A `WritebackPoller` delivers the
   terminal reply with its cost, tokens, cache-read percentage, model, and reasoning effort
@@ -485,6 +492,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Terminal | `extensions/ufo` | live (held directive stream) | member token | session (private) |
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email/hex (private; a member opens any number of conversations per agent, each behind `conversation=new`; conversations that predate the rail keep bare agent/email keys, reachable by id) + intent/agent/email (the member's prepared-intent lane to that agent) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign. `surface_label` is `#name` off the `conversations.info` the audience decision already fetched (never a call of its own, and never an MPIM's member-naming name), `Direct message` for a DM, else null |
+| iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member (ten-minute reply confirmation requested in signed-in chat and bound to one direct provider conversation) | provider conversation id; DM = member, group = room |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
@@ -667,7 +675,9 @@ neither reaches a core internal nor the other extension's tables.
 Two-way attachments cross under explicit bounds at every hop: an inbound Slack file streams from
 `url_private` in bounded chunks into the conversation's workspace before the turn runs; a shared
 file (`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
-external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). The
+external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts).
+iMessage downloads and uploads through Spectrum's gRPC attachment service under the same workspace
+and payload bounds. The
 web composer's inbound files are refused unless the request declares a length the server frames
 the body by — a chunked body, whose length no header can state, is refused rather than parsed — and
 only then does the parse buffer each part within that length (in memory up to the parser's spool
@@ -708,6 +718,12 @@ the identity. **Alternative — bring-your-own app** (`slack_connect method="man
 `slack-app-setup` skill): an admin creates an app from `slack_app_manifest`, fills the per-workspace
 `slack_bot_token` and `slack_signing_secret` slots privately, and `slack_connect` derives the
 identity with `auth.test`.
+
+iMessage setup is one chat tool. An admin binds the deploy's Spectrum project to the workspace;
+each signed-in member claims an E.164 phone number. Spectrum returns the shared line to message,
+and the first inbound message from the claimed phone links that phone to the requesting member.
+The listener opens the live stream, buffers it while it replays from its extension-store sequence
+cursor, then drains the buffer; each provider message GUID is the admission idempotency key.
 
 Shared surface requests authenticate their workspace before core binds it. The untrusted team id
 selects one unique `surface_installation`, and that workspace's signing secret — its own slot (a
@@ -927,6 +943,7 @@ bundle installs OSS, on-prem, or hosted.
 |---|---|
 | OpenRouter (any model router) | models |
 | Slack surface (ingest + writeback + attachments) | surfaces, credentials, skills |
+| iMessage surface (stream + writeback + attachments) | surfaces, tools, deploy_keys |
 | Brief pipeline (typed outline → draft → critic stages the agent chains) | subagents, skills |
 | Composio / Pipedream connector brokers | connectors, routes (OAuth) |
 | Docker, E2B | carriers |

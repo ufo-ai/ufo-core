@@ -594,6 +594,24 @@ runtime_instance = sa.Table(
     sa.Index("runtime_instance_live", "workspace_id", "heartbeat_at"),
 )
 
+surface_listener_claim = sa.Table(
+    "surface_listener_claim",
+    metadata,
+    sa.Column("surface", sa.Text, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=True),
+    sa.Column(
+        "owner_id",
+        sa.Uuid,
+        sa.ForeignKey("runtime_instance.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("owner_token", sa.Uuid, nullable=False),
+    sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("surface <> ''", name="surface_listener_claim_surface_nonempty"),
+)
+
 source = sa.Table(
     "source",
     metadata,

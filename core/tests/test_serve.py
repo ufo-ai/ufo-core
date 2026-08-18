@@ -260,20 +260,28 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     reconciler = ShutdownProbe()
     poller = ShutdownProbe()
     speaker = ShutdownProbe()
+    listener = ShutdownProbe()
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
     monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
     app = SimpleNamespace(
-        state=SimpleNamespace(dbos=object(), writeback_poller=poller, mid_turn_reply_poller=speaker)
+        state=SimpleNamespace(
+            dbos=object(),
+            writeback_poller=poller,
+            mid_turn_reply_poller=speaker,
+            surface_listeners=(listener,),
+        )
     )
     async with serve._serve_lifespan(app):
         await recovery.started.wait()
         await reconciler.started.wait()
         await poller.started.wait()
         await speaker.started.wait()
+        await listener.started.wait()
     assert recovery.stopped.is_set()
     assert reconciler.stopped.is_set()
     assert poller.stopped.is_set()
     assert speaker.stopped.is_set()
+    assert listener.stopped.is_set()
 
 
 async def test_serve_lifespan_propagates_a_background_failure(
@@ -284,7 +292,12 @@ async def test_serve_lifespan_propagates_a_background_failure(
     monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
     monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
     app = SimpleNamespace(
-        state=SimpleNamespace(dbos=object(), writeback_poller=None, mid_turn_reply_poller=None)
+        state=SimpleNamespace(
+            dbos=object(),
+            writeback_poller=None,
+            mid_turn_reply_poller=None,
+            surface_listeners=(),
+        )
     )
     with pytest.raises(ExceptionGroup) as raised:
         async with serve._serve_lifespan(app):

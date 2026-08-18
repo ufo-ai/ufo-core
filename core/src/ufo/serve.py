@@ -101,6 +101,7 @@ from ufo.ext.surface import (
     SurfaceAuth,
     SurfaceContext,
     SurfaceIdentityContext,
+    SurfaceListenerRunner,
     SurfaceSpec,
     WritebackPoller,
     mid_turn_reply_workspaces,
@@ -311,6 +312,7 @@ def run() -> None:
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
     app.state.mid_turn_reply_poller = None
+    app.state.surface_listeners = ()
     app.state.blob = blob
     app.state.artifact_token_secret = artifact_secret
     app.include_router(callback_router)
@@ -928,6 +930,7 @@ def _mount_shared_surfaces(
     tailer = HubTailer(hub=hub)
     stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
     registered: dict[str, SurfaceSpec] = {}
+    listeners = []
 
     deploy_sandbox_internet = any(manifest.sandbox_internet for manifest in manifests)
     deploy_extensions = tuple(
@@ -1016,6 +1019,18 @@ def _mount_shared_surfaces(
                 raise RuntimeError(f"surface {spec.name!r} needs a credential key but none is set")
             if spec.post is not None:
                 registered[spec.name] = spec
+            if spec.listen is not None:
+                listeners.append(
+                    SurfaceListenerRunner(
+                        surface=spec.name,
+                        instance_id=app.state.instance_id,
+                        listener=spec.listen,
+                        _auth=auth,
+                        _context_for=context_for,
+                    )
+                )
+            if spec.routes and resolver is None:
+                raise RuntimeError(f"surface {spec.name!r} has routes but no workspace resolver")
             for route in spec.routes:
 
                 async def endpoint(
@@ -1040,6 +1055,7 @@ def _mount_shared_surfaces(
                     methods=[route.method],
                 )
             log("serve.shared_surface.mounted", surface=spec.name)
+    app.state.surface_listeners = tuple(listeners)
     _mount_home(app, manifests)
     if registered:
         worker_id = uuid4().hex
@@ -1102,6 +1118,8 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
         for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
             if poller is not None:
                 tasks.append(group.create_task(poller.run()))
+        for listener in app.state.surface_listeners:
+            tasks.append(group.create_task(listener.run()))
         try:
             yield
         finally:

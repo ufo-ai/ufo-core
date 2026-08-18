@@ -219,6 +219,8 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
     "slack-client-id"                        = ""
     "slack-client-secret"                    = ""
     "slack-signing-secret"                   = ""
+    "spectrum-project-id"                    = ""
+    "spectrum-project-secret"                = ""
     "github-app-id"                          = ""
     "github-app-client-id"                   = ""
     "github-app-client-secret"               = ""

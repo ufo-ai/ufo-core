@@ -113,6 +113,14 @@ def test_assistant_hosted_pack_is_discovered_with_its_bundle_and_skills() -> Non
     )
 
 
+def test_assistant_hosted_pack_activates_the_imessage_surface() -> None:
+    manifests = load_manifests(assistant_hosted.NAME)
+    imessage = next(manifest for manifest in manifests if manifest.name == "imessage")
+    assert len(imessage.surfaces) == 1
+    assert imessage.surfaces[0].listen is not None
+    assert imessage.deploy_keys == ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET")
+
+
 def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() -> None:
     """The hosted variant narrows to its managed-infra bundle (Turbopuffer, Slack, Redis, E2B on top
     of the assistant capabilities) in declared order, followed by the pack's own manifest carrying

@@ -38,6 +38,8 @@ def _environment(deployment_id: str = "run-1") -> dict[str, str]:
         "PERPLEXITY_API_KEY": "perplexity-value",
         "OPENAI_API_KEY": "openai-value",
         "OPENROUTER_API_KEY": "openrouter-value",
+        "SPECTRUM_PROJECT_ID": "spectrum-project-id",
+        "SPECTRUM_PROJECT_SECRET": "spectrum-project-secret",
         "TURBOPUFFER_API_KEY": "turbopuffer-value",
     }
 
@@ -180,6 +182,8 @@ def test_production_secret_writes_preserve_owned_values() -> None:
     assert api_keys["perplexity-api-key"] == "perplexity-value"
     assert api_keys["openai-api-key"] == "openai-value"
     assert api_keys["openrouter-api-key"] == "openrouter-value"
+    assert api_keys["spectrum-project-id"] == "spectrum-project-id"
+    assert api_keys["spectrum-project-secret"] == "spectrum-project-secret"
     assert api_keys["turbopuffer-api-key"] == "turbopuffer-value"
     assert all(
         api_keys[name] == f"owned-{name}" for name in API_KEYS_PROPERTIES - API_KEY_INPUTS.keys()
@@ -200,6 +204,8 @@ def test_production_secret_writes_preserve_owned_values() -> None:
         "perplexity-value",
         "openai-value",
         "openrouter-value",
+        "spectrum-project-id",
+        "spectrum-project-secret",
         "turbopuffer-value",
     ]
     assert all(value not in part for write in writes for value in values for part in write.command)
@@ -369,6 +375,8 @@ def test_main_initializes_missing_production_values(
             "perplexity-api-key": "perplexity-value",
             "openai-api-key": "openai-value",
             "openrouter-api-key": "openrouter-value",
+            "spectrum-project-id": "spectrum-project-id",
+            "spectrum-project-secret": "spectrum-project-secret",
             "turbopuffer-api-key": "turbopuffer-value",
         }
     else:

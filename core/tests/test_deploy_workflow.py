@@ -2376,6 +2376,8 @@ def test_production_secrets_fail_before_aws_changes() -> None:
         "PERPLEXITY_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
+        "SPECTRUM_PROJECT_ID",
+        "SPECTRUM_PROJECT_SECRET",
         "TURBOPUFFER_API_KEY",
     )
     assert step["env"] == {name: f"${{{{ secrets.{name} }}}}" for name in required}
@@ -2830,6 +2832,8 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
             "PERPLEXITY_API_KEY": "${{ secrets.PERPLEXITY_API_KEY }}",
             "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
             "OPENROUTER_API_KEY": "${{ secrets.OPENROUTER_API_KEY }}",
+            "SPECTRUM_PROJECT_ID": "${{ secrets.SPECTRUM_PROJECT_ID }}",
+            "SPECTRUM_PROJECT_SECRET": "${{ secrets.SPECTRUM_PROJECT_SECRET }}",
             "TURBOPUFFER_API_KEY": "${{ secrets.TURBOPUFFER_API_KEY }}",
             "PRODUCTION_DEPLOYMENT_ID": "${{ github.run_id }}",
         },

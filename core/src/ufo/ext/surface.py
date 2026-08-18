@@ -12,12 +12,12 @@ tasks and evals admits internal turns and can never name a speaker.
 One `SurfaceSpec`/`SurfaceContext` expresses both shapes of surface, differing only in how the reply
 gets back and thus in how much of the one context each uses:
 
-- A **durable** surface (Slack) is delivered to — its member is elsewhere. Declaring a two-phase
-  delivery (`post` then best-effort `attach`) is what marks it durable; core runs the
+- A **durable** surface (Slack, iMessage) is delivered to — its member is elsewhere. Its two-phase
+  delivery (`post` then best-effort `attach`) marks it durable; core runs the
   `WritebackPoller` that delivers at-least-once from the durable terminal frame (the hub is lossy,
-  so never from a live frame). It declares one route (its ingest) and never tails. Its ingest admits
-  ambient traffic too — a thread reply addressed to nobody — so it asks `ambient_reply_wanted`
-  first, and a message the agent is not wanted in founds no turn at all.
+  so never from a live frame). It declares provider ingress as routes or a listener and never
+  tails. A surface that admits ambient traffic asks `ambient_reply_wanted` first, and a message the
+  agent is not wanted in founds no turn at all.
 - A **live** surface (web; core's built-in CLI is the twin) holds the member's connection open and
   tails the turn's frames off the hub as they publish, so no poller row is written for its
   conversations. It declares its own routes (page, admit, SSE tail, spend) and reaches the hub
@@ -1059,10 +1059,11 @@ class SurfaceContext:
     """The privileged handle a surface's route handlers receive — one context spanning both delivery
     modes. `blob` and the admit/identity reach are deliberately unscoped for a workspace's trusted
     surface (the distinction from a scoped extension context, which never admits a turn or asserts
-    identity). A **durable** surface (Slack) delivers through the poller; a **live** surface (web;
-    core's CLI is the built-in twin) delivers by `tail`-ing the turn's frames off the hub in its
-    own SSE route, reading `turn_owner` to gate a tail, `spend_rollup` for a workspace spend view
-    and `member_spend` for the reader's own, and the per-agent projections a portal renders —
+    identity). A **durable** surface (Slack, iMessage) delivers through the poller; a **live**
+    surface (web; core's CLI is the built-in twin) delivers by `tail`-ing the turn's frames off the
+    hub in its own SSE route, reading `turn_owner` to gate a tail, `spend_rollup` for a workspace
+    spend view and `member_spend` for the reader's own, and the per-agent projections a portal
+    renders —
     `list_member_objects`/`member_object`/`object_kind`, `agent_skills`, `agent_spend`, and
     `memory_available`/`search_memory` —
     and either mode renders a turn's
@@ -1442,12 +1443,29 @@ class SurfaceContext:
             ).first()
         if member is None:
             return None
+        return await self.link_member_id(external_id, member.id)
+
+    async def link_member_id(self, external_id: str, member_id: UUID) -> UUID | None:
+        """Link this surface's external id to one member after the surface proves that exact
+        member requested the link. A missing member leaves the identity unlinked; a lost race
+        collapses on the identity's primary key."""
+        async with workspace_tx() as connection:
+            member = (
+                await connection.execute(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == self.workspace_id,
+                        tables.member.c.id == member_id,
+                    )
+                )
+            ).one_or_none()
+        if member is None:
+            return None
         try:
             async with workspace_tx() as connection:
                 await connection.execute(
                     sa.insert(tables.surface_identity).values(
                         workspace_id=self.workspace_id,
-                        member_id=member.id,
+                        member_id=member_id,
                         surface=self.surface,
                         external_id=external_id,
                         created_at=sa.func.now(),
@@ -1456,7 +1474,7 @@ class SurfaceContext:
                 )
         except sa.exc.IntegrityError:
             log("surface.identity_link_race", surface=self.surface, external_id=external_id)
-        return member.id
+        return member_id
 
     async def join_member(self, external_id: str, email: str) -> UUID | None:
         """`link_member`, plus the domain-match join: an email with no member row whose domain is
@@ -3721,6 +3739,7 @@ AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
 SpeakHandler = Callable[[SurfaceContext, MidTurnReply], Awaitable[str]]
 WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | Response | None]]
 SurfaceContextFactory = Callable[[UUID, str], SurfaceContext]
+SurfaceListenerOwner = Callable[[], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -3733,6 +3752,158 @@ class SurfaceIdentityContext:
 
 
 SurfaceIdentityResolver = Callable[[SurfaceIdentityContext], Awaitable[str | None]]
+
+
+@dataclass(frozen=True)
+class SurfaceListenerContext:
+    """The fleet gate a persistent surface listener uses to bind one provider installation to its
+    workspace before it reads or admits anything. The returned context manager holds the workspace
+    scope for the complete event and releases it when delivery ends."""
+
+    surface: str
+    _auth: SurfaceAuth
+    _context_for: SurfaceContextFactory
+    _owned: SurfaceListenerOwner
+
+    @asynccontextmanager
+    async def workspace(self, installation_id: str) -> AsyncIterator[SurfaceContext | None]:
+        if not await self._owned():
+            raise RuntimeError(f"surface listener {self.surface!r} lost fleet ownership")
+        workspace_id = await self._auth.workspace(installation_id)
+        if workspace_id is None:
+            yield None
+            return
+        with ws(workspace_id):
+            yield self._context_for(workspace_id, self.surface)
+
+
+SurfaceListener = Callable[[SurfaceListenerContext], Awaitable[None]]
+
+SURFACE_LISTENER_OWNER_POLL_SECONDS = 2.0
+SURFACE_LISTENER_LEASE_SECONDS = 10.0
+
+
+@dataclass(frozen=True)
+class SurfaceListenerRunner:
+    """Run a persistent listener under one fleet-wide fenced lease. Core owns this assignment
+    because an extension can see only its process, while core owns the fleet seats and listener
+    lifecycle. A database availability error restarts at the ownership poll interval. Any other
+    listener failure parks its cursor and keeps the lease until shutdown or ownership loss, so it
+    does not stop unrelated server work or hot-loop the failed event."""
+
+    surface: str
+    instance_id: UUID
+    listener: SurfaceListener
+    _auth: SurfaceAuth
+    _context_for: SurfaceContextFactory
+    poll_seconds: float = SURFACE_LISTENER_OWNER_POLL_SECONDS
+    lease_seconds: float = SURFACE_LISTENER_LEASE_SECONDS
+    _token: UUID = field(default_factory=uuid4)
+
+    async def run(self) -> None:
+        while True:
+            await self._wait_until_owned()
+            listener: asyncio.Future[None] = asyncio.ensure_future(
+                self.listener(
+                    SurfaceListenerContext(
+                        surface=self.surface,
+                        _auth=self._auth,
+                        _context_for=self._context_for,
+                        _owned=self._owns,
+                    )
+                )
+            )
+            ownership = asyncio.create_task(self._wait_until_not_owned())
+            try:
+                done, _ = await asyncio.wait(
+                    (listener, ownership), return_when=asyncio.FIRST_COMPLETED
+                )
+                if ownership in done:
+                    ownership.result()
+                    continue
+                error = asyncio.CancelledError() if listener.cancelled() else listener.exception()
+                error_class = type(error).__name__ if error is not None else "ListenerEnded"
+                log(
+                    "surface.listener_failed",
+                    surface=self.surface,
+                    error_class=error_class,
+                )
+                match error:
+                    case sa.exc.SQLAlchemyError():
+                        await asyncio.sleep(self.poll_seconds)
+                    case _:
+                        await ownership
+            finally:
+                for task in (listener, ownership):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(listener, ownership, return_exceptions=True)
+
+    async def _wait_until_not_owned(self) -> None:
+        while True:
+            owned = await self._owned_on_tick()
+            if owned is False:
+                return
+            await asyncio.sleep(self.poll_seconds)
+
+    async def _wait_until_owned(self) -> None:
+        while True:
+            if await self._owned_on_tick():
+                return
+            await asyncio.sleep(self.poll_seconds)
+
+    async def _owned_on_tick(self) -> bool | None:
+        try:
+            return await self._owns()
+        except sa.exc.SQLAlchemyError as error:
+            log(
+                "surface.listener_claim_failed",
+                surface=self.surface,
+                error_class=type(error).__name__,
+            )
+            return None
+
+    async def _owns(self) -> bool:
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=self.lease_seconds)
+        async with owner_tx() as connection:
+            claim: Any
+            match connection.dialect.name:
+                case "postgresql":
+                    claim = postgres_insert(tables.surface_listener_claim)
+                case "sqlite":
+                    claim = sqlite_insert(tables.surface_listener_claim)
+                case dialect:
+                    raise RuntimeError(f"unsupported database dialect {dialect!r}")
+            owner = await connection.scalar(
+                claim.values(
+                    surface=self.surface,
+                    workspace_id=None,
+                    owner_id=self.instance_id,
+                    owner_token=self._token,
+                    claim_expires_at=expires_at,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_update(
+                    index_elements=[tables.surface_listener_claim.c.surface],
+                    set_={
+                        "owner_id": self.instance_id,
+                        "owner_token": self._token,
+                        "claim_expires_at": expires_at,
+                        "updated_at": now,
+                    },
+                    where=sa.or_(
+                        tables.surface_listener_claim.c.claim_expires_at <= now,
+                        sa.and_(
+                            tables.surface_listener_claim.c.owner_id == self.instance_id,
+                            tables.surface_listener_claim.c.owner_token == self._token,
+                        ),
+                    ),
+                )
+                .returning(tables.surface_listener_claim.c.owner_token)
+            )
+        return owner == self._token
 
 
 class SurfaceDeliveryError(RuntimeError):
@@ -3777,8 +3948,8 @@ class SurfaceSpec:
     from becoming source pages without coupling the two extensions."""
 
     name: str
-    routes: tuple[SurfaceRoute, ...]
-    identify: WorkspaceResolver
+    routes: tuple[SurfaceRoute, ...] = ()
+    identify: WorkspaceResolver | None = None
     """How the shared fleet resolves a request's workspace before binding it. The async resolver
     uses `SurfaceAuth` to map an installation and verify that workspace's credential. A UUID binds
     that workspace, None rejects the request, and a Response completes a bounded side-effect-free
@@ -3788,6 +3959,10 @@ class SurfaceSpec:
     attach: AttachHandler | None = None
     speak: SpeakHandler | None = None
     self_user_id: SurfaceIdentityResolver | None = None
+    listen: SurfaceListener | None = None
+    """A persistent provider stream owned by this surface. Core starts it with the app and cancels
+    it during app shutdown because only core owns the process lifecycle and privileged workspace
+    binding. HTTP-only surfaces leave it unset."""
     home: bool = False
     """Whether a browser arriving at the deploy's root belongs on this surface. Core answers `GET /`
     with a redirect to `/surface/<name>`, so the bare host is a door rather than a 404. At most one

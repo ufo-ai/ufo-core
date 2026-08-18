@@ -34,6 +34,8 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     "tomli-w>=1.0",
     "uvicorn>=0.30",
+    "grpcio>=1.74",
+    "protobuf>=6.31.1",
 ]
 
 [project.scripts]
@@ -55,6 +57,7 @@ e2b = "ufo_ext_e2b:manifest"
 embed_openai = "ufo_ext_embed_openai:manifest"
 eval_env = "ufo_ext_eval_env.manifest:manifest"
 index_default = "ufo_ext_index_default:manifest"
+imessage = "ufo_ext_imessage.manifest:manifest"
 keyed_connectors = "ufo_ext_keyed_connectors:manifest"
 mcp = "ufo_ext_mcp:manifest"
 memory = "ufo_ext_memory.manifest:manifest"
@@ -116,6 +119,7 @@ dev = [
     "types-openpyxl>=3.1",
     "types-protobuf>=6.30",
     "types-pyyaml>=6.0",
+    "types-grpcio>=1.83.0.20260730",
 ]
 
 [build-system]
@@ -148,6 +152,7 @@ packages = [
     "extensions/documents/ufo_ext_documents",
     "evals",
     "extensions/eval_env/ufo_ext_eval_env",
+    "extensions/imessage/ufo_ext_imessage",
     "extensions/memory/ufo_ext_memory",
     "extensions/monitors/ufo_ext_monitors",
     "extensions/pipedream/ufo_ext_pipedream",
@@ -209,7 +214,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["extensions/**/skills/**", ".worktrees"]
+extend-exclude = ["extensions/**/skills/**", "extensions/imessage/**/proto/**", ".worktrees"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID", "ERA"]
@@ -229,7 +234,7 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 mypy_path = "core/src"
 files = ["core/src/ufo", "extensions", "evals", "gates.py"]
-exclude = ["extensions/.*/skills/", "extensions/.*/tests/"]
+exclude = ["extensions/.*/skills/", "extensions/.*/tests/", "extensions/imessage/.*/proto/"]
 
 [[tool.mypy.overrides]]
 module = [

@@ -184,6 +184,32 @@ def test_rls_bootstrap_cli_is_idempotent(shared_role_env: SharedRoleEnv) -> None
     assert "rls policies at head" in result.output
 
 
+async def test_surface_listener_claim_is_a_fleet_owner_table(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    owner = await asyncpg.connect(shared_role_env.owner_dsn)
+    try:
+        row = await owner.fetchrow(
+            "select col.is_nullable, rel.relrowsecurity, pol.qual, pol.with_check "
+            "from information_schema.columns col "
+            "join pg_class rel on rel.relname = col.table_name "
+            "join pg_namespace ns on ns.oid = rel.relnamespace and ns.nspname = col.table_schema "
+            "join pg_policies pol on pol.schemaname = col.table_schema "
+            "and pol.tablename = col.table_name and pol.policyname = $1 "
+            "where col.table_schema = 'public' and col.table_name = $2 "
+            "and col.column_name = 'workspace_id'",
+            rls.POLICY_NAME,
+            "surface_listener_claim",
+        )
+    finally:
+        await owner.close()
+    expected = rls.EXPECTED_POLICY_EXPR.format(
+        column=rls.WORKSPACE_COLUMN,
+        guc=rls.WORKSPACE_GUC,
+    )
+    assert row == ("YES", True, expected, expected)
+
+
 async def test_rds_style_owner_bootstraps_serve_role(shared_role_env: SharedRoleEnv) -> None:
     owner = await asyncpg.connect(shared_role_env.owner_dsn)
     try:

@@ -237,6 +237,20 @@ def test_hosted_serve_receives_the_perplexity_api_key() -> None:
     )
 
 
+def test_hosted_serve_receives_the_spectrum_project_credentials() -> None:
+    secrets = PLATFORM_SECRETS.read_text()
+    projections = CLUSTER_SERVICES_TEMPLATE.read_text()
+    for name, property_name in (
+        ("SPECTRUM_PROJECT_ID", "spectrum-project-id"),
+        ("SPECTRUM_PROJECT_SECRET", "spectrum-project-secret"),
+    ):
+        assert f'"{property_name}"' in secrets
+        assert (
+            f"{{secretKey: {name}, remoteRef: "
+            f"{{key: ${{secret_api_keys}}, property: {property_name}}}}}" in projections
+        )
+
+
 def test_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None:
     """The shared app host fronts both the onboarding gateway and the serve fleet behind one
     ingress, so the sign-in flow is same-origin with the product it deposits members into. The

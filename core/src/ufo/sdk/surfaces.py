@@ -103,6 +103,9 @@ from ufo.ext.surface import (
     SurfaceInstallationConflict as SurfaceInstallationConflict,
 )
 from ufo.ext.surface import (
+    SurfaceListenerContext as SurfaceListenerContext,
+)
+from ufo.ext.surface import (
     SurfaceRoute as SurfaceRoute,
 )
 from ufo.ext.surface import (
