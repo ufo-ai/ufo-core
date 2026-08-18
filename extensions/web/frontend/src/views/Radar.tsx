@@ -1,14 +1,18 @@
+import { useLayoutEffect, useState } from "react";
+
 import { Filter } from "@/components/ui/filter";
-import { ArtifactText } from "@/kernel/artifact";
+import { Reveal } from "@/components/ui/reveal";
+import { ARTIFACT_TEXT_BYTES, useTextArtifact } from "@/kernel/artifact";
 import { useBeside } from "@/kernel/beside";
 import { ObjectDetail, ObjectPane, type ObjectAddress } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
 import { PageHeader, PageToolbar } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { slackLink } from "@/lib/audience";
+import { useAgents } from "@/lib/mainAgent";
 import { Markdown } from "@/lib/markdown";
 import { Moment, day } from "@/lib/moments";
-import { chatHash } from "@/lib/route";
+import { agentHash, chatHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
 /** What stands on the radar: the feed of what ran on its own leads, and the two kinds of standing
@@ -200,13 +204,18 @@ function isDocument(artifact: RadarArtifact): boolean {
   );
 }
 
-/** One run as a story: the task that fired it is the headline — pressed, it opens that task's
- *  record, where the prompt and schedule are read — and under it the dateline of ways out: when
- *  it ran, the conversation it reported into, the thread on the surface it came from, and any
- *  outcome. The body is what the run made, never what it said: files with their pictures where
- *  one exists, markdown documents read inline whole. Only a run that did not end well speaks in
- *  text, because a failure explains itself; the reply a successful run posted lives in its
- *  conversation, one link away. */
+/** One run as a story: the report it published is the headline, so the story is titled the way the
+ *  document titles itself and the page's own heading face carries it. Under it stands the byline —
+ *  the agent the task belongs to, reached at its page, and the task itself, pressed to open the
+ *  record where the prompt and schedule are read — and under that the dateline of ways out: when it
+ *  ran, the conversation it reported into, the thread on the surface it came from, and any outcome.
+ *  The body is what the run made, never what it said: files with their pictures where one exists,
+ *  markdown documents read inline. Only a run that did not end well speaks in text, because a
+ *  failure explains itself; the reply a successful run posted lives in its conversation, one link
+ *  away.
+ *
+ *  A run that published no document, or one whose document opens on no title, is headed by the task
+ *  that fired it — every story states what it is before it states what it did. */
 function Story({
   run,
   onPlace,
@@ -214,38 +223,41 @@ function Story({
   run: RadarRun;
   onPlace: (place: Placement) => void;
 }) {
+  const [title, setTitle] = useState<string | null>(null);
+  const agent = useAgents().find((entry) => entry.id === run.agent_id);
   const note = STATUS_NOTES[run.status];
   const thread = slackLink(run.surface, run.source);
   const documents = run.artifacts.filter(isDocument);
   const files = run.artifacts.filter((artifact) => !isDocument(artifact));
-  const pages = documents.map((artifact) => (
-    <ArtifactText
-      key={artifact.filename}
-      url={artifact.url}
-      name={artifact.filename}
-      mediaType="text/markdown"
-      display="frame"
-    />
-  ));
+  const heading = title ?? run.task ?? "Scheduled run";
   const out =
     "text-inherit no-underline hover:underline focus-visible:underline";
   return (
     <li className="flex flex-col gap-sm border-b border-edge py-4xl last:border-b-0">
-      <h3 className="m-0 font-display text-title font-normal">
-        {run.task ? (
-          <button
-            type="button"
-            onClick={() =>
-              onPlace({ open: OBJECT_PREFIX + TASK_KIND + "/" + run.task, agent: run.agent_id })
-            }
-            className="m-0 border-0 bg-transparent p-0 text-left font-display text-title font-normal text-ink hover:underline"
-          >
-            {run.task}
-          </button>
-        ) : (
-          "Scheduled run"
-        )}
-      </h3>
+      <h3 className="m-0 text-title font-medium">{heading}</h3>
+      {agent || run.task ? (
+        <p className="m-0 text-ui text-ink-soft">
+          by{" "}
+          {agent ? (
+            <>
+              <a href={agentHash(agent.id, "home")} className={out}>
+                {agent.name}
+              </a>{" "}
+            </>
+          ) : null}
+          {run.task ? (
+            <button
+              type="button"
+              onClick={() =>
+                onPlace({ open: OBJECT_PREFIX + TASK_KIND + "/" + run.task, agent: run.agent_id })
+              }
+              className="m-0 border-0 bg-transparent p-0 text-left text-inherit hover:underline"
+            >
+              {run.task}
+            </button>
+          ) : null}
+        </p>
+      ) : null}
       <p className="m-0 flex flex-wrap gap-x-lg font-mono text-mono text-ink-soft">
         <Moment at={run.fired_at} />
         <a href={chatHash(run.conversation_id)} className={out}>
@@ -280,8 +292,63 @@ function Story({
           <Markdown text={run.text} />
         </div>
       ) : null}
-      {pages}
+      {documents.map((artifact, at) => (
+        <Report
+          key={artifact.filename}
+          artifact={artifact}
+          heading={heading}
+          onTitle={at === 0 ? setTitle : undefined}
+        />
+      ))}
     </li>
+  );
+}
+
+/** A document's own title and the body under it: a report opens with the one `# Title` line that
+ *  names it, which the story states as its heading instead. */
+function titled(text: string): { title: string | null; body: string } {
+  const opening = /^\s*#[ \t]+(\S.*?)[ \t]*(?:\n|$)/.exec(text);
+  if (!opening) return { title: null, body: text };
+  return { title: opening[1], body: text.slice(opening[0].length) };
+}
+
+/** The report the run published, read as the story's own body: the document flows inline down the
+ *  feed and one longer than the fold opens on the member's word, because a box that scrolls inside
+ *  a page that scrolls traps the wheel over the very thing the member came to read. The title line
+ *  is dropped where the story already stands under it, and a second document — which titles nothing
+ *  above it — keeps its own. The story is told the title before the frame is painted, so no reader
+ *  ever catches a report saying its own name twice. */
+function Report({
+  artifact,
+  heading,
+  onTitle,
+}: {
+  artifact: RadarArtifact;
+  heading: string;
+  onTitle?: (title: string) => void;
+}) {
+  const { body, bounded, message } = useTextArtifact(artifact.url);
+  const read = titled(body ?? "");
+
+  useLayoutEffect(() => {
+    if (read.title !== null) onTitle?.(read.title);
+  }, [onTitle, read.title]);
+
+  if (message) return <div className="font-mono text-small text-ink-soft">{message}</div>;
+  if (body === null) return <div>Loading…</div>;
+  return (
+    <>
+      <Reveal bare>
+        <div className="text-body leading-reading">
+          <Markdown text={read.title === heading ? read.body : body} />
+        </div>
+      </Reveal>
+      {bounded ? (
+        <div className="font-mono text-small text-ink-soft">
+          First {formatSize(ARTIFACT_TEXT_BYTES)} shown.
+        </div>
+      ) : null}
+    </>
   );
 }
 

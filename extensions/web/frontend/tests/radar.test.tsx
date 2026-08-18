@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -114,8 +114,14 @@ test("a story is what a run made or how it went wrong, never what it said", asyn
   expect(screen.getByRole("heading", { level: 2, name: "Aug 13 2026" })).toBeTruthy();
 
   const headline = screen.getByRole("heading", { level: 3, name: "morning-digest" });
-  expect(headline.querySelector("button")).toBeTruthy();
+  expect(headline.querySelector("button")).toBeNull();
   expect(screen.getByRole("heading", { level: 3, name: "Scheduled run" })).toBeTruthy();
+
+  const byline = screen.getAllByText("by")[0];
+  expect(byline.textContent).toBe("by assistant morning-digest");
+  expect(within(byline).getByRole("link", { name: "assistant" }).getAttribute("href")).toBe(
+    "#/agents/" + AGENT.id,
+  );
 
   const preview = screen.getByRole("img", { name: "the queue" });
   expect(preview.getAttribute("src")).toBe("/dl/queue.png?preview");
@@ -135,6 +141,64 @@ test("a story is what a run made or how it went wrong, never what it said", asyn
   expect(screen.getByText("Failed")).toBeTruthy();
   expect(screen.getByText("The roll-up source timed out.")).toBeTruthy();
   expect(screen.getByText("Stopped")).toBeTruthy();
+});
+
+/** jsdom lays nothing out, so the fold — the one measurement `Reveal` reads — is stated here. */
+function laid(content: number, fold: number) {
+  const held = [
+    vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(content),
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(fold),
+  ];
+  return () => held.forEach((spy) => spy.mockRestore());
+}
+
+test("a story is titled the way its report titles itself, and says that title once", async () => {
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/dl/notes.md": () => new Response("# Standup\n\nTwo blockers cleared."),
+  });
+  mountRadarSection();
+
+  expect(await screen.findByRole("heading", { level: 3, name: "Standup" })).toBeTruthy();
+  expect(screen.queryByRole("heading", { level: 3, name: "morning-digest" })).toBeNull();
+  expect(screen.queryByRole("heading", { level: 1, name: "Standup" })).toBeNull();
+  expect(screen.getByText("Two blockers cleared.")).toBeTruthy();
+  expect(screen.getByText("by").textContent).toBe("by assistant morning-digest");
+});
+
+test("a report reads inline behind a fold, never inside a box of its own that scrolls", async () => {
+  const restore = laid(900, 280);
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/dl/notes.md": () => new Response("# Standup\n\n" + "Two blockers cleared. ".repeat(80)),
+  });
+  mountRadarSection();
+
+  const more = await screen.findByRole("button", { name: "Show more" });
+  const region = document.getElementById(String(more.getAttribute("aria-controls")));
+  expect(region?.className).toContain("max-h-(--size-reveal)");
+  const story = more.closest("li");
+  expect(story?.querySelector("[data-artifact-document]")).toBeNull();
+  expect(story?.querySelector(".overflow-y-auto")).toBeNull();
+
+  await userEvent.click(more);
+  const less = screen.getByRole("button", { name: "Show less" });
+  expect(less.getAttribute("aria-expanded")).toBe("true");
+  expect(region?.className).not.toContain("max-h-(--size-reveal)");
+  restore();
+});
+
+test("a report that fits is offered no fold", async () => {
+  const restore = laid(120, 280);
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/dl/notes.md": () => new Response("# Standup\n\nTwo blockers cleared."),
+  });
+  mountRadarSection();
+
+  expect(await screen.findByText("Two blockers cleared.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+  restore();
 });
 
 test("the feed draws every run the page holds", async () => {

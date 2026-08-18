@@ -4,7 +4,7 @@ import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/size";
 
-const ARTIFACT_TEXT_BYTES = 64 * 1024;
+export const ARTIFACT_TEXT_BYTES = 64 * 1024;
 const ARTIFACT_HTML_BYTES = 256 * 1024;
 const MARKDOWN_MEDIA_TYPE = "text/markdown";
 const HTML_MEDIA_TYPE = "text/html";
@@ -54,24 +54,17 @@ function csvRows(text: string): string[][] {
   return rows;
 }
 
-/** A shared text file, read to the fold. Markdown renders as the document it is — the same
- *  renderer that draws an agent's reply — and every other text type stays preformatted, since a
- *  `.txt` or a `.csv` means the characters it holds and a markdown pass would eat them. */
-export function ArtifactText({
-  url,
-  name,
-  mediaType,
-  display = "frame",
-}: {
-  url: string | null;
-  name: string;
-  mediaType: string;
-  display?: "excerpt" | "frame" | "inline";
-}) {
+/** A shared text file's characters, read to the byte the fold is cut at: the read stops there and
+ *  `bounded` states that the file goes on past it, so a view can say what it is showing. A view
+ *  that draws the text itself — because it reads the document's own title off the first line —
+ *  takes the read from here rather than fetching the file a second way. */
+export function useTextArtifact(
+  url: string | null,
+  byteLimit: number = ARTIFACT_TEXT_BYTES,
+): { body: string | null; bounded: boolean; message: string | null } {
   const [body, setBody] = useState<string | null>(null);
   const [bounded, setBounded] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const byteLimit = mediaType === HTML_MEDIA_TYPE ? ARTIFACT_HTML_BYTES : ARTIFACT_TEXT_BYTES;
 
   useEffect(() => {
     if (!url) return;
@@ -113,6 +106,26 @@ export function ArtifactText({
       live = false;
     };
   }, [byteLimit, url]);
+
+  return { body, bounded, message };
+}
+
+/** A shared text file, read to the fold. Markdown renders as the document it is — the same
+ *  renderer that draws an agent's reply — and every other text type stays preformatted, since a
+ *  `.txt` or a `.csv` means the characters it holds and a markdown pass would eat them. */
+export function ArtifactText({
+  url,
+  name,
+  mediaType,
+  display = "frame",
+}: {
+  url: string | null;
+  name: string;
+  mediaType: string;
+  display?: "excerpt" | "frame" | "inline";
+}) {
+  const byteLimit = mediaType === HTML_MEDIA_TYPE ? ARTIFACT_HTML_BYTES : ARTIFACT_TEXT_BYTES;
+  const { body, bounded, message } = useTextArtifact(url, byteLimit);
 
   if (message) return <div className="font-mono text-small text-ink-soft">{message}</div>;
   if (body === null) return <div>Loading…</div>;
