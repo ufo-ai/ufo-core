@@ -406,6 +406,16 @@ async def test_scoped_store_upserts(db: None) -> None:
         assert await store.get("k") == "two"
 
 
+async def test_scoped_store_put_survives_a_concurrent_first_write(db: None) -> None:
+    """Two callers writing one key that is not there yet. Each finds nothing to update, so a probe
+    followed by a separate insert leaves both to insert and one to fail on the primary key."""
+    with ws(await _workspace()):
+        store = ScopedStore(extension="sample")
+        writers = [store.put("contested", f"writer-{n}") for n in range(8)]
+        await asyncio.gather(*writers)
+        assert await store.get("contested") in {f"writer-{n}" for n in range(8)}
+
+
 async def test_scoped_store_delete_removes_only_its_key(db: None) -> None:
     with ws(await _workspace()):
         store = ScopedStore(extension="sample")

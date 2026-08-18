@@ -143,27 +143,30 @@ class ScopedStore:
         return {row.key: row.value for row in rows}
 
     async def put(self, key: str, value: JsonValue) -> None:
+        """Write `key`, whether or not it is already there. One upsert, not a probe and a write: two
+        callers writing a key that does not exist yet each find nothing to update, and separate
+        statements would leave both to insert and one to fail on the primary key."""
         async with workspace_tx() as connection:
-            updated = await connection.execute(
-                sa.update(tables.ext_store)
-                .values(value=value, updated_at=sa.func.now())
-                .where(
-                    tables.ext_store.c.workspace_id == self.workspace_id,
-                    tables.ext_store.c.extension == self.extension,
-                    tables.ext_store.c.key == key,
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.ext_store)
+                .values(
+                    workspace_id=self.workspace_id,
+                    extension=self.extension,
+                    key=key,
+                    value=value,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_update(
+                    index_elements=[
+                        tables.ext_store.c.workspace_id,
+                        tables.ext_store.c.extension,
+                        tables.ext_store.c.key,
+                    ],
+                    set_={"value": value, "updated_at": sa.func.now()},
                 )
             )
-            if updated.rowcount == 0:
-                await connection.execute(
-                    sa.insert(tables.ext_store).values(
-                        workspace_id=self.workspace_id,
-                        extension=self.extension,
-                        key=key,
-                        value=value,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
 
     async def put_if(self, key: str, value: JsonValue, expected: JsonValue | None) -> bool:
         """Write only while the stored value is still `expected`; returns whether it was written. A
