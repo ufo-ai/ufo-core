@@ -258,11 +258,11 @@ def test_hosted_serve_scopes_the_shared_spectrum_project_by_deploy() -> None:
     )
     root = Path(__file__).resolve().parents[2]
     assert (
-        'spectrum_phone_scope = "allow:+17183167766"'
+        'spectrum_phone_scope = "allow:+17183167766,+14158104267"'
         in (root / "infra/envs/testing/ufo.tf").read_text()
     )
     assert (
-        'spectrum_phone_scope = "block:+17183167766"'
+        'spectrum_phone_scope = "block:+17183167766,+14158104267"'
         in (root / "infra/envs/prod/ufo.tf").read_text()
     )
 

@@ -225,7 +225,7 @@ data "kubectl_file_documents" "hosted" {
 
     region               = var.region
     otlp_endpoint        = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
-    spectrum_phone_scope = "allow:+17183167766"
+    spectrum_phone_scope = "allow:+17183167766,+14158104267"
 
     # The sandbox cache (RFC 0032), on for testing with the durable S3 tier so it survives pod rolls.
     cache_enabled     = local.cache_enabled

@@ -250,7 +250,7 @@ data "kubectl_file_documents" "hosted" {
 
     region               = var.region
     otlp_endpoint        = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
-    spectrum_phone_scope = "block:+17183167766"
+    spectrum_phone_scope = "block:+17183167766,+14158104267"
 
     # The sandbox cache (RFC 0032). `cache_enabled` gates the daemon sidecar; `cache_s3_bucket` empty
     # runs it disk-only (cold on every pod roll). The bucket and IRSA role exist (created by the
