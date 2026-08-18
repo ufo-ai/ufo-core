@@ -32,11 +32,11 @@ locals {
 
   # The three sequential shutdown phases. `graceful_shutdown_seconds` is the window `DBOS.destroy`
   # polls in-flight turns for before it cancels them, so the model round a roll interrupts finishes
-  # and records. Half of prod's 600: testing rolls on every merge and the pods' SIGKILL deadline
-  # derives from these below, so a roll is bounded at 400s, inside the deploy's 10m rollout waits.
+  # and records. Matches prod: the pods' SIGKILL deadline derives from these below, so a roll is
+  # bounded at 700s, inside the deploy's 15m rollout waits.
   prestop_seconds           = 10
   request_shutdown_seconds  = 30
-  graceful_shutdown_seconds = 300
+  graceful_shutdown_seconds = 600
 
   # The digest-pinned runtime image used by migration, proxy, and serve.
   bundle_image = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
