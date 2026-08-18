@@ -12,6 +12,7 @@ export function useViewer(): string | null {
 export const WEB_SURFACE = "web";
 export const SLACK_SURFACE = "slack";
 export const UFO_SURFACE = "ufo";
+export const IMESSAGE_SURFACE = "imessage";
 
 export function isPortalChat(surface: string): boolean {
   return surface === WEB_SURFACE || surface.startsWith("extension:");
@@ -21,6 +22,7 @@ const SURFACE_WORDS: Record<string, string> = {
   [WEB_SURFACE]: "Portal",
   [SLACK_SURFACE]: "Slack",
   [UFO_SURFACE]: "Terminal",
+  [IMESSAGE_SURFACE]: "iMessage",
 };
 
 /** The member's word for a surface. A surface the map does not name reads as its own word rather

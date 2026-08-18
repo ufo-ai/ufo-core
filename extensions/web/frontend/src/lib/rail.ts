@@ -1,5 +1,5 @@
 import { agentName } from "@/lib/agentName";
-import { SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
+import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
 import type { OwnedConversation } from "@/lib/types";
 
 export type ChatRow = {
@@ -64,21 +64,26 @@ function groupChatsByAgent(rows: ChatRow[]): RailGroup[] {
   }));
 }
 
-export type RailShown = { terminal: boolean; slack: boolean };
+export type RailShown = { terminal: boolean; slack: boolean; imessage: boolean };
 
 export const RAIL_SHOWN_OPTIONS: { surface: keyof RailShown; label: string }[] = [
   { surface: "terminal", label: "Terminal" },
   { surface: "slack", label: "Slack" },
+  { surface: "imessage", label: "iMessage" },
 ];
 
 const HELD_SHOWN = "rail-shown";
 
-/** Which surfaces beside the portal's own the rail admits, held across sessions. A Slack thread or
- *  a terminal session is a conversation the member had somewhere else, so each is admitted only
- *  once they name it, and a browser holding nothing admits neither. */
+/** Which surfaces beside the portal's own the rail admits, held across sessions. A Slack thread, a
+ *  terminal session and an iMessage exchange are conversations the member had somewhere else, so
+ *  each is admitted only once they name it, and a browser holding nothing admits none. */
 export function heldRailShown(): RailShown {
   const held = (localStorage.getItem(HELD_SHOWN) ?? "").split(",");
-  return { terminal: held.includes("terminal"), slack: held.includes("slack") };
+  return {
+    terminal: held.includes("terminal"),
+    slack: held.includes("slack"),
+    imessage: held.includes("imessage"),
+  };
 }
 
 export function holdRailShown(shown: RailShown): void {
@@ -86,9 +91,34 @@ export function holdRailShown(shown: RailShown): void {
   localStorage.setItem(HELD_SHOWN, named.map((option) => option.surface).join(","));
 }
 
+const HELD_SHUT = "rail-shut";
+
+/** The groups the member has shut, by label, held across sessions — a rail narrowed to the ladders
+ *  someone works from would widen again on every reload otherwise. A label is the key under either
+ *  sort, since an agent's name and a date bucket's name are both labels. A browser holding nothing
+ *  has never had a heading clicked, which is not the same as one holding an empty set. */
+export function heldRailShut(): string[] | null {
+  const held = localStorage.getItem(HELD_SHUT);
+  return held === null ? null : held.split("\n").filter(Boolean);
+}
+
+export function holdRailShut(shut: string[]): void {
+  localStorage.setItem(HELD_SHUT, shut.join("\n"));
+}
+
+/** Which groups stand shut. Until the member has touched a heading the rail opens its first group
+ *  and shuts the rest: the conversations someone is working from are the recent ones, and the rest
+ *  of the history is a list they ask for. The first click writes that whole set down, so from then
+ *  on the member's own set governs — including the set that holds nothing shut. A label the rail
+ *  has stopped drawing stays in the set and governs nothing until it is drawn again. */
+export function railShut(held: string[] | null, labels: string[]): string[] {
+  return held ?? labels.slice(1);
+}
+
 function admits(row: ChatRow, shown: RailShown): boolean {
   if (row.surface === UFO_SURFACE) return shown.terminal;
   if (row.surface === SLACK_SURFACE) return shown.slack;
+  if (row.surface === IMESSAGE_SURFACE) return shown.imessage;
   return true;
 }
 

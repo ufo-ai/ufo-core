@@ -21,8 +21,10 @@ import {
 } from "./harness";
 
 const OTHER_ID = "66666666-6666-4666-8666-666666666666";
-const OTHER_ROW = { ...CHAT_ROW, conversation_id: OTHER_ID, title: "The other thread" };
-const RAIL = { chats: [CHAT_ROW, OTHER_ROW] };
+const TODAY = new Date().toISOString();
+const MINE = { ...CHAT_ROW, last_at: TODAY };
+const OTHER_ROW = { ...MINE, conversation_id: OTHER_ID, title: "The other thread" };
+const RAIL = { chats: [MINE, OTHER_ROW] };
 const LATER_TURN = "77777777-7777-4777-8777-777777777777";
 
 beforeEach(() => {

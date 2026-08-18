@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconAdjustments, IconBrandSlack, IconTerminal2 } from "@tabler/icons-react";
+import {
+  IconAdjustments,
+  IconBrandSlack,
+  IconChevronRight,
+  IconMessageCircle,
+  IconTerminal2,
+} from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
@@ -16,6 +27,7 @@ import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 import {
+  IMESSAGE_SURFACE,
   SLACK_SURFACE,
   UFO_SURFACE,
   WEB_SURFACE,
@@ -50,9 +62,12 @@ import {
   RAIL_SHOWN_OPTIONS,
   bumpChat,
   heldRailShown,
+  heldRailShut,
   holdRailShown,
+  holdRailShut,
   mergeChats,
   railGroups,
+  railShut,
   stampIso,
   type ChatRow,
   type ChatsPayload,
@@ -118,6 +133,11 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
   const setRailShownHeld = useCallback((next: RailShown) => {
     setRailShown(next);
     holdRailShown(next);
+  }, []);
+  const [railShut, setRailShut] = useState<string[] | null>(heldRailShut);
+  const setRailShutHeld = useCallback((next: string[]) => {
+    setRailShut(next);
+    holdRailShut(next);
   }, []);
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
   const routeRef = useRef(route);
@@ -341,6 +361,8 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
                   onSort={setRailSortHeld}
                   shown={railShown}
                   onShown={setRailShownHeld}
+                  shut={railShut}
+                  onShut={setRailShutHeld}
                   onNewChat={openNewChat}
                   onOpen={openChat}
                   onRetry={() => setReloads((count) => count + 1)}
@@ -540,6 +562,8 @@ function ChatSidebar({
   onSort,
   shown,
   onShown,
+  shut,
+  onShut,
   onNewChat,
   onOpen,
   onRetry,
@@ -551,6 +575,8 @@ function ChatSidebar({
   onSort: (sort: RailSort) => void;
   shown: RailShown;
   onShown: (shown: RailShown) => void;
+  shut: string[] | null;
+  onShut: (shut: string[]) => void;
   onNewChat: (agentId: string) => void;
   onOpen: (conversationId: string) => void;
   onRetry: () => void;
@@ -587,6 +613,8 @@ function ChatSidebar({
           mainAgent={mainAgent}
           sort={sort}
           shown={shown}
+          shut={shut}
+          onShut={onShut}
           onOpen={onOpen}
           onRetry={onRetry}
         />
@@ -890,7 +918,7 @@ function RailSettings({
           </DropdownMenuSubContent>
         </DropdownMenuSub>
         <DropdownMenuSub>
-          <DropdownMenuSubTrigger>Filter</DropdownMenuSubTrigger>
+          <DropdownMenuSubTrigger>Show</DropdownMenuSubTrigger>
           <DropdownMenuSubContent>
             {RAIL_SHOWN_OPTIONS.map((option) => (
               <DropdownMenuCheckboxItem
@@ -910,12 +938,30 @@ function RailSettings({
   );
 }
 
+export const RAIL_NARROW = "(width < 720px)";
+
+/** The rail draws no group heading in the narrow layout, so a group shut there would hold its rows
+ *  behind a control the layout never draws. Below the breakpoint every group stands open, and what
+ *  the member shut is waiting for them at the width that can reopen it. */
+function useNarrowRail(): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(RAIL_NARROW).matches);
+  useEffect(() => {
+    const query = window.matchMedia(RAIL_NARROW);
+    const answer = () => setNarrow(query.matches);
+    query.addEventListener("change", answer);
+    return () => query.removeEventListener("change", answer);
+  }, []);
+  return narrow;
+}
+
 function RailList({
   rail,
   route,
   mainAgent,
   sort,
   shown,
+  shut,
+  onShut,
   onOpen,
   onRetry,
 }: {
@@ -924,10 +970,18 @@ function RailList({
   mainAgent: Agent | null;
   sort: RailSort;
   shown: RailShown;
+  shut: string[] | null;
+  onShut: (shut: string[]) => void;
   onOpen: (conversationId: string) => void;
   onRetry: () => void;
 }) {
   const now = new Date();
+  const narrow = useNarrowRail();
+  const groups = railGroups(rail.rows, sort, shown, now);
+  const standing = railShut(
+    shut,
+    groups.map((group) => group.label),
+  );
   return (
     <>
       {rail.phase === "loading" ? (
@@ -945,36 +999,57 @@ function RailList({
           </button>
         </div>
       ) : null}
-      {railGroups(rail.rows, sort, shown, now).map((group) => (
-        <section key={group.label} className="max-narrow:contents">
-          <h2 className="m-0 flex h-(--size-row) items-center px-sm font-sans text-label font-medium text-ink-soft max-narrow:hidden">
-            {group.label}
-          </h2>
-          <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">
-            {group.rows.map((row) => {
-              const facts = [
-                row.speaker ? speakerName(row.speaker) : null,
-                isPortalChat(row.surface) ? null : origin(row),
-                mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
-              ].filter((fact): fact is string => fact !== null);
-              return (
-                <li key={row.conversation_id}>
-                  <RailRow
-                    current={
-                      (route.kind === "chat" || route.kind === "conversation-slot") &&
-                      route.conversationId === row.conversation_id
-                    }
-                    facts={facts.length ? facts.join(" · ") : null}
-                    onClick={() => onOpen(row.conversation_id)}
-                  >
-                    <SurfaceGlyph surface={row.surface} />
-                    <span className="min-w-0 flex-1 truncate">{row.title}</span>
-                  </RailRow>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
+      {groups.map((group) => (
+        <Collapsible
+          key={group.label}
+          asChild
+          open={narrow || !standing.includes(group.label)}
+          onOpenChange={(open) =>
+            onShut(
+              open
+                ? standing.filter((label) => label !== group.label)
+                : [...standing, group.label],
+            )
+          }
+        >
+          <section className="max-narrow:contents">
+            <h2 className="m-0 max-narrow:hidden">
+              <CollapsibleTrigger className="group/rail flex h-(--size-row) w-full items-center gap-2xs rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill">
+                <span className="min-w-0 truncate">{group.label}</span>
+                <IconChevronRight
+                  aria-hidden
+                  className="size-icon shrink-0 transition-transform group-data-[state=open]/rail:rotate-90"
+                />
+              </CollapsibleTrigger>
+            </h2>
+            <CollapsibleContent asChild>
+              <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">
+                {group.rows.map((row) => {
+                  const facts = [
+                    row.speaker ? speakerName(row.speaker) : null,
+                    isPortalChat(row.surface) ? null : origin(row),
+                    mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
+                  ].filter((fact): fact is string => fact !== null);
+                  return (
+                    <li key={row.conversation_id}>
+                      <RailRow
+                        current={
+                          (route.kind === "chat" || route.kind === "conversation-slot") &&
+                          route.conversationId === row.conversation_id
+                        }
+                        facts={facts.length ? facts.join(" · ") : null}
+                        onClick={() => onOpen(row.conversation_id)}
+                      >
+                        <span className="min-w-0 flex-1 truncate">{row.title}</span>
+                        <SurfaceGlyph surface={row.surface} />
+                      </RailRow>
+                    </li>
+                  );
+                })}
+              </ul>
+            </CollapsibleContent>
+          </section>
+        </Collapsible>
       ))}
     </>
   );
@@ -1019,12 +1094,17 @@ function RailRow({
   );
 }
 
-const SURFACE_GLYPH = "size-(--size-glyph) shrink-0 text-ink-soft";
+const SURFACE_GLYPH = "size-(--size-glyph) shrink-0 text-ink-faint";
 
-/** The surface a conversation came in on, drawn before its title. The portal draws none: the rail
- *  is read in the portal, so a glyph on every row would state where the member already is. The
- *  words for the same fact stay in the row's tooltip, which is what a reader unable to see the
+/** The surface a conversation came in on, drawn at the far end of its row. The portal draws none:
+ *  the rail is read in the portal, so a glyph on every row would state where the member already is.
+ *  The words for the same fact stay in the row's tooltip, which is what a reader unable to see the
  *  glyph gets.
+ *
+ *  Since most rows carry no glyph, one drawn ahead of the title would indent that row alone and
+ *  leave the rail without a left edge to read down. It trails instead, where it marks the few rows
+ *  that have it without moving the many that do not, and it is drawn faint: a title is what the
+ *  member scans for, and the surface is the answer to a question they have already asked.
  *
  *  It is drawn at `--size-glyph`, the size every other mark in the sidebar takes, rather than at the
  *  row's own text size: a glyph scaled to a 13px label is read as a smudge beside a title that runs
@@ -1032,6 +1112,9 @@ const SURFACE_GLYPH = "size-(--size-glyph) shrink-0 text-ink-soft";
 function SurfaceGlyph({ surface }: { surface: string }) {
   if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_GLYPH} aria-hidden />;
   if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_GLYPH} aria-hidden />;
+  if (surface === IMESSAGE_SURFACE) {
+    return <IconMessageCircle className={SURFACE_GLYPH} aria-hidden />;
+  }
   return null;
 }
 
@@ -1040,6 +1123,9 @@ const SURFACE_MARK = "size-(--size-surface-mark) shrink-0";
 function surfaceMark(surface: string): React.ReactNode {
   if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_MARK} aria-hidden />;
   if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_MARK} aria-hidden />;
+  if (surface === IMESSAGE_SURFACE) {
+    return <IconMessageCircle className={SURFACE_MARK} aria-hidden />;
+  }
   return null;
 }
 
