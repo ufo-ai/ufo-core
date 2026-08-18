@@ -58,7 +58,7 @@ from ufo.grants import (
     OAuthAccount,
     install_connect_flow,
 )
-from ufo.hub import Absorbed, InProcessHub, LiveFrame, SkillLoad, ToolCall
+from ufo.hub import Absorbed, InProcessHub, LiveFrame, Resumed, SkillLoad, ToolCall
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     Compaction,
@@ -1312,6 +1312,33 @@ async def test_claim_turn_names_the_branch_that_matched(db: None) -> None:
     assert await _claim_turn(turn.id, "wf-1") == FRESH_CLAIM
     assert await _claim_turn(turn.id, "wf-1") == ADOPTED_CLAIM
     assert await _claim_turn(turn.id, "wf-2") is None
+
+
+async def test_an_execution_that_adopted_a_running_turn_announces_the_resume(
+    db: None, tmp_path: Path
+) -> None:
+    """A turn the fleet picks back up after the process running it died is indistinguishable, from
+    the member's side, from a turn that died with it: the same stopped output under the same wait.
+    The execution that adopts it says so once, naming the attempt that did, and a first execution
+    says nothing because nothing was interrupted."""
+    turn = await _seed_turn("queued", None)
+    hub = RecordingHub()
+    engine = replace(_engine(turn, EchoModel(), tmp_path), hub=hub, attempt="attempt-one")
+    engine.adoption.replaying = True
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert [f for f in hub.frames if isinstance(f, Resumed)] == [Resumed(attempt="attempt-one")]
+
+    fresh_turn = await _seed_turn("queued", None)
+    fresh_hub = RecordingHub()
+    fresh = replace(
+        _engine(fresh_turn, EchoModel(), tmp_path), hub=fresh_hub, attempt="attempt-two"
+    )
+
+    assert (await fresh.run()).status == "done"
+    assert [f for f in fresh_hub.frames if isinstance(f, Resumed)] == []
 
 
 async def test_a_live_drain_closes_the_adoption_replay_window(db: None, tmp_path: Path) -> None:

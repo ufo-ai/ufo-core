@@ -41,6 +41,7 @@ from ufo.sdk.hub import (
     LiveFrame,
     Parked,
     Reply,
+    Resumed,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -66,6 +67,7 @@ from ufo.sdk.surfaces import (
 SURFACE_UFO = "ufo"
 SOURCE = "ufo cli"
 PROMPT = ">"
+RESUMED_NOTE = "the service restarted; this turn resumed"
 POLL_SECONDS = 1
 MAX_MESSAGE_BYTES = 40_000
 MAX_SECRET_BYTES = 4_096
@@ -233,7 +235,10 @@ def directives_for(
     names the credential prompts still awaiting values, `files` the ones it shared). A drain names
     the member arrivals it folded (`absorbed`), which is how a client holding a message it sent
     mid-turn learns the agent has taken that message up. A reply the turn delivered mid-flight says
-    itself (`say`): the member has been sent those words, and they never rode the token stream."""
+    itself (`say`): the member has been sent those words, and they never rode the token stream. A
+    turn the fleet resumed after the process running it died narrates that as a `note`, on the
+    frame — a client's notes already carry every other thing the turn is doing, so this one needs no
+    grace to keep it clear of the answer."""
     match frame:
         case TextDelta():
             return (directive("txt", frame.text),) if frame.text else ()
@@ -253,6 +258,8 @@ def directives_for(
         case Absorbed():
             arrivals = tuple(str(arrival) for arrival in frame.arrivals)
             return (directive("absorbed", *arrivals),) if arrivals else ()
+        case Resumed():
+            return (directive("note", RESUMED_NOTE),)
         case Reply():
             return (directive("say", frame.text),) if frame.text else ()
     raise ValueError(f"unmapped live frame {type(frame).__name__}")

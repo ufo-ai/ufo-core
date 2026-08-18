@@ -78,6 +78,16 @@ class Absorbed(BaseModel):
     arrivals: tuple[UUID, ...]
 
 
+class Resumed(BaseModel):
+    """A turn whose execution died mid-run and which this execution picked back up, pushed once by
+    the execution that adopted it so a surface can say the wait it is still serving was interrupted.
+    Non-terminal, and distinguished from the other frames by carrying the `attempt` that adopted the
+    turn — the identity a surface reports against, so a frame the hub replays to a second reader
+    tells it about the same resume rather than a new one."""
+
+    attempt: str
+
+
 class Reply(BaseModel):
     """One reply a running turn already delivered to a member: the whole text of a span the model
     marked for delivery, and the `message_ref` it answers when the tag named a readable one.
@@ -124,6 +134,7 @@ LiveFrame = (
     | ToolCall
     | SkillLoad
     | Absorbed
+    | Resumed
     | Reply
     | SubagentActivity
 )

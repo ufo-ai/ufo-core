@@ -18,6 +18,7 @@ from ufo.hub import (
     LiveFrame,
     Parked,
     Reply,
+    Resumed,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -38,6 +39,7 @@ SSE_FIXTURE_PATH = (
 ARRIVAL_ID = UUID("88888888-8888-4888-8888-888888888888")
 REPLY_ID = UUID("66666666-6666-4666-8666-666666666666")
 CONVERSATION_ID = "55555555-5555-4555-8555-555555555555"
+ATTEMPT = "44444444444444444444444444444444"
 
 
 def sse_frames() -> dict[type, LiveFrame]:
@@ -56,6 +58,7 @@ def sse_frames() -> dict[type, LiveFrame]:
         ),
         CostTick: CostTick(cost_micro_usd=110, tokens=12),
         Absorbed: Absorbed(arrivals=(ARRIVAL_ID,)),
+        Resumed: Resumed(attempt=ATTEMPT),
         Reply: Reply(
             id=REPLY_ID,
             message_ref=ARRIVAL_ID,
@@ -140,6 +143,7 @@ def sse_rows() -> list[dict[str, str]]:
         frames[CostTick],
         frames[Reply],
         frames[Absorbed],
+        frames[Resumed],
     ]
     rows = [_row(_sse("", frame)) for frame in live]
     rows.extend(_row(raw) for raw in _synthesized())

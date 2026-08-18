@@ -66,6 +66,7 @@ from ufo.hub import (
     LiveFrame,
     Parked,
     Reply,
+    Resumed,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -858,7 +859,11 @@ class AdoptionReplay:
     executes is the crashed attempt's in-flight work re-running, chosen by a model that cannot have
     seen anything queued since; an unkeyed redo yields to pending member guidance instead of
     running ahead of it, while a side-effecting re-execution dedups through its idempotency key
-    and keeps its reattach."""
+    and keeps its reattach.
+
+    It is also what the member is told: an execution that opens this window publishes one Resumed
+    frame, because a wait that survived a restart looks from the thread exactly like a wait that
+    died."""
 
     replaying: bool = False
 
@@ -958,6 +963,8 @@ class TurnEngine:
             profile=self.profile,
             parent_turn_id=str(self.turn.parent_turn_id or ""),
         )
+        if self.adoption.replaying:
+            await self._publish(Resumed(attempt=self.attempt))
         usage_events: list[Usage] = []
         arrival_log: list[Message] = []
         absorbed_ids: list[UUID] = []

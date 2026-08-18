@@ -122,6 +122,7 @@ from ufo.sdk.hub import (
     CostTick,
     LiveFrame,
     Parked,
+    Resumed,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -710,6 +711,7 @@ STATUS_WORKING_TEXT = "Working… ({tool})"
 STATUS_SKILL_TEXT = "Loading skill {skill}…"
 STATUS_GENERATING_TEXT = "Generating…"
 STATUS_PICKED_UP_TEXT = "Picked up your message…"
+STATUS_RESUMED_TEXT = "Resumed after a restart…"
 STATUS_CLEAR_TEXT = ""
 STATUS_TEXT_LIMIT = 50
 """Slack's own ceiling on `assistant.threads.setStatus`, not a display choice: an entry of
@@ -726,6 +728,10 @@ PROGRESS_CAP_SECONDS = 1_800.0
 PROGRESS_ACTIVITY_LIMIT = 200
 PROGRESS_LINE = "{activity} · {elapsed} in"
 PROGRESS_PREPARING_RESPONSE = "Preparing the response"
+RESUME_NOTICE_GRACE_SECONDS = 15.0
+RESUME_NOTICE_LINE = (
+    "The service restarted during this turn. The work resumed from where it stopped."
+)
 
 ASK_ACTION_ID_PREFIX = "ask:"
 CONNECT_ACTION_ID = "connect"
@@ -2607,6 +2613,8 @@ class ThreadStatus:
                             text = STATUS_DESCRIBED_TEXT.format(description=stated)
                         case Absorbed():
                             text = STATUS_PICKED_UP_TEXT
+                        case Resumed():
+                            text = STATUS_RESUMED_TEXT
                         case TextDelta():
                             text = STATUS_GENERATING_TEXT
                         case _:
@@ -2800,6 +2808,10 @@ class ThreadProgress:
     end. Bounded like the thread status: the tail ends on the durable terminal state (its own poll,
     not the lossy hub), so the task always ends within a second of the commit.
 
+    A turn the fleet resumed after the process running it died posts one line saying so, off the
+    ladder and once per adopting attempt, held back by a short grace so a resume that lands its
+    answer immediately stays silent.
+
     The turn's first post carries the standard footer, so the member reaches the conversation on the
     web from the first thing the turn says rather than only from its reply. Every later checkpoint
     posts without one, so no thread carries the footer twice — and a reporter armed after the turn's
@@ -2830,15 +2842,23 @@ class ThreadProgress:
         deadline = next(checkpoints)
         activity = TurnActivity()
         spend: CostTick | None = None
+        resume_due: float | None = None
+        announced: set[str] = set()
         async with self.ctx.tail(self.turn_id) as frames:
             upcoming = asyncio.ensure_future(anext(frames))
             try:
                 while True:
-                    waiting = max(deadline - self._elapsed(), 0.0)
+                    due = deadline if resume_due is None else min(deadline, resume_due)
+                    waiting = max(due - self._elapsed(), 0.0)
                     done, _pending = await asyncio.wait([upcoming], timeout=waiting)
                     if not done:
                         if await self.ctx.turn_is_terminal(self.turn_id):
                             return
+                        if resume_due is not None and self._elapsed() >= resume_due:
+                            resume_due = None
+                            posted = await self._post_resumed(client, bot_token, spend, first)
+                            first = first and not posted
+                            continue
                         posted = await self._post(
                             client, bot_token, activity, self._elapsed(), spend, first
                         )
@@ -2857,6 +2877,9 @@ class ThreadProgress:
                             activity.tool(tool, description)
                         case SkillLoad(skill=skill):
                             activity.skill(skill)
+                        case Resumed(attempt=attempt) if attempt not in announced:
+                            announced.add(attempt)
+                            resume_due = self._elapsed() + RESUME_NOTICE_GRACE_SECONDS
                         case SubagentActivity() if frame.tool or frame.skill:
                             label = frame.name or frame.profile
                             worked = frame.description or frame.skill or frame.tool
@@ -2898,6 +2921,30 @@ class ThreadProgress:
                 elapsed_seconds=int(elapsed_seconds),
             )
             return False
+        return await self._say(client, bot_token, text, elapsed_seconds, spend, first)
+
+    async def _post_resumed(
+        self, client: httpx.AsyncClient, bot_token: str, spend: CostTick | None, first: bool
+    ) -> bool:
+        """The one line a resumed turn owes the member. A turn the fleet picked back up after the
+        process running it died looks from the thread exactly like a turn that died — the same
+        stopped output, the same standing status — so the wait is named rather than left to be
+        read as a failure.
+
+        Posted on the grace, not on the frame: a turn that reaches its terminal state within
+        seconds of the resume says nothing, because a notice landing after the answer describes a
+        problem the member no longer has."""
+        return await self._say(client, bot_token, RESUME_NOTICE_LINE, self._elapsed(), spend, first)
+
+    async def _say(
+        self,
+        client: httpx.AsyncClient,
+        bot_token: str,
+        text: str,
+        elapsed_seconds: float,
+        spend: CostTick | None,
+        first: bool,
+    ) -> bool:
         channel = self.thread.queue_key.partition(":")[0]
         thread_ts = self.thread.anchor()
         metadata = await self._footer(bot_token, channel, spend) if first else None

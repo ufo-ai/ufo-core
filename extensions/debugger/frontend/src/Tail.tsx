@@ -9,6 +9,7 @@ const EVENT_KINDS = [
   "subagent_activity",
   "cost",
   "absorbed",
+  "resumed",
   "reply",
   "parked",
   "terminal",

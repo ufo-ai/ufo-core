@@ -13,6 +13,7 @@ import type { ChatFile, SubagentRun, Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const MALFORMED_REPLY = "Malformed reply — try again.";
+const RESUMED_NOTE = "Resumed after a restart";
 const CANCELLED = "cancelled";
 const STOPPED = "Stopped.";
 
@@ -422,6 +423,22 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
   source.addEventListener("skill", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
     const entry: ActivityEvent = { kind: "skill", name: frame.skill, preview: "", description: "" };
+    onLive((streamed) => {
+      const live = noted(streamed);
+      return {
+        ...live,
+        events: live.events.concat(entry),
+        activity: eventLabel(entry, "active"),
+      };
+    });
+  });
+
+  /** A turn the fleet picked back up after the process running it died takes a step of its own, so
+   *  a member reading a long wait sees why the work went quiet rather than only that it did. It
+   *  settles into the round's step list like any other, which is what keeps it in the transcript
+   *  once the reply lands. */
+  source.addEventListener("resumed", () => {
+    const entry: ActivityEvent = { kind: "note", text: RESUMED_NOTE };
     onLive((streamed) => {
       const live = noted(streamed);
       return {

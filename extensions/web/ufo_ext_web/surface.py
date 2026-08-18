@@ -59,6 +59,7 @@ from ufo.sdk.hub import (
     LiveFrame,
     Parked,
     Reply,
+    Resumed,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -3218,6 +3219,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             )
         case Absorbed():
             return head + b"event: absorbed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        case Resumed():
+            return head + b"event: resumed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case Reply():
             return head + b"event: reply\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case TextDelta():

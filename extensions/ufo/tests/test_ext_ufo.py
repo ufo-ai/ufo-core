@@ -59,6 +59,7 @@ from ufo.hub import (
     CostTick,
     InProcessHub,
     Parked,
+    Resumed,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -120,6 +121,9 @@ def test_frame_map_covers_every_live_frame() -> None:
         b"note\trunning bash: listing\n",
     )
     assert directives_for(SkillLoad(skill="demo"), False) == (b"note\tloading skill: demo\n",)
+    assert directives_for(Resumed(attempt="attempt-one"), False) == (
+        b"note\tthe service restarted; this turn resumed\n",
+    )
     run = SubagentActivity(
         turn_id=UUID(int=1),
         parent_turn_id=UUID(int=2),

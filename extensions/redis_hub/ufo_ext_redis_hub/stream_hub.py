@@ -28,6 +28,7 @@ from ufo.sdk.hub import (
     LiveFrame,
     Parked,
     Reply,
+    Resumed,
     SkillLoad,
     SubagentActivity,
     Terminal,
@@ -49,6 +50,7 @@ _FRAME_KINDS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("tool_call", ToolCall),
     ("skill_load", SkillLoad),
     ("absorbed", Absorbed),
+    ("resumed", Resumed),
     ("reply", Reply),
     ("subagent_activity", SubagentActivity),
 )

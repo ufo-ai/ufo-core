@@ -2681,3 +2681,17 @@ test("an address a member sent is a link in the member's own bubble", async () =
   expect(link.getAttribute("rel")).toBe("noopener noreferrer");
   expect(link.closest("[data-role=me]")).not.toBeNull();
 });
+
+test("a turn the fleet picked back up says so among its steps", async () => {
+  wire(transcript({ messages: [{ role: "user", text: "Run the migration." }], turn: TURN_ID }));
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("tool", { tool: "bash", preview: "alembic upgrade head" });
+  StreamFake.last().emit("resumed", { attempt: "attempt-one" });
+
+  // The line stands where the work does, so the wait reads as interrupted rather than as stopped:
+  // once as the open disclosure's summary and once in the step list standing behind it.
+  expect(await screen.findAllByText("Resumed after a restart")).toHaveLength(2);
+  expect(screen.getByText("bash alembic upgrade head")).toBeTruthy();
+});
