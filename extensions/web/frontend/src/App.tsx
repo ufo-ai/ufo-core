@@ -34,6 +34,7 @@ import { SCHEME_OPTIONS, heldScheme, holdScheme, type Scheme } from "@/lib/schem
 import { pageTitle } from "@/lib/title";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuRadioGroup,
@@ -44,12 +45,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  RAIL_SHOWN_OPTIONS,
   bumpChat,
+  heldRailShown,
+  holdRailShown,
   mergeChats,
   railGroups,
   stampIso,
   type ChatRow,
   type ChatsPayload,
+  type RailShown,
   type RailSort,
 } from "@/lib/rail";
 import {
@@ -104,6 +109,11 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
   const setRailSortHeld = useCallback((next: RailSort) => {
     setRailSort(next);
     localStorage.setItem("rail-sort", next);
+  }, []);
+  const [railShown, setRailShown] = useState<RailShown>(heldRailShown);
+  const setRailShownHeld = useCallback((next: RailShown) => {
+    setRailShown(next);
+    holdRailShown(next);
   }, []);
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
   const routeRef = useRef(route);
@@ -325,6 +335,8 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
                   route={route}
                   sort={railSort}
                   onSort={setRailSortHeld}
+                  shown={railShown}
+                  onShown={setRailShownHeld}
                   onNewChat={openNewChat}
                   onOpen={openChat}
                   onRetry={() => setReloads((count) => count + 1)}
@@ -520,6 +532,8 @@ function ChatSidebar({
   route,
   sort,
   onSort,
+  shown,
+  onShown,
   onNewChat,
   onOpen,
   onRetry,
@@ -529,6 +543,8 @@ function ChatSidebar({
   route: Route;
   sort: RailSort;
   onSort: (sort: RailSort) => void;
+  shown: RailShown;
+  onShown: (shown: RailShown) => void;
   onNewChat: (agentId: string) => void;
   onOpen: (conversationId: string) => void;
   onRetry: () => void;
@@ -552,13 +568,19 @@ function ChatSidebar({
           ) : null}
         </li>
       </ul>
+      <div className="flex h-(--size-row) shrink-0 items-center justify-between px-sm max-narrow:px-0">
+        <h2 className="m-0 pl-sm font-sans text-label font-medium text-ink-soft max-narrow:hidden">
+          Conversations
+        </h2>
+        <RailSettings sort={sort} onSort={onSort} shown={shown} onShown={onShown} />
+      </div>
       <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0">
         <RailList
           rail={rail}
           route={route}
           mainAgent={mainAgent}
           sort={sort}
-          onSort={onSort}
+          shown={shown}
           onOpen={onOpen}
           onRetry={onRetry}
         />
@@ -831,12 +853,68 @@ function PaneNote({ children }: { children: React.ReactNode }) {
   );
 }
 
+function RailSettings({
+  sort,
+  onSort,
+  shown,
+  onShown,
+}: {
+  sort: RailSort;
+  onSort: (sort: RailSort) => void;
+  shown: RailShown;
+  onShown: (shown: RailShown) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label="Conversation settings"
+          className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill data-[state=open]:bg-fill"
+        >
+          <IconAdjustments className="size-(--size-glyph)" aria-hidden />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>Sort by</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownMenuRadioGroup
+              value={sort}
+              onValueChange={(value) => onSort(value === "agent" ? "agent" : "recency")}
+            >
+              <DropdownMenuRadioItem value="recency">Recency</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="agent">Agent</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>Filter</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            {RAIL_SHOWN_OPTIONS.map((option) => (
+              <DropdownMenuCheckboxItem
+                key={option.surface}
+                checked={shown[option.surface]}
+                onCheckedChange={(checked) =>
+                  onShown({ ...shown, [option.surface]: checked === true })
+                }
+              >
+                {option.label}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function RailList({
   rail,
   route,
   mainAgent,
   sort,
-  onSort,
+  shown,
   onOpen,
   onRetry,
 }: {
@@ -844,43 +922,13 @@ function RailList({
   route: Route;
   mainAgent: Agent | null;
   sort: RailSort;
-  onSort: (sort: RailSort) => void;
+  shown: RailShown;
   onOpen: (conversationId: string) => void;
   onRetry: () => void;
 }) {
   const now = new Date();
   return (
     <>
-      <div className="flex h-(--size-row) shrink-0 items-center justify-between pl-sm max-narrow:hidden">
-        <h2 className="m-0 font-sans text-label font-medium text-ink-soft">Conversations</h2>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label="Conversation settings"
-              className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill data-[state=open]:bg-fill"
-            >
-              <IconAdjustments className="size-(--size-glyph)" aria-hidden />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger value={sort === "agent" ? "Agent" : "Recency"}>
-                Sort by
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                <DropdownMenuRadioGroup
-                  value={sort}
-                  onValueChange={(value) => onSort(value === "agent" ? "agent" : "recency")}
-                >
-                  <DropdownMenuRadioItem value="recency">Recency</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="agent">Agent</DropdownMenuRadioItem>
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
       {rail.phase === "loading" ? (
         <div className="p-sm text-ink-soft">Loading…</div>
       ) : null}
@@ -896,7 +944,7 @@ function RailList({
           </button>
         </div>
       ) : null}
-      {railGroups(rail.rows, sort, now).map((group) => (
+      {railGroups(rail.rows, sort, shown, now).map((group) => (
         <section key={group.label} className="max-narrow:contents">
           <h2 className="m-0 flex h-(--size-row) items-center px-sm font-sans text-label font-medium text-ink-soft max-narrow:hidden">
             {group.label}

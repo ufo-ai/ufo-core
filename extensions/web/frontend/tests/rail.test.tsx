@@ -5,6 +5,8 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import {
   bumpChat,
+  heldRailShown,
+  holdRailShown,
   mergeChats,
   railGroups,
   type ChatRow,
@@ -39,6 +41,9 @@ const NOW = new Date(2026, 7, 1, 12, 0, 0);
 
 const NOT_SHARED = "This conversation is not shared with this account.";
 
+const PORTAL_ONLY = { terminal: false, slack: false };
+const EVERY_SURFACE = { terminal: true, slack: true };
+
 function hoursAgo(hours: number): string {
   return new Date(NOW.getTime() - hours * 3_600_000).toISOString();
 }
@@ -71,6 +76,7 @@ test("chats group by recency in rail order and empty groups are absent", () => {
       row("e", hoursAgo(90 * 24)),
     ],
     "recency",
+    PORTAL_ONLY,
     NOW,
   );
   expect(grouped.map((group) => group.label)).toEqual([
@@ -87,7 +93,7 @@ test("chats group by recency in rail order and empty groups are absent", () => {
     ["d"],
     ["e"],
   ]);
-  expect(railGroups([row("a", hoursAgo(4))], "recency", NOW)).toHaveLength(1);
+  expect(railGroups([row("a", hoursAgo(4))], "recency", PORTAL_ONLY, NOW)).toHaveLength(1);
 });
 
 test("agent sort groups rows under their agent and keeps recency within each group", () => {
@@ -98,6 +104,7 @@ test("agent sort groups rows under their agent and keeps recency within each gro
       row("c", hoursAgo(3)),
     ],
     "agent",
+    PORTAL_ONLY,
     NOW,
   );
   expect(grouped.map((group) => group.label)).toEqual(["assistant", "support"]);
@@ -115,18 +122,142 @@ test("everyone else's conversations are one group at the foot, under either sort
     theirs("t2", hoursAgo(30 * 24), "sam@example.com"),
   ];
 
-  const byRecency = railGroups(rows, "recency", NOW);
+  const byRecency = railGroups(rows, "recency", PORTAL_ONLY, NOW);
   expect(byRecency.map((group) => group.label)).toEqual(["Today", "Yesterday", "Other members"]);
   expect(byRecency[2].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
 
-  const byAgent = railGroups(rows, "agent", NOW);
+  const byAgent = railGroups(rows, "agent", PORTAL_ONLY, NOW);
   expect(byAgent.map((group) => group.label)).toEqual(["assistant", "Other members"]);
   expect(byAgent[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "b"]);
   expect(byAgent[1].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
 
-  expect(railGroups([row("a", hoursAgo(1))], "recency", NOW).map((group) => group.label)).toEqual([
+  expect(railGroups([row("a", hoursAgo(1))], "recency", PORTAL_ONLY, NOW).map((group) => group.label)).toEqual([
     "Today",
   ]);
+});
+
+function elsewhere(id: string, surface: string): ChatRow {
+  return { ...row(id, hoursAgo(1)), surface, title: surface + " " + id };
+}
+
+test("the rail holds portal conversations until the filter names another surface", () => {
+  const rows = [
+    row("a", hoursAgo(1)),
+    elsewhere("s1", "slack"),
+    elsewhere("u1", "ufo"),
+    { ...elsewhere("s2", "slack"), mine: false, speaker: "sam@example.com" },
+  ];
+
+  expect(railGroups(rows, "recency", PORTAL_ONLY, NOW)).toEqual([
+    { label: "Today", rows: [rows[0]] },
+  ]);
+
+  const withSlack = railGroups(rows, "recency", { terminal: false, slack: true }, NOW);
+  expect(withSlack.map((group) => group.label)).toEqual(["Today", "Other members"]);
+  expect(withSlack[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "s1"]);
+  expect(withSlack[1].rows.map((entry) => entry.conversation_id)).toEqual(["s2"]);
+
+  const withTerminal = railGroups(rows, "agent", { terminal: true, slack: false }, NOW);
+  expect(withTerminal.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
+    ["a", "u1"],
+  ]);
+
+  const withBoth = railGroups(rows, "recency", EVERY_SURFACE, NOW);
+  expect(withBoth[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "s1", "u1"]);
+});
+
+test("a browser holding no filter admits neither surface, and holds what a member names", () => {
+  expect(heldRailShown()).toEqual(PORTAL_ONLY);
+
+  holdRailShown({ terminal: true, slack: false });
+  expect(heldRailShown()).toEqual({ terminal: true, slack: false });
+
+  holdRailShown(EVERY_SURFACE);
+  expect(heldRailShown()).toEqual(EVERY_SURFACE);
+
+  holdRailShown(PORTAL_ONLY);
+  expect(heldRailShown()).toEqual(PORTAL_ONLY);
+});
+
+const SLACK_CHAT = {
+  ...CHAT_ROW,
+  conversation_id: "66666666-6666-4666-8666-666666666666",
+  title: "Deploy question",
+  surface: "slack",
+};
+
+const TERMINAL_CHAT = {
+  ...CHAT_ROW,
+  conversation_id: "77777777-7777-4777-8777-777777777777",
+  title: "Migration run",
+  surface: "ufo",
+};
+
+/** The menu holds the rest of the document `aria-hidden` while it is open, so the rail is read only
+ *  once it is shut — as a member reads it. */
+async function shutMenu() {
+  await userEvent.keyboard("{Escape}");
+  await userEvent.keyboard("{Escape}");
+}
+
+async function filterBy(label: string) {
+  await userEvent.click(await screen.findByRole("button", { name: "Conversation settings" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Filter" }));
+  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: label }));
+  await shutMenu();
+}
+
+test("the filter admits a surface into the rail and the browser keeps the choice", async () => {
+  wire({ "/api/chats": () => json({ chats: [CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT] }) });
+  const first = render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Deploy question/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Migration run/ })).toBeNull();
+
+  await filterBy("Slack");
+  expect(await screen.findByRole("button", { name: /Deploy question/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Migration run/ })).toBeNull();
+
+  await filterBy("Terminal");
+  expect(await screen.findByRole("button", { name: /Migration run/ })).toBeTruthy();
+
+  first.unmount();
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  expect(await screen.findByRole("button", { name: /Deploy question/ })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /Migration run/ })).toBeTruthy();
+});
+
+/** The narrow layout drops every heading and scrolls the rows sideways. The filter still applies
+ *  there, so a control the layout hides is a rail with rows missing and no way to ask for them
+ *  back. */
+test("the settings control survives the narrow layout that hides the rail's headings", async () => {
+  wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const nav = screen.getByRole("navigation", { name: "Conversations" });
+  let held = await screen.findByRole("button", { name: "Conversation settings" });
+  while (held !== nav) {
+    expect(held.className).not.toContain("max-narrow:hidden");
+    held = held.parentElement!;
+  }
+});
+
+test("a tick leaves the filter open, so both surfaces are named in one visit", async () => {
+  wire({ "/api/chats": () => json({ chats: [CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT] }) });
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Conversation settings" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Filter" }));
+  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Slack" }));
+  await userEvent.click(screen.getByRole("menuitemcheckbox", { name: "Terminal" }));
+  expect(
+    screen.getAllByRole("menuitemcheckbox").map((item) => item.getAttribute("aria-checked")),
+  ).toEqual(["true", "true"]);
+
+  await shutMenu();
+  expect(await screen.findByRole("button", { name: /Deploy question/ })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /Migration run/ })).toBeTruthy();
 });
 
 test("bumping a conversation moves it to the top", () => {
@@ -364,6 +495,7 @@ test("a row from another surface draws its glyph and states the surface's own na
     surface_label: "Direct message",
     title: "Slack question",
   };
+  holdRailShown(EVERY_SURFACE);
   wire({ "/api/chats": () => json({ chats: [slack] }) });
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -376,6 +508,7 @@ test("a row from another surface draws its glyph and states the surface's own na
 
 test("a cli row draws the terminal glyph and reads as Terminal, never as the surface's own name", async () => {
   const cli = { ...CHAT_ROW, surface: "ufo", surface_label: null, title: "Deploy the branch" };
+  holdRailShown(EVERY_SURFACE);
   wire({ "/api/chats": () => json({ chats: [cli] }) });
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -387,6 +520,7 @@ test("a cli row draws the terminal glyph and reads as Terminal, never as the sur
 
 test("the surface glyph is drawn at the sidebar's glyph size, not at the row's text size", async () => {
   const slack = { ...CHAT_ROW, surface: "slack", surface_label: "#ops", title: "Slack question" };
+  holdRailShown(EVERY_SURFACE);
   wire({ "/api/chats": () => json({ chats: [slack] }) });
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -458,6 +592,7 @@ test("an origin rail row opens the read-only pane, never the live chat", async (
     disclosable: false,
     agent: { id: AGENT.id, name: AGENT.name },
   };
+  holdRailShown(EVERY_SURFACE);
   wire({
     "/api/chats": (url) =>
       url.includes("conversation=")

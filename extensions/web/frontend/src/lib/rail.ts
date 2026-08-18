@@ -1,3 +1,4 @@
+import { SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
 import type { OwnedConversation } from "@/lib/types";
 
 export type ChatRow = {
@@ -56,16 +57,53 @@ function groupChatsByAgent(rows: ChatRow[]): RailGroup[] {
   return [...buckets.entries()].map(([label, grouped]) => ({ label, rows: grouped }));
 }
 
+export type RailShown = { terminal: boolean; slack: boolean };
+
+export const RAIL_SHOWN_OPTIONS: { surface: keyof RailShown; label: string }[] = [
+  { surface: "terminal", label: "Terminal" },
+  { surface: "slack", label: "Slack" },
+];
+
+const HELD_SHOWN = "rail-shown";
+
+/** Which surfaces beside the portal's own the rail admits, held across sessions. A Slack thread or
+ *  a terminal session is a conversation the member had somewhere else, so each is admitted only
+ *  once they name it, and a browser holding nothing admits neither. */
+export function heldRailShown(): RailShown {
+  const held = (localStorage.getItem(HELD_SHOWN) ?? "").split(",");
+  return { terminal: held.includes("terminal"), slack: held.includes("slack") };
+}
+
+export function holdRailShown(shown: RailShown): void {
+  const named = RAIL_SHOWN_OPTIONS.filter((option) => shown[option.surface]);
+  localStorage.setItem(HELD_SHOWN, named.map((option) => option.surface).join(","));
+}
+
+function admits(row: ChatRow, shown: RailShown): boolean {
+  if (row.surface === UFO_SURFACE) return shown.terminal;
+  if (row.surface === SLACK_SURFACE) return shown.slack;
+  return true;
+}
+
 const OTHER_MEMBERS = "Other members";
 
 /** The rail's groups, in the order it draws them. The member's own conversations take the ladder
  *  the sort names, and the readable ones their colleagues are in follow as one group at the foot —
  *  never subdivided, and by recency under either sort: a sidebar column holds two heading weights,
  *  not three, and a colleague's thread is read for what happened lately in it. The group is drawn
- *  only when it holds a row. */
-export function railGroups(rows: ChatRow[], sort: RailSort, now: Date): RailGroup[] {
-  const own = rows.filter((row) => row.mine);
-  const theirs = rows.filter((row) => !row.mine);
+ *  only when it holds a row.
+ *
+ *  The filter narrows the groups and never the rail itself: a permalink to a Slack thread opens it
+ *  whether or not the rail is admitting Slack. */
+export function railGroups(
+  rows: ChatRow[],
+  sort: RailSort,
+  shown: RailShown,
+  now: Date,
+): RailGroup[] {
+  const admitted = rows.filter((row) => admits(row, shown));
+  const own = admitted.filter((row) => row.mine);
+  const theirs = admitted.filter((row) => !row.mine);
   const grouped = sort === "agent" ? groupChatsByAgent(own) : groupChats(own, now);
   return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
 }

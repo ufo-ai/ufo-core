@@ -119,6 +119,28 @@ export function DropdownMenuSubContent({
   );
 }
 
+/** A choice a member turns on and off rather than picks between. Ticking one leaves the menu open:
+ *  the options are read as a set and are usually changed together. */
+export function DropdownMenuCheckboxItem({
+  className,
+  children,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.CheckboxItem>) {
+  return (
+    <DropdownMenuPrimitive.CheckboxItem
+      data-slot="dropdown-menu-checkbox-item"
+      className={cn(ITEM, className)}
+      onSelect={(event) => event.preventDefault()}
+      {...props}
+    >
+      {children}
+      <DropdownMenuPrimitive.ItemIndicator asChild>
+        <Tick />
+      </DropdownMenuPrimitive.ItemIndicator>
+    </DropdownMenuPrimitive.CheckboxItem>
+  );
+}
+
 export function DropdownMenuRadioItem({
   className,
   children,
