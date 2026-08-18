@@ -739,6 +739,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "name": agent.name,
                     "main": agent.main,
                     "model": agent.model,
+                    "icon": agent.icon,
                     **(
                         {"web_audience": list(grants.get(agent.id, ()))}
                         if grants is not None
@@ -2983,6 +2984,7 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
                     "name": agent.name,
                     "main": agent.main,
                     "model": agent.model,
+                    "icon": agent.icon,
                     "internet_access_allowed": agent.internet_access_allowed,
                     "installations": [
                         entry.surface for entry in installations if entry.agent_id == agent.id

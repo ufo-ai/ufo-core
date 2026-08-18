@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { IconAdjustments, IconBrandSlack, IconTerminal2 } from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -27,6 +28,7 @@ import {
   useViewer,
 } from "@/lib/audience";
 import { COLUMN, Pane, PaneHeader } from "@/kernel/pane";
+import { agentName } from "@/lib/agentName";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -489,9 +491,11 @@ function AccountMenu({ member, onAdmin }: { member: Member; onAdmin: () => void 
         <button
           type="button"
           aria-label={member.email}
-          className="flex size-(--size-avatar) shrink-0 items-center justify-center rounded-full border-0 bg-fill p-0 text-small text-inherit data-[state=open]:outline data-[state=open]:outline-edge"
+          className="flex shrink-0 rounded-full border-0 bg-transparent p-0 data-[state=open]:outline data-[state=open]:outline-edge"
         >
-          {member.email.slice(0, 1).toUpperCase()}
+          <Avatar>
+            <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
+          </Avatar>
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
@@ -716,12 +720,7 @@ function RoutedPane({
     const agent =
       listedAgent ??
       (row && row.surface.startsWith("extension:")
-        ? {
-            id: row.agent_id,
-            name: row.agent_name,
-            model: row.agent_model ?? "",
-            main: false,
-          }
+        ? { id: row.agent_id, name: row.agent_name, model: row.agent_model ?? "" }
         : undefined);
     if (!row || !agent) {
       if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;
@@ -802,7 +801,7 @@ function LinkedPane({
       >
         <div className="flex min-h-0 min-w-0 flex-col">
           <PaneHeader
-            parent={{ label: agent.name, onGo: () => onOpenAgent(agent.id) }}
+            parent={{ label: agentName(agent.name), onGo: () => onOpenAgent(agent.id) }}
             current={subject(conversation, viewer)}
             actions={<SurfaceMark conversation={conversation} />}
           />
@@ -956,7 +955,7 @@ function RailList({
               const facts = [
                 row.speaker ? speakerName(row.speaker) : null,
                 isPortalChat(row.surface) ? null : origin(row),
-                mainAgent && row.agent_id !== mainAgent.id ? row.agent_name : null,
+                mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
               ].filter((fact): fact is string => fact !== null);
               return (
                 <li key={row.conversation_id}>

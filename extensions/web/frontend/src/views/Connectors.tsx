@@ -43,6 +43,7 @@ import {
 } from "@/kernel/panel";
 import { DataTable, OPEN } from "@/kernel/table";
 import { Moment } from "@/lib/moments";
+import { agentName } from "@/lib/agentName";
 import { BASE, postIntent } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents } from "@/lib/mainAgent";
@@ -180,7 +181,7 @@ export function WorkspaceConnectors({ place }: { place: Placement }) {
                   <TdFact>{entry.provider}</TdFact>
                   <Td>{accountName(entry)}</Td>
                   <TdFact>{entry.shared ? "Workspace" : "Only you"}</TdFact>
-                  <Td>{(entry.agents ?? []).map((agent) => agent.name).join(", ") || "—"}</Td>
+                  <Td>{(entry.agents ?? []).map((agent) => agentName(agent.name)).join(", ") || "—"}</Td>
                 </>
               )}
             </DataTable>
@@ -241,7 +242,7 @@ function PoolRecord({
               <SelectContent>
                 {agents.map((agent) => (
                   <SelectItem key={agent.id} value={agent.id}>
-                    {agent.name}
+                    {agentName(agent.name)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -580,8 +581,8 @@ function ConnectorList({
               rowKey={(entry) => entry.grant}
               empty={
                 sharedOnly
-                  ? "No connector is shared with " + agent.name + " yet."
-                  : "No account is connected to " + agent.name + " yet."
+                  ? "No connector is shared with " + agentName(agent.name) + " yet."
+                  : "No account is connected to " + agentName(agent.name) + " yet."
               }
               note={query ? "No connected account matches this search." : undefined}
               open={(entry) => () => setOpened(entry.grant)}

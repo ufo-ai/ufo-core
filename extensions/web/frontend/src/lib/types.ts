@@ -4,6 +4,8 @@ export type Agent = {
   name: string;
   model: string;
   main: boolean;
+  /** One slug of the closed set `AGENT_ICONS` holds. */
+  icon: string;
   web_audience?: string[];
 };
 

@@ -1,8 +1,11 @@
 """Boundary records and the queue contract shared by surfaces and workers."""
 
+import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from hashlib import sha256
+from typing import Literal, get_args
 from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -37,6 +40,144 @@ SCHEDULED_ADMISSION: TurnAdmissionSource = "scheduled"
 INTENT_ADMISSION: TurnAdmissionSource = "intent"
 SPAWN_RESULT_KEY_PREFIX = "subagent-result:"
 SUBAGENT_SURFACE = "subagent"
+
+AgentIcon = Literal[
+    "ufo",
+    "robot",
+    "rocket",
+    "bolt",
+    "brain",
+    "sparkles",
+    "bulb",
+    "compass",
+    "telescope",
+    "microscope",
+    "flask",
+    "atom",
+    "code",
+    "terminal-2",
+    "bug",
+    "database",
+    "server",
+    "cloud",
+    "mail",
+    "message",
+    "calendar",
+    "clock",
+    "checklist",
+    "notebook",
+    "book",
+    "folder",
+    "search",
+    "chart-line",
+    "chart-pie",
+    "receipt",
+    "shopping-cart",
+    "users",
+    "headset",
+    "lifebuoy",
+    "shield",
+    "map-pin",
+    "plane",
+    "briefcase",
+    "palette",
+    "pencil",
+    "gavel",
+]
+AGENT_ICONS: tuple[AgentIcon, ...] = get_args(AgentIcon)
+"""Every icon an agent may carry, in the order a picker shows them. The slugs are tabler icon
+names, so a surface renders one by name without a table of its own."""
+
+MAIN_AGENT_ICON: AgentIcon = "ufo"
+"""The icon the workspace's main agent is created with, and the one a member reaches for to say
+an agent is the workspace itself."""
+
+DEFAULT_AGENT_ICON: AgentIcon = "robot"
+"""The icon a row inserted without one carries."""
+
+AUTO_AGENT_ICONS: tuple[AgentIcon, ...] = tuple(
+    icon for icon in AGENT_ICONS if icon != MAIN_AGENT_ICON
+)
+"""The icons an agent may be dealt automatically: every icon but the product's own mark, which a
+member applies deliberately or not at all."""
+
+AGENT_ICON_KEYWORDS: dict[str, AgentIcon] = {
+    "support": "lifebuoy",
+    "help": "lifebuoy",
+    "desk": "headset",
+    "sales": "chart-line",
+    "revenue": "chart-line",
+    "research": "microscope",
+    "analysis": "chart-pie",
+    "analytics": "chart-pie",
+    "data": "database",
+    "sql": "database",
+    "code": "code",
+    "dev": "code",
+    "engineer": "code",
+    "build": "code",
+    "bug": "bug",
+    "qa": "bug",
+    "ops": "server",
+    "infra": "server",
+    "deploy": "rocket",
+    "finance": "receipt",
+    "billing": "receipt",
+    "invoice": "receipt",
+    "legal": "gavel",
+    "contract": "gavel",
+    "people": "users",
+    "hr": "users",
+    "recruit": "users",
+    "team": "users",
+    "design": "palette",
+    "brand": "palette",
+    "write": "pencil",
+    "writer": "pencil",
+    "content": "pencil",
+    "copy": "pencil",
+    "mail": "mail",
+    "email": "mail",
+    "inbox": "mail",
+    "calendar": "calendar",
+    "schedule": "clock",
+    "task": "checklist",
+    "note": "notebook",
+    "doc": "book",
+    "file": "folder",
+    "search": "search",
+    "scout": "telescope",
+    "security": "shield",
+    "travel": "plane",
+    "shop": "shopping-cart",
+    "map": "map-pin",
+    "idea": "bulb",
+    "lab": "flask",
+}
+
+NAME_TOKENS = re.compile(r"[^a-z0-9]+")
+
+
+def auto_agent_icon(name: str, taken: Collection[str]) -> AgentIcon:
+    """The icon a new agent starts with, drawn from `AUTO_AGENT_ICONS`: the first name token a
+    keyword names, else the name's hash over the icons the workspace has not used yet, so agents of
+    one workspace read apart at a glance and a given name always lands on the same icon. Once every
+    icon is taken the workspace repeats one."""
+    seed = int.from_bytes(sha256(name.encode()).digest(), "big")
+    keyword = next(
+        (
+            AGENT_ICON_KEYWORDS[token]
+            for token in NAME_TOKENS.split(name.lower())
+            if token in AGENT_ICON_KEYWORDS
+        ),
+        None,
+    )
+    if keyword is not None and keyword not in taken:
+        return keyword
+    free = tuple(icon for icon in AUTO_AGENT_ICONS if icon not in taken)
+    if not free:
+        return keyword if keyword is not None else AUTO_AGENT_ICONS[seed % len(AUTO_AGENT_ICONS)]
+    return free[seed % len(free)]
 
 
 class ToolIntent(BaseModel):

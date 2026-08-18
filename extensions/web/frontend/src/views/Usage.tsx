@@ -13,6 +13,7 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
+import { agentName } from "@/lib/agentName";
 import { postIntent } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 import { money } from "@/lib/money";
@@ -339,6 +340,13 @@ function dollars(micro: number): string {
   return (micro < 0 ? "-" : "") + "$" + (Math.abs(micro) / 1e6).toFixed(2);
 }
 
+/** An agent's line of the breakdown, headed the way every screen heads that agent. The line the
+ *  rollup gives no agent id is the workspace's own jobs, whose label is the report's word rather
+ *  than any agent's name. */
+function named(line: BreakdownLine): BreakdownLine {
+  return line.id ? { ...line, label: agentName(line.label) } : line;
+}
+
 function refillRule(amountMicro: number, belowMicro: number): string {
   return dollars(amountMicro) + " when the balance falls below " + dollars(belowMicro);
 }
@@ -449,7 +457,7 @@ export function WorkspaceUsage() {
             {payload.workspace ? (
               <>
                 <Section title="Agents">
-                  <Breakdown heading="Agent" rows={payload.workspace.by_agent} empty="No agent used model tokens in this range." />
+                  <Breakdown heading="Agent" rows={payload.workspace.by_agent.map(named)} empty="No agent used model tokens in this range." />
                 </Section>
                 <Section title="Delegation">
                   <Breakdown heading="Execution" rows={delegation(report.by_execution)} empty="No model tokens were used in this range." />

@@ -1,3 +1,4 @@
+import { agentName } from "@/lib/agentName";
 import { isPortalChat } from "@/lib/audience";
 import type { ChatRow } from "@/lib/rail";
 import type { Route } from "@/lib/route";
@@ -37,19 +38,22 @@ function where(
   linked: Record<string, OwnedConversation>,
   main: Agent | null,
 ): (string | undefined)[] {
-  const named = (agentId: string) => agents.find((agent) => agent.id === agentId)?.name;
+  const named = (agentId: string) => {
+    const found = agents.find((agent) => agent.id === agentId);
+    return found ? agentName(found.name) : undefined;
+  };
   switch (route.kind) {
     case "home":
-      return [NEW_CONVERSATION, main?.name];
+      return [NEW_CONVERSATION, main ? agentName(main.name) : undefined];
     case "new-chat":
       return [NEW_CONVERSATION, named(route.agentId)];
     case "chat": {
       const row = rows.find(
         (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
       );
-      if (row) return [row.title, row.agent_name];
+      if (row) return [row.title, agentName(row.agent_name)];
       const held = linked[route.conversationId];
-      return held ? [held.description, held.agent.name] : [];
+      return held ? [held.description, agentName(held.agent.name)] : [];
     }
     case "conversation-slot":
       return [route.slot, named(route.agentId)];

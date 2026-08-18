@@ -150,6 +150,7 @@ export const AGENT = {
   name: "assistant",
   model: "opus",
   main: true,
+  icon: "robot",
 };
 
 export const ADMIN_AGENT = {
@@ -164,6 +165,7 @@ export const SECOND = {
   id: SECOND_ID,
   name: "second",
   main: false,
+  icon: "telescope",
 };
 
 export const MEMBER = { id: "m1", email: "member@example.com", admin: false };
@@ -179,7 +181,7 @@ export const SETTINGS = {
     prompt: "be useful",
     prompt_digest: "abc123",
   },
-  spec: { model: "opus", reasoning: "high", internet_access_allowed: true },
+  spec: { icon: "robot", model: "opus", reasoning: "high", internet_access_allowed: true },
   spec_schema: {
     properties: {
       model: { type: "string" },
@@ -312,14 +314,15 @@ export async function openAgentRow(name: string): Promise<void> {
   await userEvent.click(within(index).getByRole("button", { name: new RegExp("^" + name) }));
 }
 
-/** An agent's settings, which stand in a dialog the index's gear opens rather than on a tab of the
- *  agent's page. The dialog opens on Settings; `tab` reaches the other three. */
+/** An agent's settings, which stand in a dialog the gear in the agent's own pane header opens
+ *  rather than on a tab of the agent's page. The dialog opens on Settings; `tab` reaches the
+ *  other three. */
 export async function openAgentSettings(
-  name = "assistant",
+  name = "Assistant",
   tab: "Settings" | "Connectors" | "Skills" | "Scheduled" = "Settings",
 ): Promise<HTMLElement> {
-  const index = await agentIndex();
-  await userEvent.click(within(index).getByRole("button", { name: "Settings for " + name }));
+  const pane = await screen.findByRole("region", { name });
+  await userEvent.click(within(pane).getByRole("button", { name: "Settings for " + name }));
   const dialog = await screen.findByRole("dialog");
   if (tab !== "Settings") {
     await userEvent.click(within(dialog).getByRole("tab", { name: tab }));

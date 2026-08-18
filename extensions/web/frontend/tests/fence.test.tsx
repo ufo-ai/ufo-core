@@ -53,7 +53,7 @@ test("leaving a view discards the read left behind rather than painting it", asy
 
   location.hash = "#/agents/" + AGENT.id;
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   await waitFor(() => expect(releaseConnectors).not.toBeNull());
 

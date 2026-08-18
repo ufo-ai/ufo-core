@@ -31,7 +31,7 @@ from ufo.onboarding import (
     Onboarding,
 )
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.schema.records import DEFAULT_AGENT_NAME, MAIN_AGENT_ICON
 from ufo.workspace import init_workspace_credentials, ws
 
 OWNER_EMAIL = "owner@example.com"
@@ -80,6 +80,7 @@ async def test_onboarding_creates_the_initial_admin_and_main_agent(
     assert agent.workspace_id == onboarded.workspace_id
     assert agent.is_main
     assert agent.visibility == "workspace"
+    assert agent.icon == MAIN_AGENT_ICON
 
 
 async def test_re_running_against_an_initialized_workspace_fails_loud(

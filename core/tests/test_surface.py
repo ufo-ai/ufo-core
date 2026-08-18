@@ -91,6 +91,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import (
+    MAIN_AGENT_ICON,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     WRITEBACK_PENDING,
@@ -220,6 +221,7 @@ async def _seed(*, member_email: str | None = None) -> tuple[UUID, UUID, UUID | 
                 id=agent_id,
                 workspace_id=workspace_id,
                 name="assistant",
+                icon=MAIN_AGENT_ICON,
                 prompt="be brief",
                 model="claude-opus-4-8",
                 is_main=True,
@@ -675,6 +677,35 @@ async def test_list_agents_orders_main_first_then_name(db: None, tmp_path) -> No
     assert listed[0].internet_access_allowed
     assert listed[1].id == second
     assert listed[1].model == "claude-sonnet-5"
+
+
+async def test_agent_projections_carry_the_icon(db: None, tmp_path) -> None:
+    workspace_id, agent_id, _ = await _seed()
+    second = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second,
+                workspace_id=workspace_id,
+                name="helpdesk",
+                icon="headset",
+                prompt="be helpful",
+                model="claude-sonnet-5",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    with ws(workspace_id):
+        listed = await context.list_agents()
+        detail = await context.agent_detail(second)
+    assert [(agent.name, agent.icon) for agent in listed] == [
+        ("assistant", MAIN_AGENT_ICON),
+        ("helpdesk", "headset"),
+    ]
+    assert listed[0].id == agent_id
+    assert detail is not None
+    assert detail.icon == "headset"
 
 
 async def _seed_agent(workspace_id: UUID, name: str) -> UUID:

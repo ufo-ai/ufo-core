@@ -128,6 +128,7 @@ from ufo.schema.records import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
+    AgentIcon,
     AgentVisibility,
     ReasoningEffort,
     SandboxSize,
@@ -541,7 +542,8 @@ class AgentSummary(BaseModel):
     capability, carried for the administration view. `owner_member_id` is the member who created
     the row (None for the main agent and provisioned rows), so an audience can give an owner
     their own agent without a separate grant. `visibility` is the agent's own audience floor:
-    `workspace` answers every member, `private` its owner and admins plus per-surface grants."""
+    `workspace` answers every member, `private` its owner and admins plus per-surface grants.
+    `icon` is the slug the surface draws the agent with."""
 
     id: UUID
     name: str
@@ -549,6 +551,7 @@ class AgentSummary(BaseModel):
     model: str
     internet_access_allowed: bool
     visibility: AgentVisibility
+    icon: AgentIcon
     owner_member_id: UUID | None = None
 
 
@@ -564,7 +567,7 @@ class InstallationSummary(BaseModel):
 class AgentDetail(BaseModel):
     """One agent as a portal settings read states it: the row's configuration beside its prompt
     digest, the chat surfaces whose installations bind to it, and what it still needs from a
-    member."""
+    member. `icon` is the slug the settings page draws the agent with."""
 
     name: str
     main: bool
@@ -573,6 +576,7 @@ class AgentDetail(BaseModel):
     reasoning: ReasoningEffort
     sandbox_size: SandboxSize
     visibility: AgentVisibility
+    icon: AgentIcon
     prompt: str
     prompt_digest: str
     surfaces: tuple[str, ...]
@@ -1881,6 +1885,7 @@ class SurfaceContext:
                         tables.agent.c.model,
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.visibility,
+                        tables.agent.c.icon,
                         tables.agent.c.owner_member_id,
                     )
                     .where(tables.agent.c.workspace_id == self.workspace_id)
@@ -1895,6 +1900,7 @@ class SurfaceContext:
                 model=row.model,
                 internet_access_allowed=row.internet_access_allowed,
                 visibility=row.visibility,
+                icon=row.icon,
                 owner_member_id=row.owner_member_id,
             )
             for row in rows
@@ -1932,6 +1938,7 @@ class SurfaceContext:
                         tables.agent.c.reasoning,
                         tables.agent.c.sandbox_size,
                         tables.agent.c.visibility,
+                        tables.agent.c.icon,
                         tables.agent.c.prompt,
                         tables.agent.c.updated_at,
                     ).where(
@@ -1964,6 +1971,7 @@ class SurfaceContext:
             reasoning=row.reasoning,
             sandbox_size=row.sandbox_size,
             visibility=row.visibility,
+            icon=row.icon,
             prompt=row.prompt,
             prompt_digest=prompt_digest(row.prompt),
             surfaces=tuple(surfaces),

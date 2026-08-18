@@ -167,6 +167,6 @@ test("the blank names the agent, and the bar holds the only New skill act", asyn
   await renderSkills();
   await openInstalled();
 
-  expect(await screen.findByText("No skill has been saved onto assistant yet.")).toBeTruthy();
+  expect(await screen.findByText("No skill has been saved onto Assistant yet.")).toBeTruthy();
   expect(screen.getAllByRole("button", { name: "New skill" }).length).toBe(1);
 });

@@ -16,6 +16,7 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import { RowLines } from "@/kernel/rows";
+import { agentName } from "@/lib/agentName";
 import { postIntent } from "@/lib/api";
 import {
   audienceLabel,
@@ -132,7 +133,7 @@ export function subject(conversation: Conversation, viewer: string | null): stri
  *  that ran it where the read spans every agent, else the surface it came in on. One fact, and it
  *  is the one the pane the member is standing in does not already state. */
 function origin(conversation: Conversation): string {
-  return conversation.agent ? conversation.agent.name : surfaceOrigin(conversation);
+  return conversation.agent ? agentName(conversation.agent.name) : surfaceOrigin(conversation);
 }
 
 /** One conversation names itself the same way on every screen that opens it — where it came from,
@@ -346,7 +347,7 @@ export function Conversations({
       {(payload) => (
         <ConversationList
           rows={payload.conversations}
-          blank={"No conversation with " + agent.name + " yet."}
+          blank={"No conversation with " + agentName(agent.name) + " yet."}
           typed={typed}
           searched={searched}
           onType={setTyped}
@@ -415,7 +416,7 @@ export function ConversationsPane({
             />
             {state.phase === "ready" && !rows.length ? (
               <p className="m-0 text-label text-ink-soft">
-                {"No conversation with " + agent.name + " yet."}
+                {"No conversation with " + agentName(agent.name) + " yet."}
               </p>
             ) : null}
           </>

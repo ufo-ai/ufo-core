@@ -1,19 +1,23 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
+import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
+import { agentName } from "@/lib/agentName";
 
 import {
   AGENT,
   AGENT_ID,
   MEMBER,
   SECOND_ID,
+  SETTINGS,
   agentIndex,
   json,
   opened,
   openAgentRow,
+  openAgentSettings,
   useStreamFake,
   wire,
 } from "./harness";
@@ -53,7 +57,22 @@ const SPEC_SCHEMA = {
 
 const NEW_AGENT = { spec_schema: SPEC_SCHEMA, models: ["claude-opus-4-8", "claude-sonnet-5"] };
 const ADMIN = { ...MEMBER, admin: true };
-const RESEARCH = { id: SECOND_ID, name: "research", model: "claude-opus-4-8", main: false };
+const RESEARCH = {
+  id: SECOND_ID,
+  name: "research",
+  model: "claude-opus-4-8",
+  main: false,
+  icon: "telescope",
+};
+/** An app whose name a member typed as two lowercase words, which is the case the drawn name and
+ *  the stored name differ in most plainly. */
+const REVIEWER = {
+  id: SECOND_ID,
+  name: "code reviewer",
+  model: "claude-opus-4-8",
+  main: false,
+  icon: "code",
+};
 const PROMPT = "Answer with sources.";
 
 function boot(agents: unknown[], member: unknown, newAgent: unknown) {
@@ -110,13 +129,13 @@ test("an admin creates an agent from the bar, and the workspace answers with it"
   });
 
   await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
-  expect(await screen.findByText("Created research.")).toBeTruthy();
+  expect(await screen.findByText("Created Research.")).toBeTruthy();
 
-  await openAgentRow("research");
+  await openAgentRow("Research");
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
   expect(screen.queryByText("No such agent.")).toBeNull();
-  expect(await screen.findByRole("region", { name: "research" })).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
 test("a refused create keeps the panel standing with what the member typed", async () => {
@@ -133,7 +152,7 @@ test("a refused create keeps the panel standing with what the member typed", asy
   expect(await screen.findByText("An agent named 'research' already exists.")).toBeTruthy();
   expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("research");
   expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe(PROMPT);
-  expect(screen.queryByText("Created research.")).toBeNull();
+  expect(screen.queryByText("Created Research.")).toBeNull();
 });
 
 test("a field the kind requires holds the act, and closing the panel leaves without one", async () => {
@@ -195,3 +214,120 @@ test("a member the kind admits no create from is offered no act", async () => {
   expect(screen.queryByRole("button", { name: "New app" })).toBeNull();
 });
 
+test("each row in the index draws its own app's mark, and states nothing by it", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
+  const index = within(await agentIndex());
+
+  const assistant = index.getByRole("button", { name: /^Assistant/ });
+  expect(assistant.querySelector(".tabler-icon-robot")).toBeTruthy();
+  expect(assistant.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  expect(index.getByRole("button", { name: /^Research/ }).querySelector(".tabler-icon-telescope"))
+    .toBeTruthy();
+});
+
+test("a member picks another mark, and the pick rides one intent and comes back", async () => {
+  const posted: unknown[] = [];
+  let icon = "robot";
+  wire({
+    "/settings": () => json({ ...SETTINGS, spec: { ...SETTINGS.spec, icon } }),
+    "/connections": () => json({ connections: [] }),
+    "/intents": (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      posted.push(body);
+      icon = String(body.spec.icon);
+      return json({ applied: true, message: "Applied." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings();
+
+  const marks = await screen.findAllByRole("radio");
+  expect(marks.length).toBe(Object.keys(AGENT_ICONS).length);
+  // The set leads with the workspace's own mark, and the picker draws the set in its own order.
+  expect(Object.keys(AGENT_ICONS)[0]).toBe("ufo");
+  expect(marks[0].getAttribute("value")).toBe("ufo");
+  // Every label is the slug's words capitalized, except the product's own name, which is read as
+  // it is written.
+  expect(marks[0].getAttribute("aria-label")).toBe("ufo");
+  expect(screen.getByRole("radio", { name: "Shopping cart" })).toBeTruthy();
+  expect((screen.getByRole("radio", { name: "Robot" }) as HTMLInputElement).checked).toBe(true);
+  // The schema hides `icon` the way it hides `prompt`, so the generic form draws no control for it.
+  expect(screen.queryByRole("combobox", { name: "icon" })).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "icon" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("radio", { name: "Chart line" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save icon" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toEqual({
+    verb: "apply",
+    kind: "agent",
+    name: "assistant",
+    spec: { icon: "chart-line" },
+  });
+  expect(await screen.findByText("Applied.")).toBeTruthy();
+  await waitFor(() =>
+    expect((screen.getByRole("radio", { name: "Chart line" }) as HTMLInputElement).checked).toBe(
+      true,
+    ),
+  );
+  expect((screen.getByRole("radio", { name: "Robot" }) as HTMLInputElement).checked).toBe(false);
+});
+
+test("a mark outside the set raises rather than leaving a hole where a mark belongs", () => {
+  expect(() => AgentIcon({ name: "unicorn" })).toThrow("no app mark is drawn for unicorn");
+});
+
+test("a name is drawn word by word, and only a word written wholly in lowercase is raised", () => {
+  expect(agentName("assistant")).toBe("Assistant");
+  expect(agentName("code reviewer")).toBe("Code Reviewer");
+  expect(agentName("Code reviewer")).toBe("Code Reviewer");
+  expect(agentName("iOS helper")).toBe("iOS Helper");
+  // A hyphen parts words the way a space does, so an extension's slug is not left half-drawn.
+  expect(agentName("daily-brief")).toBe("Daily-Brief");
+  expect(agentName("release_bot")).toBe("Release_Bot");
+});
+
+test("the index row and the pane header draw the app's name in Title Case", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/agents/" + SECOND_ID;
+  render(<App agents={[AGENT, REVIEWER]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const index = within(await agentIndex());
+  expect(index.getByRole("button", { name: /^Code Reviewer/ })).toBeTruthy();
+  expect(index.queryByText("code reviewer")).toBeNull();
+
+  const pane = await screen.findByRole("region", { name: "Code Reviewer" });
+  expect(within(pane).getByRole("heading", { name: "Code Reviewer" })).toBeTruthy();
+});
+
+/** The drawn name is text; the stored name is the app's identity, and it is what addresses the
+ *  object in the intent. A screen that raised the name it writes would rename the app on its first
+ *  save. */
+test("the settings dialog reads the drawn name and the intent it posts carries the stored one", async () => {
+  const posted: { name: string }[] = [];
+  wire({
+    "/settings": () => json({ ...SETTINGS, agent: { ...SETTINGS.agent, name: REVIEWER.name } }),
+    "/connections": () => json({ connections: [] }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + SECOND_ID;
+  render(<App agents={[AGENT, REVIEWER]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  const dialog = within(await openAgentSettings("Code Reviewer"));
+
+  expect(dialog.getByRole("heading", { name: "Code Reviewer" })).toBeTruthy();
+
+  await userEvent.click(dialog.getByRole("button", { name: "Save prompt" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0].name).toBe("code reviewer");
+});

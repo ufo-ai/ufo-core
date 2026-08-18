@@ -239,7 +239,7 @@ test("an index carries the name and the two facts a prose-less kind leads with",
   expect(headings()).toEqual(["Name", "Agent", "Last Run At", "Next Run At", ""]);
   const said = cells("daily-brief");
   expect(said[0]).toBe("daily-briefActive");
-  expect(said[1]).toBe("assistant");
+  expect(said[1]).toBe("Assistant");
   expect(said[2]).toBe("Jul 31 2026 · done");
   expect(said[3]).toContain("in ");
   expect(screen.queryByText("write the daily brief")).toBeNull();
@@ -533,8 +533,8 @@ test("the index names no agent, so the read fans out over the whole audience", a
   await screen.findByText("daily-brief");
   expect(reads[0]).not.toContain("agent=");
   expect(reads[0]).not.toContain("cursor=");
-  expect(cells("daily-brief")[1]).toBe("assistant");
-  expect(cells("weekly-roll")[1]).toBe("second");
+  expect(cells("daily-brief")[1]).toBe("Assistant");
+  expect(cells("weekly-roll")[1]).toBe("Second");
 });
 
 test("one agent's index names that agent, so it neither reads nor draws the owner", async () => {
@@ -550,7 +550,7 @@ test("one agent's index names that agent, so it neither reads nor draws the owne
   await screen.findByText("daily-brief");
   expect(reads[0]).toContain("agent=" + AGENT_ID);
   expect(headings()).toEqual(["Name", "Created By", "Last Run At", "Next Run At", ""]);
-  expect(screen.queryByRole("link", { name: "assistant" })).toBeNull();
+  expect(screen.queryByRole("link", { name: "Assistant" })).toBeNull();
 });
 
 test("a page with more behind it walks on the cursor one agent's read returned", async () => {
@@ -581,7 +581,7 @@ test("a row names the agent that owns it, and leads nowhere but the record", asy
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [SECOND_TASK_ROW]) });
   mount([AGENT, SECOND]);
 
-  const owner = await screen.findByText("second");
+  const owner = await screen.findByText("Second");
   expect(owner.closest("a")).toBeNull();
   expect(owner.closest("tr")?.getAttribute("tabindex")).toBe("0");
 });
@@ -819,7 +819,7 @@ test("an app's Scheduled tab lists that app's tasks, and a row opens inside the 
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const dialog = await openAgentSettings("assistant", "Scheduled");
+  const dialog = await openAgentSettings("Assistant", "Scheduled");
 
   expect(await within(dialog).findByText("daily-brief")).toBeTruthy();
   expect(listed.every((read) => read.includes("agent=" + AGENT_ID))).toBe(true);
@@ -1045,7 +1045,7 @@ test("the act that writes a task asks which agent runs it, and writes to that la
   mount([AGENT, SECOND]);
 
   await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
-  await pick("Agent", "second");
+  await pick("Agent", "Second");
   await userEvent.type(screen.getByLabelText("Name"), "digest");
   await userEvent.click(screen.getByRole("button", { name: "Create" }));
 

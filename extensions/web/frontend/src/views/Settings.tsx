@@ -6,7 +6,9 @@ import { Field, Hint, Textarea } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { type NoticeState, OutcomeNotice, Panel, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
+import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
 import { postIntent } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { newChatHash, workspaceHash } from "@/lib/route";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
@@ -22,6 +24,11 @@ type AgentSetupNeeded = { connectors: string[]; instructions: string };
  *  agent reads its own outstanding grants at that moment instead of trusting a stale button. */
 const SETUP_ASK = "Load the agent-setup skill and follow its instructions.";
 
+/** The one mark whose label is not derived from its slug. Every other label is the slug's words
+ *  with a capital on the first; the product is named ufo, and its name is written as it is
+ *  written wherever it is read. */
+const UFO_ICON = "ufo";
+
 type SettingsPayload = {
   agent: {
     name: string;
@@ -32,7 +39,7 @@ type SettingsPayload = {
     prompt_digest: string;
     setup: AgentSetupNeeded | null;
   };
-  spec: Record<string, unknown>;
+  spec: { icon: string; [field: string]: unknown };
   spec_schema: { properties?: Record<string, SchemaProperty> };
   models: string[];
   deploy: { sandbox_internet: boolean };
@@ -44,6 +51,7 @@ export function Settings({ agent }: { agent: Agent }) {
   const state = usePanelRead<SettingsPayload>("/agents/" + agent.id + "/settings", reloads);
   const [values, setValues] = useState<Record<string, SpecValue>>({});
   const [prompt, setPrompt] = useState("");
+  const [icon, setIcon] = useState("");
   // What the member has edited and what they have sent, held outside state on purpose: the seeding
   // effect below has to read them as they are when it runs, not as they were when the render that
   // scheduled it closed over them. An effect already scheduled when the member's first keystroke
@@ -52,6 +60,8 @@ export function Settings({ agent }: { agent: Agent }) {
   const settingsSaved = useRef<Record<string, SpecValue> | null>(null);
   const promptDirty = useRef(false);
   const promptSaved = useRef<string | null>(null);
+  const iconDirty = useRef(false);
+  const iconSaved = useRef<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
 
@@ -83,6 +93,14 @@ export function Settings({ agent }: { agent: Agent }) {
       if (promptLanded) {
         promptDirty.current = false;
         promptSaved.current = null;
+      }
+    }
+    const iconLanded = iconSaved.current !== null && payload.spec.icon === iconSaved.current;
+    if (!iconDirty.current || iconLanded) {
+      setIcon(payload.spec.icon);
+      if (iconLanded) {
+        iconDirty.current = false;
+        iconSaved.current = null;
       }
     }
   }, [payload]);
@@ -124,6 +142,24 @@ export function Settings({ agent }: { agent: Agent }) {
           setNotice(outcomeNotice(outcome));
           if (outcome.applied) {
             promptSaved.current = prompt;
+            setReloads((count) => count + 1);
+          }
+        }
+
+        async function saveIcon(event: FormEvent) {
+          event.preventDefault();
+          if (busy) return;
+          setBusy(true);
+          const outcome = await postIntent(agent.id, {
+            verb: "apply",
+            kind: "agent",
+            name: ready.agent.name,
+            spec: { icon },
+          });
+          setBusy(false);
+          setNotice(outcomeNotice(outcome));
+          if (outcome.applied) {
+            iconSaved.current = icon;
             setReloads((count) => count + 1);
           }
         }
@@ -197,6 +233,60 @@ export function Settings({ agent }: { agent: Agent }) {
                   },
                 ]}
               />
+            </Group>
+
+            <Group title="Icon">
+              {/* The set is closed and every mark in it is drawn, so the member picks by eye from
+                  all of them at once rather than opening a list of names. A mark carries no name
+                  the member reads; what a screen reader is given is the mark's own word. */}
+              <form onSubmit={saveIcon}>
+                <fieldset
+                  className={cn(
+                    "m-0 grid min-w-0 gap-xs border-0 p-0",
+                    "grid-cols-[repeat(auto-fill,minmax(var(--size-touch),1fr))]",
+                  )}
+                >
+                  <legend className="sr-only">Icon</legend>
+                  {Object.keys(AGENT_ICONS).map((slug) => {
+                    const word = slug.replaceAll("-", " ");
+                    const label =
+                      slug === UFO_ICON ? UFO_ICON : word[0].toUpperCase() + word.slice(1);
+                    return (
+                      <label
+                        key={slug}
+                        className={cn(
+                          "relative flex h-(--size-touch) cursor-pointer items-center justify-center",
+                          "rounded-control border border-edge text-ink-soft",
+                          "transition-colors duration-100 ease-control hover:bg-fill",
+                          "has-[>input:focus-visible]:border-edge-strong",
+                          "has-[>input:checked]:border-primary has-[>input:checked]:bg-fill",
+                          "has-[>input:checked]:text-ink",
+                        )}
+                      >
+                        <input
+                          type="radio"
+                          name="agent-icon"
+                          value={slug}
+                          checked={icon === slug}
+                          aria-label={label}
+                          onChange={() => {
+                            iconDirty.current = true;
+                            iconSaved.current = null;
+                            setIcon(slug);
+                          }}
+                          className="absolute inset-0 size-full cursor-pointer opacity-0"
+                        />
+                        <AgentIcon name={slug} className="size-(--size-glyph)" />
+                      </label>
+                    );
+                  })}
+                </fieldset>
+                <div className="mt-lg flex justify-end">
+                  <Button type="submit" variant="send" size="bar" busy={busy}>
+                    Save icon
+                  </Button>
+                </div>
+              </form>
             </Group>
 
             <Group title="Settings">

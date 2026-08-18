@@ -3,10 +3,11 @@ import { useState } from "react";
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
 import { COLUMN, Pane } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
 import { Moment } from "@/lib/moments";
-import type { Agent } from "@/lib/types";
+import type { ConversationAgent } from "@/lib/types";
 import { formatSize } from "@/lib/size";
 
 export type ConversationSlotSummary = {
@@ -124,7 +125,7 @@ export function ConversationSlotPane({
   onClose,
   onOpenAgent,
 }: {
-  agent: Agent;
+  agent: ConversationAgent;
   conversationId: string;
   slot: string;
   rootConversationId?: string;
@@ -154,7 +155,7 @@ export function ConversationSlotPane({
             onClick={() => onOpenAgent(agent.id)}
             className="m-0 border-0 bg-transparent p-0 text-title font-strong text-inherit"
           >
-            {agent.name}
+            {agentName(agent.name)}
           </button>
         ) : null}
         <span className="inline-flex items-center gap-xs font-mono text-mono text-ink-soft">

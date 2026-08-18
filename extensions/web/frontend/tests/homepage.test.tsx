@@ -31,7 +31,7 @@ test("a set homepage frames the bound site in the pane", async () => {
       }),
   });
 
-  const frame = await screen.findByTitle("assistant homepage");
+  const frame = await screen.findByTitle("Assistant homepage");
   expect(frame.tagName).toBe("IFRAME");
   expect(frame.getAttribute("src")).toBe(HOMEPAGE_URL);
   expect(frame.hasAttribute("sandbox")).toBe(false);
@@ -41,7 +41,7 @@ test("an absent homepage states the one line and nothing else", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({ "/homepage": () => json({ state: "none" }) });
 
-  expect(await screen.findByText("assistant has not built its homepage.")).toBeTruthy();
+  expect(await screen.findByText("Assistant has not built its homepage.")).toBeTruthy();
   expect(document.querySelector("iframe")).toBeNull();
 });
 
@@ -49,6 +49,6 @@ test("the bare agents hash shows the main agent's Home without navigating", asyn
   location.hash = "#/agents";
   open({});
 
-  expect(await screen.findByText("assistant has not built its homepage.")).toBeTruthy();
+  expect(await screen.findByText("Assistant has not built its homepage.")).toBeTruthy();
   expect(location.hash).toBe("#/agents");
 });

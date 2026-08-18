@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
+import { agentName } from "@/lib/agentName";
 import {
   bumpChat,
   heldRailShown,
@@ -107,7 +108,7 @@ test("agent sort groups rows under their agent and keeps recency within each gro
     PORTAL_ONLY,
     NOW,
   );
-  expect(grouped.map((group) => group.label)).toEqual(["assistant", "support"]);
+  expect(grouped.map((group) => group.label)).toEqual(["Assistant", "Support"]);
   expect(grouped.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
     ["a", "c"],
     ["b"],
@@ -127,7 +128,7 @@ test("everyone else's conversations are one group at the foot, under either sort
   expect(byRecency[2].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
 
   const byAgent = railGroups(rows, "agent", PORTAL_ONLY, NOW);
-  expect(byAgent.map((group) => group.label)).toEqual(["assistant", "Other members"]);
+  expect(byAgent.map((group) => group.label)).toEqual(["Assistant", "Other members"]);
   expect(byAgent[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "b"]);
   expect(byAgent[1].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
 
@@ -485,7 +486,7 @@ test("a row of a non-main agent names its agent in the rail", async () => {
   const railRow = await screen.findByRole("button", { name: /An ops question/ });
   expect(railRow.textContent).toBe("An ops question");
   fireEvent.focus(railRow);
-  expect((await screen.findByRole("tooltip")).textContent).toBe("second");
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Second");
 });
 
 test("a row from another surface draws its glyph and states the surface's own name", async () => {
@@ -613,7 +614,7 @@ test("a private extension conversation opens the live chat", async () => {
   const sweep = {
     ...CHAT_ROW,
     agent_id: "22222222-2222-4222-8222-222222222222",
-    agent_name: "daily-brief",
+    agent_name: "Daily-Brief",
     agent_model: "claude-sonnet-5",
     surface: "extension:sweep",
     surface_label: null,
@@ -632,7 +633,7 @@ test("a private extension conversation opens the live chat", async () => {
   expect(crumb.getByText("Daily brief")).toBeTruthy();
   // The agent holds the conversation but is not one this member can open, so it is named and not
   // linked.
-  expect(crumb.getByText("daily-brief")).toBeTruthy();
+  expect(crumb.getByText("Daily-Brief")).toBeTruthy();
   expect(crumb.queryByRole("button", { name: "Back to daily-brief" })).toBeNull();
   expect(screen.queryByText("claude-sonnet-5")).toBeNull();
   expect(screen.getByLabelText("Message the agent")).toBeTruthy();
@@ -743,7 +744,7 @@ test("a Slack conversation is headed like a web thread, marked with its way out 
   const header = within(screen.getByRole("main"));
   const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Warehouse restock plan")).toBeTruthy();
-  expect(crumb.getByText(AGENT.name)).toBeTruthy();
+  expect(crumb.getByText(agentName(AGENT.name))).toBeTruthy();
   expect(crumb.queryByText(AGENT.model)).toBeNull();
   expect(header.queryByRole("heading", { name: "Warehouse restock plan" })).toBeNull();
   expect(header.queryByRole("button", { name: "All conversations" })).toBeNull();
@@ -887,7 +888,7 @@ test("the new-conversation control targets the main agent, and offers no other",
   // A conversation that does not exist yet is headed by nothing; the composer's own picker names
   // the agent that would hold it.
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
-  expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("assistant");
+  expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("Assistant");
 });
 
 test("the agents index opens the agent's page, and chat starts the conversation", async () => {
@@ -898,7 +899,7 @@ test("the agents index opens the agent's page, and chat starts the conversation"
   expect(screen.queryByRole("button", { name: "New conversation" })).toBeNull();
 
   location.hash = "#/agents";
-  await openAgentRow("assistant");
+  await openAgentRow("Assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 
   await userEvent.click(screen.getByRole("button", { name: "Chat" }));
@@ -942,10 +943,10 @@ test("the chat header names the agent holding the conversation and what it is ca
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
   const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Pick one thread")).toBeTruthy();
-  expect(crumb.getByText("assistant")).toBeTruthy();
+  expect(crumb.getByText("Assistant")).toBeTruthy();
   expect(crumb.queryByText(AGENT.model)).toBeNull();
 
-  await userEvent.click(crumb.getByRole("button", { name: "Back to assistant" }));
+  await userEvent.click(crumb.getByRole("button", { name: "Back to Assistant" }));
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 });
 
@@ -1041,8 +1042,8 @@ test("the top bar marks the category the member is in and leaves the others off"
   await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   expect(marked()).toEqual(["Apps"]);
   const index = within(await screen.findByRole("navigation", { name: "Agents" }));
-  expect(index.getByText("assistant")).toBeTruthy();
-  expect(index.getByText("second")).toBeTruthy();
+  expect(index.getByText("Assistant")).toBeTruthy();
+  expect(index.getByText("Second")).toBeTruthy();
 });
 
 test("a failed rail read states it and retries on demand", async () => {

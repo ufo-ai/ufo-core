@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.db import workspace_tx
 from ufo.ext.manifest import AgentProvision, Manifest
 from ufo.schema import tables
+from ufo.schema.records import auto_agent_icon
 from ufo.workspace import ws
 
 CREATED = "created"
@@ -148,6 +149,17 @@ class AgentProvisioning:
         reach here; the unique provision identity settles which one writes. An `IntegrityError`
         here would leave the turn path, and fail a member's turn for a write that was not theirs."""
         spec = provision.spec
+        taken = (
+            (
+                await connection.execute(
+                    sa.select(tables.agent.c.icon).where(
+                        tables.agent.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
         insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
         await connection.execute(
             insert(tables.agent)
@@ -155,6 +167,7 @@ class AgentProvisioning:
                 id=uuid4(),
                 workspace_id=workspace_id,
                 name=name,
+                icon=auto_agent_icon(name, taken),
                 prompt=spec.prompt,
                 model=spec.model,
                 reasoning=spec.reasoning,

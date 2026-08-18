@@ -167,7 +167,7 @@ test("an agent matches from the payload the shell holds, under its own heading",
   await type("second");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: "second opus" })).toBeTruthy();
+  expect(await found.findByRole("option", { name: "Second opus" })).toBeTruthy();
   expect(headings().slice(0, 2)).toEqual(["Actions", "Apps"]);
   expect(calls.some((url) => url.includes("/api/agents?q="))).toBe(false);
 });

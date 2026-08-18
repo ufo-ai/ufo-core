@@ -6,6 +6,7 @@ import sqlalchemy as sa
 from sqlalchemy.engine.default import DefaultExecutionContext
 
 from ufo.audience import conversation_audience
+from ufo.schema.records import DEFAULT_AGENT_ICON
 
 
 def _conversation_audience(context: DefaultExecutionContext) -> str:
@@ -79,6 +80,7 @@ agent = sa.Table(
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("name", sa.Text, nullable=False),
+    sa.Column("icon", sa.Text, nullable=False, server_default=sa.text(f"'{DEFAULT_AGENT_ICON}'")),
     sa.Column("prompt", sa.Text, nullable=False),
     sa.Column("model", sa.Text, nullable=False),
     sa.Column("reasoning", sa.Text, nullable=False, server_default=sa.text("'auto'")),

@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { IconSettings } from "@tabler/icons-react";
 
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
@@ -9,6 +9,8 @@ import { BesideHost, useBeside } from "@/kernel/beside";
 import { BANDS } from "@/kernel/pane";
 import { outcomeNotice, type NoticeState } from "@/kernel/panel";
 import { TabPanel, TabRow } from "@/kernel/tabs";
+import { AgentIcon } from "@/lib/agentIcon";
+import { agentName } from "@/lib/agentName";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
@@ -95,7 +97,7 @@ export function Agents({
     const outcome = await postIntent(lane, { ...envelope, create_only: true });
     if (outcome.applied) {
       onAgents();
-      setToast({ title: "Created " + envelope.name + "." });
+      setToast({ title: "Created " + agentName(envelope.name) + "." });
     }
     return outcomeNotice(outcome);
   }
@@ -134,14 +136,12 @@ export function Agents({
           {agents.map((agent) => {
             const open = agent.id === shown?.id;
             return (
-              /** The gear stands on the open row rather than over the list: it acts on that one
-               *  app, and a control that named none while the list named several would be read as
-               *  reaching all of them. It is a sibling of the row, never inside it — the row is
-               *  itself the control that opens the app. */
+              /** The whole row is the one control: it opens the app, and nothing else stands on
+               *  it. What acts on the open app is worn by that app's own pane, beside its name. */
               <li
                 key={agent.id}
                 className={cn(
-                  "flex items-center gap-xs rounded-control pr-xs hover:bg-fill",
+                  "flex items-center rounded-control hover:bg-fill",
                   open && "bg-fill",
                 )}
               >
@@ -150,31 +150,25 @@ export function Agents({
                   aria-current={open}
                   onClick={() => onOpen(agent.id)}
                   className={cn(
-                    "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent",
+                    "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent",
                     "px-sm py-xs text-left text-inherit",
                   )}
                 >
-                  <span className="flex w-full items-baseline gap-sm">
-                    <span className="min-w-0 truncate text-label">{agent.name}</span>
-                    {agent.main ? <span className="text-small text-ink-soft">{MAIN}</span> : null}
-                  </span>
-                  <span className="w-full truncate font-mono text-small text-ink-soft">
-                    {agent.model}
+                  <Avatar>
+                    <AvatarFallback>
+                      <AgentIcon name={agent.icon} className="size-(--size-glyph)" />
+                    </AvatarFallback>
+                  </Avatar>
+                  <span className="flex min-w-0 flex-1 flex-col gap-2xs">
+                    <span className="flex w-full items-baseline gap-sm">
+                      <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
+                      {agent.main ? <span className="text-small text-ink-soft">{MAIN}</span> : null}
+                    </span>
+                    <span className="w-full truncate font-mono text-small text-ink-soft">
+                      {agent.model}
+                    </span>
                   </span>
                 </button>
-                {open ? (
-                  <Button
-                    size="icon"
-                    aria-label={"Settings for " + agent.name}
-                    className="shrink-0 rounded-full"
-                    onClick={() => {
-                      setSettingsTab(SETTINGS_TABS[0]);
-                      setSettling(true);
-                    }}
-                  >
-                    <IconSettings className="size-icon" aria-hidden />
-                  </Button>
-                ) : null}
               </li>
             );
           })}
@@ -187,6 +181,10 @@ export function Agents({
           tabs={AGENT_TABS}
           selected={selected !== null}
           onTab={onTab}
+          onSettings={() => {
+            setSettingsTab(SETTINGS_TABS[0]);
+            setSettling(true);
+          }}
           place={place}
           onPlace={onPlace}
         />
@@ -202,7 +200,7 @@ export function Agents({
                 pane's column lies under the dialog's scrim, where nothing can reach it. */}
             <BesideHost over>
               <DialogHeader className="flex-row items-center gap-2xl">
-                <DialogTitle className="min-w-0 flex-1 truncate">{shown.name}</DialogTitle>
+                <DialogTitle className="min-w-0 flex-1 truncate">{agentName(shown.name)}</DialogTitle>
                 <TabRow
                   group="agent-settings"
                   tabs={SETTINGS_TABS}

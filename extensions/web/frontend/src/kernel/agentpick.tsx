@@ -6,7 +6,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import type { Placement } from "@/kernel/pager";
+import { AgentIcon } from "@/lib/agentIcon";
+import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import type { Agent } from "@/lib/types";
 
@@ -22,24 +25,31 @@ export function chosenAgent(agents: Agent[], place: Placement): Agent | undefine
  *  agent is offered nothing to pick, the way the sidebar offers no agent list for a new
  *  conversation it can only start one way. */
 export function AgentPicker({
-  agent,
+  agentId,
   agents,
   onPick,
 }: {
-  agent: Agent;
+  agentId: string;
   agents: Agent[];
   onPick: (agentId: string) => void;
 }) {
   if (agents.length < 2) return null;
   return (
-    <Select value={agent.id} onValueChange={onPick}>
+    <Select value={agentId} onValueChange={onPick}>
       <SelectTrigger aria-label="Agent" className={cn(BAR_CONTROL, "w-(--container-control-row)")}>
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
         {agents.map((entry) => (
           <SelectItem key={entry.id} value={entry.id}>
-            {entry.name}
+            <span className="flex min-w-0 items-center gap-xs">
+              <Avatar>
+                <AvatarFallback>
+                  <AgentIcon name={entry.icon} className="size-(--size-glyph)" />
+                </AvatarFallback>
+              </Avatar>
+              <span className="min-w-0 truncate">{agentName(entry.name)}</span>
+            </span>
           </SelectItem>
         ))}
       </SelectContent>

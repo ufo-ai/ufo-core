@@ -208,7 +208,7 @@ test("settings polling preserves dirty edits", async () => {
   try {
     render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
     // The gear, not `openAgentSettings`: this test drives fake timers, which userEvent waits on.
-    fireEvent.click(screen.getByRole("button", { name: "Settings for assistant" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings for Assistant" }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
       await Promise.resolve();
@@ -293,7 +293,7 @@ test("a non-admin reads the same index rows", async () => {
 
   const index = within(await screen.findByRole("navigation", { name: "Agents" }));
   expect(index.getByText("Main")).toBeTruthy();
-  expect(index.getByText("second")).toBeTruthy();
+  expect(index.getByText("Second")).toBeTruthy();
   expect(screen.queryByText("Every member")).toBeNull();
   expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });
@@ -353,7 +353,7 @@ test("the scheduled index leads with both runs, and its detail pauses through th
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
   expect(said[0]).toBe("digestActive");
   // The workspace feed crosses agents, so the row names the one that holds the task.
-  expect(said[1]).toBe("assistant");
+  expect(said[1]).toBe("Assistant");
   expect(said[2]).toBe("Jul 31 2026 · done");
   expect(said[3]).toContain("in ");
   expect(screen.queryByText("summarize")).toBeNull();
@@ -438,7 +438,7 @@ test("a private grant is shared with the agent from the settings connectors sect
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
   expect(await screen.findByText("Only you")).toBeTruthy();
   await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
@@ -478,7 +478,7 @@ test("the agent's own section lists what is shared with it and not what is held 
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.queryByText("notion")).toBeTruthy();
@@ -917,6 +917,7 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
           ],
           by_agent: [
             { id: AGENT_ID, label: "assistant", tokens: 7_200, priced_micro_usd: 9_000_000 },
+            { id: null, label: "Workspace jobs", tokens: 0, priced_micro_usd: 0 },
           ],
           by_origin: [
             { label: "#eng", tokens: 6_000, priced_micro_usd: 7_500_000 },
@@ -941,7 +942,10 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   expect(screen.getByText("member@example.com")).toBeTruthy();
   expect(screen.getByText("Origins")).toBeTruthy();
   expect(screen.getByText("#eng")).toBeTruthy();
-  expect(screen.getByText("Workspace jobs")).toBeTruthy();
+  // An agent's line is headed the way every screen heads that agent; the line the rollup gives no
+  // agent id is the report's own word for work no agent ran, and stands as the report wrote it.
+  expect(screen.getByText("Assistant")).toBeTruthy();
+  expect(screen.getAllByText("Workspace jobs").length).toBe(2);
   expect(screen.getByRole("img", { name: "7.2K tokens across 1 daily buckets" })).toBeTruthy();
   expect(usageWire.calls.some((url) => url.includes("range=30d"))).toBe(true);
 
@@ -994,7 +998,7 @@ test("the top bar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/agents");
   expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-current")).toBe("true");
 
-  await openAgentRow("second");
+  await openAgentRow("Second");
   expect(location.hash).toBe("#/agents/" + SECOND.id);
   expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-current")).toBe("true");
 
@@ -1039,7 +1043,7 @@ test("the agent tab strip opens the tab named in the hash, and Home takes the ba
   });
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("No conversation with assistant yet.")).toBeTruthy();
+  expect(await screen.findByText("No conversation with Assistant yet.")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Conversations" }).getAttribute("aria-selected")).toBe(
     "true",
   );
@@ -1049,7 +1053,7 @@ test("the agent tab strip opens the tab named in the hash, and Home takes the ba
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
   expect(screen.getByRole("tab", { name: "Home" }).getAttribute("aria-selected")).toBe("true");
-  expect(await screen.findByText("assistant has not built its homepage.")).toBeTruthy();
+  expect(await screen.findByText("Assistant has not built its homepage.")).toBeTruthy();
 });
 
 test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
@@ -1126,7 +1130,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),
@@ -1194,7 +1198,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),

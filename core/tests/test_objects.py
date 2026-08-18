@@ -111,7 +111,7 @@ from ufo.sandbox.session import (
     SandboxSpec,
 )
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import MAIN_AGENT_ICON, Agent, Turn
 from ufo.sdk.objects import AgentTargetVerb
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
@@ -914,6 +914,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
             "reasoning": "high",
             "sandbox_size": "small",
             "visibility": "workspace",
+            "icon": "robot",
             "prompt": "be brief",
             "input_schema": None,
             "output_schema": None,
@@ -1146,6 +1147,90 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
                 )
             ).one()
         assert repaired == ("workspace", "drifted")
+
+
+async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_named(
+    db: None,
+) -> None:
+    """A created agent is stamped from its name, and the second agent of a workspace cannot land
+    on the first's icon nor on the main agent's mark; an update that omits `icon` keeps what the
+    row holds, one that names an icon writes it — the mark included — and a slug outside the set is
+    refused at the write."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        member = await _member(workspace_id, ADMIN_CREATED_AT)
+        main = await _agent_row(workspace_id, name="ufo", is_main=True)
+        ctx = _tool_context(workspace_id, speaker_member_id=member, agent_id=main)
+        apply_tool = tools["object_apply"]
+
+        def manifest(name: str, spec: dict) -> str:
+            return yaml.safe_dump({"kind": AGENT_KIND, "name": name, "spec": spec})
+
+        base = {"model": "m2", "internet_access_allowed": True, "reasoning": "low"}
+        for name in ("support-desk", "support-team"):
+            created = json.loads(
+                await _text(
+                    tools, "object_apply", ctx, manifest=manifest(name, {**base, "prompt": "p"})
+                )
+            )
+            assert created["result"] == "created"
+        async with workspace_tx() as connection:
+            icons = dict(
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.name, tables.agent.c.icon).where(
+                            tables.agent.c.workspace_id == workspace_id
+                        )
+                    )
+                ).all()
+            )
+        assert icons["support-desk"] == "lifebuoy"
+        assert icons["support-team"] not in ("lifebuoy", "robot", MAIN_AGENT_ICON)
+
+        await apply_tool.handler(
+            ctx,
+            apply_tool.input_model.model_validate(
+                {
+                    "user_description": OBJECT_NARRATION,
+                    "manifest": manifest("support-desk", base),
+                }
+            ),
+        )
+        async with workspace_tx() as connection:
+            kept = await connection.scalar(
+                sa.select(tables.agent.c.icon).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.name == "support-desk",
+                )
+            )
+        assert kept == "lifebuoy"
+
+        for slug in ("rocket", MAIN_AGENT_ICON):
+            applied = json.loads(
+                await _text(
+                    tools,
+                    "object_apply",
+                    ctx,
+                    manifest=manifest("support-desk", {**base, "icon": slug}),
+                )
+            )
+            assert applied["result"] == "updated"
+            fetched = yaml.safe_load(
+                await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="support-desk")
+            )
+            assert fetched["spec"]["icon"] == slug
+
+        with pytest.raises(SpecValidationFailed, match="icon"):
+            await apply_tool.handler(
+                ctx,
+                apply_tool.input_model.model_validate(
+                    {
+                        "user_description": OBJECT_NARRATION,
+                        "manifest": manifest("support-desk", {**base, "icon": "unicorn"}),
+                    }
+                ),
+            )
 
 
 async def test_a_child_agent_is_scoped_to_the_main_agent(db: None) -> None:

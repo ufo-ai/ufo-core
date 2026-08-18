@@ -50,7 +50,7 @@ test("a connect intent opens the stream for the turn it reports and shows the co
     "/intents": () => json({ applied: true, message: "Requested.", turn_id: TURN_ID }),
   });
   render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(

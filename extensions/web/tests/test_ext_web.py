@@ -823,6 +823,7 @@ async def _seed_workspace() -> tuple[UUID, UUID]:
                 prompt="be brief",
                 model="claude-opus-4-8",
                 reasoning="high",
+                icon="compass",
                 is_main=True,
                 visibility="workspace",
                 created_at=sa.func.now(),
@@ -2153,7 +2154,13 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     assert {key: value for key, value in body.items() if key != "new_agent"} == {
         "member": {"email": "outsider@example.com", "admin": False},
         "agents": [
-            {"id": str(agent_id), "name": "assistant", "main": True, "model": "claude-opus-4-8"}
+            {
+                "id": str(agent_id),
+                "name": "assistant",
+                "main": True,
+                "model": "claude-opus-4-8",
+                "icon": "compass",
+            }
         ],
     }
     empty_rail = await client.get("/surface/web/api/chats", headers=cookie)
@@ -2210,6 +2217,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
                 name="ops",
                 prompt="be operational",
                 model="claude-sonnet-5",
+                icon="telescope",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2231,6 +2239,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "name": "assistant",
             "main": True,
             "model": "claude-opus-4-8",
+            "icon": "compass",
             "web_audience": [],
         },
         {
@@ -2238,6 +2247,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "name": "ops",
             "main": False,
             "model": "claude-sonnet-5",
+            "icon": "telescope",
             "web_audience": ["member@example.com"],
         },
     ]
@@ -2301,6 +2311,49 @@ async def test_boot_read_carries_the_create_form_for_every_member(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert member_view.json()["new_agent"] == form
+
+
+async def test_every_agent_read_carries_its_icon_and_no_form_asks_for_one(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The portal draws an agent by its icon wherever it names one, so the icon rides all three
+    reads a screen draws an agent from: the boot index, the administration table, and the settings
+    spec that states the current value the picker opens on. Neither form offers the field — the
+    kind assigns an icon at birth, so the create form has nothing to ask, and the settings page
+    picks from a grid of drawn marks that a schema enum cannot describe."""
+    client, workspace_id, _agent_id = web
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-sonnet-5",
+                icon="telescope",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    boot = (await client.get("/surface/web/api/agents", headers=headers)).json()
+    assert {agent["name"]: agent["icon"] for agent in boot["agents"]} == {
+        "assistant": "compass",
+        "ops": "telescope",
+    }
+    assert "icon" not in boot["new_agent"]["spec_schema"]["properties"]
+    administration = (await client.get("/surface/web/api/admin", headers=headers)).json()
+    assert {agent["name"]: agent["icon"] for agent in administration["agents"]} == {
+        "assistant": "compass",
+        "ops": "telescope",
+    }
+    settings = (
+        await client.get(f"/surface/web/agents/{second_agent}/settings", headers=headers)
+    ).json()
+    assert settings["spec"]["icon"] == "telescope"
+    assert "icon" not in settings["spec_schema"]["properties"]
 
 
 async def _seed_connection(
@@ -8128,6 +8181,7 @@ async def test_settings_projects_spec_schema_ceiling_and_admin_audience(
         "internet_access_allowed": True,
         "reasoning": "high",
         "visibility": "workspace",
+        "icon": "compass",
         "input_schema": None,
         "output_schema": None,
     }
@@ -8221,6 +8275,74 @@ async def test_admin_updates_agent_prompt_through_the_intent_lane(
     assert proposal_count == 0
     assert turn.admission_source == "intent"
     assert json.loads(turn.inbound)["tool"] == "object_apply"
+
+
+async def test_a_member_repicks_the_agent_icon_through_the_intent_lane(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The icon picker submits the icon alone. The fields `AgentSpec` requires are merged in from
+    the agent, so the pick applies and every setting the member was not shown survives it."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(sandbox_size="large", icon="compass", prompt="be useful")
+            .where(tables.agent.c.id == agent_id)
+        )
+    picked = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "agent",
+            "name": "assistant",
+            "spec": {"icon": "chart-line"},
+        },
+        headers=headers,
+    )
+    assert picked.status_code == 200
+    assert picked.json()["applied"] is True
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.agent.c.icon,
+                    tables.agent.c.prompt,
+                    tables.agent.c.model,
+                    tables.agent.c.internet_access_allowed,
+                    tables.agent.c.reasoning,
+                    tables.agent.c.sandbox_size,
+                ).where(tables.agent.c.id == agent_id)
+            )
+        ).one()
+    assert tuple(row) == ("chart-line", "be useful", "claude-opus-4-8", True, "high", "large")
+
+
+async def test_an_icon_outside_the_closed_set_is_refused(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "agent",
+            "name": "assistant",
+            "spec": {"icon": "unicorn"},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False
+    async with workspace_tx() as connection:
+        icon = (
+            await connection.execute(
+                sa.select(tables.agent.c.icon).where(tables.agent.c.id == agent_id)
+            )
+        ).scalar_one()
+    assert icon != "unicorn"
 
 
 async def test_concurrent_intents_serialize_on_the_members_intent_conversation(

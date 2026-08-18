@@ -7,6 +7,7 @@ import {
   type TablerIcon,
 } from "@tabler/icons-react";
 
+import { agentName } from "@/lib/agentName";
 import { getJson } from "@/lib/api";
 import { chatHash, sectionHash, workspaceHash, agentHash } from "@/lib/route";
 import { SITE_FAMILY } from "@/views/Artifacts";
@@ -120,7 +121,7 @@ export async function searchEverywhere(
           key: entry.id,
           hash: chatHash(entry.id),
           primary: entry.description || entry.id,
-          fact: entry.agent?.name ?? "",
+          fact: entry.agent ? agentName(entry.agent.name) : "",
         })),
       signal,
     ),
@@ -204,7 +205,7 @@ export async function searchEverywhere(
       hits: matched.map((agent) => ({
         key: agent.id,
         hash: agentHash(agent.id, "home"),
-        primary: agent.name,
+        primary: agentName(agent.name),
         fact: agent.model,
       })),
       failed: null,

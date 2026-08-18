@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Chat, type ChatProps } from "@/views/Chat";
 import { Pane, PaneHeader } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
+import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import {
   ConversationSlotPane,
@@ -51,10 +52,10 @@ export function ChatPane({
   const header = conversationId ? (
     <PaneHeader
       parent={{
-        label: agent.name,
+        label: agentName(agent.name),
         onGo: onOpenAgent && !conversationOnly ? () => onOpenAgent(agent.id) : undefined,
       }}
-      current={title ?? agent.name}
+      current={title ?? agentName(agent.name)}
       actions={
         !conversationOnly && slots.phase === "ready" && slots.payload.slots.length ? (
           <div className="flex items-center gap-sm" aria-label="Conversation slots">

@@ -52,8 +52,13 @@ import {
 } from "@/lib/turnStream";
 import type { Agent, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
 
+/** Who a chat is addressed to. A conversation another surface holds names its agent on the rail
+ *  row alone, without the boot read listing it, so a chat asks for the facts such a row carries
+ *  and never for the whole record. */
+export type ChatAgent = { id: string; name: string; model: string };
+
 export type ChatProps = {
-  agent: Agent;
+  agent: ChatAgent;
   member: Member;
   conversationId: string | null;
   onCreated?: (conversationId: string, title: string) => void;
@@ -427,7 +432,7 @@ function Composer({
   draftKey: string;
   input: RefObject<HTMLTextAreaElement | null>;
   starting: boolean;
-  agent: Agent;
+  agent: ChatAgent;
   agents?: Agent[];
   onPickAgent?: (agentId: string) => void;
 }) {
@@ -536,7 +541,7 @@ function Composer({
           <PromptInputAttach />
           <div className="flex items-center gap-sm">
             {starting && agents && onPickAgent ? (
-              <AgentPicker agent={agent} agents={agents} onPick={onPickAgent} />
+              <AgentPicker agentId={agent.id} agents={agents} onPick={onPickAgent} />
             ) : null}
             <PromptInputSubmit
               stops={Boolean(running && state.busy && !text.trim())}

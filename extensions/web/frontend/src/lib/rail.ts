@@ -1,3 +1,4 @@
+import { agentName } from "@/lib/agentName";
 import { SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
 import type { OwnedConversation } from "@/lib/types";
 
@@ -49,12 +50,18 @@ function groupChats(rows: ChatRow[], now: Date): RailGroup[] {
 
 export type RailSort = "recency" | "agent";
 
+/** The agent sort's groups. Rows bucket under the name as stored — that name is the agent's
+ *  identity, and two agents whose names differ only in case are two agents — and the heading is
+ *  that name drawn the way every other surface draws it. */
 function groupChatsByAgent(rows: ChatRow[]): RailGroup[] {
   const buckets = new Map<string, ChatRow[]>();
   for (const row of rows) {
     buckets.set(row.agent_name, (buckets.get(row.agent_name) ?? []).concat(row));
   }
-  return [...buckets.entries()].map(([label, grouped]) => ({ label, rows: grouped }));
+  return [...buckets.entries()].map(([name, grouped]) => ({
+    label: agentName(name),
+    rows: grouped,
+  }));
 }
 
 export type RailShown = { terminal: boolean; slack: boolean };

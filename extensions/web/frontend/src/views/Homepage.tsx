@@ -1,4 +1,5 @@
 import { PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { agentName } from "@/lib/agentName";
 import type { Agent } from "@/lib/types";
 
 type HomepageRead = { state: "set"; url: string } | { state: "none" };
@@ -11,13 +12,13 @@ export function Homepage({ agent }: { agent: Agent }) {
   if (read.phase === "loading") return null;
   if (read.phase === "failed") return <PanelEmpty>{read.message}</PanelEmpty>;
   if (read.payload.state !== "set") {
-    return <PanelEmpty>{agent.name} has not built its homepage.</PanelEmpty>;
+    return <PanelEmpty>{agentName(agent.name)} has not built its homepage.</PanelEmpty>;
   }
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <iframe
         src={read.payload.url}
-        title={agent.name + " homepage"}
+        title={agentName(agent.name) + " homepage"}
         className="size-full border-0"
       />
     </div>

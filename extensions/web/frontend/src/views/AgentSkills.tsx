@@ -33,6 +33,7 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
+import { agentName } from "@/lib/agentName";
 import { getJson, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type { Agent } from "@/lib/types";
@@ -398,7 +399,7 @@ export function AgentSkills({ agent }: { agent: Agent }) {
             {(payload) => {
               if (!payload.skills.length)
                 return (
-                  <PanelBlank body={"No skill has been saved onto " + agent.name + " yet."} />
+                  <PanelBlank body={"No skill has been saved onto " + agentName(agent.name) + " yet."} />
                 );
               const matched = payload.skills.filter((skill) =>
                 (skill.name + " " + skill.description).toLowerCase().includes(query.toLowerCase()),

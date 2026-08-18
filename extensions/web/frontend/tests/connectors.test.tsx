@@ -106,7 +106,7 @@ test("the agent's own edges fit that same desktop", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   const across = (await screen.findByText("github")).closest("table")!.style.minWidth;
   expect(pageFits(across)).toBe(true);
@@ -119,7 +119,7 @@ test("the agent's settings read its attached connections", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   const { calls } = connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/connections"))).toBe(true);
@@ -144,7 +144,7 @@ test("the pool's record states what the row gave up, and attaches to the agent n
   expect(fact("Owner")).toBe("You");
   expect(fact("Connected")).toBe("Jul 1 2026");
 
-  await pick("Agent", "second");
+  await pick("Agent", "Second");
   await userEvent.click(screen.getByRole("button", { name: "Attach to agent" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
@@ -194,7 +194,7 @@ test("a grant change is admitted into the lane of the agent whose settings hold 
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   await pressRow("github");
 
@@ -220,7 +220,7 @@ test("the agent's record revokes the grant it stands on", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
@@ -245,7 +245,7 @@ test("a revoked connection stays shut when the grant comes back on a later read"
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   await pressRow("github");
   expect(await screen.findByRole("complementary", { name: "acct" })).toBeTruthy();
@@ -275,7 +275,7 @@ test("the attach picker names the provider and the account, not the broker id", 
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   await userEvent.click(await screen.findByRole("combobox", { name: "Connection" }));
 
@@ -327,7 +327,7 @@ test("the bar is drawn while the first read is still in flight", async () => {
     }),
   );
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   expect(await screen.findByRole("combobox", { name: "Connection" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Add connector" })).toBeTruthy();
@@ -342,7 +342,7 @@ test("the agent's own section states what is shared with that agent", async () =
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await openAgentSettings("assistant", "Connectors");
+  await openAgentSettings("Assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
@@ -355,7 +355,7 @@ test("the agent's connectors stand on their own tab of its settings dialog", asy
   connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const dialog = within(await openAgentSettings("assistant", "Connectors"));
+  const dialog = within(await openAgentSettings("Assistant", "Connectors"));
   expect(dialog.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
     "Settings",
     "Connectors",

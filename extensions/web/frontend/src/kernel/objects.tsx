@@ -27,6 +27,7 @@ import {
 } from "@/kernel/panel";
 import { DataTable, OPEN, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
+import { agentName } from "@/lib/agentName";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Moment, isMoment } from "@/lib/moments";
@@ -425,7 +426,7 @@ function ObjectIndex({
                         ) : null}
                       </span>
                     </Td>
-                    {agentId === null ? <TdFact>{row.agent_name}</TdFact> : null}
+                    {agentId === null ? <TdFact>{agentName(row.agent_name)}</TdFact> : null}
                     {owned ? <TdFact>{creator(row[OWNER_FIELD], viewer)}</TdFact> : null}
                     {prose === null ? null : (
                       <Td>
@@ -502,7 +503,7 @@ function NewObject({
               <SelectContent>
                 {agents.map((agent) => (
                   <SelectItem key={agent.id} value={agent.id}>
-                    {agent.name}
+                    {agentName(agent.name)}
                   </SelectItem>
                 ))}
               </SelectContent>

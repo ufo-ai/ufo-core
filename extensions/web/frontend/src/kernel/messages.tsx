@@ -30,6 +30,7 @@ import {
   useMessageScroller,
 } from "@/components/ui/message-scroller";
 import { Reveal } from "@/components/ui/reveal";
+import { agentName } from "@/lib/agentName";
 import { speakerName } from "@/lib/audience";
 import { brailleOf, randomCell } from "@/lib/braille";
 import { cn } from "@/lib/cn";
@@ -579,6 +580,10 @@ function ActivityTree({
   );
 }
 
+/** What a delegated run's profile reads as when the run is another agent rather than a subagent
+ *  profile: the rest of the profile is that agent's name. */
+const AGENT_PROFILE = "agent:";
+
 /** One run's row: its name (the profile when the spawn gave none) linking to the run's own record,
  *  with what it is doing now beside it while it works; opening the row shows the work it has done,
  *  the runs it spawned in turn, and — once it answered — its answer. */
@@ -592,8 +597,8 @@ function RunRow({ run, live }: { run: SubagentRun; live: boolean }) {
         <summary className="flex cursor-pointer list-none items-center gap-sm">
           <span className="shrink-0">
             {run.name ||
-              (run.profile.startsWith("agent:")
-                ? "Agent · " + run.profile.slice("agent:".length)
+              (run.profile.startsWith(AGENT_PROFILE)
+                ? "Agent · " + agentName(run.profile.slice(AGENT_PROFILE.length))
                 : "Subagent · " + run.profile)}
           </span>
           {current ? (

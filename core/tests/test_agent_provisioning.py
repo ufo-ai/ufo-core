@@ -35,7 +35,13 @@ from ufo.object_name import validate_object_name
 from ufo.onboarding import Onboarding
 from ufo.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME, INTENT_ADMISSION, MEMBER_ADMISSION
+from ufo.schema.records import (
+    AUTO_AGENT_ICONS,
+    DEFAULT_AGENT_NAME,
+    INTENT_ADMISSION,
+    MAIN_AGENT_ICON,
+    MEMBER_ADMISSION,
+)
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
@@ -116,6 +122,10 @@ async def test_onboarding_creates_the_shipped_agent(
         False,
     )
     assert created.tools == ["sample_echo", *SETUP_TOOLS]
+    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
+    assert main is not None
+    assert main.icon == MAIN_AGENT_ICON
+    assert created.icon in AUTO_AGENT_ICONS
     assert (created.provisioned_by, created.provisioned_name, created.provisioned_version) == (
         sample.NAME,
         PROVISIONED_AGENT_NAME,

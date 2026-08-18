@@ -47,14 +47,14 @@ beforeEach(() => {
 });
 
 test("every page names where the member is, innermost first, then the product", () => {
-  expect(titled({ kind: "home" })).toBe("New conversation · assistant · ufo");
-  expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New conversation · second · ufo");
+  expect(titled({ kind: "home" })).toBe("New conversation · Assistant · ufo");
+  expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New conversation · Second · ufo");
   expect(titled({ kind: "agents" })).toBe("Apps · ufo");
   expect(titled({ kind: "agent", agentId: AGENT_ID, tab: "home", ...PLACE })).toBe(
-    "Home · assistant · ufo",
+    "Home · Assistant · ufo",
   );
   expect(titled({ kind: "agent", agentId: AGENT_ID, tab: "conversations", ...PLACE })).toBe(
-    "Conversations · assistant · ufo",
+    "Conversations · Assistant · ufo",
   );
   expect(titled({ kind: "workspace", view: "team", ...PLACE })).toBe("Team · Workspace · ufo");
   expect(titled({ kind: "workspace", view: "credentials", ...PLACE })).toBe(
@@ -71,16 +71,16 @@ test("every page names where the member is, innermost first, then the product", 
       conversationId: CONVO_ID,
       slot: "changes",
     }),
-  ).toBe("changes · assistant · ufo");
+  ).toBe("changes · Assistant · ufo");
 });
 
 test("a conversation is named by its own subject, and one still unread by the product alone", () => {
   expect(titled({ kind: "chat", conversationId: CONVO_ID })).toBe(
-    "Pick one thread · assistant · ufo",
+    "Pick one thread · Assistant · ufo",
   );
   expect(titled({ kind: "chat", conversationId: "unknown" })).toBe("ufo");
   expect(titled({ kind: "chat", conversationId: "linked" }, { linked: LINKED })).toBe(
-    "Ship the release · assistant · ufo",
+    "Ship the release · Assistant · ufo",
   );
 });
 
@@ -94,7 +94,7 @@ test("the tab follows the hash the member opens", async () => {
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
-  await waitFor(() => expect(document.title).toBe("Pick one thread · assistant · ufo"));
+  await waitFor(() => expect(document.title).toBe("Pick one thread · Assistant · ufo"));
 
   location.hash = "#/agents";
   await waitFor(() => expect(document.title).toBe("Apps · ufo"));

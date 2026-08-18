@@ -178,7 +178,9 @@ test("the member's menu states who is signed in and offers the theme choice", as
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
+  const trigger = screen.getByRole("button", { name: MEMBER.email });
+  expect(trigger.querySelector("[data-slot=avatar-fallback]")!.textContent).toBe("M");
+  await userEvent.click(trigger);
 
   expect(await screen.findByText(MEMBER.email)).toBeTruthy();
   expect(screen.getByText("Member")).toBeTruthy();
@@ -237,7 +239,7 @@ async function revoke(record: HTMLElement): Promise<void> {
  *  right. Every table administration draws has to fit the page it is drawn on. */
 test("every administration table fits the desktop page it is read on", async () => {
   await administration({ "/api/admin": () => json(ADMIN_TABLES) });
-  await screen.findByText("second");
+  await screen.findByText("Second");
 
   expect(tableFloors()).toEqual([
     "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 1 * var(--size-act))",
@@ -272,12 +274,12 @@ test("an agent's record carries its surfaces and the web access grant, and the r
   );
 
   await openAdministration();
-  await screen.findByText("second");
+  await screen.findByText("Second");
   expect(screen.queryByPlaceholderText("email@work.com")).toBeNull();
   expect(screen.queryByText("Slack, Terminal")).toBeNull();
 
-  await pressRow("second");
-  const record = await screen.findByRole("complementary", { name: "second" });
+  await pressRow("Second");
+  const record = await screen.findByRole("complementary", { name: "Second" });
   expect(within(record).getByText("Surfaces")).toBeTruthy();
   expect(within(record).getByText("Slack, Terminal")).toBeTruthy();
 
@@ -304,8 +306,8 @@ const GRANT_ROUTES = {
 };
 
 async function grantForm(): Promise<HTMLElement> {
-  await pressRow("second");
-  return await screen.findByRole("complementary", { name: "second" });
+  await pressRow("Second");
+  return await screen.findByRole("complementary", { name: "Second" });
 }
 
 /** One field, two acts, one contract. The address is declared by the field, so the field is what
@@ -365,7 +367,7 @@ test("the row and the record spell a web audience the way the one audience map d
     "/api/admin": () =>
       json({ ...ADMIN_TABLES, agents: [SECOND_AGENT, GRANTED_AGENT], members: [], caps: [] }),
   });
-  await screen.findByText("second");
+  await screen.findByText("Second");
 
   expect(screen.getByText(webAudienceLabel(false, []))).toBeTruthy();
   expect(screen.getByText(webAudienceLabel(false, GRANTED_AGENT.web_audience))).toBeTruthy();
@@ -379,9 +381,9 @@ test("the main agent's record states its audience and carries no grant form", as
   await administration({
     "/api/admin": () => json({ ...ADMIN_TABLES, agents: [ADMIN_AGENT] }),
   });
-  await pressRow("assistant");
+  await pressRow("Assistant");
 
-  const record = await screen.findByRole("complementary", { name: "assistant" });
+  const record = await screen.findByRole("complementary", { name: "Assistant" });
   expect(within(record).getByText("Every member")).toBeTruthy();
   expect(within(record).queryByRole("button", { name: "Grant" })).toBeNull();
 });
@@ -438,9 +440,9 @@ test("a refused audience change tones the notice inside the record that raised i
     "/api/admin": () => json({ ...ADMIN_TABLES, members: [] }),
     "/intents": () => json({ applied: false, message: "Only an admin grants access." }),
   });
-  await pressRow("second");
+  await pressRow("Second");
 
-  const record = await screen.findByRole("complementary", { name: "second" });
+  const record = await screen.findByRole("complementary", { name: "Second" });
   await userEvent.type(within(record).getByLabelText("Web Access Address"), "new@work.com");
   await userEvent.click(within(record).getByRole("button", { name: "Grant" }));
 

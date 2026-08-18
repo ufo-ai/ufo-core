@@ -118,6 +118,7 @@
   --color-link: var(--accent-primary);
 
   --color-fill: var(--bkgd-200);
+  --color-fill-strong: var(--bkgd-300);
   --color-scrim: color-mix(in srgb, var(--text-primary) 40%, transparent);
 
   /* Each accent laid over the pane at the one weight the comps tint a status at. */

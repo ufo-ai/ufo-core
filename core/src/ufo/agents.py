@@ -1,11 +1,11 @@
 """The core-registered `agent` object kind: the workspace's agent as a workspace object.
 
 The spec holds the prompt, model, reasoning effort, sandbox size, public-internet policy, portal
-visibility, and the optional I/O contract a spawn of the agent validates against. `object_apply`
-is their one member write path. Any speaking member creates agents and owns the ones they created;
-an owner or a workspace admin edits, and an ownerless row — the main agent, a provisioned agent —
-answers to admins alone. Create never copies grants, credentials, sources, or derived data. Delete
-raises; a mutation by anyone else raises `AdminRequired`."""
+visibility, icon, and the optional I/O contract a spawn of the agent validates against.
+`object_apply` is their one member write path. Any speaking member creates agents and owns the
+ones they created; an owner or a workspace admin edits, and an ownerless row — the main agent, a
+provisioned agent — answers to admins alone. Create never copies grants, credentials, sources, or
+derived data. Delete raises; a mutation by anyone else raises `AdminRequired`."""
 
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -36,9 +36,11 @@ from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_AGENT_VISIBILITY,
     DEFAULT_SANDBOX_SIZE,
+    AgentIcon,
     AgentVisibility,
     ReasoningEffort,
     SandboxSize,
+    auto_agent_icon,
 )
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
@@ -95,6 +97,14 @@ class AgentSpec(BaseModel):
             "(every member) or 'private' (its owner, workspace admins, and members granted web "
             "access in chat — grants open chat, not the homepage). The main agent is always "
             "'workspace'."
+        ),
+    )
+    icon: AgentIcon | None = Field(
+        default=None,
+        description=(
+            "The agent's icon in the member portal, one slug from a closed set. Omit it on an "
+            "update to keep the current icon; a new agent without one takes an icon from its "
+            "name."
         ),
     )
     prompt: str | None = Field(
@@ -193,6 +203,7 @@ class AgentObjects:
             reasoning=row.reasoning,
             sandbox_size=row.sandbox_size,
             visibility=row.visibility,
+            icon=row.icon,
             prompt=row.prompt,
             input_schema=row.input_schema,
             output_schema=row.output_schema,
@@ -253,6 +264,7 @@ class AgentObjects:
         _known_model(ctx, spec.model, spec.reasoning)
         next_prompt = row.prompt if spec.prompt is None else spec.prompt
         prompt_changed = next_prompt != row.prompt
+        next_icon = row.icon if spec.icon is None else spec.icon
         next_sandbox_size = (
             spec.sandbox_size if "sandbox_size" in spec.model_fields_set else row.sandbox_size
         )
@@ -275,6 +287,7 @@ class AgentObjects:
             spec.reasoning,
             next_sandbox_size,
             next_visibility,
+            next_icon,
             next_input_schema,
             next_output_schema,
         ) != (
@@ -283,6 +296,7 @@ class AgentObjects:
             row.reasoning,
             row.sandbox_size,
             row.visibility,
+            row.icon,
             row.input_schema,
             row.output_schema,
         )
@@ -300,6 +314,7 @@ class AgentObjects:
                     reasoning=spec.reasoning,
                     sandbox_size=next_sandbox_size,
                     visibility=next_visibility,
+                    icon=next_icon,
                     input_schema=next_input_schema,
                     output_schema=next_output_schema,
                     updated_at=sa.func.now(),
@@ -321,6 +336,17 @@ class AgentObjects:
             raise ValueError(AGENT_PROMPT_REQUIRED)
         _known_model(ctx, spec.model, spec.reasoning)
         async with workspace_tx() as connection:
+            taken = (
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.icon).where(
+                            tables.agent.c.workspace_id == ws_current().workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
             try:
                 await connection.execute(
                     sa.insert(tables.agent).values(
@@ -334,6 +360,7 @@ class AgentObjects:
                         reasoning=spec.reasoning,
                         sandbox_size=spec.sandbox_size,
                         visibility=spec.visibility,
+                        icon=spec.icon if spec.icon is not None else auto_agent_icon(name, taken),
                         input_schema=spec.input_schema,
                         output_schema=spec.output_schema,
                         owner_member_id=ctx.speaker_member_id,
@@ -367,6 +394,7 @@ class AgentObjects:
                         tables.agent.c.reasoning,
                         tables.agent.c.sandbox_size,
                         tables.agent.c.visibility,
+                        tables.agent.c.icon,
                         tables.agent.c.tools,
                         tables.agent.c.input_schema,
                         tables.agent.c.output_schema,
@@ -395,7 +423,7 @@ AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
         "A workspace agent: its prompt, model, reasoning effort, public-internet policy, portal "
-        "visibility, and the I/O contract a spawn of it validates against — readable by all "
+        "visibility, icon, and the I/O contract a spawn of it validates against — readable by all "
         "members, creatable by any member, updatable by its owner or a workspace admin. It "
         "cannot be deleted through objects."
     ),
@@ -411,7 +439,9 @@ AGENT_OBJECT = ObjectKind(
         "deploy's sandbox backend offers sizes; existing conversations keep the sandbox they "
         "have. Visibility 'workspace' answers every member in the portal, 'private' answers its "
         "owner, workspace admins, and members granted web access in chat; the agent's homepage "
-        "follows it, and the main agent stays 'workspace'. "
+        "follows it, and the main agent stays 'workspace'. The icon the portal shows is one slug "
+        "from a closed set; a new agent takes one from its name, and omitting it on an update "
+        "keeps the current icon. "
         "input_schema and output_schema (raw JSON Schema, top-level type 'object') fix the "
         "contract a spawn of this agent validates against; unset means {task} in and {result} "
         "out. Applying a name no agent holds "

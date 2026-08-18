@@ -31,6 +31,7 @@ INTENT_RESULT_TIMEOUT_SECONDS = 120
 ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
 CONNECT_ONLY_KINDS = frozenset({"connection"})
+AGENT_SPEC_REQUIRED = frozenset({"model", "internet_access_allowed", "reasoning"})
 
 
 class ApplyIntent(BaseModel):
@@ -326,7 +327,12 @@ async def submit_intent(
     intent lands on the member's one durable intent conversation with this agent — never the chat
     conversation, so it cannot fold into a live chat turn — and a model the deploy's registry
     cannot serve refuses before a turn exists, because a stored unknown id would wedge the agent's
-    every later turn at setup."""
+    every later turn at setup.
+
+    A panel that writes one part of an agent — its prompt, its icon — submits that part alone, so
+    the fields `AgentSpec` requires are read from the agent and merged beneath what was submitted.
+    Without it the spec fails validation on fields the member was never shown, and the panel is
+    told no model was named."""
     body = await request.body()
     if len(body) > INTENT_MAX_BYTES:
         return JSONResponse(
@@ -351,14 +357,12 @@ async def submit_intent(
         isinstance(submitted, ApplyIntent)
         and submitted.verb == "apply"
         and submitted.kind == "agent"
-        and submitted_fields == {"prompt"}
+        and submitted.spec is not None
+        and not AGENT_SPEC_REQUIRED <= submitted_fields
     ):
         detail = await ctx.agent_detail(agent_id)
         if detail is None or detail.name != submitted.name:
             return JSONResponse({"applied": False, "message": "No such agent."})
-        if submitted.spec is None:
-            raise RuntimeError("a prompt-only agent intent has no spec")
-        prompt = submitted.spec["prompt"]
         submitted = submitted.model_copy(
             update={
                 "spec": {
@@ -366,7 +370,7 @@ async def submit_intent(
                     "internet_access_allowed": detail.internet_access_allowed,
                     "reasoning": detail.reasoning,
                     "sandbox_size": detail.sandbox_size,
-                    "prompt": prompt,
+                    **submitted.spec,
                 }
             }
         )
@@ -440,14 +444,18 @@ async def submit_intent(
 
 
 def agent_create_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
-    """The create form's field source: the whole writable spec, with `prompt` among the required
+    """The create form's field source: the writable spec, with `prompt` among the required
     fields. The kind takes the initial prompt at birth and refuses a create without one, so the
     form states the requirement exactly where the kind enforces it. The I/O contract fields stay
-    with `object_apply`, where a raw schema is typed, not formed. `sandbox_size` renders only
-    where the deploy's carrier offers sizes — on a single-shape backend the field would change
-    nothing a member can observe, so the form never states the choice."""
+    with `object_apply`, where a raw schema is typed, not formed. `icon` is absent because the
+    kind assigns one at birth, so the form never asks a member to pick before the agent exists.
+    `sandbox_size` renders only where the deploy's carrier offers sizes — on a single-shape
+    backend the field would change nothing a member can observe, so the form never states the
+    choice."""
     schema = AgentSpec.model_json_schema()
-    hidden = {"input_schema", "output_schema"} | (set() if sandbox_sizes else {"sandbox_size"})
+    hidden = {"input_schema", "output_schema", "icon"} | (
+        set() if sandbox_sizes else {"sandbox_size"}
+    )
     schema["properties"] = {
         key: value for key, value in schema["properties"].items() if key not in hidden
     }
@@ -455,10 +463,11 @@ def agent_create_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
 
 
 def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
-    """The settings form's field source: the writable spec schema minus `prompt`, which the
-    settings page renders in its own multiline control."""
+    """The settings form's field source: the writable spec schema minus `prompt` and `icon`. The
+    settings page renders each in a control the schema cannot describe — a multiline editor for
+    the prompt, a grid of drawn icons for the icon — and takes its current value from `spec`."""
     schema = AgentSpec.model_json_schema()
-    hidden = {"input_schema", "output_schema", "prompt"} | (
+    hidden = {"input_schema", "output_schema", "prompt", "icon"} | (
         set() if sandbox_sizes else {"sandbox_size"}
     )
     schema["properties"] = {
@@ -499,6 +508,7 @@ async def agent_settings(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
                 reasoning=detail.reasoning,
                 sandbox_size=detail.sandbox_size,
                 visibility=detail.visibility,
+                icon=detail.icon,
             ).model_dump(
                 mode="json",
                 exclude={"prompt"} if ctx.sandbox_sizes else {"prompt", "sandbox_size"},

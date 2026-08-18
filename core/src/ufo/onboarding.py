@@ -24,7 +24,7 @@ from ufo.models.registry import model_registry
 from ufo.o11y import log
 from ufo.provisioning import AgentProvisioning
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.schema.records import DEFAULT_AGENT_NAME, MAIN_AGENT_ICON
 from ufo.seats import create_member
 from ufo.workspace import ws
 
@@ -148,6 +148,7 @@ class Onboarding:
                     id=agent_id,
                     workspace_id=workspace_id,
                     name=DEFAULT_AGENT_NAME,
+                    icon=MAIN_AGENT_ICON,
                     prompt=DEFAULT_AGENT_PROMPT,
                     model=self.model,
                     is_main=True,

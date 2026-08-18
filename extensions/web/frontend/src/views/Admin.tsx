@@ -18,6 +18,7 @@ import {
 } from "@/kernel/panel";
 import { Page, PageHeader, Pane, RecordPanel } from "@/kernel/pane";
 import { DataTable, OPEN } from "@/kernel/table";
+import { agentName } from "@/lib/agentName";
 import { postIntent } from "@/lib/api";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { money } from "@/lib/money";
@@ -207,7 +208,7 @@ function AgentSection({
           {(row) => (
             <>
               <Td>
-                {row.name}
+                {agentName(row.name)}
                 {row.main ? <span className="ml-xs text-small text-ink-soft">Main</span> : null}
               </Td>
               <TdFact>{row.model}</TdFact>
@@ -251,7 +252,7 @@ function AgentRecord({
   }
 
   return (
-    <RecordPanel title={agent.name} onClose={onClose}>
+    <RecordPanel title={agentName(agent.name)} onClose={onClose}>
       <Facts
         rows={[
           { label: "Model", value: agent.model },

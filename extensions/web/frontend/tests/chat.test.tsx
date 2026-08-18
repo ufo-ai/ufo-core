@@ -311,6 +311,32 @@ test("a live subagent run nests under the reply it produced", async () => {
   expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
 });
 
+/** A run delegated to another agent is headed by that agent, named the way every other surface
+ *  names it. A run the spawn named carries that name instead. */
+test("a run delegated to an agent heads the row with the agent's drawn name", async () => {
+  wire(transcript({ messages: [{ role: "user", text: "Review it." }], turn: TURN_ID }));
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("subagent", {
+    profile: "agent:code reviewer",
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    events: [],
+    output: "Looks right.",
+    subagents: [],
+  });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "Reviewed.",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+
+  await userEvent.click(await screen.findByText("Completed 1 step"));
+  expect(screen.getByText("Agent \u00b7 Code Reviewer")).toBeTruthy();
+});
+
 test("a live run states its name and current step, and clears the wait when it ends", async () => {
   const conversationId = "66666666-6666-4666-8666-666666666666";
   const childTurn = "88888888-8888-4888-8888-888888888888";
@@ -2707,7 +2733,7 @@ test("the start screen picks the agent in its own composer, and carries what was
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "draft this");
-  await pick("Agent", "second");
+  await pick("Agent", "Second");
 
   expect(location.hash).toBe("#/new/" + SECOND_ID);
   await waitFor(() =>
@@ -2715,7 +2741,33 @@ test("the start screen picks the agent in its own composer, and carries what was
       "draft this",
     ),
   );
-  expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("second");
+  expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("Second");
+});
+
+/** The composer is where a member chooses the app a new conversation goes to, so each option is
+ *  drawn with that app's own mark, and the closed control keeps the mark of the one chosen. */
+test("the composer's agent picker draws each app's mark, and keeps the chosen one", async () => {
+  wire({ ...transcript() });
+  location.hash = "#/";
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Message the agent");
+  const control = screen.getByRole("combobox", { name: "Agent" });
+  expect(control.querySelector(".tabler-icon-robot")).toBeTruthy();
+
+  await userEvent.click(control);
+  const assistant = await screen.findByRole("option", { name: "Assistant" });
+  expect(assistant.querySelector("[data-slot=avatar-fallback] .tabler-icon-robot")).toBeTruthy();
+  expect(
+    screen.getByRole("option", { name: "Second" }).querySelector(".tabler-icon-telescope"),
+  ).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("option", { name: "Second" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("combobox", { name: "Agent" }).querySelector(".tabler-icon-telescope"),
+    ).toBeTruthy(),
+  );
 });
 
 test("a conversation that has opened fixes its agent, and the picker goes with the start screen", async () => {
