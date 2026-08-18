@@ -42,7 +42,8 @@ const BLANK = "Nothing matches this search.";
 
 const WORKING = "Searching…";
 
-/** The chord that opens the palette from anywhere, and closes it again. */
+/** The chord that opens the palette from anywhere, and closes it again. Meta holds it alone:
+ *  `ctrl+k` is kill-line in every readline-shaped field, so it is not a chord to take away. */
 const CHORD = "k";
 
 const SECTION_ICONS: Record<Section, TablerIcon> = { artifacts: IconFile, radar: IconRadar };
@@ -91,8 +92,8 @@ export function Spotlight({
 
   useEffect(() => {
     const chord = (event: KeyboardEvent) => {
-      if (event.key !== CHORD || event.altKey || event.shiftKey) return;
-      if (!event.metaKey && !event.ctrlKey) return;
+      if (event.key !== CHORD || event.altKey || event.ctrlKey || event.shiftKey) return;
+      if (!event.metaKey) return;
       event.preventDefault();
       show(!open);
     };
@@ -166,7 +167,7 @@ export function Spotlight({
         <button
           type="button"
           aria-label="Search"
-          aria-keyshortcuts="Meta+K Control+K"
+          aria-keyshortcuts="Meta+K"
           className={cn(className, open && "bg-fill")}
         >
           <IconSearch className="size-(--size-glyph)" aria-hidden />

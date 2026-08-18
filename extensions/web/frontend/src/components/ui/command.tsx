@@ -8,8 +8,8 @@ import { cn } from "@/lib/cn";
  *  options under the box's combobox rather than buttons, so the member reaches every one of them
  *  without leaving the field they are typing in.
  *
- *  `ctrl+k` opens this, so cmdk's vim bindings — which spend `ctrl+k` on moving the cursor up —
- *  are off: the one chord cannot mean two things depending on whether the list is already open. */
+ *  cmdk's vim bindings — which spend `ctrl+k` on moving the cursor up — are off: `ctrl+k` is
+ *  kill-line in a readline-shaped field, and the box is one of those fields. */
 export function Command({ className, ...props }: ComponentProps<typeof CommandPrimitive>) {
   return (
     <CommandPrimitive

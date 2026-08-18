@@ -372,6 +372,22 @@ test("the chord opens the palette from anywhere, and closes it again", async () 
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
+/** `ctrl+k` is kill-line wherever a field is readline-shaped, so the palette never takes it: the
+ *  chord is Meta's alone, and that is what the bar states as the shortcut. */
+test("the ctrl chord leaves the palette shut", async () => {
+  everything();
+  portal();
+
+  await userEvent.keyboard("{Control>}k{/Control}");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByRole("button", { name: "Search" }).getAttribute("aria-keyshortcuts")).toBe(
+    "Meta+K",
+  );
+
+  await userEvent.keyboard("{Meta>}k{/Meta}");
+  expect(await screen.findByRole("combobox", { name: "Search" })).toBeTruthy();
+});
+
 /** Opened on nothing, the palette is still worth reading: it states what the member can do and
  *  every place the bar reaches, and it reads nothing until there is a term to read for. */
 test("an unopened term lists what to do and where to go, and reads nothing", async () => {
