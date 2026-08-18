@@ -981,11 +981,14 @@ async def _billing_seed() -> tuple[UUID, UUID, UUID, UUID]:
     return workspace_id, owner_id, mate_id, conversation_id
 
 
-def _billing_tool(audience: Audience) -> tuple[ToolDef, ExtensionContext]:
+def _billing_tool(
+    audience: Audience, public_base_url: str | None = None
+) -> tuple[ToolDef, ExtensionContext]:
     declared, ext_by_tool = turn_tools(
         (metronome.manifest(),),
         CredentialStore(fernet=Fernet(Fernet.generate_key())),
         audience=audience,
+        public_base_url=public_base_url,
     )
     tool = next(t for t in declared if t.name == metronome.MANAGE_BILLING_TOOL)
     return tool, ext_by_tool[metronome.MANAGE_BILLING_TOOL]
@@ -997,10 +1000,11 @@ async def _manage_billing(
     speaker: UUID | None,
     disclosure_member_id: UUID | None,
     action: str,
+    public_base_url: str | None = None,
     **extra: object,
 ) -> dict[str, object]:
     audience = conversation_audience(disclosure_member_id)
-    tool, ext = _billing_tool(audience)
+    tool, ext = _billing_tool(audience, public_base_url)
     ctx = _tool_context(workspace_id, ext, tmp_path, speaker, audience)
     with ws(workspace_id):
         async with workspace_tx() as connection:
@@ -1928,3 +1932,42 @@ async def test_the_billing_page_answers_an_admin_what_stops_the_workspace(
     _status, paid = await _read_billing(workspace_id, "owner@example.com")
     assert paid["grace_micro_usd"] == TOPUP_GRACE_MICRO_USD
     assert paid["refused_below_micro_usd"] == 5 * DOLLAR - TOPUP_GRACE_MICRO_USD
+
+
+async def test_the_card_link_sends_the_member_back_to_their_billing_screen(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stripe leaves a member wherever the session says, and a session with nowhere to return to
+    strands them at the provider holding a card this deploy has not seen. The return lands on the
+    one screen that reads the card from the provider and answers while the balance refuses turns,
+    so the card becomes known at the moment it is saved rather than whenever something next looks.
+    """
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    await _manage_billing(
+        workspace_id, tmp_path, owner_id, None, "portal", public_base_url="https://ufo.test/"
+    )
+
+    (session,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
+    assert _form(session)["return_url"] == "https://ufo.test/surface/web#/workspace/usage"
+
+
+async def test_a_deploy_with_no_public_base_still_saves_a_card(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A self-hosted deploy that never set a public base has nowhere to send anyone back to. That
+    is not a reason to refuse the link: the session still saves a card, and the member is simply
+    left at the provider."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    answer = await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+
+    (session,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
+    assert "return_url" not in _form(session)
+    assert str(answer["portal_url"]).startswith("https://billing.stripe.com/")

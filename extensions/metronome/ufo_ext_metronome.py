@@ -447,7 +447,13 @@ async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolR
             stripe_customer_id=await _stripe_customer(config, workspace_id, BILLING_TRANSPORT)
         )
         await ext.store.put(BILLING_KEY, record.model_dump(mode="json"))
-    url = await _portal_session(config, record.stripe_customer_id, None, BILLING_TRANSPORT)
+    url = await _portal_session(
+        config,
+        record.stripe_customer_id,
+        None,
+        BILLING_TRANSPORT,
+        _billing_screen(ext.public_base_url),
+    )
     log("metronome.billing_portal", workspace_id=str(workspace_id))
     return _text_result({"portal_url": url, "stripe_customer_id": record.stripe_customer_id})
 
@@ -497,14 +503,23 @@ async def _portal_session(
     customer_id: str,
     flow: str | None,
     transport: httpx.AsyncBaseTransport | None,
+    return_url: str | None = None,
 ) -> str:
     """A short-lived Customer Portal URL under the deploy's portal configuration — the configuration
     is what keeps subscription mutation out of the member's hands. `flow` narrows the session to one
-    task (payment-method update at setup); None opens the full management portal."""
+    task (payment-method update at setup); None opens the full management portal.
+
+    `return_url` is where Stripe sends the member when they are done. Without it they are left at
+    the provider with no way back, and the card they just saved is known only to Stripe: the deploy
+    learns of it whenever something next reads the provider. Sending them to the workspace's own
+    billing screen closes that gap at the moment it opens, because that screen reads the card from
+    the provider and is reachable even while the balance refuses every turn."""
     data = {
         "customer": customer_id,
         "configuration": config.stripe_portal_configuration_id,
     }
+    if return_url is not None:
+        data["return_url"] = return_url
     if flow is not None:
         data["flow_data[type]"] = flow
     session = await _stripe(config, "POST", "/billing_portal/sessions", transport, data=data)
@@ -832,6 +847,18 @@ def _rfc3339(moment: datetime) -> str:
 
 
 BILLING_ROUTE_PATH = "billing"
+BILLING_SCREEN_PATH = "/surface/web#/workspace/usage"
+
+
+def _billing_screen(public_base_url: str | None) -> str | None:
+    """Where Stripe returns the member once they are done, or None on a deploy with no public base.
+
+    None is not a failure: the session is still created and still saves a card. It only means the
+    member is left at the provider rather than back on the screen that states what the workspace
+    has left."""
+    if not public_base_url:
+        return None
+    return f"{public_base_url.rstrip('/')}{BILLING_SCREEN_PATH}"
 
 
 def _billing_request_workspace(request: Request) -> UUID | None:
