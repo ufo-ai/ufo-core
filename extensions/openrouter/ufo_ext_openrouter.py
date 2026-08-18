@@ -67,6 +67,9 @@ MAX_EMPTY_PROVIDER_RETRIES = 3
 
 OPENROUTER_CONTEXT_WINDOW = 200_000
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
+_REQUIRED_REASONS = ReasoningSupport(
+    supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
+)
 
 IMAGES_PATH = "/images"
 IMAGE_TIMEOUT_SECONDS = 300.0
@@ -460,6 +463,7 @@ def _openrouter(
     price: ModelPrice,
     cutoff: str,
     context_window: int = OPENROUTER_CONTEXT_WINDOW,
+    reasoning: ReasoningSupport = _REASONS,
 ) -> ModelSpec:
     return ModelSpec(
         id=id,
@@ -468,7 +472,7 @@ def _openrouter(
         price=price,
         knowledge_cutoff=cutoff,
         context_window=context_window,
-        reasoning=_REASONS,
+        reasoning=reasoning,
         api_surface="chat",
         key_slot=OPENROUTER_KEY_SLOT,
         key_env=OPENROUTER_API_KEY_ENV,
@@ -491,6 +495,13 @@ OPENROUTER_MODEL_SPECS = (
         ModelPrice(3_000_000, 15_000_000, 300_000, 0, 0),
         "2026-04",
         context_window=1_000_000,
+    ),
+    _openrouter(
+        "anthropic/claude-fable-5",
+        ModelPrice(10_000_000, 50_000_000, 1_000_000, 0, 0),
+        "2026-01",
+        context_window=1_000_000,
+        reasoning=_REQUIRED_REASONS,
     ),
 )
 

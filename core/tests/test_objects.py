@@ -176,7 +176,7 @@ DEPLOY_MODELS = (
     "claude-opus-4-8",
     "claude-opus-5",
     "claude-sonnet-5",
-    "claude-fable-5",
+    "claude-5-fable-20260609",
     "m2",
     "m3",
 )
@@ -931,7 +931,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
                 "kind": AGENT_KIND,
                 "name": "assistant",
                 "spec": {
-                    "model": "claude-fable-5",
+                    "model": "claude-5-fable-20260609",
                     "internet_access_allowed": False,
                     "reasoning": "low",
                 },
@@ -952,7 +952,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
             ).one()
         assert (row.prompt, row.model, row.internet_access_allowed, row.reasoning) == (
             "be brief",
-            "claude-fable-5",
+            "claude-5-fable-20260609",
             False,
             "low",
         )
@@ -988,7 +988,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
                         "name": "assistant",
                         "spec": {
                             "prompt": "injected",
-                            "model": "claude-fable-5",
+                            "model": "claude-5-fable-20260609",
                             "internet_access_allowed": False,
                             "reasoning": "high",
                         },
@@ -1028,7 +1028,7 @@ async def test_agent_kind_round_trips_sandbox_size(db: None) -> None:
                 "kind": AGENT_KIND,
                 "name": "assistant",
                 "spec": {
-                    "model": "claude-fable-5",
+                    "model": "claude-5-fable-20260609",
                     "internet_access_allowed": True,
                     "reasoning": "high",
                     "sandbox_size": "large",
@@ -3502,17 +3502,17 @@ async def test_an_agent_write_refuses_off_reasoning_for_a_required_reasoning_mod
     db: None,
 ) -> None:
     workspace_id = await _workspace()
-    fable = next(spec for spec in core_model_specs("", "") if spec.id == "claude-fable-5")
+    fable = next(spec for spec in core_model_specs("", "") if spec.id == "claude-5-fable-20260609")
     with ws(workspace_id):
         owner = await _member(workspace_id, ADMIN_CREATED_AT)
         ctx = _tool_context(
             workspace_id,
             speaker_member_id=owner,
-            model_specs={"claude-fable-5": fable},
-            auto_model="claude-fable-5",
+            model_specs={"claude-5-fable-20260609": fable},
+            auto_model="claude-5-fable-20260609",
         )
         invalid = AgentSpec(
-            model="claude-fable-5",
+            model="claude-5-fable-20260609",
             internet_access_allowed=False,
             reasoning="off",
             prompt="be brief",

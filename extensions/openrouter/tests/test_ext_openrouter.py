@@ -269,7 +269,12 @@ async def test_length_finish_raises_truncated() -> None:
 def test_manifest_registers_slug_pinned_specs() -> None:
     manifest = openrouter.manifest()
     by_id = {spec.id: spec for spec in manifest.models}
-    assert set(by_id) == {"google/gemini-2.5-pro", "z-ai/glm-5.2", "moonshotai/kimi-k3"}
+    assert set(by_id) == {
+        "google/gemini-2.5-pro",
+        "z-ai/glm-5.2",
+        "moonshotai/kimi-k3",
+        "anthropic/claude-fable-5",
+    }
     assert by_id["z-ai/glm-5.2"].price.output == 3_000_000
     assert by_id["z-ai/glm-5.2"].knowledge_cutoff == "2026-03"
 
@@ -280,6 +285,23 @@ def test_kimi_k3_spec_carries_its_price_cache_rate_and_million_token_window() ->
     assert spec.price.output == 15_000_000
     assert spec.price.cache_read == 300_000
     assert spec.context_window == 1_000_000
+
+
+def test_fable_5_route_carries_its_slug_price_window_and_required_reasoning() -> None:
+    """The id is the slug OpenRouter serves, which its own catalog spells `anthropic/claude-fable-5`
+    over canonical slug `anthropic/claude-5-fable-20260609`. Cache writes carry no rate, so this
+    router's one write channel leaves them priced as input, like every other row here. The model
+    reasons on every call, so a row that let an agent write `off` would send a budget it refuses."""
+    spec = {s.id: s for s in openrouter.manifest().models}["anthropic/claude-fable-5"]
+    assert openrouter.openrouter_slug(spec.id) == "anthropic/claude-fable-5"
+    assert spec.price.input == 10_000_000
+    assert spec.price.output == 50_000_000
+    assert spec.price.cache_read == 1_000_000
+    assert spec.price.cache_write_30m == 0
+    assert spec.context_window == 1_000_000
+    assert spec.reasoning.default_on
+    assert not spec.reasoning.can_disable
+    assert spec.wire_reasoning("off", ()) == "low"
 
 
 async def test_model_client_requires_its_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

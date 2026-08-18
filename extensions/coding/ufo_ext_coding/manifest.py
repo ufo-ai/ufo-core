@@ -77,7 +77,7 @@ CODING_TOOL_NAMES = (
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 100
 FABLE_ESCALATION_PROFILE_NAME = "fable_escalation"
-FABLE_ESCALATION_MODEL = "claude-fable-5"
+FABLE_ESCALATION_MODEL = "claude-5-fable-20260609"
 FABLE_ESCALATION_PROMPT = (
     Path(__file__).parent / "prompts" / "subagent_fable_escalation.md"
 ).read_text()

@@ -218,7 +218,7 @@ def test_the_escalation_profile_reuses_the_coding_contract_and_raises_only_the_m
     assert escalation.output_model is coding_profile.output_model
     assert escalation.max_rounds == coding_profile.max_rounds
     assert coding_profile.model is None
-    assert escalation.model == coding.FABLE_ESCALATION_MODEL == "claude-fable-5"
+    assert escalation.model == coding.FABLE_ESCALATION_MODEL == "claude-5-fable-20260609"
     assert escalation.prompt == coding.FABLE_ESCALATION_PROMPT != coding_profile.prompt
 
 

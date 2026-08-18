@@ -80,9 +80,10 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     models are called on the Responses surface (`api_surface="responses"`) — each rejects `tools` +
     `reasoning_effort` together on `/v1/chat/completions` (#568), so they declare the surface that
     renders the legal request rather than tripping a mid-turn 400 — with 30-minute cache writes at
-    1.25x base input and cache reads at 0.1x. `claude-opus-5`
-    carries the 1M-token context window it ships with, at Opus-tier pricing unchanged from Opus 4.8.
-    Anthropic cache writes are 1.25x base input at 5m and 2x at 1h; cache reads are 0.1x.
+    1.25x base input and cache reads at 0.1x. `claude-5-fable-20260609` is the dated id the
+    Anthropic API serves Fable 5 under, and it carries a 1M-token context window, as does
+    `claude-opus-5` at Opus-tier pricing unchanged from Opus 4.8. Anthropic cache writes are 1.25x
+    base input at 5m and 2x at 1h; cache reads are 0.1x.
 
     The GPT-5.6 family accepts 1,050,000 tokens, but a request whose input passes 272,000 is billed
     at 2x input and 1.5x output for the whole request, which one rate per token class cannot
@@ -91,10 +92,11 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     number would let a turn grow into a tier this table bills at half price."""
     return (
         _anthropic(
-            "claude-fable-5",
+            "claude-5-fable-20260609",
             ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000, 20_000_000),
             "2026-01",
             anthropic_key_env,
+            context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
             reasoning=REQUIRED_REASONS_WITH_TOOLS,
         ),
         _anthropic(
