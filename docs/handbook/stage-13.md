@@ -1,249 +1,212 @@
-# Browser automation and web-interaction execution  `stage-13`
+# Higher-level agent workflows and extension domain features  `stage-13`
 
-This stage is the system’s web browser workbench. It is used during the main work loop when an agent needs to open a site, read it, click buttons, type into forms, upload or download files, or take screenshots.
+This stage sits above the basic tools and helps the assistant run larger jobs that take planning, waiting, delegation, or repeated checking. It is part main work loop and part behind-the-scenes support, like a project manager layer on top of simple actions.
 
-At the center, the BUA session layer leases a browser for the current turn and defines the allowed actions, like click, type, scroll, and wait. The DevTools transport is the communication cable to Chrome, using Chrome’s control protocol to send commands and receive events. Page inspection tools turn a live web page into readable text, accessibility information, and screen coordinates the agent can use. Action execution tools then turn the agent’s plan into real mouse, keyboard, form, and file actions, while waiting for the page to settle afterward.
+The planning and automation pieces give agents a shared notebook for objectives, an alarm clock for scheduled work, and a watchman for monitors. They record plans, blockers, delegated tasks, paused conversations, and recurring jobs so progress survives beyond one chat message. The creation workflow pieces turn plans into outputs: they help build and publish websites, manage who can view them, hand web work to specialist agents, and split research across parallel workers.
 
-Tabs, pop-up dialogs, and downloads are managed separately so browsing does not get stuck or lose track of files. External provider adapters can supply a local sandbox browser, a hosted Chrome session, or a cloud browsing service. Finally, `tools.py` exposes these abilities as agent tools, connecting tool calls to the browser engine underneath.
+The brief pipeline adds a simple writing assembly line: outline first, draft second, critique third, with clear input and output rules for each step. The todos extension gives a conversation a visible checklist, so both the assistant and user can see what is done, in progress, or still waiting.
 
 ## Sub-stages
 
-- [BUA session orchestration and action schema](stage-13.1.md) `stage-13.1` — 5 files
-- [Chrome DevTools transport and runtime bridge](stage-13.2.md) `stage-13.2` — 3 files
-- [Page inspection, accessibility content, and element lookup](stage-13.3.md) `stage-13.3` — 4 files
-- [User interaction execution and action fixups](stage-13.4.md) `stage-13.4` — 5 files
-- [Tabs, dialogs, and downloads management](stage-13.5.md) `stage-13.5` — 3 files
-- [External browser providers and hosted automation adapters](stage-13.6.md) `stage-13.6` — 3 files
+- [Planning, delegation, automations, and monitors](stage-13.1.md) `stage-13.1` — 13 files
+- [Creation workflows for sites, documents, code, and research](stage-13.2.md) `stage-13.2` — 6 files
 
 ## Files in this stage
 
-### Browser automation and web-interaction execution
-### `extensions/browser/ufo_ext_browser/tools.py`
+### Brief Writing Pipeline
+Defines the brief pipeline package and its structured outline, drafting, and critique workflow.
 
-`orchestration` · `per-turn tool handling`
+### `extensions/brief_pipeline/ufo_ext_brief_pipeline/__init__.py`
 
-This file turns high-level browser requests into safe, structured calls to a single browser session for the current turn. Without it, the agent might know it wants to click, read, or download something, but it would have no standard doorway into the browser.
+`other` · `import time`
 
-Each tool has an input shape, defined with Pydantic models. Pydantic checks that the tool arguments have the expected fields and types before anything touches the browser. Most functions then remove the human-facing `user_description` field, pass the remaining machine instructions to `BuaSurface`, and return the browser’s answer as JSON text.
+This is the package marker for the `ufo_ext_brief_pipeline` extension. In Python, an `__init__.py` file tells Python that a folder should be treated as an importable package, like putting a label on a drawer so the rest of the program knows it can look inside. Here, the only content is a short documentation string saying this is the “Brief pipeline extension.” That means the actual behavior of the extension lives in other files, while this file provides the package identity. Without it, some Python environments or tooling might not recognize this directory as a package, which could make imports fail or make the extension harder to discover.
 
-A key detail is that `_browser` creates only one `BuaSurface` per turn and reuses it. Think of it like borrowing one browser remote control for the whole conversation turn instead of picking up a new remote for every button press. The cleanup registry closes that remote at the end, even if the turn fails.
 
-Two tools also move files through the shared workspace. `computer` can save a screenshot image, and `wait_for_download` saves downloaded bytes into a downloads folder. This matters because other agents or later steps can then refer to those files by path.
+### `extensions/brief_pipeline/ufo_ext_brief_pipeline/pipeline.py`
+
+`config` · `extension load / pipeline setup`
+
+This file is like a recipe card for a small writing assembly line. The goal is to turn a topic into a useful brief by passing work through three specialist subagents: one creates an outline, one writes the draft, and one reviews the result. A subagent is a smaller AI worker with its own instructions and expected input and output.
+
+The file first names the three stages and sets a shared round limit, which keeps each stage from going back and forth forever. It then points to a local prompts folder, where the written instructions for each subagent live.
+
+The small Pydantic models define the “forms” each stage must receive and return. Pydantic is a Python library that checks data has the expected fields. For example, the outline stage receives a topic and audience, then returns an outline. The draft stage receives the topic plus outline, then returns a draft. The critic stage receives the draft, then returns a verdict and optional improvements.
+
+At the bottom, the file builds three SubagentProfile objects. Each profile combines a name, a prompt file, no tools, an input model, an output model, and the round limit. These profiles do not run the pipeline by themselves; they describe the workers so a parent agent can start them in order and pass each result to the next stage.
+
+
+### Todo Checklist Extension
+Implements conversation-visible todo lists so agents can create, update, and display task progress.
+
+### `extensions/todos/ufo_ext_todos.py`
+
+`domain_logic` · `extension load, tool calls, and conversation state display`
+
+This extension gives the agent a simple shared checklist, like a small whiteboard beside a project. Without it, a long multi-step request would have no durable task board: the agent could still talk about plans, but the UI would not have a reliable list of tasks and statuses to show.
+
+The file defines the shape of todo data: each task has text and a status, and a board has a title plus a list of tasks. It also defines two tools the agent can call. The first, update_todo_list, creates or fully replaces the board. The second, update_todo_status, changes the status of existing tasks by their 1-based position in the list.
+
+The board is stored in the extension's scoped store, keyed by conversation ID. That means the checklist is not just temporary text in one answer; later turns in the same conversation can read the same board back. Each tool returns the full current board as JSON, so the agent sees exactly what was saved.
+
+The file also exposes the checklist as a conversation slot, which is a structured piece of conversation state the product can display. When reading for display, it trims overly long titles, descriptions, or task lists and marks the result as truncated so the UI knows it is not showing everything.
 
 #### Function details
 
-##### `_browser`  (lines 105–128)
+##### `_require_ext`  (lines 93–96)
 
 ```
-def _browser(ctx: ToolContext) -> BuaSurface
+def _require_ext(ctx: ToolContext) -> ExtensionContext
 ```
 
-**Purpose**: Gets the one browser-control surface for the current turn, creating it the first time a browser tool is used. This avoids repeatedly opening browser connections and makes sure the connection is closed when the turn ends.
+**Purpose**: This helper makes sure a tool call has an extension context available. The extension context is the object that gives access to the extension's private stored data.
 
-**Data flow**: It receives the tool context, reads the cleanup registry, browser connection provider, sandbox, model, extension store, and conversation id from that context, and checks whether a browser surface already exists for this turn. If not, it builds a `BuaSurface`, stores it in a weak cache tied to the turn cleanup object, registers its close function for cleanup, and returns it.
+**Data flow**: It receives a tool context. If that context contains an extension context, it returns it. If not, it stops the call by raising an error, because the todo tools cannot save or read their board without that storage access.
 
-**Call relations**: All browser tool handlers call this before doing their work. When it has to create a surface, it hands the needed browser and workspace ingredients to `BuaSurface.__init__`; later handlers in the same turn reuse that same surface.
+**Call relations**: Both update_todo_list and update_todo_status call this at the start. It acts like checking that the notebook is on the desk before trying to write or edit the checklist.
 
-*Call graph*: called by 11 (_computer, _find, _form_input, _get_page_text, _navigate, _read_page, _tabs_close, _tabs_context, _tabs_create, _upload_file (+1 more)); 1 external calls (__init__).
-
-
-##### `_json_result`  (lines 131–132)
-
-```
-def _json_result(reply: dict[str, JsonValue]) -> ToolResult
-```
-
-**Purpose**: Packages a plain dictionary reply from the browser engine into the standard tool-result format expected by the rest of the agent system.
-
-**Data flow**: It receives a dictionary, turns it into a JSON string, wraps that string as text content, and returns a `ToolResult` containing that text.
-
-**Call relations**: Most tool handlers call this after the browser surface replies. It is the common final step that makes browser replies look like normal tool output.
-
-*Call graph*: called by 11 (_computer, _find, _form_input, _get_page_text, _navigate, _read_page, _tabs_close, _tabs_context, _tabs_create, _upload_file (+1 more)); 3 external calls (__init__, __init__, dumps).
+*Call graph*: called by 2 (update_todo_list, update_todo_status).
 
 
-##### `_required_str`  (lines 135–138)
+##### `_board_key`  (lines 99–100)
 
 ```
-def _required_str(value: JsonValue, field: str) -> str
+def _board_key(conversation_id: UUID) -> str
 ```
 
-**Purpose**: Checks that a browser reply contains a required non-empty string field. It is used before decoding important base64 data such as screenshots or downloaded files.
+**Purpose**: This helper builds the storage key for one conversation's todo board. It keeps each conversation's checklist separate from every other conversation.
 
-**Data flow**: It receives a value and the name of the field being checked. If the value is a non-empty string, it returns it; otherwise it raises an error explaining that the browser reply is missing that field.
+**Data flow**: It receives a conversation ID. It combines a fixed prefix with that ID and returns a string key that can be used to read or write the board in the extension store.
 
-**Call relations**: `_computer` uses it before saving a screenshot, and `_wait_for_download` uses it before saving a downloaded file. It protects later file-writing steps from silently using missing or malformed data.
+**Call relations**: The write, update, summarize, and read paths all use this helper before touching stored todo data. That keeps every part of the file using the same naming rule for saved boards.
 
-*Call graph*: called by 2 (_computer, _wait_for_download).
-
-
-##### `_navigate`  (lines 141–145)
-
-```
-async def _navigate(ctx: ToolContext, args: NavigateInput) -> ToolResult
-```
-
-**Purpose**: Moves the browser to a URL or performs a navigation action such as using browser history. It is the tool handler behind the agent’s navigate command.
-
-**Data flow**: It receives validated navigation arguments, converts them into a JSON-ready dictionary while dropping the timeline-only `user_description`, sends that dictionary to the browser surface, and returns the browser reply as a JSON tool result.
-
-**Call relations**: When the navigate tool is invoked, this function gets the shared browser surface through `_browser`, asks it to navigate, then uses `_json_result` to hand the answer back to the agent.
-
-*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+*Call graph*: called by 4 (_read_tasks, _summarize_tasks, update_todo_list, update_todo_status).
 
 
-##### `_tabs_context`  (lines 148–149)
+##### `_board_result`  (lines 103–104)
 
 ```
-async def _tabs_context(ctx: ToolContext, args: TabsContextInput) -> ToolResult
+def _board_result(board: TodoBoard) -> ToolResult
 ```
 
-**Purpose**: Gets a summary of the currently open browser tabs. This lets the agent understand what pages are open before choosing where to work next.
+**Purpose**: This helper turns a todo board into the standard tool response returned to the agent. It makes sure tool callers receive the current checklist after each change.
 
-**Data flow**: It receives the tool context and the validated request, asks the shared browser surface for tab context with no extra browser arguments, and returns the result as JSON text.
+**Data flow**: It receives a TodoBoard object. It converts the board into JSON text, wraps that text in a TextContent object, then wraps that content in a ToolResult and returns it.
 
-**Call relations**: This is called when the tabs-context tool runs. It relies on `_browser` for the active browser surface and `_json_result` to format the tab summary for the agent.
+**Call relations**: update_todo_list and update_todo_status call this after saving changes. It is the final packaging step that hands the updated board back to the model.
 
-*Call graph*: calls 2 internal fn (_browser, _json_result).
-
-
-##### `_tabs_create`  (lines 152–154)
-
-```
-async def _tabs_create(ctx: ToolContext, args: TabsCreateInput) -> ToolResult
-```
-
-**Purpose**: Creates a new browser tab, optionally opening a given URL. If no URL is supplied, it opens a blank page.
-
-**Data flow**: It receives the requested tab information, chooses either the provided URL or `about:blank`, sends that to the browser surface, and returns the browser’s reply as a JSON tool result.
-
-**Call relations**: This function is the handler for the tab-create tool. It gets the current turn’s browser surface through `_browser`, asks it to create the tab, then formats the reply with `_json_result`.
-
-*Call graph*: calls 2 internal fn (_browser, _json_result).
+*Call graph*: called by 2 (update_todo_list, update_todo_status); 3 external calls (__init__, __init__, model_dump_json).
 
 
-##### `_tabs_close`  (lines 157–161)
+##### `_read_board`  (lines 107–109)
 
 ```
-async def _tabs_close(ctx: ToolContext, args: TabsCloseInput) -> ToolResult
+async def _read_board(ext: ExtensionContext, key: str) -> TodoBoard | None
 ```
 
-**Purpose**: Closes a browser tab, usually the current one or a specified tab. This helps the agent clean up pages it no longer needs.
+**Purpose**: This helper reads a saved todo board from the extension store. It returns a validated board object if one exists, or nothing if the conversation has no board yet.
 
-**Data flow**: It receives validated close-tab arguments, removes fields that are only for human activity descriptions, sends the remaining tab information to the browser surface, and returns the reply as JSON text.
+**Data flow**: It receives the extension context and a storage key. It asks the store for the saved value at that key. If nothing is stored there, it returns None; otherwise, it checks the saved data against the TodoBoard shape and returns the resulting board object.
 
-**Call relations**: When the close-tab tool is used, this handler calls `_browser` to reach the active browser session and `_json_result` to return the result in the standard format.
+**Call relations**: update_todo_status uses this before editing tasks, while _summarize_tasks and _read_tasks use it when preparing conversation state for display. It is the shared doorway from stored data back into usable todo objects.
 
-*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
-
-
-##### `_upload_file`  (lines 164–168)
-
-```
-async def _upload_file(ctx: ToolContext, args: UploadFileInput) -> ToolResult
-```
-
-**Purpose**: Sets a webpage file-upload input using files from the shared workspace. This is how the agent attaches documents to forms in the browser.
-
-**Data flow**: It receives a browser element reference, workspace file paths, and optional tab information, strips out the human-only description, and passes the upload request to the browser surface. The browser reply is then returned as JSON text.
-
-**Call relations**: This handler runs for the upload-file tool. It uses `_browser` to talk to the browser engine and `_json_result` to report whether the upload action succeeded or what the browser returned.
-
-*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+*Call graph*: called by 3 (_read_tasks, _summarize_tasks, update_todo_status).
 
 
-##### `_read_page`  (lines 171–175)
+##### `update_todo_list`  (lines 112–116)
 
 ```
-async def _read_page(ctx: ToolContext, args: ReadPageInput) -> ToolResult
+async def update_todo_list(ctx: ToolContext, args: UpdateTodoListInput) -> ToolResult
 ```
 
-**Purpose**: Reads the page’s accessibility tree, which is a structured view of page elements such as buttons, links, text boxes, and labels. This gives the agent a more action-oriented picture of the page than raw HTML.
+**Purpose**: This is the tool that creates or replaces the whole checklist for a conversation. An agent uses it at the start of multi-step work, or when the plan needs to be rewritten.
 
-**Data flow**: It receives options such as depth, filter, element reference, and tab id, removes the timeline description, and asks the browser surface to read the page accordingly. It returns the structured page information as a JSON tool result.
+**Data flow**: It receives the tool context and input containing a title, tasks, and a short user-facing description. It checks that extension storage is available, builds a new TodoBoard, stores it under the current conversation's key, and returns the full saved board as JSON in a tool result.
 
-**Call relations**: This is the read-page tool handler. It gets the shared browser surface through `_browser` and uses `_json_result` to pass the page reading back to the agent.
+**Call relations**: This is one of the public tools registered by manifest. It calls _require_ext to get storage access, _board_key to choose where to save the board, and _board_result to return the saved checklist to the agent.
 
-*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
-
-
-##### `_get_page_text`  (lines 178–182)
-
-```
-async def _get_page_text(ctx: ToolContext, args: GetPageTextInput) -> ToolResult
-```
-
-**Purpose**: Extracts the raw visible text from a browser page. This is useful when the agent needs to read content without needing the full structure of buttons and fields.
-
-**Data flow**: It receives the requested tab information, removes the human-only description, sends the remaining request to the browser surface, and returns the extracted text reply as JSON.
-
-**Call relations**: When the get-page-text tool is called, this function uses `_browser` to reach the browser session and `_json_result` to turn the browser’s response into standard tool output.
-
-*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+*Call graph*: calls 3 internal fn (_board_key, _board_result, _require_ext); 2 external calls (__init__, loads).
 
 
-##### `_find`  (lines 185–189)
+##### `update_todo_status`  (lines 119–130)
 
 ```
-async def _find(ctx: ToolContext, args: FindInput) -> ToolResult
+async def update_todo_status(ctx: ToolContext, args: UpdateTodoStatusInput) -> ToolResult
 ```
 
-**Purpose**: Searches the current page for elements by things like role, text, name, or URL. This helps the agent locate the specific button, link, field, or item it wants to use next.
+**Purpose**: This is the tool that changes the status of one or more existing tasks. An agent uses it to mark work as pending, in progress, or completed as the request moves forward.
 
-**Data flow**: It receives a search query and optional tab id, drops the activity-description field, sends the search request to the browser surface, and returns the found matches as JSON text.
+**Data flow**: It receives the tool context and a set of requested status updates. It checks for extension storage, finds the current conversation's board, refuses to continue if no board exists, validates that each requested task number is within the list, changes the selected task statuses, saves the updated board, and returns the full updated board as JSON.
 
-**Call relations**: This is the handler for the find tool. It obtains the turn’s browser surface via `_browser`; that surface can use the project’s finding or ranking hook, and the handler formats the answer with `_json_result`.
+**Call relations**: This is the second public tool registered by manifest. It relies on _read_board to load the current checklist, _board_key to locate it, and _board_result to send the updated state back. Its validation protects the stored board from edits to missing or nonexistent tasks.
 
-*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
-
-
-##### `_form_input`  (lines 192–196)
-
-```
-async def _form_input(ctx: ToolContext, args: FormInputInput) -> ToolResult
-```
-
-**Purpose**: Fills or changes a form field identified by a browser reference. It is used when the agent needs to type into text boxes, choose values, or otherwise set form data.
-
-**Data flow**: It receives the target element reference, the value to put there, and optional tab information, removes the human-only description, sends the instruction to the browser surface, and returns the result as JSON.
-
-**Call relations**: This function backs the form-input tool. It calls `_browser` for the current browser session and `_json_result` after the browser reports what happened.
-
-*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+*Call graph*: calls 4 internal fn (_board_key, _board_result, _read_board, _require_ext); 1 external calls (loads).
 
 
-##### `_computer`  (lines 199–217)
+##### `_summarize_tasks`  (lines 133–135)
 
 ```
-async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult
+async def _summarize_tasks(ctx: ConversationSlotContext) -> int | None
 ```
 
-**Purpose**: Runs lower-level browser interaction actions such as mouse moves, clicks, keyboard input, scrolling, waiting, and screenshots. It can also save a screenshot into the shared workspace so later steps can use it as a file.
+**Purpose**: This helper gives a quick summary of whether a conversation has tasks and how many there are. It is used for the conversation slot summary rather than for editing the board.
 
-**Data flow**: It receives a list of computer-style actions plus options such as tab id and screenshot save path. It sends the action list to the browser surface, then checks whether a screenshot was returned. If saving is requested, it decodes the base64 screenshot bytes and writes them to the sandbox workspace. If a screenshot is present, it returns both JSON text and image content; otherwise it returns only JSON text.
+**Data flow**: It receives a conversation slot context, builds the storage key for that conversation, and reads the board. If there is no board, it returns None. If a board exists, it returns the number of tasks on it.
 
-**Call relations**: This handler is used by the computer tool. It depends on `_browser` for the active browser surface, `_required_str` when screenshot bytes must be present, and `_json_result` when there is no image to attach separately.
+**Call relations**: TASKS_SLOT uses this as its summarize function. It shares the same _board_key and _read_board helpers as the tool paths, so the summary reflects the same stored checklist the tools edit.
 
-*Call graph*: calls 3 internal fn (_browser, _json_result, _required_str); 6 external calls (__init__, __init__, __init__, b64decode, model_dump, dumps).
+*Call graph*: calls 2 internal fn (_board_key, _read_board).
 
 
-##### `_wait_for_download`  (lines 220–228)
+##### `_read_tasks`  (lines 138–168)
 
 ```
-async def _wait_for_download(ctx: ToolContext, args: WaitForDownloadInput) -> ToolResult
+async def _read_tasks(ctx: ConversationSlotContext) -> TasksSlotPayload
 ```
 
-**Purpose**: Waits for a browser download to finish and saves the downloaded file into the shared workspace. This turns an in-browser download into a path the rest of the agent system can use.
+**Purpose**: This helper prepares the todo board for display as structured conversation state. It turns the stored board into a UI-friendly payload with counts, task statuses, and truncation information.
 
-**Data flow**: It receives optional download id, target path, and timeout settings, sends them to the browser surface, and expects a filename plus base64-encoded file content back. It validates those fields, decodes the file bytes, writes them into the sandbox under the requested folder or the default downloads folder, and returns the saved path, filename, and size as JSON.
+**Data flow**: It receives a conversation slot context, reads the board for that conversation, and returns an empty task payload if none exists. If a board exists, it copies up to the allowed number of tasks, shortens any title or description that is too long, counts completed tasks, notes whether anything was trimmed, and returns a TasksSlotPayload.
 
-**Call relations**: This function backs the wait-for-download tool. It gets the browser session through `_browser`, uses `_required_str` to make sure the download reply is usable, writes the file through the sandbox, then reports the final workspace path with `_json_result`.
+**Call relations**: TASKS_SLOT uses this as its read function when the system wants the current task list for display. It calls _board_key and _read_board to get the stored board, then creates ConversationTask and TasksSlotPayload objects for the UI-facing version.
 
-*Call graph*: calls 3 internal fn (_browser, _json_result, _required_str); 2 external calls (b64decode, model_dump).
+*Call graph*: calls 2 internal fn (_board_key, _read_board); 2 external calls (__init__, __init__).
+
+
+##### `manifest`  (lines 181–203)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This function tells the host application what this extension provides. It registers the todo tools, the prompt instructions, and the conversation slot used to show tasks.
+
+**Data flow**: It takes no input. It builds and returns a Manifest containing the extension name and version, two tool definitions, one prompt section loaded from a markdown file, and the tasks conversation slot.
+
+**Call relations**: The host calls this when loading the extension. The manifest points tool calls to update_todo_list and update_todo_status, includes the prompt text that teaches the agent how to use the checklist, and exposes TASKS_SLOT so the stored board can appear in conversation state.
+
+*Call graph*: 3 external calls (__init__, __init__, __init__).
 
 ## 📊 State Registers Touched
 
-- `reg-tool-catalog` — The runtime menu of tools the agent may call, including built-ins and extension-provided tools.
-- `reg-sandbox-workspace` — The per-conversation isolated workbench, including its handle, files, execution backend, and recorded file changes.
-- `reg-browser-session` — The leased browser instance for a turn, including tabs, page state, downloads, dialogs, and provider connection details.
-- `reg-provider-client-pools` — Per-process reusable transport/client state for external providers such as model APIs, search and embedding services, connector brokers, browser providers, billing services, and related retry or throttle windows.
+- `reg-extension-catalog` — The shared list of installed extensions and the capabilities they registered for this deployment.
+- `reg-db-session` — The active database connection, transaction, and workspace-safe persistence context used while work is running.
+- `reg-agent-definitions` — The saved assistant agents for each workspace, including their settings, tools, model choices, and provisioning source.
+- `reg-identity-context` — The current answer to who is acting, in which workspace, and on behalf of which member or agent.
+- `reg-tool-registry` — The shared catalog of tools the model is allowed to call and the input rules for each tool.
+- `reg-conversation-state` — The durable conversation records, titles, audience, surface labels, sandbox links, and visible thread metadata.
+- `reg-transcript-state` — The saved message history and transcript snapshots that are read, compacted, updated, audited, and shown later.
+- `reg-turn-queue` — The durable queue of conversation turns, including admitted work, claimed work, failures, retries, and completion state.
+- `reg-portal-slots` — The safe display state for conversation panels such as sources, artifacts, tasks, sites, automations, and workspace changes.
+- `reg-source-feeds` — The registered external content sources, sync cursors, backoff state, ownership, grants, and wake-up triggers.
+- `reg-page-index` — The stored pages, revisions, chunks, embeddings, and search indexes used to find synced knowledge later.
+- `reg-memory-store` — The durable remembered facts and notes that agents can search, browse, update, consolidate, and show with provenance.
+- `reg-scheduled-work` — The saved jobs, scheduled tasks, pauses, monitors, due times, retry state, and duplicate-run guards.
+- `reg-workflow-plans` — The longer-running goals, objective steps, blockers, todos, delegated work, and progress evidence that survive across turns.
+- `reg-subagent-delivery` — The parent-child turn links and pending result records used when helper agents run work and report back.
+- `reg-prompt-governance` — The saved prompt proposals, approval status, evaluation results, and safety checks for changing agent instructions.
+- `reg-extension-kv-store` — Private per-workspace JSON/key-value state owned by extensions for setup, feature bookkeeping, and small durable extension data that is not a user-visible object.
+- `reg-coding-review-state` — The coding extension’s durable review inbox and review-run records, including links to the agent, conversation, and turn that handle review automation.
+- `reg-hosted-site-state` — Durable hosted website records, publication metadata, permissions, and homepage-agent bindings used to build, serve, list, and remove sites.
+- `reg-research-observations` — Durable per-conversation web/search source observations and retrieval metadata saved by research tools for later citation and Sources-panel rendering.
+- `reg-skill-workflow-catalog` — The registered agent skills, helper subagent profiles, workflow profiles, and related prompt/activity metadata injected into turns and surfaced to users.

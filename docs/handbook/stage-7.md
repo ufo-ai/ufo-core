@@ -1,242 +1,274 @@
-# Conversation admission, turn creation, and live control  `stage-7`
+# Turn admission, cancellation, and live subscription setup  `stage-7`
 
-This stage is the conversation “front desk” during the main work loop. It decides when new work may enter a conversation, creates a durable turn record for that work, and gives people live control over work that is already running.
+This stage is the front door for work before the main agent loop begins, and it also handles “stop” requests while work is running. Every new member message, scheduled wake-up, and internal call enters through the admission path. admission.py checks permissions, finds or creates the right conversation, decides whether to join an existing turn or queue a new one, and prepares the work for execution.
 
-The admission file is the main doorway. Member messages, scheduled events, and results from internal tools all pass through it. It applies the same safety and permission checks, then either starts a new turn or joins the caller to an existing live stream. This keeps conversation work orderly and recorded instead of happening as loose background activity.
+ambient_reply.py is a small gatekeeper for group threads. If someone speaks without directly calling the agent, it decides whether the agent should answer or stay quiet, avoiding wasted turns when people are just talking to each other.
 
-The ambient reply file handles a quieter case: a message appears in a thread without directly calling on the agent. Before spending money and time on a full response, it asks a small bounded model whether the agent should speak or stay silent.
+While a turn runs, the live frame and terminal transport stage acts like a viewing window. It sends partial answers, tool updates, terminal data, and final status to listeners, and lets them reconnect without missing the ending.
 
-The stop file is the emergency brake. It verifies that a person is allowed to stop a running turn, cancels it safely, starts any waiting follow-up work, and notifies live listeners that the old turn ended.
+If a member presses stop, stop.py checks that the request is allowed, uses cancellation.py to safely tell the outside workflow system to halt, records the cancellation, notifies listeners, and can start a follow-up turn if needed.
+
+## Sub-stages
+
+- [Live frame and terminal transport](stage-7.1.md) `stage-7.1` — 4 files
 
 ## Files in this stage
 
-### Turn Admission and Control
-Decides when to create conversational work, admits eligible turn inputs through shared checks, and handles member-initiated stopping of running turns.
+### Admission filtering and turn creation
+Shared admission logic decides whether a message merits a turn and routes incoming messages, wakeups, and extension calls through consistent checks before queueing work.
 
 ### `core/src/ufo/ambient_reply.py`
 
-`domain_logic` · `request handling, before a new ambient thread reply becomes an agent turn`
+`domain_logic` · `request handling, before admitting a new ambient thread reply as an agent turn`
 
-In a group chat thread, not every new message is meant for the agent. After the agent has joined a thread once, later replies may be people talking to each other, thanking someone else, or asking another person for an opinion. If the system treated every such message as a full agent turn, it would spend time and money just to say something like “nothing from me.” This file puts a cheap gate in front of that.
+In a group chat thread, the agent may have already spoken once. After that, new messages can arrive that mention nobody, or mention someone else. Without a gate like this, every such message could become a full agent turn, even if the right answer is silence. This file makes a cheaper first decision: should the agent reply at all?
 
-The main idea is simple: before admitting a new message as an agent turn, the code asks a classifier model for exactly one decision: REPLY or NO_REPLY. The classifier gets the new message plus a small recent slice of thread history, because short messages only make sense in context. Each message records who said it, whether it was written by the agent, and the text.
+The file defines a small message shape, `AmbientMessage`, containing who spoke, whether it was the agent, and the text. It also defines a `MeteredModel` interface: any model plugged in here must say what model name it uses and must be able to complete one request. The main worker is `AmbientReplyClassifier`. It builds a compact view of the recent thread, sends it to a language model with strict instructions, and expects exactly one decision word: `REPLY` or `NO_REPLY`.
 
-The file is careful about safety and cost. It trims the number of history messages and the length of each message. It wraps the thread data as JSON between fence lines, so a user’s words are treated as quoted data, not as instructions to the classifier. If the model’s answer cannot be read, this code raises an error instead of silently guessing. The caller can then choose the safer fallback: admit the turn rather than accidentally ignore someone who wanted the agent.
+The recent thread is deliberately limited: only the last few messages are included, and each message is shortened. This keeps cost and risk under control. The thread is sent as JSON, like putting the chat transcript in a sealed envelope, so a user’s text is treated as data rather than as instructions to the classifier. If the model answer cannot be read, this code raises an error instead of silently choosing. The caller can then choose the safer fallback: admit the turn rather than miss a real request.
 
 #### Function details
 
-##### `MeteredModel.model`  (lines 91–91)
+##### `MeteredModel.model`  (lines 94–94)
 
 ```
 def model(self) -> str
 ```
 
-**Purpose**: This protocol property describes the model name that will be billed and used for the ambient reply decision. It lets this file depend on a small promise about the model object without importing the larger model-access machinery.
+**Purpose**: This property promises that any model object used here can report the name of the actual language model it will call. The classifier needs that name when it builds the request.
 
-**Data flow**: A concrete model object supplies its configured model name. Code using the protocol reads that name and places it into the request sent to the model provider. Nothing is changed by reading it.
+**Data flow**: The classifier reads this property from the supplied model object. It gets back a model name string, which is copied into the request sent to the model provider.
 
-**Call relations**: AmbientReplyClassifier.decide relies on this property when it builds the model request. The protocol keeps the classifier loosely connected to whatever real model-access class the rest of the system provides.
+**Call relations**: This is part of the `MeteredModel` protocol, which is like a contract for compatible model objects. `AmbientReplyClassifier.decide` relies on this contract when it prepares the one-shot classification call.
 
 
-##### `MeteredModel.complete`  (lines 93–93)
+##### `MeteredModel.complete`  (lines 96–96)
 
 ```
 async def complete(self, request: ModelRequest) -> str
 ```
 
-**Purpose**: This protocol method describes the one-shot model call used to classify a message as REPLY or NO_REPLY. It is the narrow doorway through which this file asks the language model for a decision.
+**Purpose**: This method promises that the supplied model object can take a model request and return the model’s text answer. Here, that answer should contain the decision word for whether to reply.
 
-**Data flow**: A ModelRequest goes in, containing the prompt, the fenced thread data, token limits, and reasoning setting. The concrete model object sends that request to the model service and returns the model’s text answer. The classifier later reads that text to find the decision word.
+**Data flow**: A `ModelRequest` goes in, containing the system instructions, the thread payload, token limits, and reasoning setting. The model provider processes it and returns text, which the classifier later searches for `REPLY` or `NO_REPLY`.
 
-**Call relations**: AmbientReplyClassifier.decide calls this method after preparing the payload. The actual implementation lives elsewhere, but this file only needs to know that it can submit a request and receive a string response.
+**Call relations**: This is the other half of the `MeteredModel` contract. `AmbientReplyClassifier.decide` calls it after building the request, then interprets the returned text as the gate’s decision.
 
 
-##### `_entry`  (lines 96–101)
+##### `_entry`  (lines 99–104)
 
 ```
 def _entry(message: AmbientMessage) -> dict[str, object]
 ```
 
-**Purpose**: This helper turns one AmbientMessage into the compact dictionary form sent to the classifier model. It also shortens the message text so the prompt stays small and predictable.
+**Purpose**: This helper turns one `AmbientMessage` into the simple dictionary form that will be placed in the JSON payload. It also trims the message text so one long chat message cannot make the classifier request too large or too expensive.
 
-**Data flow**: An AmbientMessage goes in, with a speaker, text, and a flag saying whether the agent wrote it. The function copies those fields into a plain dictionary and cuts the text down to the allowed character limit. The resulting dictionary comes out ready to be placed into the JSON payload.
+**Data flow**: An `AmbientMessage` goes in, with a speaker, text, and an `own` flag saying whether the agent wrote it. A plain dictionary comes out with the same speaker and ownership flag, plus the text shortened to the configured character limit.
 
-**Call relations**: AmbientReplyClassifier._payload calls this helper for each recent history item and for the new message. It is the small formatting step that keeps every message represented in the same safe, simple shape before json.dumps serializes it.
+**Call relations**: `AmbientReplyClassifier._payload` calls this for each recent history message and for the new message being judged. It is the small formatting step before the whole thread is serialized as JSON.
 
 *Call graph*: called by 1 (_payload).
 
 
-##### `AmbientReplyClassifier.decide`  (lines 114–129)
+##### `AmbientReplyClassifier.decide`  (lines 117–133)
 
 ```
 async def decide(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> AmbientDecision
 ```
 
-**Purpose**: This is the main decision point: it asks the classifier model whether the agent should answer a new unmentioned or third-party-directed message. Someone would use it before starting a full agent turn, to avoid spending a full response on a message that was not meant for the agent.
+**Purpose**: This is the main decision function. It asks the cheap classifier model whether the agent should answer the new ambient message, then returns either `REPLY` or `NO_REPLY`.
 
-**Data flow**: The new message and recent history go in. The function builds a fenced JSON payload, wraps it in a user Message, creates a ModelRequest with the fixed system instructions and cost controls, and sends it through the metered model. It then searches the model’s answer for REPLY or NO_REPLY. A readable decision comes out; if no decision word is found, it raises an error instead of pretending to know.
+**Data flow**: It receives the new message and recent thread history. It builds a safe payload from them, wraps that payload in a model request with the classifier instructions, and sends it through the configured metered model. It then scans the model’s answer for a valid decision word and returns the last one it finds. If no valid word appears, it raises an error instead of guessing.
 
-**Call relations**: This method is the public action of AmbientReplyClassifier. It calls AmbientReplyClassifier._payload to prepare the thread context, then constructs the external Message and ModelRequest objects needed by the model interface. It hands the request to MeteredModel.complete and converts the model’s text response back into the small decision the surrounding chat surface needs.
+**Call relations**: A caller uses this before creating a full agent turn for an unmentioned reply. Inside, it calls `AmbientReplyClassifier._payload` to prepare the thread, constructs the chat `Message` and `ModelRequest`, then hands the request to `MeteredModel.complete`. Its result is the admission gate for the new turn.
 
 *Call graph*: calls 1 internal fn (_payload); 2 external calls (__init__, __init__).
 
 
-##### `AmbientReplyClassifier._payload`  (lines 131–147)
+##### `AmbientReplyClassifier._payload`  (lines 135–151)
 
 ```
 def _payload(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> str
 ```
 
-**Purpose**: This method builds the exact text shown to the classifier model as the thread evidence. It packages the recent history and new message as JSON, then places that JSON between matching fence lines so the model can clearly tell data from instructions.
+**Purpose**: This function packages the recent thread and the new message into a compact, safe JSON block for the classifier model. Its goal is to give the model enough context to decide without letting chat text masquerade as instructions.
 
-**Data flow**: The new AmbientMessage and a tuple of history messages go in. The method keeps only the latest allowed history messages, converts each message with _entry, serializes the result as compact JSON, and chooses a fence string that does not appear inside the payload. The output is one string containing the fence, the JSON, and the same fence again.
+**Data flow**: It receives the new message and the full available history. It keeps only the most recent configured number of history messages, converts each message with `_entry`, serializes everything as JSON, and surrounds it with matching fence lines. If the fence text already appears inside the JSON, it lengthens the fence until it is unique. The result is one string ready to place in the model request.
 
-**Call relations**: AmbientReplyClassifier.decide calls this right before creating the model request. Inside, it calls _entry to normalize each message and json.dumps to turn the Python data into JSON. Its output becomes the user-facing content of the classifier request, while the system prompt supplies the decision rules.
+**Call relations**: `AmbientReplyClassifier.decide` calls this right before asking the model for a decision. `_payload` calls `_entry` for message formatting and `json.dumps` for serialization, then hands the finished string back to `decide` as the user-facing content of the classifier request.
 
 *Call graph*: calls 1 internal fn (_entry); called by 1 (decide); 1 external calls (dumps).
 
 
 ### `core/src/ufo/surfaces/admission.py`
 
-`domain_logic` · `request handling and job admission`
+`domain_logic` · `request handling and turn admission`
 
-A “turn” is one unit of conversation work: a message comes in, the agent thinks, and a reply or final status is produced. This file makes turn creation safe and consistent. Without it, different parts of the system could accidentally skip limits, create duplicate turns, switch a conversation to the wrong agent, or race each other when several messages arrive at once.
+A "turn" is one unit of conversation work: a message comes in, the agent thinks, and a reply or result is produced. This file decides whether a new turn should be created, whether the message should be folded into an already-running turn, or whether the work must be parked or cancelled. It is like a reception desk with one ledger: every visitor is recorded in order, checked against the rules, and either sent to a room, asked to wait, or turned away with a reason.
 
-The main idea is simple: before any work is placed on the durable DBOS queue, admission takes a lock on the conversation row in the database. That lock is like a single checkout counter: only one caller at a time can assign the next sequence number, decide whether a live turn already exists, and record what should happen.
+The main rules live in `Admission._admit`. It locks the conversation row in the database so two messages cannot claim the same sequence number at the same time. It checks that the conversation is still bound to the expected agent, checks idempotency keys so repeated deliveries do not create duplicate turns, checks member seats, and asks the spend evaluator whether the workspace is allowed to spend more. If another turn is already live, a normal incoming message is stored as an inbound arrival for that live turn instead of starting separate work.
 
-If a conversation already has a live turn, most new messages are not given their own run. They are written into an inbound-message queue so the live turn can absorb them at a safe point. If no live turn exists, admission creates a new turn row. It then checks seats, spend limits, idempotency keys, and agent binding. Seat checks stop unseated members from speaking. Spend checks either allow the turn, park it for later, or cancel it with a message. Idempotency keys stop retries from creating duplicate turns.
-
-For durable surfaces, admission also creates a writeback row so the eventual reply will be delivered even if the original caller is gone. Finally, only queued turns are offered to DBOS for execution.
+When a turn is accepted and ready to run, this file writes the turn row, optionally writes a durable delivery row, and enqueues the turn in DBOS, the background workflow system. The wrapper classes give safer, narrower entry points: surfaces can admit member messages, while internal jobs can invoke turns without pretending to be a member.
 
 #### Function details
 
-##### `_refused`  (lines 83–94)
+##### `_refused`  (lines 87–98)
 
 ```
 def _refused(holds_work_already_done: bool, message: str) -> tuple[TurnStatus, TerminalFrame | None]
 ```
 
-**Purpose**: Decides what should happen when a turn is refused by a limit or gate. If the turn already represents paid-for work, it parks the turn instead of throwing away the result; otherwise it cancels the turn with a clear message.
+**Purpose**: This helper decides what should happen when a turn is not allowed to proceed. If the turn has not already produced valuable work, it creates a cancelled result with a clear message; if it carries already-paid-for work, it parks the turn instead of throwing that work away.
 
-**Data flow**: It receives a yes-or-no flag saying whether completed work is already attached, plus the refusal text. If work must be preserved, it returns a parked status and no final reply. If not, it creates a terminal frame, which is the stored final result for a turn, and returns a cancelled status with that frame.
+**Data flow**: It receives a yes-or-no flag saying whether work has already been done, plus the refusal message. If work must be preserved, it returns a parked status and no final reply. Otherwise it returns a cancelled status and a terminal frame containing the explanation.
 
-**Call relations**: Admission._admit calls this when a seat check or spending decision refuses a new turn. The returned status and optional terminal frame are then stored with the turn row so later readers can see whether the turn is waiting or cancelled.
+**Call relations**: The main admission flow calls this when a seat check or spend check refuses work. Its answer tells `Admission._admit` whether to write the new turn as parked for later retry or as cancelled so the caller can see the refusal.
 
 *Call graph*: called by 1 (_admit); 1 external calls (__init__).
 
 
-##### `Admission.admit_member`  (lines 102–127)
+##### `Admission.admit_member`  (lines 106–131)
 
 ```
 async def admit_member(self, workspace_id: UUID, conversation_id: UUID, body: str, speaker_member_id: UUID | None, idempotency_key: str | None=None, context: TurnContext | None=None, intent: ToolInten
 ```
 
-**Purpose**: Admits a message that came from a real member-facing surface, such as a chat interface. It enforces that prepared tool intents are tied to an actual speaking member and then sends the message through the shared admission path.
+**Purpose**: This is the public entry point for admitting a message spoken by a member. It validates that any prepared tool intent matches the actual message body, then sends the request into the shared admission path.
 
-**Data flow**: It receives the workspace, conversation, message body, optional speaker member, idempotency key, context, and optional intent. It first checks that an intent has a speaker and that the message body exactly matches the intent envelope. It then opens an observability span, a timing/logging wrapper for tracing work, and passes everything to Admission._admit as a member admission. It returns an Admitted result describing the turn and whether a new run opened.
+**Data flow**: It takes the workspace, conversation, message text, speaker member id, optional idempotency key, context, and optional intent. It checks that intents really came from a known speaker and that the serialized intent matches the message body. Then it opens an observability span and returns the `Admitted` result produced by `_admit`.
 
-**Call relations**: Admission.redispatch uses this when it needs to re-admit an old pending member message. Member-facing callers usually reach it through MemberAdmission.admit, while the heavy decision-making is delegated to Admission._admit.
+**Call relations**: Surfaces use this path when a real member speaks, and `Admission.redispatch` also uses it when it re-admits an older pending member message. It hands the real decision-making to `Admission._admit`, marking the admission as member-originated so member-only rules apply.
 
 *Call graph*: calls 1 internal fn (_admit); called by 1 (redispatch); 2 external calls (model_dump_json, span).
 
 
-##### `Admission.redispatch`  (lines 129–178)
+##### `Admission.redispatch`  (lines 133–182)
 
 ```
 async def redispatch(self, workspace_id: UUID, conversation_id: UUID) -> tuple[UUID, UUID] | None
 ```
 
-**Purpose**: Gives an old pending member message another chance to become work. This is used when a member message was left waiting because its original target turn was cancelled or no longer alive.
+**Purpose**: This function gives an older pending member message another chance to start work. It is used when a message was left waiting and now needs to be re-admitted safely without risking a duplicate.
 
-**Data flow**: It receives a workspace and conversation. It opens a database transaction, finds the oldest unconsumed inbound member message, and locks that row so another task cannot pick the same one at the same time. If the row has no idempotency key, it stamps one onto it. Then it calls admit_member with the saved body, speaker, key, and context. If that call starts a new run, it returns the new turn id together with the arrival row id; if there was nothing to do, or the message folded into an existing turn, it returns None.
+**Data flow**: It opens a database transaction, finds the oldest unconsumed inbound message in the conversation that came from a member, and locks that row. If the message has no idempotency key, it stamps one onto it. Then it calls `admit_member` with the stored body, speaker, key, and context. It returns the turn id and arrival id only if this re-admission opened a new run; otherwise it returns nothing.
 
-**Call relations**: This function calls Admission.admit_member so the retry follows exactly the same rules as a fresh member delivery. It reads and updates inbound_message rows through workspace_tx, and it rebuilds saved context using TurnContext.model_validate before handing the message back to admission.
+**Call relations**: This function sits between the stored inbound-message queue and normal member admission. Instead of inventing a special path, it routes the old message through `Admission.admit_member`, so the same seat, spend, idempotency, and folding rules apply as if the member had resent it.
 
 *Call graph*: calls 1 internal fn (admit_member); 4 external calls (model_validate, select, update, workspace_tx).
 
 
-##### `Admission.invoke`  (lines 180–245)
+##### `Admission.invoke`  (lines 184–255)
 
 ```
 async def invoke(self, workspace_id: UUID, conversation_id: UUID, agent_id: UUID, body: str, idempotency_key: str | None=None, context: TurnContext | None=None, on_behalf_of_member_id: UUID | None=Non
 ```
 
-**Purpose**: Admits an internal turn, such as a scheduled fire, extension invocation, or subagent result. It can also refuse to start if a member has spoken since the caller began waiting, which prevents both a timer and a member reply from resuming the same wait.
+**Purpose**: This is the public entry point for internal work that wants to wake or start a turn. It is used by jobs, scheduled fires, extension workflows, or subagent results rather than by a member directly.
 
-**Data flow**: It receives the workspace, conversation, asserted agent, message body, optional idempotency key, context, member authority, scheduling flags, preservation flag, and optional member watermarks. It passes these to Admission._admit. If _admit reports that a member already superseded the wait, this function returns None; otherwise it returns the admitted turn id.
+**Data flow**: It receives the workspace, conversation, expected agent, message body, optional idempotency key, context, and several flags that describe why the internal work is being admitted. It passes these values to `_admit`. If `_admit` reports that a member already spoke after the caller began waiting, this function returns `None`; otherwise it returns the admitted turn id.
 
-**Call relations**: AdmissionInvoker.invoke is the workspace-bound wrapper that normally calls this for jobs and extension code. This function itself does not perform the database work; it hands the whole request to Admission._admit and only translates the special superseded-member exception into a None result.
+**Call relations**: Internal callers use this instead of `admit_member` so they cannot claim to be a speaking member. It delegates the shared admission rules to `Admission._admit`, and it translates the private `_SupersededByMember` signal into the simpler result `None`.
 
 *Call graph*: calls 1 internal fn (_admit).
 
 
-##### `Admission._admit`  (lines 247–631)
+##### `Admission._admit`  (lines 257–686)
 
 ```
 async def _admit(self, workspace_id: UUID, conversation_id: UUID, asserted_agent_id: UUID | None, body: str, speaker_member_id: UUID | None, idempotency_key: str | None, context: TurnContext | None, o
 ```
 
-**Purpose**: This is the central admission engine. It decides whether an inbound item joins a live turn, creates a new turn, gets parked, gets cancelled, or is simply recognized as a retry of something already admitted.
+**Purpose**: This is the central admission engine. It decides whether an incoming message creates a new turn, joins a live turn, reuses an existing idempotent turn, gets parked, gets cancelled, or gets queued to run.
 
-**Data flow**: It receives all details about the proposed turn: workspace, conversation, agent assertion, body, speaker, idempotency key, context, source type, intent, seat/spend flags, and optional wait watermarks. Inside one database transaction, it locks the conversation, verifies the agent binding, checks the speaker, looks for duplicate turn or inbound-message records, checks whether a member has superseded a wait, and looks for an existing live turn. If folding into a live turn is allowed, it writes an inbound_message row. If a new turn is needed, it assigns the next sequence number, computes a stable turn id, checks seats and spending, inserts the turn, possibly creates a durable writeback row, and decides whether this turn should be enqueued now. After the transaction, it enqueues any turn that should run immediately and returns an Admitted result with the turn id, whether a run opened, and sometimes an arrival id.
+**Data flow**: It receives all information about the attempted admission: workspace, conversation, agent assertion, message body, speaker identity, idempotency key, context, and special internal flags. Inside one database transaction, it locks the conversation, verifies the agent binding, validates the speaker, updates the speaker timezone when provided, checks for prior work with the same idempotency key, optionally refuses if a member has spoken since a waiting watermark, looks for a live turn to fold into, checks seats, checks spend limits, assigns sequence numbers, writes turn or inbound-message rows, and records durable writeback rows when needed. After the transaction, it enqueues queued work when appropriate and returns an `Admitted` object describing what happened.
 
-**Call relations**: Admission.admit_member and Admission.invoke both funnel into this function, which is why all callers share the same rules. It calls _refused to turn refusals into stored statuses, uses Seats and SpendEvaluator to enforce access and budget rules, creates Admitted results for callers, and calls Admission._enqueue when a queued turn should be offered to the worker queue.
+**Call relations**: Both member admission and internal invocation funnel into this function. It calls `_refused` to turn seat or spend denials into parked or cancelled outcomes, and it calls `_enqueue` after the database commit when a turn should actually run. It is the file’s traffic controller: all narrower entry points exist mainly to prepare safe inputs for this shared decision point.
 
-*Call graph*: calls 2 internal fn (_enqueue, _refused); called by 2 (admit_member, invoke); 17 external calls (__init__, __init__, __init__, __init__, model_dump, model_validate, delete, exists, insert, select (+7 more)).
+*Call graph*: calls 2 internal fn (_enqueue, _refused); called by 2 (admit_member, invoke); 18 external calls (__init__, __init__, __init__, __init__, model_dump, model_validate, delete, exists, insert, select (+8 more)).
 
 
-##### `Admission._enqueue`  (lines 633–673)
+##### `Admission._enqueue`  (lines 688–728)
 
 ```
 async def _enqueue(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID, workflow_id: str | None=None) -> None
 ```
 
-**Purpose**: Places a queued turn onto the DBOS workflow queue so a worker can execute it. It also cleans up the database marker if enqueueing is interrupted or fails, so the turn can be retried later.
+**Purpose**: This function places an admitted queued turn onto the DBOS workflow queue so a worker can run it. It also repairs the database marker if enqueueing is interrupted or fails.
 
-**Data flow**: It receives the workspace id, conversation id, turn id, and optionally a workflow id. It builds DBOS enqueue options, including the queue name, workflow name, partition key, and app version, then asks DBOS to enqueue the turn. If the task is cancelled or enqueueing raises an error, it opens a transaction and clears dispatch_enqueued_at on the queued turn. On ordinary errors it also logs that enqueueing was deferred; on cancellation it re-raises the cancellation.
+**Data flow**: It receives the workspace id, conversation id, turn id, and optionally a workflow id. It builds queue options, using the conversation as the partition key so work for the same conversation is ordered. It asks DBOS to enqueue the turn. If the task is cancelled or enqueueing throws an error, it clears the turn’s `dispatch_enqueued_at` marker in the database so another attempt can try later; non-cancellation errors are also logged.
 
-**Call relations**: Admission._admit calls this after it has safely committed the turn or reawakened a parked turn. This separation matters because the database record is written first, then the external queue is notified; if notification fails, the database is marked so another dispatcher can try again.
+**Call relations**: `Admission._admit` calls this only after the admission transaction has decided a queued turn should be dispatched. `_enqueue` is deliberately separate from the database writes so the system can commit the durable admission first, then make a best-effort queue offer and recover if that offer fails.
 
 *Call graph*: called by 1 (_admit); 3 external calls (update, workspace_tx, log).
 
 
-##### `AdmissionInvoker.invoke`  (lines 684–709)
+##### `AdmissionInvoker.invoke`  (lines 739–764)
 
 ```
 async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, on_behalf_of_member_id: UUID | None=None, holds_work_alr
 ```
 
-**Purpose**: Provides a workspace-bound way for internal jobs and extensions to admit turns. Because the workspace is already fixed and there is no speaker argument, callers using this capability cannot pretend their turn was directly spoken by a member.
+**Purpose**: This is a workspace-bound wrapper for internal turn invocation. It lets jobs and extension workflows start or wake turns in one workspace without being able to choose a different workspace or impersonate a member speaker.
 
-**Data flow**: It receives a conversation, agent, message, and optional admission details such as idempotency key, context, member authority, scheduling flag, and wait watermarks. It adds the stored workspace id and forwards the request to Admission.invoke. The result is the new or existing turn id, or None if a member message already won the race.
+**Data flow**: It receives the conversation, agent, message, optional idempotency key, context, and internal admission options. It adds the wrapper’s stored workspace id and forwards everything to `Admission.invoke`. It returns the turn id from that call, or `None` if the invocation was superseded by a member message.
 
-**Call relations**: This is a thin capability wrapper around Admission.invoke. Jobs and extension workflows can be given this object instead of the full Admission object, which narrows what they are allowed to admit.
+**Call relations**: Code that should have internal-invocation power gets this wrapper rather than the full `Admission` object. The wrapper narrows what the caller can do, then hands the actual admission decision to `Admission.invoke`.
 
 
-##### `MemberAdmission.admit`  (lines 720–738)
+##### `MemberAdmission.admit`  (lines 775–793)
 
 ```
 async def admit(self, conversation_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None) -> Adm
 ```
 
-**Purpose**: Provides a workspace-bound way for member-facing surfaces to admit member messages. It forces every surface delivery to name the speaking member separately from the message text, so seat checks and member identity rules can be applied.
+**Purpose**: This is a workspace-bound wrapper for admitting member messages from a surface. It ensures surface code can submit only member-originated messages and must provide the speaker identity.
 
-**Data flow**: It receives a conversation, message, optional idempotency key, optional context, required speaker member id, and optional prepared intent. It adds the stored workspace id and forwards the request to Admission.admit_member. It returns the Admitted result, including the turn id and whether this delivery opened a new run or joined an existing one.
+**Data flow**: It receives the conversation, message, optional idempotency key, context, required speaker member id, and optional intent. It adds the wrapper’s stored workspace id and forwards the request to `Admission.admit_member`. It returns the resulting `Admitted` object, which says whether a new run opened or the message joined an existing turn.
 
-**Call relations**: Surfaces use this wrapper instead of calling the full Admission object directly. It hands off to Admission.admit_member, which then validates member-specific rules and delegates the main decision to Admission._admit.
+**Call relations**: Surfaces receive this limited capability instead of the full admission service. It keeps surface admissions on the member path, where `Admission.admit_member` and then `Admission._admit` apply member-specific checks such as speaker resolution and seat gating.
+
+
+### Cancellation and stop handling
+Stop requests use the shared cancellation path, notify live listeners, and may create a follow-up turn from already-sent member input.
+
+### `core/src/ufo/cancellation.py`
+
+`domain_logic` · `cancellation handling`
+
+A “turn” is a unit of work that may be running as a durable DBOS workflow, meaning DBOS remembers and can recover that work even after failures. Cancelling is tricky because a turn can have child turns, and stopping one workflow does not automatically stop its descendants. This file deliberately solves only one small, important problem: cancel exactly one turn in a safe order.
+
+The key rule is “cancel first, write cancelled second.” In everyday terms, it is like first calling the delivery driver to stop the trip, and only then marking the order as cancelled in the shop’s records. If the system crashes between those two steps, the database still shows the turn as unfinished, so later repair code can try again. What it avoids is the dangerous opposite: a database row that says “cancelled” even though the workflow was never told to stop.
+
+The function first checks the turn row in the database. If the turn is missing or already finished, it leaves it alone. Otherwise it asks DBOS to cancel the workflow for that turn id. Then it updates the database row to a cancelled terminal state, but only if the row is still unfinished. This protects against races where the turn finishes normally at the same time someone tries to cancel it. Finally, if the cancellation really changed the row, it emits a metric so monitoring can count cancelled turns.
+
+#### Function details
+
+##### `cancel_one_turn`  (lines 24–73)
+
+```
+async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool
+```
+
+**Purpose**: Cancels one turn safely and records that cancellation only after DBOS has been asked to stop the durable workflow. It returns true only when this call actually changed the turn from unfinished to cancelled.
+
+**Data flow**: It receives a DBOS client and a turn id. It reads the turn’s current status, profile, and parent id from the database; if the turn does not exist or is already finished, it returns false. If the turn is still active, it asks DBOS to cancel the workflow with that turn id, then writes a cancelled terminal record back to the turn row if it is still active. If that database write succeeds, it emits a cancellation metric using the turn’s profile information and returns true; if another process already finished the turn first, it returns false.
+
+**Call relations**: All cancellation paths are meant to use this function when they need to stop a single turn. Inside, it opens database transactions with `ufo.db.workspace_tx`, builds its read and write statements with SQLAlchemy, asks `DBOSClient.cancel_workflow_async` to stop the durable workflow, and reports the result through `ufo.o11y.emit_metric` after formatting the profile with `ufo.o11y.turn_profile`.
+
+*Call graph*: 6 external calls (cancel_workflow_async, select, update, workspace_tx, emit_metric, turn_profile).
 
 
 ### `core/src/ufo/surfaces/stop.py`
 
-`domain_logic` · `request handling`
+`orchestration` · `request handling`
 
-A “turn” is one running unit of conversation work. This file is the stop button’s back-end path for a member-facing surface, such as a chat screen. Its job is to make stopping a turn safe and predictable, even when other things are happening at the same time.
+This file is the “stop button” path for a conversation turn. A turn is one running stretch of work in a conversation. When a member asks to stop it, the system must be careful: it should only stop a turn that really belongs to that member’s conversation, it must record the cancellation durably, and it must wake up anyone watching the turn so they do not keep waiting.
 
-The main class, MemberStop, first checks the database to make sure the requested turn really belongs to the conversation the surface says it belongs to. This matters because stopping the wrong turn would be like pulling the emergency brake on someone else’s train. If the turn is not part of that conversation, it refuses the request.
+The main piece is `MemberStop`, which is given three collaborators: a DBOS client for durable background-work control, a hub for publishing live updates, and an admission object that can start or “redispatch” a follow-up turn if there is already a pending member message.
 
-If the turn is valid, it asks the shared cancellation system to cancel that one turn. If the turn had already ended, the cancellation does nothing and the method reports that nothing new was stopped. This makes repeated stop clicks harmless.
+The flow is deliberately ordered. First it looks in the database to confirm that the given turn belongs to the given conversation in the given workspace. This prevents one conversation from stopping another conversation’s work. Then it asks the shared cancellation primitive to cancel that one turn. If the turn had already finished, nothing more is done; this makes repeated stop presses harmless.
 
-When cancellation succeeds, it gives the admission system a chance to start a follow-up turn that the member may already have sent. If such a new turn is created, the file publishes a message to the hub saying which incoming message was absorbed into that new turn. Finally, it publishes a cancelled terminal message for the stopped turn, so any live stream or “tail” waiting on that turn wakes up immediately instead of waiting until it checks again.
+If cancellation succeeds, it may start a replacement turn for a pending message. If that happens, it publishes an “absorbed” notice for the message that founded the new turn. Finally, it publishes a cancelled terminal frame for the stopped turn. That final notice is like turning on the lights in a waiting room: any live stream or “tail” watching the old turn wakes up immediately and sees that it ended by cancellation.
 
 #### Function details
 
@@ -246,25 +278,28 @@ When cancellation succeeds, it gives the admission system a chance to start a fo
 async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> Stopped
 ```
 
-**Purpose**: Stops one running turn for a member, but only after proving that the turn belongs to the requested conversation. It cancels the turn, optionally starts the next waiting turn, and notifies live listeners that the stopped turn has ended as cancelled.
+**Purpose**: Stops one running turn on behalf of a member, but only after proving the turn belongs to the requested conversation. It records the cancellation, starts a follow-up turn if a pending member message should continue the conversation, and tells live listeners that the old turn is cancelled.
 
-**Data flow**: It receives a workspace ID, conversation ID, and turn ID. It reads the database inside a workspace transaction to find which conversation owns that turn in that workspace. If the owner does not match the requested conversation, it raises an error. If ownership matches, it asks the shared cancellation helper to cancel the turn. If the turn was already finished, it returns a Stopped result saying nothing ended. If cancellation succeeds, it asks admission to redispatch any waiting follow-up message into a new turn. When a new turn is founded, it publishes an Absorbed hub event for that new turn. It then publishes a Terminal hub event with the standard cancelled frame for the stopped turn, and returns a Stopped result saying the stop succeeded and, if applicable, naming the new turn.
+**Data flow**: It receives a workspace ID, conversation ID, and turn ID. It first reads the database to find which conversation owns that turn in that workspace. If the owner does not match the requested conversation, it raises an error instead of cancelling anything. If the turn is valid, it asks the shared cancellation routine to cancel it. If cancellation says the turn was already finished, it returns a `Stopped` result saying no new ending happened. If cancellation succeeds, it asks admission to redispatch any pending follow-up message. When a new turn is founded, it publishes a notice tying that new turn to the message it consumed. It then publishes a cancelled terminal notice for the stopped turn and returns a `Stopped` result that says the turn ended and includes the new turn ID if one was created.
 
-**Call relations**: This is the end-to-end stop workflow used when a surface asks to stop a member’s turn. It relies on the database transaction helper to safely check ownership, the shared cancel_one_turn primitive to perform durable cancellation, and the hub to notify live readers. It creates Stopped responses for the caller, Absorbed events when a follow-up turn is founded, and a Terminal event so listeners of the cancelled turn immediately learn that it is over.
+**Call relations**: This is the end-to-end stop workflow used by the member-facing surface. It opens a workspace database transaction to check ownership, hands the actual durable cancellation to the shared `cancel_one_turn` primitive, asks `Admission` to create the next turn when needed, and uses the hub to broadcast both the new turn’s founding message and the old turn’s cancelled ending. The cancelled terminal is published last so listeners of the stopped turn wake up only after any replacement turn is already visible.
 
 *Call graph*: 6 external calls (__init__, __init__, __init__, select, cancel_one_turn, workspace_tx).
 
 ## 📊 State Registers Touched
 
-- `reg-workspace-membership` — The roster of workspaces, members, admins, seats, and which people belong where.
-- `reg-agent-directory` — The saved assistants in each workspace and their settings, such as model behavior, sandbox size, and internet access.
-- `reg-model-catalog` — The lookup table of available AI models, providers, routing details, capabilities, and pricing metadata.
-- `reg-surface-installations` — Mappings from outside entry points like Slack, web, terminal, and hosted surfaces into workspaces, members, and agents.
-- `reg-inbound-message-log` — Incoming external messages saved until they are safely rendered, deduplicated, and admitted into a conversation.
-- `reg-conversation-transcript` — The durable history of conversations, messages, speakers, titles, context, and results.
-- `reg-turn-queue` — The durable waiting line and status record for each unit of agent work, from queued to running to finished or failed.
-- `reg-live-hub` — The live stream state that lets browsers, terminals, and operators watch progress and reconnect without losing updates.
-- `reg-scheduled-automation` — Future and repeating tasks, pauses, wakeups, and their last-run state for long-running automation.
-- `reg-human-interaction-requests` — Pending user questions, approval prompts, and credential-request prompts created by tools and resumed through surfaces.
-- `reg-execution-scope-context` — Per-request, per-job, and per-turn scoped context carrying the active workspace, member, agent, turn, permissions, credentials, billing, and service handles through core code.
-- `reg-inflight-cancellation-handles` — Live cancellation signals, workflow handles, and parent-child cancellation propagation state for active turns and delegated work before final durable status is written.
+- `reg-db-session` — The active database connection, transaction, and workspace-safe persistence context used while work is running.
+- `reg-workspace-roster` — The saved list of workspaces, members, admins, seats, and membership rules.
+- `reg-agent-definitions` — The saved assistant agents for each workspace, including their settings, tools, model choices, and provisioning source.
+- `reg-identity-context` — The current answer to who is acting, in which workspace, and on behalf of which member or agent.
+- `reg-conversation-state` — The durable conversation records, titles, audience, surface labels, sandbox links, and visible thread metadata.
+- `reg-transcript-state` — The saved message history and transcript snapshots that are read, compacted, updated, audited, and shown later.
+- `reg-turn-queue` — The durable queue of conversation turns, including admitted work, claimed work, failures, retries, and completion state.
+- `reg-cancellation-state` — The shared stop-and-recovery state used to cancel running turns and prevent abandoned work from continuing.
+- `reg-live-delivery` — The live stream and delivery state for partial replies, tool updates, terminal output, final status, and missed messages.
+- `reg-runtime-fleet` — The records of which runtime processes and workers are alive, what they own, and when they last checked in.
+- `reg-surface-ingress` — The shared records that connect external surfaces like web, Slack, shell, OAuth, and inbound messages to conversations and replies.
+- `reg-scheduled-work` — The saved jobs, scheduled tasks, pauses, monitors, due times, retry state, and duplicate-run guards.
+- `reg-spend-controls` — The spend caps, prepaid balances, price table fingerprints, and checks that decide whether work may continue.
+- `reg-observability` — The shared logs, traces, metrics, trace links, and sanitized diagnostic records used to understand system behavior.
+- `reg-ephemeral-cache-bus` — The selected Redis/cache/pub-sub backend and its ephemeral keys, locks, and connection state used to coordinate live delivery, workers, and shared runtime services.

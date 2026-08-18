@@ -1,289 +1,461 @@
-# Control database and Alembic preflight entrypoints  `stage-1.1`
+# Pack selection and deployment capability bundles  `stage-1.1`
 
-This stage is part of deployment and startup preparation, before the main application begins serving real traffic. Its job is to make sure the databases are in the right shape and that access rules are in place, instead of discovering problems during a live request.
+This stage is part of startup. Before the assistant begins work, the system chooses a named “pack,” which is like a prepacked toolbox for a certain setting. The extension store is the gatekeeper: it can search the catalog of available extensions, install one by recording it in a lockfile, and remove it later. That turns possible capabilities into the exact ones this deployment will load.
 
-The control package marker, __init__.py, is the small doorway that lets Python import the control database code. The schema.py file does the practical setup work for the control gateway. It creates or checks the PostgreSQL tables that the gateway depends on, making database preparation an intentional step. The rls.py file adds the safety fence around shared data. “Row-level security” means PostgreSQL checks each individual row and only lets a workspace see its own data. This file creates the application database role and applies those rules to public tables.
-
-The env.py file in the core schema migrations is the migration entrypoint. It connects Alembic, the tool that updates database structure over time, to the project’s expected schema and runs the needed changes. Together, these files prepare both structure and access boundaries before normal work starts.
+The pack files are the ready-made toolboxes. The local assistant pack enables the normal full assistant on local infrastructure. The billing pack adds billing setup so developers can test it locally. The hosted assistant pack selects features meant for managed cloud workspaces. The evaluation pack starts from the assistant tools, removes real broker connections, and adds fake test tools plus Docker support. The chief-of-staff pack focuses on Slack-driven work with meetings, notes, todos, people files, and logs. DSQA and GDPVal packs provide different evaluation capability sets. The sample pack is a small end-to-end proof that extensions, skills, and onboarding steps can be bundled correctly.
 
 ## Files in this stage
 
-### Package entrypoint
-The package marker makes the control database preparation modules importable.
+### Extension Store Foundation
+The extension store provides the mechanism for discovering, installing, and removing the extensions that packs later select.
 
-### `control/src/ufo_control/__init__.py`
+### `core/src/ufo/ext/store.py`
 
-`other` · `import time`
+`domain_logic` · `extension command handling`
 
-This is an empty package marker file. In Python, a folder can be treated as a package when it contains an `__init__.py` file. That means code elsewhere can write imports that start with `ufo_control`, and Python will know that this directory is part of the project’s import structure. Think of it like putting a label on a drawer: the drawer may contain many useful tools, but this label mainly tells people and the system how to find them. Because the file is empty, it does not run setup code, expose shortcuts, or change how the package behaves. Its value is structural: without it, some Python tools or older Python import modes might not recognize `ufo_control` as a normal package, which could make imports fail or behave inconsistently.
+This file supports commands like `ufoctl ext` that work with extensions. An extension catalog is like a shop shelf: it lists extensions that are available by name and version. The lockfile is like a receipt or packing list: it records exactly which extensions are pinned for the system to load, including a digest, which is a fingerprint of the installed package contents. That fingerprint matters because it makes the chosen extension version precise and repeatable.
 
+The file defines small data shapes for catalog entries and search results, then provides an `ExtensionStore` object that works over one catalog and one lockfile. Searching checks the catalog and marks which matching entries are already pinned. Installing first confirms the extension is listed in the catalog, refuses entries marked `disabled` because those are only meant for bundle creation, then checks that the Python package is actually installed in the current environment before writing a pin. Removing does the opposite: it checks the lockfile, errors if the extension is not pinned, and writes a new lockfile without it.
 
-### Control database setup
-The control gateway preflight prepares required tables and enforces workspace isolation through PostgreSQL row-level security.
-
-### `control/src/ufo_control/rls.py`
-
-`domain_logic` · `startup / database bootstrap`
-
-This file protects shared database tables so one workspace cannot accidentally see or change another workspace’s rows. PostgreSQL row-level security, or RLS, is a database feature that acts like a filter built into the table itself: even if a query asks for all rows, PostgreSQL only allows rows that match the current workspace setting.
-
-The file does two main jobs. First, it prepares a limited database role called `ufo_serve`, which is the role the running service should use instead of the more powerful owner role. Its password is derived from a secret seed, so the system can recreate it consistently without storing the password directly. The setup also grants the role the table and sequence permissions it needs, while keeping ownership and administration separate.
-
-Second, it walks through the public database tables and makes sure each one has the expected workspace policy. The policy compares a table’s workspace column with the database session setting `app.workspace_id`. The special `workspace` table uses its `id` column; other tables must have a `workspace_id` column. If a table lacks the needed column, setup fails rather than leaving the table unprotected.
-
-The code is careful about database locks. It sets short timeouts, checks whether a table already has the right policy before changing it, and reports who is holding a blocking lock if setup cannot continue.
+A key detail is that the store does not download or install Python packages itself. It only records installed extensions in the lockfile. Without this file, the project would lack the safe, consistent step that turns available extensions into the exact extension set the loader should boot with.
 
 #### Function details
 
-##### `owner_dsn`  (lines 22–26)
+##### `read_catalog`  (lines 48–49)
 
 ```
-def owner_dsn() -> str
+def read_catalog(path: Path) -> Catalog
 ```
 
-**Purpose**: Reads the database connection string for the powerful owner account from an environment variable. This is needed because role and policy setup must be done with privileges stronger than the normal application role.
+**Purpose**: Reads an extension catalog file from disk and turns it into a checked `Catalog` object. Someone would use this before searching or installing, so the store knows what extensions are available.
 
-**Data flow**: It looks in the process environment for `UFO_CONTROL_POSTGRES_OWNER_DSN`. If the value exists, it returns that string. If it is missing, it stops with a clear error so the system does not try to continue without the authority needed to secure the database.
+**Data flow**: It receives a file path. It reads the text at that path, parses the text as TOML, which is a human-readable configuration format, and validates the result against the catalog shape. It returns a `Catalog` containing the listed extensions.
 
-**Call relations**: This is a small entry helper for other startup code. Nothing in this file calls it directly, but external setup code can use it before calling the role or policy bootstrap functions.
+**Call relations**: This is the doorway from a catalog file into the in-memory store. It relies on the path object to read the file and on TOML parsing to understand the text; after that, other code can create an `ExtensionStore` with the returned catalog.
 
-
-##### `serve_password`  (lines 29–33)
-
-```
-def serve_password() -> str
-```
-
-**Purpose**: Creates the password for the limited `ufo_serve` database role from a secret seed. This avoids hard-coding the password while still making it stable across runs.
-
-**Data flow**: It reads `UFO_CONTROL_PG_ROLE_SEED` from the environment. It combines that seed with the fixed role name, hashes the result with SHA-256, and returns the hexadecimal password string. If the seed is missing, it raises an error because the service role cannot be safely created or used.
-
-**Call relations**: `ensure_serve_role` calls this when creating or updating the PostgreSQL role. `serve_dsn` calls it when building the connection string the application will use.
-
-*Call graph*: called by 2 (ensure_serve_role, serve_dsn); 1 external calls (sha256).
+*Call graph*: 2 external calls (read_text, loads).
 
 
-##### `serve_dsn`  (lines 36–37)
+##### `ufo_version`  (lines 52–53)
 
 ```
-def serve_dsn(postgres_host: str, app_database: str) -> str
+def ufo_version() -> str
 ```
 
-**Purpose**: Builds the database connection string for the limited service role. This is the connection the app should use when it wants PostgreSQL to enforce workspace boundaries.
+**Purpose**: Finds the installed version of the `ufo` package. The lockfile uses this as an anchor so the pinned extensions are tied to the UFO version that created or owns the lockfile.
 
-**Data flow**: It receives a PostgreSQL host and application database name. It asks `serve_password` for the derived password, then returns a connection URL containing the `ufo_serve` username, that password, the host, and the database name.
+**Data flow**: It takes no project data as input. It asks Python package metadata for the version of the installed `ufo` package and returns that version string.
 
-**Call relations**: This function depends on `serve_password` so the generated connection string always matches the password assigned by `ensure_serve_role`. It is meant to be called by startup or configuration code that needs the normal application database URL.
+**Call relations**: This helper is used by `ExtensionStore._write` when a lockfile does not already exist. In that case, `_write` needs a UFO version to put into the new lockfile before saving it.
 
-*Call graph*: calls 1 internal fn (serve_password).
-
-
-##### `ensure_serve_role`  (lines 40–64)
-
-```
-async def ensure_serve_role(admin_dsn: str) -> None
-```
-
-**Purpose**: Creates or updates the limited PostgreSQL role used by the service, then grants it the permissions it needs. This makes sure the app connects as a restricted user instead of as the database owner.
-
-**Data flow**: It receives an administrator database connection string. It derives the service password, connects to PostgreSQL, sets a lock timeout, creates or updates the `ufo_serve` role, grants role relationship permissions, sets idle transaction timeouts, grants access to public tables and sequences, and creates a related database if it does not already exist. It closes the database connection when finished.
-
-**Call relations**: This is one of the main setup routines in the file. It calls `serve_password` for the role credential, `_grant_serve_role` to apply table and sequence access, and `_ensure_database` to create the companion database when needed.
-
-*Call graph*: calls 3 internal fn (_ensure_database, _grant_serve_role, serve_password); 1 external calls (connect).
+*Call graph*: called by 1 (_write); 1 external calls (version).
 
 
-##### `bootstrap_policies`  (lines 67–94)
+##### `pin_for`  (lines 56–63)
 
 ```
-async def bootstrap_policies(dsn: str) -> None
+def pin_for(name: str) -> ExtensionPin
 ```
 
-**Purpose**: Checks every public table and installs the workspace row-level security policy where needed. This is the routine that turns the database schema into a workspace-safe schema.
+**Purpose**: Builds the exact lockfile pin for an extension that is already installed in the current Python environment. It prevents the store from pinning a name that exists in the catalog but is not actually available to run.
 
-**Data flow**: It receives a database connection string, connects to PostgreSQL, sets a short lock timeout, lists all public tables, and skips the Alembic migration-version table. For each remaining table, it first asks `_conformant` whether the existing policy is already correct. If not, it opens a short transaction and calls `_policy_for` to recreate the policy. If a database lock blocks the work too long, it asks `_lock_holders` who is blocking it and raises an error with that information.
+**Data flow**: It receives an extension name. It asks the extension loader what extensions have been discovered in the current environment. If the name is missing, it raises an error. If found, it takes the extension's declared version and calculates a digest, meaning a content fingerprint, from the installed package entry. It returns an `ExtensionPin` with the name, version, and digest.
 
-**Call relations**: This is the other main setup routine in the file. It coordinates the policy-checking path through `_conformant`, the policy-writing path through `_policy_for`, and the error-reporting path through `_lock_holders`.
+**Call relations**: `ExtensionStore.install` calls this after checking that the catalog allows the extension to be installed. `pin_for` then hands back the precise pin that `install` writes into the lockfile.
 
-*Call graph*: calls 3 internal fn (_conformant, _lock_holders, _policy_for); 1 external calls (connect).
-
-
-##### `_conformant`  (lines 97–125)
-
-```
-async def _conformant(connection: asyncpg.Connection, table: str) -> bool
-```
-
-**Purpose**: Checks whether one table already has exactly the workspace security policy this system expects. It lets setup skip unnecessary database changes when a table is already safe.
-
-**Data flow**: It receives an open database connection and a table name. It reads PostgreSQL’s system catalogs to see whether row-level security is enabled and whether the named policy has the expected condition, applies to all commands, and applies to the public role. It asks `_scope_column` which column should be used for this table. It returns `true` only if everything matches exactly; otherwise it returns `false`.
-
-**Call relations**: `bootstrap_policies` uses this as the fast inspection step before doing any table-changing work. When `_conformant` needs to know which column should define the workspace boundary, it hands that question to `_scope_column`.
-
-*Call graph*: calls 1 internal fn (_scope_column); called by 1 (bootstrap_policies); 1 external calls (fetchrow).
+*Call graph*: called by 1 (install); 3 external calls (__init__, discovered, extension_digest).
 
 
-##### `_lock_holders`  (lines 128–143)
+##### `ExtensionStore.search`  (lines 73–84)
 
 ```
-async def _lock_holders(connection: asyncpg.Connection, table: str) -> str
+def search(self, query: str) -> tuple[StoreListing, ...]
 ```
 
-**Purpose**: Explains who is currently holding a database lock on a table. This turns a vague timeout into a useful error message for operators.
+**Purpose**: Searches the catalog for extension names containing a query string and reports whether each match is already pinned in the lockfile. This is what lets a user see both availability and current install state in one result.
 
-**Data flow**: It receives an open database connection and a table name. It queries PostgreSQL’s lock and activity views for other sessions holding granted locks on that table. It formats their process id, username, state, transaction age, and a shortened query into a readable string. If no holder is visible, it returns a placeholder message saying so.
+**Data flow**: It receives a search string. It reads the current pins from the lockfile through `_pins`, collects the pinned names, then scans the catalog entries. For entries whose names contain the query, it creates `StoreListing` results with the catalog name, version, disabled flag, and an installed true-or-false value. It returns all matching listings as a tuple.
 
-**Call relations**: `bootstrap_policies` calls this only after a lock timeout. Its output is included in the raised error so the person running setup can see what is blocking the security update.
+**Call relations**: This is a read-only path through the store. It calls `_pins` to learn what is already selected, combines that with the catalog, and returns display-friendly search results without changing the lockfile.
 
-*Call graph*: called by 1 (bootstrap_policies); 1 external calls (fetch).
-
-
-##### `_grant_serve_role`  (lines 146–159)
-
-```
-async def _grant_serve_role(connection: asyncpg.Connection) -> None
-```
-
-**Purpose**: Gives the limited service role the practical permissions it needs on the public schema. It also adjusts default privileges so future tables do not automatically inherit unwanted direct grants.
-
-**Data flow**: It receives an open database connection. It runs a series of PostgreSQL permission commands: revoking certain default table and sequence privileges, granting schema usage, granting read/write access to existing public tables, and granting sequence usage. It does not return a value; it changes database permissions.
-
-**Call relations**: `ensure_serve_role` calls this after creating or updating the `ufo_serve` role. It is the permissions step in the role setup story.
-
-*Call graph*: called by 1 (ensure_serve_role); 1 external calls (execute).
+*Call graph*: calls 1 internal fn (_pins); 1 external calls (__init__).
 
 
-##### `_ensure_database`  (lines 162–165)
+##### `ExtensionStore.install`  (lines 86–96)
 
 ```
-async def _ensure_database(connection: asyncpg.Connection, name: str, owner: str) -> None
+def install(self, name: str) -> ExtensionPin
 ```
 
-**Purpose**: Creates a PostgreSQL database if it does not already exist. This is used to make sure a related database owned by the service role is present.
+**Purpose**: Pins one catalog extension into the lockfile so the loader can use it later. It also protects users from installing names that are not in the catalog, bundle-only entries, or packages missing from the current environment.
 
-**Data flow**: It receives an open database connection, a database name, and an owner role name. It checks PostgreSQL’s database list for that name. If the database is missing, it creates it with the requested owner. If it already exists, it leaves it alone.
+**Data flow**: It receives an extension name. It looks for that name in the catalog. If there is no entry, it raises an error. If the entry is disabled, it raises an error explaining that it is bundle-only. Otherwise it asks `pin_for` to create a precise pin from the installed package. It reads the existing pins, replaces any old pin with the same name, writes the updated set, and returns the new pin.
 
-**Call relations**: `ensure_serve_role` calls this near the end of role setup, after it has confirmed the service role exists. It keeps database creation idempotent, meaning repeated setup runs do not fail just because the database was already made.
+**Call relations**: This is the main write path for adding an extension. It calls `pin_for` to prove the extension is installed and get its fingerprint, uses `_pins` to preserve the rest of the lockfile, then hands the new pin set to `_write` to save it.
 
-*Call graph*: called by 1 (ensure_serve_role); 2 external calls (execute, fetchval).
-
-
-##### `_policy_for`  (lines 168–175)
-
-```
-async def _policy_for(connection: asyncpg.Connection, table: str) -> None
-```
-
-**Purpose**: Installs the workspace row-level security policy for one table. This is the step that actually changes a table so PostgreSQL enforces the workspace filter.
-
-**Data flow**: It receives an open database connection and a table name. It asks `_scope_column` which column should identify the workspace for that table. It builds a policy condition comparing that column to the session setting `app.workspace_id`, enables row-level security on the table, removes the old managed policy if present, and creates the new policy. It does not return a value; it changes the table definition.
-
-**Call relations**: `bootstrap_policies` calls this when `_conformant` says a table is missing the correct policy or has a drifted one. `_policy_for` relies on `_scope_column` so the same column choice is used for both checking and creating policies.
-
-*Call graph*: calls 1 internal fn (_scope_column); called by 1 (bootstrap_policies); 1 external calls (execute).
+*Call graph*: calls 3 internal fn (_pins, _write, pin_for).
 
 
-##### `_scope_column`  (lines 178–192)
+##### `ExtensionStore.remove`  (lines 98–102)
 
 ```
-async def _scope_column(connection: asyncpg.Connection, table: str) -> str
+def remove(self, name: str) -> None
 ```
 
-**Purpose**: Decides which column represents the workspace boundary for a table. This prevents the system from silently applying a security policy to the wrong field.
+**Purpose**: Removes an extension pin from the lockfile. This tells the loader that the extension should no longer be part of the selected extension set.
 
-**Data flow**: It receives an open database connection and a table name. If the table is the central `workspace` table, it returns `id` because each workspace row identifies itself. For any other table, it checks whether a `workspace_id` column exists. If it does, it returns `workspace_id`; if not, it raises an error because the table cannot be safely scoped to a workspace.
+**Data flow**: It receives an extension name. It reads the current pins from the lockfile. If none of them match the name, it raises an error because there is nothing installed to remove. Otherwise it builds a new pin list without that name and writes it back to the lockfile. It returns nothing.
 
-**Call relations**: Both `_conformant` and `_policy_for` call this. That means the code uses the same rule when deciding whether an existing policy is correct and when creating a new one.
+**Call relations**: This is the opposite of `ExtensionStore.install`. It uses `_pins` to inspect the current lockfile and `_write` to save the reduced pin list.
 
-*Call graph*: called by 2 (_conformant, _policy_for); 1 external calls (fetchval).
+*Call graph*: calls 2 internal fn (_pins, _write).
 
 
-### `control/src/ufo_control/schema.py`
+##### `ExtensionStore._pins`  (lines 104–105)
 
-`orchestration` · `deploy migration and gateway startup`
+```
+def _pins(self) -> tuple[ExtensionPin, ...]
+```
 
-This file is the gateway’s database “floor plan” for control data such as gateway claims, invites, and Slack connection records. Without it, a gateway replica could start serving requests while its required tables are missing, or two startup jobs could try to create the same table at the same time and one would crash with a database uniqueness error.
+**Purpose**: Reads the current extension pins from the lockfile, or returns an empty set of pins if there is no lockfile yet. It gives the rest of the store one simple way to ask, “what is currently selected?”
 
-The file defines the set of ledger tables the gateway depends on, the SQL statements that create the schema and tables, and a PostgreSQL advisory lock. An advisory lock is a database-level lock chosen by the application; here it works like a single key to the maintenance room, so only one schema-shaping process can make changes at once.
+**Data flow**: It uses the store's lockfile path. If the file exists, it reads and parses the lockfile, then returns its extension pins. If the file does not exist, it returns an empty tuple.
 
-The main migration function opens a database connection, starts one transaction, takes that lock, checks for an old invite table shape, drops that old table if needed, then runs all create-or-update statements. It also removes obsolete columns from the gateway store table. The important behavior is that running the migration again is safe: if the database is already up to date, it should do nothing meaningful.
+**Call relations**: `search`, `install`, and `remove` all call this before deciding what to show or change. It hides the difference between “no lockfile yet” and “a lockfile with no extensions,” so those higher-level operations can stay simpler.
 
-The second function is the safety check used by the gateway. It does not create anything. It only verifies that every required ledger table exists, and if not, it tells the operator to run the migration command before starting the gateway.
+*Call graph*: called by 3 (install, remove, search); 1 external calls (read_lockfile).
+
+
+##### `ExtensionStore._write`  (lines 107–111)
+
+```
+def _write(self, pins: tuple[ExtensionPin, ...]) -> None
+```
+
+**Purpose**: Writes a complete lockfile with a supplied set of extension pins. It preserves the existing lockfile's UFO version when possible, and creates a new version anchor when writing the first lockfile.
+
+**Data flow**: It receives the full tuple of pins that should be saved. It checks whether the lockfile already exists. If it does, it reads the existing UFO version from it; if not, it asks `ufo_version` for the currently installed UFO version. It builds a new `Lockfile` object with that version and the supplied pins, then writes it to disk.
+
+**Call relations**: `install` and `remove` call this after they have decided the new desired pin set. `_write` is the final saving step: it gathers the lockfile version anchor, creates the lockfile data, and hands it to the loader's lockfile writer.
+
+*Call graph*: calls 1 internal fn (ufo_version); called by 2 (install, remove); 3 external calls (__init__, read_lockfile, write_lockfile).
+
+
+### Assistant Deployment Packs
+These packs define local, billing-enabled, hosted, and evaluation-focused assistant capability bundles.
+
+### `packs/assistant_dev/ufo_pack_assistant.py`
+
+`config` · `startup/config load`
+
+A “pack” is a convenient preset. Instead of asking someone to enable dozens of features one by one, this file gives that whole set a single name: “assistant”. When this pack is activated, the system knows exactly which extensions belong in this assistant setup.
+
+The file does not implement the features itself. It does not contain the web search engine, memory store, browser tools, connector code, document creation, coding helper, or debugger. Instead, it names those extension packages so the larger system can load them. An everyday analogy is a recipe card: the card does not grow vegetables or bake bread, but it lists the ingredients needed to make the meal.
+
+The important detail is that this pack is for a locally carried assistant. It includes memory, search, connectors, sandbox browser support, code execution, document tools, scheduled tasks, user-created skills, the web portal, debugging tools, and model/provider support. It also includes index and embedding extensions used for local recall. Because the pack only lists extensions, each extension remains responsible for its own tools, setup instructions, and behavior.
 
 #### Function details
 
-##### `shape_control_schema`  (lines 46–68)
+##### `pack`  (lines 52–53)
 
 ```
-async def shape_control_schema(dsn: str) -> None
+def pack() -> Pack
 ```
 
-**Purpose**: This function brings the control database schema up to the current expected shape. It is meant to be run by the migration command before gateway replicas begin serving traffic.
+**Purpose**: Creates the pack definition that tells the system the pack’s name, version, and which extensions to activate. Someone would use this when the system is loading available packs and needs a concrete Pack object for the “assistant” preset.
 
-**Data flow**: It receives a database connection string, uses asyncpg to connect to PostgreSQL, and opens a transaction so the changes are grouped together. Inside that transaction it takes the schema lock, checks whether an old invite table is missing the email-domain column, drops that outdated invite table if necessary, runs the schema and table creation statements, and removes obsolete columns. It returns nothing, but the database is left in the current expected shape; the connection is always closed afterward.
+**Data flow**: The function reads the file’s constants: the pack name, its version, and the tuple of extension names. It passes those values into the Pack constructor, which turns the plain list of settings into a Pack object. The result is returned to the caller; the function does not change files, network state, or other data.
 
-**Call relations**: This is the active migration path described by the file: the deployment or operator runs it before the gateway starts. Its only external handoff in the call graph is to asyncpg.connect, which gives it the live database connection it needs before it issues SQL statements.
+**Call relations**: When the pack-loading part of the system asks this module for its pack, this function is the small handoff point. It delegates the actual object creation to Pack.__init__, giving it the name, version, and extension list so the broader system can later activate that bundle.
 
-*Call graph*: 1 external calls (connect).
-
-
-##### `require_control_schema`  (lines 71–80)
-
-```
-async def require_control_schema(dsn: str) -> None
-```
-
-**Purpose**: This function checks that the required control ledger tables already exist. It protects the running gateway from silently serving requests against an unprepared database.
-
-**Data flow**: It receives a database connection string, connects to PostgreSQL, and asks the database whether each required table name is registered. If every table is present, it finishes without returning a value. If any table is missing, it raises an error that names the absent table and tells the operator to run `ufo-control migrate`; the connection is closed either way.
-
-**Call relations**: This is the gateway-side guard that complements the migration function. Instead of creating tables itself, it calls asyncpg.connect to inspect the database, then either allows startup to continue or stops it with a clear instruction to run the migration step first.
-
-*Call graph*: 1 external calls (connect).
+*Call graph*: 1 external calls (__init__).
 
 
-### Application migration bridge
-The Alembic environment connects deployment-time migration execution to the core application schema.
+### `packs/assistant_billing/ufo_pack_assistant_billing.py`
 
-### `core/src/ufo/schema/migrations/env.py`
+`config` · `config load`
 
-`orchestration` · `database migration run`
+A “pack” here is a named bundle of system extensions that can be switched on together. The regular local assistant pack is meant for day-to-day development, so it does not include Metronome, the external billing and usage-metering service. The hosted assistant pack does include Metronome, but it also brings in other hosted-only services that are not useful on a laptop. This file fills the gap between those two choices.
 
-Database migrations are controlled changes to the shape of a database, such as adding a table or renaming a column. This file is the setup script Alembic uses when a migration command runs. Without it, Alembic would not know how to connect to the project’s database or what schema metadata to compare against.
+It creates an `assistant_billing` pack by taking all the extensions from the normal assistant pack and adding one more extension: `metronome`. That makes it possible to test the hosted onboarding action called “Set up billing” in a local environment. Without this pack, a developer could see that billing action in the product flow, but a local deployment would not have the billing service available to complete it.
 
-The file starts by importing the project’s table metadata, which is the application’s map of what the database should look like. It then defines two steps. First, it creates an asynchronous database engine from Alembic’s configuration. An engine is the object SQLAlchemy uses to open database connections. Second, once connected, it hands that connection to Alembic so Alembic can run migration scripts inside a transaction. A transaction is like a safety envelope: either the migration work is committed together, or it can be rolled back if something goes wrong.
-
-There is one important detail for SQLite databases. SQLite has limits around changing existing tables, so the file asks Alembic to use “batch” mode when the database dialect is SQLite. In plain terms, Alembic uses a safer table-copying approach for changes SQLite cannot do directly.
-
-At the bottom, the file immediately runs the async setup. This means loading this migration environment starts the migration process.
+This pack is intentionally opt-in. Turning it on also enables billing-related jobs, such as activating billing and shipping usage or seat-count information. Those jobs need real credentials for Metronome and Stripe, so the file’s comments warn developers to use sandbox or test-mode keys. In everyday terms, this file is like a special “local rehearsal” switch: it lets the team practice the billing path safely before using the real stage.
 
 #### Function details
 
-##### `run_migrations`  (lines 11–18)
+##### `pack`  (lines 25–26)
 
 ```
-def run_migrations(connection: Connection) -> None
+def pack() -> Pack
 ```
 
-**Purpose**: This function gives Alembic the live database connection and the project’s schema map, then tells it to run the migration steps. It is the moment where the migration tool is prepared with everything it needs to change the database safely.
+**Purpose**: This function builds and returns the pack definition for `assistant_billing`. It is used when the system asks this file what extensions should be enabled for the local assistant-with-billing setup.
 
-**Data flow**: It receives an already-open database connection. It reads the database type from that connection and compares it with the project’s table metadata. It configures Alembic with those pieces, opens a transaction, runs the migration scripts, and returns nothing after the database work has been attempted.
+**Data flow**: It reads the fixed pack name, version, and extension list defined in this file. It then creates a `Pack` object containing that information, including all normal assistant extensions plus `metronome`, and returns that object to the caller.
 
-**Call relations**: The async setup function `run` opens the connection and uses SQLAlchemy’s sync bridge to call `run_migrations`. Inside, `run_migrations` hands control to Alembic by configuring the context, starting a transaction, and then asking Alembic to run the migrations.
+**Call relations**: When the pack system loads this file, it calls `pack` to get the bundle description. Inside, `pack` hands the name, version, and extensions to `Pack.__init__`, which turns those plain values into the structured pack object the rest of the system can use.
 
-*Call graph*: 3 external calls (begin_transaction, configure, run_migrations).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `run`  (lines 21–26)
+### `packs/assistant_hosted/ufo_pack_assistant_hosted.py`
+
+`config` · `config load / startup`
+
+This file is like a packing list for the hosted version of the assistant. It does not implement Slack, memory, browser automation, billing, or research itself. Instead, it names all the pieces that should be switched on together when a workspace chooses the hosted assistant pack.
+
+The pack combines many assistant abilities: memory and recall, web research, browser tools, document generation, scheduled tasks, coding help, connectors to outside services, Slack support, usage metering, and more. The important hosted-specific idea is that some heavy infrastructure is supplied by managed backends. For example, memory indexing uses Turbopuffer rather than a local index, live frames use Redis, browser sessions use Browserbase-hosted Chrome, and code sandboxes use E2B.
+
+It also includes one shipped skill, `customer-onboarding-help`. A skill here is a packaged set of assistant knowledge or behavior. This one gives the hosted assistant a curated, read-only source of onboarding facts, so it can answer common workspace setup questions without depending on a customer’s own memory store.
+
+Without this file, the system would not know what “assistant_hosted” means. The hosted deployment would have no single, declarative recipe for which capabilities, providers, and bundled skills belong together.
+
+#### Function details
+
+##### `pack`  (lines 66–72)
 
 ```
-async def run() -> None
+def pack() -> Pack
 ```
 
-**Purpose**: This function prepares the database connection that migrations need. It reads Alembic’s configured database settings, opens an asynchronous SQLAlchemy connection, runs the migration work through that connection, and then closes the engine cleanly.
+**Purpose**: Builds and returns the pack description for the hosted assistant. The system uses this description to learn the pack’s name, version, enabled extensions, and bundled skill folders.
 
-**Data flow**: It starts with Alembic’s configuration, especially settings whose names begin with `sqlalchemy.`. It turns those settings into an asynchronous database engine, opens a connection, passes that connection into `run_migrations`, and finally disposes of the engine so resources are released.
+**Data flow**: It starts with constants in this file: the pack name, version, extension names, the skills directory, and the skill names. It turns each skill name into a `SkillSpec`, which points at that skill’s folder on disk. It then puts everything into a `Pack` object and returns it to whoever is loading packs.
 
-**Call relations**: This is the top-level async migration routine, started at the bottom of the file with `asyncio.run`. It calls SQLAlchemy’s `async_engine_from_config` to build the engine, then hands the live connection to `run_migrations`, which performs the Alembic-specific migration work.
+**Call relations**: When the pack-loading part of the system asks this module for its pack definition, `pack` creates the final manifest object. To do that, it calls `SkillSpec.__init__` for each bundled skill path, then calls `Pack.__init__` to assemble the full hosted-assistant recipe.
 
-*Call graph*: 1 external calls (async_engine_from_config).
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### `packs/assistant_eval/ufo_pack_assistant_eval.py`
+
+`config` · `startup / pack selection`
+
+This file is a small but important safety and setup switch for running assistant evaluations. In normal product use, the assistant may know about real external tool brokers such as Composio or Pipedream. In an evaluation run, those real services are not available and should not be advertised as usable tools. If they stayed in the pack, the assistant could waste time trying to use decoy integrations instead of using the controlled test environment.
+
+The file builds an `assistant_eval` pack by reusing the regular assistant pack, but filtering out the real broker extensions named `composio` and `pipedream`. It then adds two evaluation-specific extensions: `eval_env`, which provides deterministic fake services like email, calendar, and code search, and `docker`, which lets the sandbox run each conversation workspace as a real mounted directory. In plain terms, this file swaps the assistant from “real-world tool mode” into “test lab mode.”
+
+The main idea is separation. Fake evaluation providers should not be included in the product pack, because registered tools can show up even before permission checks. Likewise, real broker providers should not be included in the evaluation pack, because they do not have real keys there and would only confuse the run.
+
+#### Function details
+
+##### `pack`  (lines 26–27)
+
+```
+def pack() -> Pack
+```
+
+**Purpose**: This function creates the pack description that the system can load when an evaluation deploy selects the `assistant_eval` pack. It names the pack, gives it a version, and lists the extensions that should be active.
+
+**Data flow**: It reads the constants in this file: the pack name, version, and prepared extension list. It passes those values into `Pack`, which creates a manifest-like object describing what this pack contains. The result is returned to the caller so the larger system can register or load the pack.
+
+**Call relations**: When the pack system asks this module what it provides, `pack` is the function that answers. It hands the final name, version, and filtered extension list to `Pack.__init__`, which turns them into the standard pack object used by the rest of the system.
+
+*Call graph*: 1 external calls (__init__).
+
+
+### Role-Specific Workspace Pack
+The chief-of-staff pack bundles Slack-centered management tools, skills, and workspace workflows.
+
+### `packs/chief_of_staff/ufo_pack_chief_of_staff.py`
+
+`config` · `startup / pack discovery`
+
+This file is like the label and packing list on a toolbox. It does not perform the chief-of-staff work itself. Instead, it tells the platform how to assemble that working environment.
+
+The pack is meant to support a manager who wants one Slack-based front door for many daily activities: syncing meeting notes and Slack activity into memory, preparing for 1:1 meetings, triaging observations into follow-up work, and improving the workflow over time. To make that possible, the file names the outside capabilities the pack depends on, such as connectors for external services, Slack, scheduled tasks, todos, memory, search indexing, and self-improvement tools.
+
+It also points to four skill folders: setup, sync, prep, and triage. A “skill” here is a packaged workflow the system can run or expose to the user. The setup skill is deliberately conversational, meaning the user grants access and configures things through chat rather than through hidden code.
+
+Without this file, the system would not know that this pack exists, which extensions to enable for it, or which skill directories belong to it. The actual workflows might be present on disk, but they would not be advertised as one coherent chief-of-staff package.
+
+#### Function details
+
+##### `pack`  (lines 40–46)
+
+```
+def pack() -> Pack
+```
+
+**Purpose**: Builds and returns the pack definition that the UFO system can load. It gathers the pack name, version, required extensions, and skill folder locations into one object.
+
+**Data flow**: It starts with constants defined in this file: the pack name, version, extension names, the skills directory, and the list of skill names. For each skill name, it creates a SkillSpec that points to that skill’s folder. It then puts all of that into a Pack object and returns it to the caller.
+
+**Call relations**: When the larger system wants to discover or load this pack, it calls this function to get the pack’s manifest. Inside, the function hands each skill path to SkillSpec so the platform knows where each workflow lives, then hands the complete collection of metadata to Pack so the platform can treat it as one installable bundle.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### Evaluation Capability Packs
+The DSQA and GDPVal packs provide named evaluation bundles with different project and workflow extensions enabled.
+
+### `packs/dsqa_eval/ufo_pack_dsqa_eval.py`
+
+`config` · `pack discovery and setup`
+
+This file is like a menu of tool bundles for a DSQA evaluation setup. DSQA likely needs different levels of capability depending on the task: a basic core setup, a search-enabled setup, and a browser-enabled setup. Rather than repeating those extension lists in many places, this file names them once and exposes three simple functions that build the matching Pack objects.
+
+The shared version number is set at the top, so all three packs stay in sync. The basic pack includes indexing, OpenAI-style embedding, and OpenRouter access. The search pack adds research and Exa search support on top of that. The browser pack adds browser automation and a Chrome sandbox on top of the search pack. This layering matters because it makes the relationship between the packs easy to see: each larger pack is the smaller one plus extra abilities.
+
+When another part of the system wants one of these bundles, it calls the matching function. That function creates a Pack, which is a manifest object describing the pack name, version, and enabled extensions. Without this file, the system would not have these named DSQA evaluation bundles in one clear place, and setup code would have to know the exact extension combinations itself.
+
+#### Function details
+
+##### `core_pack`  (lines 13–14)
+
+```
+def core_pack() -> Pack
+```
+
+**Purpose**: Builds the smallest DSQA evaluation pack. This is useful when the system needs only the core abilities: default indexing, embeddings, and OpenRouter access.
+
+**Data flow**: It starts with the fixed core pack name, shared version number, and core extension list defined in the file. It passes those values into the Pack constructor, which turns them into a Pack object. The result is a ready-to-use manifest for the core DSQA setup.
+
+**Call relations**: When setup or pack discovery asks for the core DSQA bundle, this function is the small factory that creates it. Its only handoff is to Pack.__init__, which receives the name, version, and extension list and builds the manifest object.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `search_pack`  (lines 17–18)
+
+```
+def search_pack() -> Pack
+```
+
+**Purpose**: Builds the DSQA pack that includes search and research features. Someone would use this when evaluation work needs to look things up beyond the basic indexed and embedded data.
+
+**Data flow**: It takes the predefined search pack name, shared version, and search extension list. That list includes the base extensions plus Exa and research support. It sends these values into the Pack constructor and returns the resulting Pack object.
+
+**Call relations**: When the system needs the search-capable DSQA bundle, this function creates the manifest for it. It delegates the actual Pack object creation to Pack.__init__, giving it the chosen name, version, and extensions.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `browser_pack`  (lines 21–22)
+
+```
+def browser_pack() -> Pack
+```
+
+**Purpose**: Builds the most capable DSQA evaluation pack, including browser automation. This is useful for tasks that need search plus the ability to open and interact with web pages in a controlled browser environment.
+
+**Data flow**: It uses the predefined browser pack name, shared version number, and browser extension list. That list builds on the search pack and adds browser and sandboxed Chrome support. It passes everything to the Pack constructor and returns the completed Pack object.
+
+**Call relations**: When setup or pack discovery needs the browser-enabled DSQA bundle, this function supplies it. It hands the pack details to Pack.__init__, which packages them into the manifest object used by the rest of the system.
+
+*Call graph*: 1 external calls (__init__).
+
+
+### `packs/gdpval_eval/ufo_pack_gdpval_eval.py`
+
+`config` · `config load / pack discovery`
+
+This file is like a menu for GDPVal evaluation setups. Instead of making users remember many individual extension names, it offers four ready-made bundles: a core bundle, a document-focused bundle, a research-focused bundle, and a full bundle with everything included.
+
+A “Pack” is a manifest object: a simple description of a package the system can load. Each Pack has a name, a version, and a list of extensions. Extensions are optional capabilities, such as indexing, embeddings, document tools, browser tools, or research tools. The shared base extensions are included in every pack, so all GDPVal setups start with the same foundation. The more specialized packs add document-related extensions, research-related extensions, or both.
+
+Without this file, someone setting up GDPVal evaluation would need to assemble these capability lists by hand, which would be easy to get wrong or make inconsistent across runs. This file keeps those combinations explicit, repeatable, and named. The functions do not run the evaluation themselves; they create small Pack objects that other parts of the system can discover and load when they need a particular setup.
+
+#### Function details
+
+##### `core_pack`  (lines 13–14)
+
+```
+def core_pack() -> Pack
+```
+
+**Purpose**: Creates the smallest GDPVal pack. It includes only the shared base capabilities needed across all GDPVal evaluation setups.
+
+**Data flow**: It starts with the fixed core pack name, the shared version string, and the base extension list. It puts those into a new Pack object and returns that object to whoever is asking what the core setup should contain.
+
+**Call relations**: When the pack system asks for the core GDPVal setup, this function builds a Pack by calling Pack.__init__. It does not call any other project logic; it simply hands back the manifest that says, “load these base extensions.”
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `documents_pack`  (lines 17–22)
+
+```
+def documents_pack() -> Pack
+```
+
+**Purpose**: Creates a GDPVal pack for document-oriented work. It includes the base capabilities plus tools for documents, an interactive Python-style workspace, and coding support.
+
+**Data flow**: It reads the fixed document pack name, the shared version, the base extensions, and the document extension list. It combines the two extension lists, places them into a Pack object, and returns the finished manifest.
+
+**Call relations**: When a document-capable GDPVal setup is needed, this function is the recipe used to build it. It calls Pack.__init__ with the combined extension list, then hands the resulting Pack back to the pack-loading machinery.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `research_pack`  (lines 25–30)
+
+```
+def research_pack() -> Pack
+```
+
+**Purpose**: Creates a GDPVal pack for research-oriented work. It includes the base capabilities plus tools for web research, browsing, and browser-based sandbox work.
+
+**Data flow**: It takes the fixed research pack name, the shared version, the base extensions, and the research extension list. It joins the base and research extensions into one ordered bundle, creates a Pack object from them, and returns it.
+
+**Call relations**: When the system or a user wants the research version of the GDPVal setup, this function provides the manifest. Its only handoff is to Pack.__init__, which turns the name, version, and extension list into a Pack object.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `full_pack`  (lines 33–38)
+
+```
+def full_pack() -> Pack
+```
+
+**Purpose**: Creates the most complete GDPVal pack. It includes the base capabilities, the document tools, and the research tools all together.
+
+**Data flow**: It starts with the fixed full pack name and version, then combines the base, document, and research extension lists. It passes that complete list into a new Pack object and returns the resulting all-in-one manifest.
+
+**Call relations**: When the fullest GDPVal environment is requested, this function builds that configuration. It calls Pack.__init__ to create the Pack, then returns it so the broader pack system can load every listed extension.
+
+*Call graph*: 1 external calls (__init__).
+
+
+### Sample Pack
+The sample pack demonstrates the pack system end to end with a small extension, skill, and onboarding bundle.
+
+### `packs/sample_pack/ufo_pack_sample.py`
+
+`config` · `pack discovery and onboarding`
+
+This is a conformance sample: a tiny but real pack that exercises the same public path a normal installed pack would use. In everyday terms, it is like a test plug-in that must fit through the same doorway as every real plug-in. If this file stops working, it suggests the pack boundary has been broken.
+
+The file names the pack, gives it a version, points to one bundled extension called "sample", and points to a skill folder on disk. It also defines an onboarding step. An onboarding step is a setup action that runs when the pack is activated, such as recording that the pack has been initialized.
+
+The important behavior is that onboarding writes to the pack's scoped store through the public `ExtensionContext`. That store is durable project storage, not just a fake log message. This means tests can later read back the same value through the same public surface the real system uses. The `pack()` function is the entry point the pack loader looks for: it returns a `Pack` object describing everything this pack contributes.
+
+#### Function details
+
+##### `_setup`  (lines 25–26)
+
+```
+async def _setup(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: This is the pack's onboarding action. It records a small marker saying the sample pack has been onboarded, so the system can prove that pack setup ran and wrote to real storage.
+
+**Data flow**: It receives an `ExtensionContext`, which is the pack's access point to shared services such as its scoped store. It writes the key `pack:onboarded` with the value `{"pack_onboarded": true}` into that store. It returns nothing, but it changes durable stored state.
+
+**Call relations**: This function is not called directly in this file. Instead, `pack()` places it inside an `OnboardingStep`, and the pack system calls it later when that onboarding step runs.
+
+
+##### `pack`  (lines 29–36)
+
+```
+def pack() -> Pack
+```
+
+**Purpose**: This is the public entry point for the pack loader. It builds and returns the description of the sample pack: its name, version, bundled extension, skill folder, and onboarding step.
+
+**Data flow**: It reads constants from this file, such as the pack name, version, bundled extension name, skill path, and onboarding name. It wraps the skill path in a `SkillSpec`, wraps `_setup` in an `OnboardingStep`, and returns a `Pack` object containing all of that information.
+
+**Call relations**: When the system discovers or activates this pack, it calls `pack()` to learn what the pack contributes. Inside that construction, it calls `SkillSpec.__init__` to describe the skill, `OnboardingStep.__init__` to describe the setup action, and `Pack.__init__` to bundle the whole pack description together.
+
+*Call graph*: 3 external calls (__init__, __init__, __init__).
