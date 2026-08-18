@@ -161,7 +161,7 @@ export function PromptInputTextarea({
         }
         onPaste?.(event);
       }}
-      className={cn("w-full", className)}
+      className={cn("w-full max-narrow:min-h-(--size-control)", className)}
     />
   );
 }

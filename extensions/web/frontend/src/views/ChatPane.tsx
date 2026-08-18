@@ -58,7 +58,10 @@ export function ChatPane({
       current={title ?? agentName(agent.name)}
       actions={
         !conversationOnly && slots.phase === "ready" && slots.payload.slots.length ? (
-          <div className="flex items-center gap-sm" aria-label="Conversation slots">
+          <div
+            className="flex items-center gap-sm max-narrow:flex-wrap"
+            aria-label="Conversation slots"
+          >
             {slots.payload.slots.map((entry) => (
               <Button
                 key={entry.id}
@@ -87,7 +90,12 @@ export function ChatPane({
           slot && "grid-cols-(--grid-slot) max-narrow:grid-cols-1",
         )}
       >
-        <div className="flex min-h-0 min-w-0 flex-col">
+        <div
+          className={cn(
+            "flex min-h-0 min-w-0 flex-col",
+            conversationId && slot && "max-narrow:invisible",
+          )}
+        >
           {header}
           <Chat
             agent={agent}

@@ -122,6 +122,10 @@ export function MessageScrollerButton({
       data-slot="message-scroller-button"
       direction="end"
       behavior={travelled}
+      /* The name rides `aria-label`, as every other icon-only act in the portal states its own: a
+         label held in the box as text has to be clipped to a pixel to keep it off the screen, and
+         a caller that hands its own words needs no label from here. */
+      aria-label={children === undefined ? "Jump to bottom" : undefined}
       className={cn(
         "absolute start-1/2 bottom-2xl z-10 -translate-x-1/2 rtl:translate-x-1/2",
         "border-edge bg-surface text-ink hover:bg-fill",
@@ -137,19 +141,16 @@ export function MessageScrollerButton({
       {...props}
     >
       {children ?? (
-        <>
-          <svg viewBox="0 0 12 12" aria-hidden className="size-(--size-icon)">
-            <path
-              d="M3 4.5 6 7.5 9 4.5"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          <span className="sr-only">Jump to bottom</span>
-        </>
+        <svg viewBox="0 0 12 12" aria-hidden className="size-(--size-icon)">
+          <path
+            d="M3 4.5 6 7.5 9 4.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
       )}
     </MessageScrollerPrimitive.Button>
   );

@@ -130,10 +130,21 @@ export function usePageAct(act: ReactNode | null): ReactNode {
 
 /** The band that narrows the records: which family of them to show, on the page's own left edge and
  *  a band clear of both the title above and the records below. The order they are in is not here —
- *  it sits on the head of the column it orders, where the member is already pointing. */
+ *  it sits on the head of the column it orders, where the member is already pointing.
+ *
+ *  A phone fits one such control on a line, so below the narrow breakpoint they wrap rather than
+ *  share: two rows of choices on one line leave each of them a strip too narrow to read a label
+ *  in. */
 export function PageToolbar({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-(--size-control) shrink-0 items-center gap-sm">{children}</div>
+    <div
+      className={cn(
+        "flex h-(--size-control) shrink-0 items-center gap-sm",
+        "max-narrow:h-auto max-narrow:flex-wrap",
+      )}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -227,7 +238,11 @@ export function RecordPanel({
  *  `note` is what the record says about itself in passing: a model, a slot, the kind of thing it
  *  is. `actions` are the acts on the record, and they stand at the far end as pills so a row of
  *  them reads as one band of controls rather than as chrome tucked under a heading. Alignment is
- *  on the box, not the baseline: a pill and a word share a centre, never a baseline. */
+ *  on the box, not the baseline: a pill and a word share a centre, never a baseline.
+ *
+ *  A phone holds the name and the acts on one line only by hiding some of the acts past an edge
+ *  that marks nothing, so the band stacks below the narrow breakpoint the way `PageHeader` does:
+ *  the name keeps its line and the acts wrap among themselves on the one beneath it. */
 export function PaneHeader({
   parent,
   current,
@@ -240,7 +255,12 @@ export function PaneHeader({
   actions?: ReactNode;
 }) {
   return (
-    <div className="box-content flex min-h-(--size-control) items-center gap-md border-b border-edge px-2xl py-lg">
+    <div
+      className={cn(
+        "box-content flex min-h-(--size-control) items-center gap-md border-b border-edge px-2xl py-lg",
+        "max-narrow:flex-col max-narrow:items-stretch",
+      )}
+    >
       <Breadcrumb className="min-w-0">
         <BreadcrumbList className="flex-nowrap">
           {parent ? (
@@ -263,7 +283,11 @@ export function PaneHeader({
           </BreadcrumbItem>
         </BreadcrumbList>
       </Breadcrumb>
-      {actions ? <div className="ml-auto flex items-center gap-sm">{actions}</div> : null}
+      {actions ? (
+        <div className="ml-auto flex items-center gap-sm max-narrow:ml-0 max-narrow:flex-wrap">
+          {actions}
+        </div>
+      ) : null}
     </div>
   );
 }

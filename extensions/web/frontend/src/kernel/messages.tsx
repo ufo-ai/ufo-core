@@ -394,6 +394,11 @@ function Said({
 
 const MARKDOWN_MEDIA_TYPE = "text/markdown";
 
+/** A file's name is the whole of the control that opens it, and a name set in a small line is 15px
+ *  tall. At a phone width the control keeps the control height as the box a finger has to land on,
+ *  which the name itself does not decide. */
+const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-narrow:items-center";
+
 /** What a reply's turn shared, under the words that shared it. A file that is itself a picture is
  *  drawn as one — part of the answer, and pressing it goes to `onOpen` where the screen has an
  *  artifacts sidebar; every other file is a card on a row that scrolls sideways rather than a
@@ -418,12 +423,17 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
                     <button
                       type="button"
                       onClick={onOpen}
-                      className="cursor-pointer border-0 bg-transparent p-0 text-inherit"
+                      className={cn(
+                        "cursor-pointer border-0 bg-transparent p-0 text-inherit",
+                        TAP_FLOOR,
+                      )}
                     >
                       {file.filename}
                     </button>
                   ) : file.url ? (
-                    <a href={file.url}>{file.filename}</a>
+                    <a href={file.url} className={TAP_FLOOR}>
+                      {file.filename}
+                    </a>
                   ) : (
                     file.filename
                   )}

@@ -378,7 +378,13 @@ export function pageFits(minWidth: string): boolean {
   return shell + tracks <= DESKTOP;
 }
 
+/** The floor one table declares. It rides a custom property rather than `min-width` itself, because
+ *  a phone stacks the table into records and lifts the floor the tracks needed. */
+export function declaredFloor(table: Element): string {
+  return (table as HTMLTableElement).style.getPropertyValue("--table-floor");
+}
+
 /** Every table on a screen, by the floor it declares. */
 export function tableFloors(): string[] {
-  return [...document.querySelectorAll("table")].map((table) => table.style.minWidth);
+  return [...document.querySelectorAll("table")].map(declaredFloor);
 }

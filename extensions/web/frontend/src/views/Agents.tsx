@@ -125,6 +125,10 @@ export function Agents({
         className={cn(
           "flex min-h-0 flex-col gap-sm overflow-y-auto",
           "border-r border-edge bg-sidebar px-sm py-2xl max-narrow:border-r-0",
+          /* The pane covers this index on a narrow screen, so the index stops answering while
+             it is covered: a row behind the cover is still a tab stop and still a row a reader
+             reads out, and neither states where the member actually is. */
+          selected && "max-narrow:invisible",
         )}
       >
         {newAgent && mainAgent ? (
@@ -154,6 +158,10 @@ export function Agents({
                     "px-sm py-xs text-left text-inherit",
                   )}
                 >
+                  {/* Both facts are read in the row's own ink rather than the soft tone: soft ink
+                      clears the contrast floor over the pane's surface and not over the fill an
+                      open or hovered row draws, and these two words are the smallest text in the
+                      rail. Size and the mono face carry the hierarchy instead. */}
                   <Avatar>
                     <AvatarFallback>
                       <AgentIcon name={agent.icon} className="size-(--size-glyph)" />
@@ -162,11 +170,9 @@ export function Agents({
                   <span className="flex min-w-0 flex-1 flex-col gap-2xs">
                     <span className="flex w-full items-baseline gap-sm">
                       <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
-                      {agent.main ? <span className="text-small text-ink-soft">{MAIN}</span> : null}
+                      {agent.main ? <span className="text-small">{MAIN}</span> : null}
                     </span>
-                    <span className="w-full truncate font-mono text-small text-ink-soft">
-                      {agent.model}
-                    </span>
+                    <span className="w-full truncate font-mono text-small">{agent.model}</span>
                   </span>
                 </button>
               </li>

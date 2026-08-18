@@ -100,7 +100,7 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--color-field": String.raw`var\(--bkgd-200\)`,
     "--color-edge": String.raw`var\(--bkgd-300\)`,
     "--color-fill": String.raw`var\(--bkgd-200\)`,
-    "--color-link": String.raw`var\(--accent-primary\)`,
+    "--color-link": String.raw`color-mix\(in srgb, var\(--accent-primary\) 80%, var\(--text-primary\)\)`,
   };
   for (const [token, step] of Object.entries(basis)) {
     expect(new RegExp(`${token}:\\s*${step}`).test(css)).toBe(true);
@@ -258,7 +258,7 @@ test("the reading plane's tokens survive into the built sheet", () => {
   expect(css).toContain("--pulse-hi:color-mix(insrgb,var(--accent-secondary)");
   expect(css).toContain("--shadow-raised:");
   expect(css).toContain("box-shadow:var(--shadow-raised)");
-  expect(css).toContain("--color-link:var(--accent-primary)");
+  expect(css).toContain("--color-link:color-mix(insrgb,var(--accent-primary)80%,var(--text-primary))");
   // Each accent tints the pane at one weight, so a status reads the same in both schemes.
   expect(css).toContain("--color-affirm:color-mix(insrgb,var(--accent-primary)15%,var(--bkgd-100))");
   expect(css).toContain(

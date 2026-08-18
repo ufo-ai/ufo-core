@@ -5,7 +5,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
-import { App, RAIL_NARROW } from "@/App";
+import { App, NARROW } from "@/App";
 import { agentName } from "@/lib/agentName";
 import {
   bumpChat,
@@ -337,7 +337,7 @@ test("the query holding the narrow rail's groups open is the theme's own breakpo
   const theme = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
   const declared = /--breakpoint-narrow:\s*(\d+)px/.exec(theme);
   expect(declared).not.toBeNull();
-  expect(RAIL_NARROW).toBe("(width < " + declared![1] + "px)");
+  expect(NARROW).toBe("(width < " + declared![1] + "px)");
 });
 
 test("bumping a conversation moves it to the top", () => {

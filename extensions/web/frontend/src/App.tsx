@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconAdjustments,
   IconBrandSlack,
   IconChevronRight,
+  IconMenu2,
   IconMessageCircle,
   IconTerminal2,
+  IconX,
 } from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
@@ -334,20 +337,22 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
     <Viewer.Provider value={member.email}>
       <MainAgentProvider agents={agents}>
         <TooltipProvider>
-          <div className="grid h-dvh grid-rows-[auto_1fr]">
+          <div className="grid h-dvh grid-cols-1 grid-rows-[auto_1fr]">
             <TopBar
               route={route}
               member={member}
               agents={agents}
+              mainAgent={mainAgent}
               onHome={openHome}
               onAgents={openAgents}
+              onNewChat={openNewChat}
               onSection={(section) => placeSection(section, {}, "push")}
               onWorkspace={() => placeWorkspace("team", {}, "push")}
               onAdmin={openAdmin}
             />
             <div
               className={cn(
-                "grid min-h-0",
+                "grid min-h-0 grid-cols-1",
                 inChat(route.kind) &&
                   "grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
               )}
@@ -402,12 +407,18 @@ function inChat(kind: Route["kind"]): boolean {
   return kind === "home" || kind === "chat" || kind === "new-chat" || kind === "conversation-slot";
 }
 
+/** A place the bar reaches, named once and read twice: the row at a desk width and the drawer at a
+ *  phone width. Two lists would let the drawer fall a destination behind the bar. */
+type Destination = { label: string; current: boolean; onSelect: () => void };
+
 function TopBar({
   route,
   member,
   agents,
+  mainAgent,
   onHome,
   onAgents,
+  onNewChat,
   onSection,
   onWorkspace,
   onAdmin,
@@ -415,64 +426,180 @@ function TopBar({
   route: Route;
   member: Member;
   agents: Agent[];
+  mainAgent: Agent | null;
   onHome: () => void;
   onAgents: () => void;
+  onNewChat: (agentId: string) => void;
   onSection: (section: Section) => void;
   onWorkspace: () => void;
   onAdmin: () => void;
 }) {
+  const [menu, setMenu] = useState(false);
+  const narrow = useNarrow();
+
+  /** A drawer left open while the window grows past the breakpoint would trap focus behind a
+   *  hamburger the layout no longer draws. */
+  useEffect(() => {
+    if (!narrow) setMenu(false);
+  }, [narrow]);
+
+  const leading: Destination[] = [
+    { label: "Chat", current: inChat(route.kind), onSelect: onHome },
+    {
+      label: "Apps",
+      current: route.kind === "agents" || route.kind === "agent",
+      onSelect: onAgents,
+    },
+    ...SECTIONS.map((section) => ({
+      label: SECTION_VIEWS[section].label,
+      current: route.kind === "section" && route.section === section,
+      onSelect: () => onSection(section),
+    })),
+  ];
+  const workspace: Destination = {
+    label: "Workspace",
+    current: route.kind === "workspace",
+    onSelect: onWorkspace,
+  };
+
   return (
     <header className="flex items-center gap-lg border-b border-edge bg-sidebar px-2xl py-md max-narrow:gap-md max-narrow:px-lg">
+      <button
+        type="button"
+        aria-label="Menu"
+        aria-expanded={menu}
+        onClick={() => setMenu(true)}
+        className="hidden size-(--size-control) shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 text-inherit hover:bg-fill max-narrow:flex"
+      >
+        <IconMenu2 className="size-(--size-glyph)" aria-hidden />
+      </button>
       <span
         role="img"
         aria-label="ufo"
-        className="h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current"
+        className="h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current max-narrow:hidden"
         style={{ mask: `url(${logo}) center / contain no-repeat` }}
       />
       <nav aria-label="Primary" className="flex min-w-0 flex-1 items-center">
         <ul className="m-0 flex min-w-0 flex-1 list-none items-center gap-xs overflow-x-auto p-0">
-          <li>
-            <BarButton current={inChat(route.kind)} onClick={onHome}>
-              Chat
-            </BarButton>
-          </li>
-          <li>
-            <BarButton
-              current={route.kind === "agents" || route.kind === "agent"}
-              onClick={onAgents}
-            >
-              Apps
-            </BarButton>
-          </li>
-          {SECTIONS.map((section) => (
-            <li key={section}>
-              <BarButton
-                current={route.kind === "section" && route.section === section}
-                onClick={() => onSection(section)}
-              >
-                {SECTION_VIEWS[section].label}
+          {leading.map((place) => (
+            <li key={place.label} className="max-narrow:hidden">
+              <BarButton current={place.current} onClick={place.onSelect}>
+                {place.label}
               </BarButton>
             </li>
           ))}
-          <li>
+          {/* Search stays on the bar below the breakpoint: it is the one destination a member
+              reaches mid-thought, and the drawer would put it a tap further away. */}
+          <li className="max-narrow:ml-auto">
             <Spotlight
               agents={agents}
               className={cn(BAR_BUTTON, "px-md")}
               onOpen={(hash) => (location.hash = hash)}
             />
           </li>
-          <li className="ml-auto">
-            <BarButton current={route.kind === "workspace"} onClick={onWorkspace}>
-              Workspace
+          <li className="ml-auto max-narrow:hidden">
+            <BarButton current={workspace.current} onClick={workspace.onSelect}>
+              {workspace.label}
             </BarButton>
           </li>
         </ul>
       </nav>
       <AccountMenu member={member} onAdmin={onAdmin} />
+      <NavDrawer
+        open={menu}
+        onClose={() => setMenu(false)}
+        mainAgent={mainAgent}
+        onNewChat={onNewChat}
+        destinations={[...leading, workspace]}
+      />
     </header>
   );
 }
 
+/** The bar's destinations at a phone width, where six of them will not sit on one row. It carries
+ *  the same list and the same current mark the bar does, and picking one both moves and shuts:
+ *  a drawer still standing over the page it just reached states nothing about where the member is. */
+function NavDrawer({
+  open,
+  onClose,
+  mainAgent,
+  onNewChat,
+  destinations,
+}: {
+  open: boolean;
+  onClose: () => void;
+  mainAgent: Agent | null;
+  onNewChat: (agentId: string) => void;
+  destinations: Destination[];
+}) {
+  return (
+    <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-10 bg-scrim animate-appear" />
+        <DialogPrimitive.Content
+          data-slot="nav-drawer"
+          aria-describedby={undefined}
+          className={cn(
+            "fixed inset-y-0 left-0 z-10 w-sidebar overflow-y-auto",
+            "bg-sidebar border-r border-edge p-lg",
+            "flex flex-col gap-2xl animate-slide-in",
+          )}
+        >
+          <header className="flex h-(--size-control) shrink-0 items-center gap-md">
+            <DialogPrimitive.Title asChild>
+              <span
+                role="img"
+                aria-label="ufo"
+                className="h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current"
+                style={{ mask: `url(${logo}) center / contain no-repeat` }}
+              />
+            </DialogPrimitive.Title>
+            <DialogPrimitive.Close asChild>
+              <Button size="icon" className="ml-auto" aria-label="Close">
+                <IconX className="size-icon" aria-hidden />
+              </Button>
+            </DialogPrimitive.Close>
+          </header>
+          {mainAgent ? (
+            <Button
+              variant="send"
+              size="bar"
+              className="w-full"
+              onClick={() => {
+                onNewChat(mainAgent.id);
+                onClose();
+              }}
+            >
+              New conversation
+            </Button>
+          ) : null}
+          <nav aria-label="Primary">
+            <ul className="m-0 flex list-none flex-col gap-xs p-0">
+              {destinations.map((place) => (
+                <li key={place.label}>
+                  <button
+                    type="button"
+                    aria-current={place.current}
+                    onClick={() => {
+                      place.onSelect();
+                      onClose();
+                    }}
+                    className={cn(
+                      "flex h-(--size-row) w-full items-center rounded-full border-0 bg-transparent px-lg text-left text-label text-inherit hover:bg-fill",
+                      place.current && "bg-fill",
+                    )}
+                  >
+                    {place.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
+  );
+}
 
 const BAR_BUTTON =
   "flex h-(--size-row) items-center whitespace-nowrap rounded-full border-0 bg-transparent px-lg text-label text-inherit hover:bg-fill";
@@ -513,7 +640,7 @@ function AccountMenu({ member, onAdmin }: { member: Member; onAdmin: () => void 
         <button
           type="button"
           aria-label={member.email}
-          className="flex shrink-0 rounded-full border-0 bg-transparent p-0 data-[state=open]:outline data-[state=open]:outline-edge"
+          className="flex shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 max-narrow:size-(--size-control) data-[state=open]:outline data-[state=open]:outline-edge"
         >
           <Avatar>
             <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
@@ -586,7 +713,9 @@ function ChatSidebar({
       aria-label="Conversations"
       className="flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0"
     >
-      <ul className="m-0 flex list-none flex-col gap-px px-sm py-0 max-narrow:flex-row max-narrow:items-center max-narrow:overflow-x-auto max-narrow:p-0">
+      {/* The drawer carries this act below the breakpoint, where a full-width pill above the rail
+          spends a row of a phone screen on a control the hamburger already reaches. */}
+      <ul className="m-0 flex list-none flex-col gap-px px-sm py-0 max-narrow:hidden">
         <li>
           {mainAgent ? (
             <Button
@@ -606,7 +735,7 @@ function ChatSidebar({
         </h2>
         <RailSettings sort={sort} onSort={onSort} shown={shown} onShown={onShown} />
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0">
+      <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:py-0 max-narrow:scroll-fade-x">
         <RailList
           rail={rail}
           route={route}
@@ -827,7 +956,9 @@ function LinkedPane({
           readable && slot && "grid-cols-(--grid-slot) max-narrow:grid-cols-1",
         )}
       >
-        <div className="flex min-h-0 min-w-0 flex-col">
+        <div
+          className={cn("flex min-h-0 min-w-0 flex-col", readable && slot && "max-narrow:invisible")}
+        >
           <PaneHeader
             parent={{ label: agentName(agent.name), onGo: () => onOpenAgent(agent.id) }}
             current={subject(conversation, viewer)}
@@ -938,15 +1069,14 @@ function RailSettings({
   );
 }
 
-export const RAIL_NARROW = "(width < 720px)";
+export const NARROW = "(width < 720px)";
 
-/** The rail draws no group heading in the narrow layout, so a group shut there would hold its rows
- *  behind a control the layout never draws. Below the breakpoint every group stands open, and what
- *  the member shut is waiting for them at the width that can reopen it. */
-function useNarrowRail(): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia(RAIL_NARROW).matches);
+/** Whether the shell is drawing its phone layout, which both the bar's drawer and the rail's
+ *  groups turn on. */
+function useNarrow(): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
   useEffect(() => {
-    const query = window.matchMedia(RAIL_NARROW);
+    const query = window.matchMedia(NARROW);
     const answer = () => setNarrow(query.matches);
     query.addEventListener("change", answer);
     return () => query.removeEventListener("change", answer);
@@ -976,7 +1106,10 @@ function RailList({
   onRetry: () => void;
 }) {
   const now = new Date();
-  const narrow = useNarrowRail();
+  /** The rail draws no group heading in the narrow layout, so a group shut there would hold its
+   *  rows behind a control the layout never draws. Below the breakpoint every group stands open,
+   *  and what the member shut is waiting for them at the width that can reopen it. */
+  const narrow = useNarrow();
   const groups = railGroups(rail.rows, sort, shown, now);
   const standing = railShut(
     shut,
@@ -1078,7 +1211,7 @@ function RailRow({
       onClick={onClick}
       className={cn(
         "flex h-(--size-row) w-full items-center gap-xs rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
-        "max-narrow:w-auto max-narrow:whitespace-nowrap",
+        "max-narrow:w-auto max-narrow:max-w-sidebar max-narrow:whitespace-nowrap",
         current && "bg-fill",
       )}
     >

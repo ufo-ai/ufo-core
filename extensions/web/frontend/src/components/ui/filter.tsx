@@ -30,10 +30,26 @@ export function Segmented({
   onPick: (value: string) => void;
 }) {
   const list = useRef<HTMLDivElement>(null);
-  const [pill, setPill] = useState({ left: 0, width: 0 });
+  const [pill, setPill] = useState({ left: 0, top: 0, width: 0, height: 0 });
   useLayoutEffect(() => {
-    const active = list.current?.querySelector<HTMLElement>('[aria-selected="true"]');
-    if (active) setPill({ left: active.offsetLeft, width: active.offsetWidth });
+    const row = list.current;
+    const active = row?.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (!row || !active) return;
+    /* The pill takes the picked choice's whole box, line included: a phone wraps the row, and a
+       pill placed by its left edge alone would sit on the first line under a choice on the second. */
+    setPill({
+      left: active.offsetLeft,
+      top: active.offsetTop,
+      width: active.offsetWidth,
+      height: active.offsetHeight,
+    });
+    /* A row wider than the screen scrolls, and the pill is the only mark of which choice is
+       picked — so the picked one is brought into the row's own view rather than left past an
+       edge, where the row states nothing at all. */
+    const before = active.offsetLeft - row.scrollLeft;
+    const after = active.offsetLeft + active.offsetWidth - row.scrollLeft - row.clientWidth;
+    if (before < 0) row.scrollLeft += before;
+    else if (after > 0) row.scrollLeft += after;
   }, [value, segments]);
   return (
     <div
@@ -44,15 +60,19 @@ export function Segmented({
       className={cn(
         "relative flex items-stretch gap-hair overflow-x-auto",
         "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+        /* A phone shows every choice whole, on as many lines as that takes — the treatment the top
+           nav and the pane's own act row already take there. A choice left half past a scrolling
+           edge is both unreadable and too small to press. */
+        "max-narrow:flex-wrap",
       )}
     >
       <span
         aria-hidden
         className={cn(
-          "absolute inset-y-0 rounded-full bg-fill",
-          "transition-[left,width] duration-100 ease-control motion-reduce:transition-none",
+          "absolute rounded-full bg-fill",
+          "transition-[left,top,width,height] duration-100 ease-control motion-reduce:transition-none",
         )}
-        style={{ left: pill.left, width: pill.width }}
+        style={{ left: pill.left, top: pill.top, width: pill.width, height: pill.height }}
       />
       {segments.map((segment, index) => {
         const active = value === segment.value;

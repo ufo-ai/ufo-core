@@ -115,7 +115,11 @@
   --color-edge: var(--bkgd-300);
   --color-edge-strong: var(--text-secondary);
 
-  --color-link: var(--accent-primary);
+  /* A link's words are read, so the accent alone is not enough of one: #0095FF over the pane reads
+     at 2.96:1 and over a fill at 2.81:1, under the 3:1 a text tone answers for. The accent held
+     towards the text step keeps the hue the comps link in and carries both schemes, since the step
+     it is held towards is the one the scheme already picked. */
+  --color-link: color-mix(in srgb, var(--accent-primary) 80%, var(--text-primary));
 
   --color-fill: var(--bkgd-200);
   --color-fill-strong: var(--bkgd-300);
@@ -151,6 +155,16 @@
     from {
       opacity: 0;
       scale: 0.97;
+    }
+  }
+
+  /* The nav drawer arrives from the edge it is anchored to, so the motion states where it came
+     from and where dismissing it puts it back. */
+  --animate-slide-in: slide-in 0.14s var(--ease-control);
+
+  @keyframes slide-in {
+    from {
+      translate: -100% 0;
     }
   }
 
@@ -780,4 +794,137 @@
 
 .typeset > :first-child {
   margin-block-start: 0;
+}
+
+/* A table read at a phone width. The tracks are stated in pixels, so a table whose floor is wider
+   than the screen holds its width and the column it is read in scrolls — and a column that scrolls
+   out of the frame is a column the member cannot see is there: `Public Internet` printed `Publi`,
+   `Allowed` printed `Allow`, and a row's own acts stood past the edge with nothing to say so.
+
+   Below the narrow breakpoint every stated column stacks instead, into the shape a record's own
+   pane already takes: one line per field, the head's label soft on the left, the value in ink
+   against the right edge, and the whole record ruled off the next. The value wraps rather than
+   cutting, because a stacked record is read down its own screen and has no column rhythm to keep.
+   Each label rides a custom property the table writes from its head, since a cell's generated
+   content cannot reach the row above it for the word.
+
+   The head keeps only the cells that are controls. A stacked cell states its own label, so the row
+   of names is noise — but the order the read is taken in is stated nowhere else on the screen.
+
+   This is written outside every layer for the reason `typeset` below is: the cells are classed in
+   Tailwind's own utilities — `truncate`, `w-full`, `w-(--size-fact-column)`, `min-w-(--table-floor)`
+   — and `@layer utilities` outranks `@layer components` whatever the selectors weigh. */
+@media (width < theme(--breakpoint-narrow)) {
+  [data-slot="table"][data-stacks] {
+    display: block;
+    min-width: 0;
+
+    & > thead {
+      display: block;
+    }
+
+    & > thead > tr {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--spacing-2xl);
+      height: auto;
+    }
+
+    & th {
+      display: none;
+    }
+
+    & th:has(button) {
+      display: block;
+      width: auto;
+      padding: var(--spacing-sm) 0;
+    }
+
+    & > tbody {
+      display: block;
+    }
+
+    & > tbody > tr {
+      display: block;
+      height: auto;
+      padding-block: var(--spacing-sm);
+      border-bottom: 1px solid var(--color-edge);
+    }
+
+    & td {
+      display: flex;
+      align-items: baseline;
+      justify-content: flex-end;
+      gap: var(--spacing-sm);
+      width: auto;
+      height: auto;
+      min-height: var(--size-record);
+      padding: 0;
+      border-bottom: 0;
+      overflow: visible;
+      color: var(--color-ink);
+      text-align: right;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    /* A field the record has nothing to say for takes no line: an act a row does not carry and a
+       value that is not there both leave the cell empty, and a blank pitch in a stacked record reads
+       as a missing label rather than as an absent value. */
+    & td:empty {
+      display: none;
+    }
+
+    /* The label holds the left edge and everything the cell draws stays one group against the right,
+       so a name and the marker beside it read as one value rather than as two columns. */
+    & td::before {
+      flex: none;
+      margin-inline-end: auto;
+      color: var(--color-ink-soft);
+    }
+
+    & td:nth-child(1)::before {
+      content: var(--table-label-1, "");
+    }
+
+    & td:nth-child(2)::before {
+      content: var(--table-label-2, "");
+    }
+
+    & td:nth-child(3)::before {
+      content: var(--table-label-3, "");
+    }
+
+    & td:nth-child(4)::before {
+      content: var(--table-label-4, "");
+    }
+
+    & td:nth-child(5)::before {
+      content: var(--table-label-5, "");
+    }
+
+    & td:nth-child(6)::before {
+      content: var(--table-label-6, "");
+    }
+
+    & td:nth-child(7)::before {
+      content: var(--table-label-7, "");
+    }
+
+    & td:nth-child(8)::before {
+      content: var(--table-label-8, "");
+    }
+
+    /* The one cell that is not a field of a record: what a narrowed table says when nothing is left
+       stands on its own, under no label. */
+    & td[colspan] {
+      justify-content: flex-start;
+      color: var(--color-ink-soft);
+      text-align: left;
+
+      &::before {
+        content: none;
+      }
+    }
+  }
 }

@@ -10,6 +10,11 @@ import { Moment } from "@/lib/moments";
 import type { ConversationAgent } from "@/lib/types";
 import { formatSize } from "@/lib/size";
 
+/** A word is the whole of some of these controls — a file name, `Open site`, the way out of the
+ *  pane — and a word set in a 13px line is 18px tall. At a phone width each keeps the control
+ *  height as the box a finger has to land on, which the words themselves do not change. */
+const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-narrow:items-center";
+
 export type ConversationSlotSummary = {
   id: string;
   label: string;
@@ -163,7 +168,7 @@ export function ConversationSlotPane({
           {label}
         </span>
         {onClose ? (
-          <button type="button" aria-label="Close slot" onClick={onClose}>
+          <button type="button" aria-label="Close slot" onClick={onClose} className={TAP_FLOOR}>
             Close
           </button>
         ) : null}
@@ -369,7 +374,7 @@ function SitesContent({ payload }: { payload: SitesPayload }) {
                 <Moment at={site.updated_at} />
               </p>
             </div>
-            <a href={site.url} target="_blank" rel="noreferrer">
+            <a href={site.url} target="_blank" rel="noreferrer" className={TAP_FLOOR}>
               Open site
             </a>
           </div>
@@ -417,7 +422,7 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
       ) : null}
       <h2 className="m-0 break-all font-mono text-label font-strong">
         {artifact.url ? (
-          <a href={artifact.url} download={artifact.filename}>
+          <a href={artifact.url} download={artifact.filename} className={TAP_FLOOR}>
             {artifact.filename}
           </a>
         ) : (
@@ -439,7 +444,10 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
           />
           <button
             type="button"
-            className="mt-sm border-0 bg-transparent p-0 text-label text-inherit underline"
+            className={cn(
+              "mt-sm border-0 bg-transparent p-0 text-label text-inherit underline",
+              TAP_FLOOR,
+            )}
             aria-expanded={opened}
             onClick={() => setOpened((full) => !full)}
           >

@@ -2,7 +2,7 @@ import { useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Filter } from "@/components/ui/filter";
-import { Table, TableNote, Td, TdActs, Th } from "@/components/ui/table";
+import { Table, TableNote, Td, TdActs, Th, tableFloor } from "@/components/ui/table";
 import { BANDS } from "@/kernel/pane";
 import { CardGrid, type CardMark } from "@/kernel/cards";
 import {
@@ -56,6 +56,7 @@ export type CardFace<Row> = {
   status?: Part<Row>;
   body?: Part<Row>;
   meta?: Part<Row>;
+  whole?: true;
 };
 
 type Presentation<Row> =
@@ -206,7 +207,15 @@ export function Listing<Payload, Row>({
                   context={context}
                 />
               ) : (
-                <Table>
+                <Table
+                  columns={[
+                    ...spec.columns.map((column) => column.label),
+                    ...(spec.actions ? [""] : []),
+                  ]}
+                  floor={tableFloor({
+                    prose: spec.columns.length + (spec.actions ? 1 : 0),
+                  })}
+                >
                   <thead>
                     <tr>
                       {spec.columns.map((column) => (
@@ -347,7 +356,7 @@ function Cards<Payload, Row>({
   rows: Row[];
   context: RowContext<Row>;
 }) {
-  const { mark, primary, status, body, meta } = face;
+  const { mark, primary, status, body, meta, whole } = face;
   const { actions } = spec;
   return (
     <CardGrid
@@ -359,6 +368,7 @@ function Cards<Payload, Row>({
       body={body ? (row) => part(body, row, context) : undefined}
       meta={meta ? (row) => part(meta, row, context) : undefined}
       action={actions ? (row) => actions(row, context) : undefined}
+      whole={whole}
     />
   );
 }

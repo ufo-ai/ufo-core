@@ -12,6 +12,7 @@ import {
   SECOND,
   SECOND_ID,
   SETTINGS,
+  declaredFloor,
   fact,
   json,
   openAgentSettings,
@@ -95,7 +96,7 @@ test("the pool fits the desktop it is read on, so the row's act never scrolls of
   connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const across = (await screen.findByText("github")).closest("table")!.style.minWidth;
+  const across = declaredFloor((await screen.findByText("github")).closest("table")!);
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
     "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 1 * var(--size-act))",
@@ -108,7 +109,7 @@ test("the agent's own edges fit that same desktop", async () => {
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await openAgentSettings("Assistant", "Connectors");
 
-  const across = (await screen.findByText("github")).closest("table")!.style.minWidth;
+  const across = declaredFloor((await screen.findByText("github")).closest("table")!);
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
     "calc(2 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",

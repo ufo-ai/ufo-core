@@ -15,7 +15,7 @@ import { Search } from "@/components/ui/field";
 import { PageHeader } from "@/kernel/pane";
 import type { SchemaProperty } from "@/lib/types";
 
-import { json, opened } from "./harness";
+import { declaredFloor, json, opened } from "./harness";
 
 type Row = { name: string };
 
@@ -190,7 +190,7 @@ test("the table states a floor covering every track it declares", async () => {
       {() => <Td />}
     </DataTable>,
   );
-  expect(screen.getByRole("table").style.minWidth).toBe(
+  expect(declaredFloor(screen.getByRole("table"))).toBe(
     "calc(3 * var(--size-fact-column) + 3 * var(--size-prose-column) + 0 * var(--size-act))",
   );
   unmount();
@@ -206,9 +206,32 @@ test("the table states a floor covering every track it declares", async () => {
       {() => <Td />}
     </DataTable>,
   );
-  expect(screen.getByRole("table").style.minWidth).toBe(
+  expect(declaredFloor(screen.getByRole("table"))).toBe(
     "calc(1 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
   );
+});
+
+/** A phone has no room for the tracks, so each row stacks into a record and every cell draws its own
+ *  head beside its value. The head words reach the cells as custom properties, one per column in the
+ *  order the cells stand in, and the column a row's acts stand in carries none. */
+test("the table states its heads for the phone that stacks its rows", () => {
+  render(
+    <DataTable
+      columns={["Member", { label: "Role", fact: true }]}
+      rows={[{ name: "one" }]}
+      rowKey={() => "one"}
+      empty="none"
+      act={() => "Open"}
+    >
+      {() => <Td />}
+    </DataTable>,
+  );
+
+  const table = screen.getByRole("table");
+  expect(table.getAttribute("data-stacks")).toBe("");
+  expect(table.style.getPropertyValue("--table-label-1")).toBe('"Member"');
+  expect(table.style.getPropertyValue("--table-label-2")).toBe('"Role"');
+  expect(table.style.getPropertyValue("--table-label-3")).toBe('""');
 });
 
 test("the pager offers only the directions the payload carries", async () => {

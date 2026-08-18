@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
-import { Table, Td, Th } from "@/components/ui/table";
+import { Table, Td, Th, tableFloor } from "@/components/ui/table";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -36,6 +36,13 @@ const ON_BREACH: Record<string, string> = {
   park: "Suspend the turn",
   reject: "Refuse new turns",
 };
+
+/** The heads each table states, named once: they size the tracks and, at a phone width, they are the
+ *  label a stacked cell draws beside its own value. A breakdown names its first column after what it
+ *  breaks down. */
+const DIMENSION_COLUMNS = ["Metered", "Units", "Cost"];
+const BREAKDOWN_COLUMNS = ["Tokens", "Token Share", "Cost", "$/Mtok"];
+const CAP_COLUMNS = ["Window", "Limit", "On Breach"];
 
 export type DimensionLine = {
   dimension: string;
@@ -216,7 +223,9 @@ function DailyHistory({ rows }: { rows: DailyLine[] }) {
       <svg
         viewBox="0 0 100 32"
         preserveAspectRatio="none"
-        className="h-(--size-usage-chart) w-full"
+        /* The stroke does not scale, so it is centred on the point rather than drawn inside the
+           box: the first and last day would each lose half their line at the plot's own edge. */
+        className="h-(--size-usage-chart) w-full overflow-visible"
         role="img"
         aria-label={tokenCount(total) + " tokens across " + rows.length + " daily buckets"}
       >
@@ -234,10 +243,10 @@ function DailyHistory({ rows }: { rows: DailyLine[] }) {
 function Dimensions({ lines, empty }: { lines: DimensionLine[]; empty: string }) {
   if (!lines.length) return <PanelBlank body={empty} />;
   return (
-    <Table>
+    <Table columns={DIMENSION_COLUMNS} floor={tableFloor({ prose: 1, fact: 2 })}>
       <thead>
         <tr>
-          {["Metered", "Units", "Cost"].map((column) => <Th key={column}>{column}</Th>)}
+          {DIMENSION_COLUMNS.map((column) => <Th key={column}>{column}</Th>)}
         </tr>
       </thead>
       <tbody>
@@ -265,11 +274,12 @@ function Breakdown({
   if (!rows.length) return <PanelBlank body={empty} />;
   const tokens = rows.reduce((sum, row) => sum + row.tokens, 0);
   const cost = rows.reduce((sum, row) => sum + row.priced_micro_usd, 0);
+  const columns = [heading, ...BREAKDOWN_COLUMNS];
   return (
-    <Table>
+    <Table columns={columns} floor={tableFloor({ prose: 1, fact: 4 })}>
       <thead>
         <tr>
-          {[heading, "Tokens", "Token Share", "Cost", "$/Mtok"].map((column) => (
+          {columns.map((column) => (
             <Th key={column}>{column}</Th>
           ))}
         </tr>
@@ -299,9 +309,9 @@ function Breakdown({
 function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
   if (!caps.length) return <PanelBlank body={empty} />;
   return (
-    <Table>
+    <Table columns={CAP_COLUMNS} floor={tableFloor({ prose: 1, fact: 2 })}>
       <thead>
-        <tr>{["Window", "Limit", "On Breach"].map((column) => <Th key={column}>{column}</Th>)}</tr>
+        <tr>{CAP_COLUMNS.map((column) => <Th key={column}>{column}</Th>)}</tr>
       </thead>
       <tbody>
         {caps.map((cap, index) => (

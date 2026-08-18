@@ -26,6 +26,7 @@ import {
   SITE_KIND,
   TASK_KIND,
   TRIGGER_KIND,
+  declaredFloor,
   fact,
   json,
   objectIndex,
@@ -297,7 +298,7 @@ test("an index fits the desktop it is read on, so the row's act never scrolls of
   mount();
 
   await screen.findByText("daily-brief");
-  const across = screen.getByRole("table").style.minWidth;
+  const across = declaredFloor(screen.getByRole("table"));
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
     "calc(3 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
@@ -312,7 +313,7 @@ test("one agent's index fits that same desktop", async () => {
   mountAgent();
 
   await screen.findByText("daily-brief");
-  const across = screen.getByRole("table").style.minWidth;
+  const across = declaredFloor(screen.getByRole("table"));
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
     "calc(3 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",

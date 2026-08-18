@@ -174,6 +174,39 @@ test("the top bar names the categories on the left and workspace and the member 
   expect(bar.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
+test("the menu drawer carries the bar's destinations and the act that starts a conversation", async () => {
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+
+  const drawer = await screen.findByRole("dialog");
+  const names = within(drawer)
+    .getAllByRole("button")
+    .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
+  expect(names).toEqual([
+    "Close",
+    "New conversation",
+    "Chat",
+    "Apps",
+    "Artifacts",
+    "Radar",
+    "Workspace",
+  ]);
+});
+
+test("picking a destination in the drawer moves the page and shuts the drawer", async () => {
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  await userEvent.click(within(drawer).getByRole("button", { name: "Artifacts" }));
+
+  expect(location.hash).toBe("#/artifacts");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
 test("the member's menu states who is signed in and offers the theme choice", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);

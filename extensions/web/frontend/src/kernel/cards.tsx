@@ -13,7 +13,12 @@ export type CardMark<Row> =
 
 /** A grid of cards holds its rhythm only while every card is the same height, so the text a row
  *  supplies is cut to a fixed number of lines: one for the name, two for the description. A card
- *  states enough to choose by; the whole of it is on the row's own screen.
+ *  states enough to choose by; the whole of it is on the row's own screen. A phone's grid is one
+ *  column, where there is no second card on the line to keep level with — so the description runs
+ *  as long as it is, and a record with no screen of its own is still read in full.
+ *
+ *  A record that has no screen of its own at any width takes `whole`: the card is all there is to
+ *  read it on, so its description runs to the end of the sentence rather than to the second line.
  *
  *  `open` hands the card to `rowControl`, so the whole card is the control that opens the record
  *  and a press on the card's own act never also opens it. */
@@ -27,6 +32,7 @@ export function CardGrid<Row>({
   meta,
   action,
   open,
+  whole,
 }: {
   rows: Row[];
   rowKey: (row: Row) => string;
@@ -37,6 +43,7 @@ export function CardGrid<Row>({
   meta?: (row: Row) => ReactNode;
   action?: (row: Row) => ReactNode;
   open?: (row: Row) => (() => void) | null;
+  whole?: boolean;
 }) {
   return (
     <ul className="m-0 grid list-none grid-cols-2 gap-lg p-0 max-narrow:grid-cols-1">
@@ -84,7 +91,10 @@ export function CardGrid<Row>({
               {said ? (
                 <p
                   data-part="body"
-                  className="m-0 mt-sm line-clamp-2 text-small text-ink-soft"
+                  className={cn(
+                    "m-0 mt-sm text-small text-ink-soft",
+                    !whole && "line-clamp-2 max-narrow:line-clamp-none",
+                  )}
                 >
                   {said}
                 </p>

@@ -113,8 +113,11 @@ export function Search({
       <input
         type="search"
         aria-label={label}
+        /* The box stands the height of the pill it sits in rather than the height of its own
+           line: the pill is what the member aims at, and a finger landing on it must reach the
+           field. */
         className={cn(
-          "min-w-0 flex-1 border-0 bg-transparent p-0 font-sans text-label",
+          "min-w-0 flex-1 self-stretch border-0 bg-transparent p-0 font-sans text-label",
           "placeholder:text-ink-faint focus-visible:outline-none",
         )}
         {...props}

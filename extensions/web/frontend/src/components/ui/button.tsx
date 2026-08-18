@@ -6,6 +6,9 @@ import { cn } from "@/lib/cn";
 export const buttonVariants = cva(
   cn(
     "inline-flex items-center justify-center gap-xs",
+    /* What a phone aims with is a finger, not a pointer, so every act keeps the control height as
+       its floor there whatever its own text and padding come to. */
+    "max-narrow:min-h-(--size-control)",
     "rounded-panel transition-[background-color,border-color,opacity,scale]",
     "duration-100 ease-control active:scale-[0.96]",
     "disabled:pointer-events-none disabled:opacity-(--disabled)",

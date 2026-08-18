@@ -1,4 +1,4 @@
-import type { ComponentProps, ReactNode } from "react";
+import type { ComponentProps, CSSProperties, ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 
@@ -15,19 +15,73 @@ import { cn } from "@/lib/cn";
  *  same fact lands on the same line whatever the rows happen to say. Measured tracks make a table's
  *  shape a function of its longest cell, which is why two screens of the same records never lined
  *  up — and it is what makes `truncate` cut a cell rather than widen it. */
-export function Table({ className, ...props }: ComponentProps<"table">) {
+export function Table({
+  className,
+  columns,
+  floor,
+  style,
+  ...props
+}: ComponentProps<"table"> & {
+  /** The head labels, in the order the cells stand in, with an empty label for a column that holds
+   *  acts rather than a fact. A table that states them stacks into a column of records at a phone
+   *  width, where no fixed track fits; a table that states none keeps its tracks and scrolls. */
+  columns?: string[];
+  /** What the table cannot be read below, from `tableFloor`. It rides a custom property rather than
+   *  `min-width` itself, because a stacked table has no tracks to protect and an inline width is
+   *  past overriding. */
+  floor?: string;
+}) {
   return (
     <div data-slot="table-container" className="shrink-0 overflow-x-auto">
       <table
         data-slot="table"
+        data-stacks={columns ? "" : undefined}
+        style={{ ...labelProperties(columns), "--table-floor": floor, ...style } as CSSProperties}
         className={cn(
-          "w-full table-fixed border-collapse [&_tr]:h-(--size-record)",
+          "w-full min-w-(--table-floor) table-fixed border-collapse [&_tr]:h-(--size-record)",
           "[&_:where(th,td):first-child]:pl-0 [&_:where(th,td):last-child]:pr-0",
           className,
         )}
         {...props}
       />
     </div>
+  );
+}
+
+/** The head labels restated as custom properties on the table, one per column, so a stacked cell can
+ *  draw its own label beside its value: generated content is a cell's own, and it cannot reach the
+ *  head row for the word above it. */
+function labelProperties(columns: string[] | undefined): Record<string, string> {
+  if (!columns) return {};
+  return Object.fromEntries(
+    columns.map((label, index) => ["--table-label-" + (index + 1), JSON.stringify(label)]),
+  );
+}
+
+/** What a table cannot be read below. The tracks are stated in pixels, so a table set in a column
+ *  narrower than their sum gives the shared columns what is left of nothing — every cell collapses
+ *  to its padding and the head above it truncates to a letter and an ellipsis. Stating the sum as
+ *  the table's own floor keeps every column its own track and lets the container scroll instead,
+ *  and it binds only there: wherever the table has the room, `w-full` is the wider of the two and
+ *  the shared columns divide the rest exactly as they did. Below the narrow breakpoint the floor
+ *  lifts, because a stacked record has no tracks to keep. */
+export function tableFloor({
+  prose,
+  fact = 0,
+  act = false,
+}: {
+  prose: number;
+  fact?: number;
+  act?: boolean;
+}): string {
+  return (
+    "calc(" +
+    fact +
+    " * var(--size-fact-column) + " +
+    prose +
+    " * var(--size-prose-column) + " +
+    (act ? 1 : 0) +
+    " * var(--size-act))"
   );
 }
 

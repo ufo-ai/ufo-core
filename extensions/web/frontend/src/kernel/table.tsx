@@ -1,7 +1,7 @@
 import { IconChevronRight } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 
-import { Table, TableNote, Td, Th } from "@/components/ui/table";
+import { Table, TableNote, Td, Th, tableFloor } from "@/components/ui/table";
 import { rowControl } from "@/kernel/row";
 import { PanelBlank } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
@@ -30,26 +30,6 @@ function width(column: Column): string | undefined {
 
 function isFact(column: Column): boolean {
   return typeof column !== "string" && Boolean(column.fact);
-}
-
-/** What the table cannot be read below. Fixed tracks are stated in pixels, so a table set in a
- *  column narrower than their sum gives the prose columns what is left of nothing — every shared
- *  cell collapses to its padding and the acts spill over the cell beside them. Stating the sum as
- *  the table's floor keeps every column its own track and lets the container scroll instead, and it
- *  binds only there: wherever the table has the room, `w-full` is the wider of the two and the
- *  shared columns divide the rest exactly as they did. */
-function floor(columns: Column[], act: boolean): string {
-  const facts = columns.filter(isFact).length;
-  const prose = columns.length - facts;
-  return (
-    "calc(" +
-    facts +
-    " * var(--size-fact-column) + " +
-    prose +
-    " * var(--size-prose-column) + " +
-    (act ? 1 : 0) +
-    " * var(--size-act))"
-  );
 }
 
 /** Drawn inline, like the chevron and the tick in `select.tsx`. Three glyphs still do not earn an
@@ -145,8 +125,16 @@ export function DataTable<Row>({
 }) {
   if (!rows.length && !note) return <PanelBlank body={empty} />;
   const span = columns.length + (act ? 1 : 0);
+  const facts = columns.filter(isFact).length;
   return (
-    <Table style={{ minWidth: floor(columns, Boolean(act)) }}>
+    <Table
+      columns={[...columns.map(label), ...(act ? [""] : [])]}
+      floor={tableFloor({
+        prose: columns.length - facts,
+        fact: facts,
+        act: Boolean(act),
+      })}
+    >
       <thead>
         <tr>
           {columns.map((column, index) => (

@@ -105,6 +105,9 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
       render: (filled) => (filled ? "Filled" : "Not set"),
     },
     body: { field: "description", render: (description) => codeSpans(description) },
+    /* A slot has no screen of its own: the card is the whole record, and the description is what
+       says which value belongs in it. */
+    whole: true,
   },
   empty: "No credential slots are declared.",
   actions: (row, { act, busy }) => (
