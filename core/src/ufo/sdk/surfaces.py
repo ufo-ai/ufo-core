@@ -52,6 +52,9 @@ from ufo.ext.surface import (
     InstallationSummary as InstallationSummary,
 )
 from ufo.ext.surface import (
+    KeyedAdmission as KeyedAdmission,
+)
+from ufo.ext.surface import (
     LedgerEntry as LedgerEntry,
 )
 from ufo.ext.surface import (

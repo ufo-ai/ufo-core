@@ -102,6 +102,7 @@ from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
     CredentialRequest,
     CredentialRequestInvalid,
+    KeyedAdmission,
     ListedConversation,
     PortalKind,
     ScheduledRun,
@@ -929,6 +930,14 @@ async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]:
         yield chunk
 
 
+def _answer_key(conversation_id: UUID, turn_id: UUID, index: int) -> str:
+    """The key one answer admits under: the conversation it was said in, the turn that asked, and
+    the question's place in that ask. Admission and the transcript projection both name an answer
+    with this, so a message is recognized as the answer to one question by the key it landed under
+    rather than by reading its words."""
+    return f"{conversation_id}:{turn_id}:answer:{index}"
+
+
 def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response:
     """The question an answer click names — validated before any conversation is opened, so a
     malformed answer leaves nothing behind — or None for an ordinary message. The answer admits
@@ -1032,7 +1041,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         if stopped.founded_turn_id is not None:
             outcome["turn_id"] = str(stopped.founded_turn_id)
         return JSONResponse(outcome)
-    key = None if answer is None else f"{conversation_id}:{answer[0]}:answer:{answer[1]}"
+    key = None if answer is None else _answer_key(conversation_id, answer[0], answer[1])
     await _deliver_uploads(ctx, conversation_id, uploads, paths)
     admitted = await ctx.admit(
         conversation_id,
@@ -1241,6 +1250,7 @@ def _rendered_messages(
     files: Mapping[str, list[dict[str, object]]] | None = None,
     apps: Mapping[str, list[dict[str, object]]] | None = None,
     attach: Attach | None = None,
+    answers: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
@@ -1254,14 +1264,19 @@ def _rendered_messages(
     bubble carries the label so a conversation more members than the viewer are in reads as who
     said what.
 
-    `questions` names what a turn still asks of the member, keyed by the turn that asked: the
-    reply carries it, so the portal draws the question under the words that asked it rather than
-    at the foot of the pane. A turn that asked and wrote nothing still renders its reply — the
-    question needs the reply it belongs to.
+    `questions` names what a turn asked of the member, keyed by the turn that asked: the reply
+    carries it, so the portal draws the question under the words that asked it rather than at the
+    foot of the pane. A turn that asked and wrote nothing still renders its reply — the question
+    needs the reply it belongs to.
 
     `asked` names the question a member's words answered, keyed like `speakers`: the bubble draws
     it over the words, and carries it for every speaker, the viewer's own included — an answer
     reads with what it answered.
+
+    `answers` names the messages a question card already states, and those draw no bubble: the card
+    on the reply that asked holds each answer under the question it answers, so a bubble of its own
+    would say the same words a second time. The words themselves are untouched — the card states
+    them, and the turn read them as the member sent them.
 
     `files` names what each turn shared, keyed like `questions`: the reply carries its own, so a
     file stands on the words that shared it and stays there when later turns run. A turn that
@@ -1360,7 +1375,7 @@ def _rendered_messages(
             current_turn_id = turn_id
         else:
             flush_reply(False)
-        if turn_id in agent_origin:
+        if turn_id in agent_origin or turn_id in answers:
             continue
         bubble = _member_bubble(member_message_text(text), attach)
         label = None if speakers is None or turn_id is None else speakers.get(turn_id)
@@ -1375,38 +1390,88 @@ def _rendered_messages(
 
 
 @dataclass(frozen=True)
+class _Asks:
+    """What this conversation asked of the member and what they answered. `cards` is the question
+    each asking turn's reply carries, keyed by that turn; `stated` names the messages those cards
+    already state, which therefore draw no bubble of their own.
+
+    One ask is open — the newest turn's, the only one the member can still answer, since a later
+    turn supersedes what an earlier one asked. Every older ask the member answered draws as the
+    record of what they chose: `closed`, so the portal states the answers and offers no control on a
+    run that is over. An older ask they answered nothing of draws nothing — there is no record to
+    make, and the question is a choice they no longer have."""
+
+    cards: dict[str, dict[str, object]]
+    stated: frozenset[str]
+
+
+def _asks(
+    conversation_id: UUID, turns: tuple[Turn, ...], admitted: tuple[KeyedAdmission, ...]
+) -> _Asks:
+    """Every question the conversation's turns asked, with the answers that landed against each of
+    them. An answer is recognized by the key it admitted under — `_answer_key` names the turn that
+    asked and the question's place in that ask — so the card states each answer under the question
+    it answers, and the answer's own message is named as one the card draws."""
+    landed = {row.idempotency_key: row for row in admitted}
+    newest = turns[-1].id if turns else None
+    cards: dict[str, dict[str, object]] = {}
+    stated: set[str] = set()
+    for turn in turns:
+        question = None if turn.terminal is None else turn.terminal.question
+        if question is None:
+            continue
+        answered: dict[str, str] = {}
+        refs: list[str] = []
+        for index in range(len(question.questions)):
+            row = landed.get(_answer_key(conversation_id, turn.id, index))
+            if row is None:
+                continue
+            answered[str(index)] = member_message_text(row.inbound)
+            refs.append(str(row.ref))
+        if turn.id != newest and not answered:
+            continue
+        card: dict[str, object] = {"turn_id": str(turn.id), **question.model_dump(mode="json")}
+        if turn.id != newest:
+            card["closed"] = True
+        if answered:
+            card["answered"] = answered
+        cards[str(turn.id)] = card
+        stated.update(refs)
+    return _Asks(cards, frozenset(stated))
+
+
+@dataclass(frozen=True)
 class _TranscriptAids:
     """Everything the transcript renderer needs beside the messages themselves — subagent runs,
-    speaker and question attribution, shared files, the applications each turn created, where a
-    member's own attachment is drawn from, and whether the conversation ran a profile — gathered
-    once so the live window and an earlier page render one message identically."""
+    speaker and question attribution, what the member answered, shared files, the applications each
+    turn created, where a member's own attachment is drawn from, and whether the conversation ran a
+    profile — gathered once so the live window and an earlier page render one message
+    identically."""
 
     subagents: SubagentRuns
     turn_ids: frozenset[str]
     agent_origin: frozenset[str]
     speakers: dict[str, str]
     asked: dict[str, str]
+    asks: _Asks
     files: dict[str, list[dict[str, object]]]
     apps: dict[str, list[dict[str, object]]]
     attach: Attach
     run_conversation: bool
 
-    def render(
-        self,
-        messages: tuple[Message, ...],
-        asking: Mapping[str, dict[str, object]] | None = None,
-    ) -> list[dict[str, object]]:
+    def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]:
         rendered = _rendered_messages(
             messages,
             self.subagents,
             self.turn_ids,
             self.agent_origin,
             self.speakers,
-            asking,
+            self.asks.cards,
             self.asked,
             self.files,
             self.apps,
             self.attach,
+            self.asks.stated,
         )
         if self.run_conversation:
             for reply in rendered:
@@ -1425,10 +1490,11 @@ async def _transcript_aids(
     asked: dict[str, str],
     opens: frozenset[UUID],
 ) -> _TranscriptAids:
-    turns, spawned, shared = await asyncio.gather(
+    turns, spawned, shared, admitted = await asyncio.gather(
         ctx.list_turns(conversation_id),
         ctx.conversation_subagent_turns(conversation_id),
         ctx.list_conversation_artifacts(conversation_id, limit=CONVERSATION_ARTIFACTS_MAX),
+        ctx.keyed_admissions(conversation_id),
     )
     files: dict[str, list[dict[str, object]]] = {}
     for entry in reversed(shared):
@@ -1460,6 +1526,7 @@ async def _transcript_aids(
             for turn in turns
             if turn.context is not None and turn.context.question is not None
         },
+        asks=_asks(conversation_id, turns, admitted),
         files=files,
         apps=drawn,
         attach=partial(_attachment_preview, agent_id, conversation_id),
@@ -1513,9 +1580,11 @@ async def _conversation_messages(
     message keeps its speaker after the turn writes it. A bubble whose words answered a question
     carries that question the same way, the viewer's own included.
 
-    A question stands on the reply that asked it, because that is the reply it answers. Only the
-    newest committed turn's: a later turn supersedes what an earlier one asked, so an older
-    question is a choice the member no longer has.
+    A question stands on the reply that asked it, because that is the reply it answers, and it
+    carries the answers the member gave it — the record of an ask is the card the ask was made on,
+    so those answers draw no bubble of their own. Only the newest committed turn's ask is still
+    open: a later turn supersedes what an earlier one asked, so an older question is a choice the
+    member no longer has and its card states what they chose and nothing else.
 
     A compacted conversation's live transcript starts at its newest summary, so this projection
     states the conversation's tail and, in `earlier`, the compaction record standing directly
@@ -1537,27 +1606,27 @@ async def _conversation_messages(
     }
     latest = await ctx.latest_turn(conversation_id)
     detail = None if latest is None else await ctx.turn_detail(latest)
-    asking: dict[str, dict[str, object]] = {}
-    if detail is not None and detail.turn.terminal is not None:
-        question = detail.turn.terminal.question
-        if question is not None:
-            asking[str(detail.turn.id)] = {
-                "turn_id": str(detail.turn.id),
-                **question.model_dump(mode="json"),
-            }
     attach = partial(_attachment_preview, agent_id, conversation_id)
     if recorded is None:
         rendered: list[dict[str, object]] = []
         earlier = 0
+        # A conversation with no written transcript has no settled turn, so it asked nothing and
+        # nothing it holds is an answer to a card.
+        stated: frozenset[str] = frozenset()
     else:
         aids = await _transcript_aids(
             ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked, opens
         )
-        rendered = aids.render(recorded.messages, asking)
+        rendered = aids.render(recorded.messages)
         earlier = await _verified_earlier(ctx, conversation_id, compactions, recorded.messages)
+        stated = aids.asks.stated
     if detail is None:
         return rendered, None, earlier
-    if detail.turn.terminal is None and str(detail.turn.id) not in agent_origin:
+    if (
+        detail.turn.terminal is None
+        and str(detail.turn.id) not in agent_origin
+        and str(detail.turn.id) not in stated
+    ):
         prompt = _member_bubble(member_message_text(detail.turn.inbound), attach)
         if (
             detail.turn.context is not None
@@ -1570,7 +1639,7 @@ async def _conversation_messages(
         rendered.append(prompt)
     draining = detail.turn.id if detail.turn.terminal is None else None
     for arrival in await ctx.queued_arrivals(conversation_id, draining):
-        if str(arrival.id) in agent_origin:
+        if str(arrival.id) in agent_origin or str(arrival.id) in stated:
             continue
         bubble = _member_bubble(member_message_text(arrival.inbound), attach)
         label = speakers.get(str(arrival.id))

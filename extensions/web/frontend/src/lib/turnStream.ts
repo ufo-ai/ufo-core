@@ -820,13 +820,7 @@ export async function answerQuestions(
     const arrivalId = typeof payload.arrival_id === "string" ? payload.arrival_id : null;
     updateChat(chatKey, (current) => ({
       ...current,
-      messages: markAnswered(current.messages, turnId, index, landed).concat({
-        role: "user",
-        text: landed,
-        ...(arrivalId !== null && !current.absorbed.includes(arrivalId)
-          ? { arrival_id: arrivalId }
-          : {}),
-      }),
+      messages: markAnswered(current.messages, turnId, index, landed),
     }));
     const joined = arrivalId !== null && payload.opened_run === false;
     if (!(joined && tailed(chatKey, turn))) streamTurn(chatKey, turn, true);
@@ -878,8 +872,10 @@ function failTurn(chatKey: string, message: string): void {
 }
 
 /** The words the surface confirmed it admitted, recorded on the entry they answer. The reply that
- *  asked holds the question, so the answer is written there too: the entry states what the member
- *  chose instead of disappearing, and a second submit has nothing left to send. */
+ *  asked holds the question, so the answer is written there and nowhere else: the entry states what
+ *  the member chose instead of disappearing, a second submit has nothing left to send, and the same
+ *  words do not stand a second time as a message of their own — which is how the transcript a
+ *  reload draws states them too. */
 function markAnswered(
   messages: Bubble[] | null,
   turnId: string,

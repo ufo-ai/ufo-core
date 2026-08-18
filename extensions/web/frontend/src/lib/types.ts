@@ -116,13 +116,15 @@ export type QuestionEntry = {
 /** What a turn asks of the member, named by the turn that asked and marked with `icon`, any tabler
  *  icon name. `answered` holds what the surface confirmed it admitted for each entry the member
  *  has submitted — the words the transcript will read back, so the entry states its answer rather
- *  than vanishing. */
+ *  than vanishing. `closed` says the run is over: a later turn superseded the ask, so the card is
+ *  the record of what the member answered and offers nothing to answer. */
 export type ChatQuestion = {
   turn_id: string;
   title?: string;
   icon?: string;
   questions: QuestionEntry[];
   answered?: Record<number, string>;
+  closed?: boolean;
 };
 
 export type CredentialPrompt = { slot: string; prompt: string; stored?: boolean };

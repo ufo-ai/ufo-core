@@ -1730,6 +1730,75 @@ test("an answered question states the words the surface confirmed it admitted", 
   expect(within(reply).getByText("left")).toBeTruthy();
 });
 
+test("an answer the card states says nothing a second time as a message", async () => {
+  wire({
+    ...transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "asking",
+          question: {
+            turn_id: TURN_ID,
+            title: "Two things",
+            questions: [
+              { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
+              { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
+            ],
+          },
+        },
+      ],
+    }),
+    "/chat": (_url, init) => json({ turn_id: REFUSED_TURN, body: String(init?.body ?? "") }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("radio", { name: "alpha" }));
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  await userEvent.click(await screen.findByRole("radio", { name: "gamma" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+  await waitFor(() => expect(screen.queryByRole("radio", { name: "gamma" })).toBeNull());
+  const reply = screen.getByText("asking").closest("[data-slot=message]") as HTMLElement;
+  expect(within(reply).getByText("alpha")).toBeTruthy();
+  expect(within(reply).getByText("gamma")).toBeTruthy();
+  expect(screen.queryByText(saying("alpha · First?"))).toBeNull();
+  expect(screen.queryByText(saying("gamma · Second?"))).toBeNull();
+});
+
+test("a question the conversation has moved past states its answers and offers none", async () => {
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "asking",
+          question: {
+            turn_id: TURN_ID,
+            title: "Two things",
+            questions: [
+              { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
+              { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
+            ],
+            answered: { 0: "alpha · First?" },
+            closed: true,
+          },
+        },
+      ],
+    }),
+  );
+  open();
+
+  const reply = (await screen.findByText("asking")).closest("[data-slot=message]") as HTMLElement;
+  expect(within(reply).getByText("First?")).toBeTruthy();
+  expect(within(reply).getByText("alpha")).toBeTruthy();
+  // The entry they left says nothing: the turn is over, so there is no answer to record and no
+  // control that could still take one.
+  expect(screen.queryByText("Second?")).toBeNull();
+  expect(screen.queryByRole("radio", { name: "gamma" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
+});
+
 test("a question stands under the reply that asked it, not at the foot of the log", async () => {
   wire(transcript({ messages: [ASKING(ASKED), { role: "user", text: "one moment" }] }));
   open();

@@ -61,6 +61,7 @@ from ufo_ext_web.surface import (
     SESSION_FAULT_HEADER,
     SUBAGENT_EVENT_LIMIT,
     SubagentNode,
+    _answer_key,
     _rendered_messages,
     _run_answer,
     _sse,
@@ -1918,6 +1919,7 @@ async def _seed_arrival(
     body: str,
     admission_source: str,
     speaker_member_id: UUID | None = None,
+    idempotency_key: str | None = None,
 ) -> UUID:
     arrival_id = uuid4()
     async with workspace_tx() as connection:
@@ -1930,6 +1932,7 @@ async def _seed_arrival(
                 body=body,
                 admission_source=admission_source,
                 speaker_member_id=speaker_member_id,
+                idempotency_key=idempotency_key,
                 admitted_turn_id=turn_id,
                 created_at=sa.func.now(),
             )
@@ -5776,8 +5779,8 @@ async def test_question_affordance_admits_the_first_answer_only(
         "Now · When should the deploy run?",
         "Yes · Page the on-call?",
     ]
-    assert answers[0].idempotency_key.endswith(":answer:0")
-    assert answers[1].idempotency_key.endswith(":answer:1")
+    assert answers[0].idempotency_key == _answer_key(conversation_id, asked_turn, 0)
+    assert answers[1].idempotency_key == _answer_key(conversation_id, asked_turn, 1)
 
 
 async def test_transcript_reply_carries_the_question_it_asked(
@@ -5823,6 +5826,189 @@ async def test_transcript_reply_carries_the_question_it_asked(
         "When should the deploy run?",
         "Page the on-call?",
     ]
+
+
+async def test_an_answered_ask_states_its_answers_on_its_own_card_and_draws_no_bubble(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The record of an ask is the card it was made on. The reply that asked carries what the member
+    answered, entry by entry, and states itself closed once a later turn has superseded the ask — so
+    the answers stand under the questions they answer and offer no control the conversation cannot
+    take. Those same words draw no bubble of their own: an answer is recognized by the key it
+    admitted under, so an ordinary message the member typed still draws one."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, asked_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="one question", question=QUESTION),
+    )
+    window = "Now · When should the deploy run?"
+    page = "Yes · Page the on-call?"
+    first = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=2,
+        inbound=window,
+        speaker_member_id=member_id,
+        idempotency_key=_answer_key(conversation_id, asked_turn, 0),
+    )
+    second = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=3,
+        inbound=page,
+        speaker_member_id=member_id,
+        idempotency_key=_answer_key(conversation_id, asked_turn, 1),
+    )
+    said = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=4,
+        inbound="and hold the release notes",
+        speaker_member_id=member_id,
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {asked_turn}\n</context>\nDeploy it.",
+                ),
+                Message(role="assistant", content="one question"),
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {first}\n</context>\n{window}",
+                ),
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {second}\n</context>\n{page}",
+                ),
+                Message(role="assistant", content="Deploying tonight."),
+                Message(
+                    role="user",
+                    content=(
+                        f"<context>\nmessage_ref: {said}\n</context>\nand hold the release notes"
+                    ),
+                ),
+            ),
+        ),
+    )
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    messages = loaded.json()["messages"]
+    assert [message["text"] for message in messages if message["role"] == "user"] == [
+        "Deploy it.",
+        "and hold the release notes",
+    ]
+    (card,) = [message["question"] for message in messages if "question" in message]
+    asking = next(message for message in messages if message.get("question") == card)
+    assert asking["text"] == "one question"
+    assert card["turn_id"] == str(asked_turn)
+    assert card["closed"] is True
+    assert card["answered"] == {"0": window, "1": page}
+
+
+async def test_a_reload_while_the_answers_run_states_them_on_the_card_alone(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A reload between the submit and the reply the answers opened. One answer founded the running
+    turn and the next folded onto its queue, so the two live in the two id spaces a transcript names
+    a message by — the key each admitted under puts both inside the card that asked, and neither
+    stands as a bubble under it. A message the member typed beside them still does, and still says
+    it is waiting on the turn."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, asked_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="one question", question=QUESTION),
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {asked_turn}\n</context>\nDeploy it.",
+                ),
+                Message(role="assistant", content="one question"),
+            ),
+        ),
+    )
+    window = "Now · When should the deploy run?"
+    page = "Yes · Page the on-call?"
+    running = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound=window,
+                speaker_member_id=member_id,
+                idempotency_key=_answer_key(conversation_id, asked_turn, 0),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _seed_arrival(
+        workspace_id,
+        conversation_id,
+        running,
+        seq=1,
+        body=page,
+        admission_source="member",
+        speaker_member_id=member_id,
+        idempotency_key=_answer_key(conversation_id, asked_turn, 1),
+    )
+    folded = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"and hold the release notes",
+        headers=cookie,
+    )
+    assert folded.status_code == 200
+
+    reloaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+
+    assert reloaded.status_code == 200
+    payload = reloaded.json()
+    assert payload["turn"] == str(running)
+    assert [message["text"] for message in payload["messages"]] == [
+        "Deploy it.",
+        "one question",
+        "and hold the release notes",
+    ]
+    card = payload["messages"][1]["question"]
+    assert card["turn_id"] == str(asked_turn)
+    assert card["closed"] is True
+    assert card["answered"] == {"0": window, "1": page}
+    assert payload["messages"][2]["arrival_id"] == folded.json()["arrival_id"]
 
 
 async def test_credential_prompts_stream_pending_and_fulfill_privately(
@@ -9365,6 +9551,7 @@ async def _seed_listed_turn(
     subagent_profile: str | None = None,
     speaker_member_id: UUID | None = None,
     context: TurnContext | None = None,
+    idempotency_key: str | None = None,
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -9383,6 +9570,7 @@ async def _seed_listed_turn(
                 subagent_profile=subagent_profile,
                 speaker_member_id=speaker_member_id,
                 context=None if context is None else context.model_dump(mode="json"),
+                idempotency_key=idempotency_key,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

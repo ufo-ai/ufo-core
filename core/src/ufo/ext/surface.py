@@ -971,6 +971,17 @@ class SpokenArrival(BaseModel):
     speaker_member_id: UUID | None
 
 
+class KeyedAdmission(BaseModel):
+    """One message a surface admitted under an idempotency key of its own: the `message_ref` the
+    transcript names it by, the key it landed under, and the words that landed. Both id spaces
+    answer, because a turn's founding message is referenced by the turn and one folded into a
+    running turn by its queue row."""
+
+    ref: UUID
+    idempotency_key: str
+    inbound: str
+
+
 def _fulfilled_marker_key(sealed: str, slot: str) -> str:
     """The blob marker one fulfilled prompt leaves, keyed by the seal's digest and the slot — the
     render gate reads it per prompt, so a stored slot stops prompting while its siblings keep
@@ -3419,6 +3430,44 @@ class SurfaceContext:
                 )
             )
         return tuple(spoken)
+
+    async def keyed_admissions(self, conversation_id: UUID) -> tuple[KeyedAdmission, ...]:
+        """Every message of one conversation that admitted under an idempotency key. `admitted_body`
+        answers one key the surface still holds; this answers the whole conversation, for a
+        projection that has to recognize its own admissions in a transcript it reads back — the key
+        says what a message was admitted as, and the ref says which message the transcript names.
+        Both id spaces answer, as `agent_origin_refs` does, because either shape an admission takes
+        carries the key it landed under."""
+        if not await self._owned_conversation(conversation_id):
+            return ()
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.union_all(
+                        sa.select(
+                            tables.turn.c.id,
+                            tables.turn.c.idempotency_key,
+                            tables.turn.c.inbound,
+                        ).where(
+                            tables.turn.c.workspace_id == self.workspace_id,
+                            tables.turn.c.conversation_id == conversation_id,
+                            tables.turn.c.idempotency_key.is_not(None),
+                        ),
+                        sa.select(
+                            tables.inbound_message.c.id,
+                            tables.inbound_message.c.idempotency_key,
+                            tables.inbound_message.c.body,
+                        ).where(
+                            tables.inbound_message.c.workspace_id == self.workspace_id,
+                            tables.inbound_message.c.conversation_id == conversation_id,
+                            tables.inbound_message.c.idempotency_key.is_not(None),
+                        ),
+                    )
+                )
+            ).all()
+        return tuple(
+            KeyedAdmission(ref=row[0], idempotency_key=row[1], inbound=row[2]) for row in rows
+        )
 
     async def read_transcript(self, conversation_id: UUID) -> Conversation | None:
         """The conversation's durable message transcript — assistant text and tool_use/tool_result

@@ -382,7 +382,12 @@ function Settled({ rows, restated }: { rows: SettledRow[]; restated: boolean }) 
  *  It is a real form, so each answer is a native control carrying a native name and the member's
  *  choice arrives as form data rather than as state a component was holding. An entry the member
  *  has already answered leaves the run and states the words the surface confirmed it admitted —
- *  hidden, it would leave them with no record of what they chose. */
+ *  hidden, it would leave them with no record of what they chose, and the card is that record: the
+ *  answers stand here rather than as bubbles of their own further down the transcript.
+ *
+ *  A card the conversation has moved past is that record and nothing else. The turn it asked in is
+ *  over, so every entry reads as what the member chose and none of them offers a control — an
+ *  answer now would name an ask the conversation cannot take. */
 function Question({
   target,
   question,
@@ -397,9 +402,11 @@ function Question({
   const asked: QuestionEntry[] = question.questions ?? [];
   const toTheFoot = useTakeMeToTheFoot();
   const landed = question.answered ?? {};
-  const open = asked
-    .map((entry, index) => ({ entry, index }))
-    .filter(({ index }) => landed[index] === undefined);
+  const open = question.closed
+    ? []
+    : asked
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ index }) => landed[index] === undefined);
   const settled = asked
     .map((entry, index) => ({ entry, answer: landed[index] }))
     .filter((row): row is SettledRow => row.answer !== undefined);
@@ -528,7 +535,7 @@ function Question({
 /** Each answer is admitted against the entry it answers, in the order they were asked, because
  *  the turn recorded them as separate questions and reads them back the same way. An entry the
  *  member skipped says nothing rather than saying nothing at length. A single question needs no
- *  restatement; one of several names itself, so the transcript reads as an answer to something. */
+ *  restatement; one of several names itself, so the words the turn reads name what they answer. */
 async function deliver(
   target: ChatTarget,
   question: ChatQuestion,
