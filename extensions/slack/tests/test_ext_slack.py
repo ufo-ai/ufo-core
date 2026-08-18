@@ -9164,6 +9164,31 @@ def test_ask_blocks_render_one_control_per_question_and_one_submit() -> None:
     assert suggested[1]["hint"] == {"type": "plain_text", "text": "v1 — the usual"}
 
 
+def test_a_question_offering_one_option_renders_as_a_box_it_guides() -> None:
+    """A group of one is nothing to choose between and a radio it holds cannot be unset, so the lone
+    option guides a text box: the member sends the words back or changes them."""
+    rendered = slack.slack_ask_blocks(
+        AskUserInput(
+            title="Create new app",
+            questions=(
+                AskQuestion(
+                    question="What job is it for?",
+                    options=(QuestionOption(label="Watch x.com for AI keywords"),),
+                ),
+            ),
+        )
+    )
+
+    assert rendered is not None
+    assert [block["type"] for block in rendered] == ["section", "input", "actions"]
+    assert rendered[1]["element"] == {
+        "type": "plain_text_input",
+        "action_id": "ask:0",
+        "multiline": True,
+    }
+    assert rendered[1]["hint"] == {"type": "plain_text", "text": "Watch x.com for AI keywords"}
+
+
 def test_an_ask_the_form_cannot_express_renders_whole_as_prose() -> None:
     single = ASK_QUESTION.questions[0]
     for richer in (

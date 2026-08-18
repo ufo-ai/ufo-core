@@ -54,7 +54,7 @@ import {
   stopTurn,
   type ChatTarget,
 } from "@/lib/turnStream";
-import type { Agent, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
+import type { Agent, ChatQuestion, Member, QuestionEntry, QuestionOption } from "@/lib/types";
 
 /** Who a chat is addressed to. A conversation another surface holds names its agent on the rail
  *  row alone, without the boot read listing it, so a chat asks for the facts such a row carries
@@ -255,12 +255,18 @@ function Handoff({ children }: { children: ReactNode }) {
  *  stands under, and reading it is worse than typing the answer. */
 const MAX_ANSWER_OPTIONS = 10;
 
+/** The fewest options a question is answered by choosing between. One option is nothing to choose
+ *  between: a control offering it states an answer the member can only agree with, so the words are
+ *  drawn as the answer the question opens with and they change them. */
+const MIN_ANSWER_OPTIONS = 2;
+
 /** Whether an entry's options are drawn as choices at all. A question that will take a file, and a
  *  list too long to read, are both the message box's job — the form can hold neither, and offering
  *  a control that cannot carry the answer is worse than saying where the answer goes. */
 function choosable(entry: QuestionEntry): boolean {
   return Boolean(
     entry.options &&
+      entry.options.length >= MIN_ANSWER_OPTIONS &&
       entry.options.length <= MAX_ANSWER_OPTIONS &&
       !entry.free_text_only &&
       !entry.allow_attachments,
@@ -269,7 +275,10 @@ function choosable(entry: QuestionEntry): boolean {
 
 /** Answered by typing into the form: words, and no file to go with them. */
 function typed(entry: QuestionEntry): boolean {
-  return !entry.allow_attachments && (Boolean(entry.free_text_only) || !(entry.options ?? []).length);
+  return (
+    !entry.allow_attachments &&
+    (Boolean(entry.free_text_only) || (entry.options ?? []).length < MIN_ANSWER_OPTIONS)
+  );
 }
 
 /** The keys the answers are drawn under and pressed by, in the order they are read: the choices
@@ -280,10 +289,11 @@ type SettledRow = { entry: QuestionEntry; answer: string };
 
 /** The key one answer is drawn under: the choice's own place in the list, or the row after the
  *  last of them for words the member typed. One rule, so the key a settled answer states is the
- *  key the member pressed to give it. */
+ *  key the member pressed to give it — options a question never drew as choices take no key. */
 function answerKey(entry: QuestionEntry, words: string): string {
-  const at = (entry.options ?? []).findIndex((option) => option.label === words);
-  return KEYS[at === -1 ? (entry.options ?? []).length : at];
+  const options = choosable(entry) ? (entry.options ?? []) : [];
+  const at = options.findIndex((option) => option.label === words);
+  return KEYS[at === -1 ? options.length : at];
 }
 
 /** How long a pressed answer stands before the run moves on: long enough to read as chosen, short
@@ -295,14 +305,40 @@ function answerKey(entry: QuestionEntry, words: string): string {
  *  question mid-read. They go on with the act that says so. */
 const ANSWERED_MS = 320;
 
+/** The answer a question opens with, wherever the turn already holds it: the words the member's own
+ *  message settled, or the one option a question offering a single answer proposes — those words
+ *  are the proposal itself, not a choice, since there is nothing to weigh them against. */
+function opened(entry: QuestionEntry): string | undefined {
+  const options = entry.options ?? [];
+  if (entry.chosen) return entry.chosen;
+  const lone = options.length === 1 && !entry.free_text_only && !entry.allow_attachments;
+  return lone ? options[0].label : undefined;
+}
+
+/** Whether the form already holds this entry's answer, so opening the run on it would ask the
+ *  member for what the step is showing them. A question taking several answers is never settled
+ *  this way: the member says when they are done choosing. */
+function already(entry: QuestionEntry): boolean {
+  return !entry.multi_select && opened(entry) !== undefined;
+}
+
 /** What the row the member types into opens with: the answer already settled, wherever no drawn
  *  choice carries it. A member who has already said what they want reads it back and changes it
  *  rather than being asked for it again. */
 function written(entry: QuestionEntry): string | undefined {
-  if (choosable(entry) && (entry.options ?? []).some((option) => option.label === entry.chosen)) {
+  const answer = opened(entry);
+  if (choosable(entry) && (entry.options ?? []).some((option) => option.label === answer)) {
     return undefined;
   }
-  return entry.chosen;
+  return answer;
+}
+
+/** The options a typed question lists beneath it: what an answer may say, where the form takes
+ *  words rather than a choice. An option the row already opens with is left out — listed as well,
+ *  it would state the same words twice. */
+function suggested(entry: QuestionEntry): QuestionOption[] {
+  const options = entry.options ?? [];
+  return options.filter((option) => option.label !== written(entry));
 }
 
 /** Everything the member has answered, drawn as one filled block: each question as it was asked
@@ -381,7 +417,14 @@ function Question({
       : {}),
   }));
   const names = items.map((item) => item.name);
-  const [at, setAt] = useState(names[0]);
+  // The run opens on the first question the turn does not already have the answer to, and a pressed
+  // answer moves it to the next of those: a step whose answer the member's own words settled asks
+  // them to confirm what it is showing, so the run passes it and they reach it with the stepper.
+  const onward = (from: number): string | undefined => {
+    const next = steppable.findIndex(({ entry }, index) => index > from && !already(entry));
+    return next === -1 ? undefined : names[next];
+  };
+  const [at, setAt] = useState(onward(-1) ?? names[0]);
   const moving = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => clearTimeout(moving.current ?? undefined), []);
   return (
@@ -439,7 +482,7 @@ function Question({
                         defaultChecked={option.label === entry.chosen}
                         onClick={() => {
                           if (entry.multi_select) return;
-                          const next = names[names.indexOf(String(index)) + 1];
+                          const next = onward(names.indexOf(String(index)));
                           if (next === undefined) return;
                           clearTimeout(moving.current ?? undefined);
                           moving.current = setTimeout(() => setAt(next), ANSWERED_MS);
@@ -453,7 +496,7 @@ function Question({
                         ) : null}
                       </QuestionnaireChoice>
                     ))
-                  : (entry.options ?? []).map((option) => (
+                  : suggested(entry).map((option) => (
                       <Meta key={option.label}>
                         {option.description
                           ? option.label + " — " + option.description

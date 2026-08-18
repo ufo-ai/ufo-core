@@ -754,6 +754,9 @@ ASK_SUBMITTED_BY_LINE = "Submitted by <@{user}>"
 CONNECT_ACTION_ID = "connect"
 MAX_ANSWER_OPTIONS = 10
 """Slack's own ceiling on a radio button or checkbox group; a wider question renders as prose."""
+MIN_ANSWER_OPTIONS = 2
+"""The fewest options a question is answered by choosing between; a lone option is nothing to choose
+between, so it guides a text box rather than standing as a group of one."""
 SLACK_BUTTON_TEXT_LIMIT = 75
 SLACK_OPTION_TEXT_LIMIT = 75
 SLACK_INPUT_LABEL_LIMIT = 2_000
@@ -1204,7 +1207,8 @@ def _mrkdwn_section(text: str) -> dict[str, object]:
 def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] | None:
     """The rendered ask for a reply whose turn ended on a question: the title, then one input block
     per question — radio buttons for a single choice, checkboxes for a multi-select, a text box for
-    a free-text answer — and one submit button for the whole ask.
+    a free-text answer or for a question offering one option — and one submit button for the whole
+    ask.
 
     The controls hold the member's selection in their own client. An input block dispatches nothing
     as it changes, so a member switches a choice, ticks and unticks values, and types until the
@@ -1246,9 +1250,10 @@ def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] |
 def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
     """One question as an input block, or None where the form cannot carry it: an attachment has no
     control, and an option group Slack will not take renders as prose rather than a truncated one.
-    An option's description, which a choice carries natively, rides the option; a free-text question
-    given options carries them as the box's hint, since they guide the answer rather than bound
-    it."""
+    An option's description, which a choice carries natively, rides the option; a question the
+    options do not decide carries them as the box's hint, since they guide the answer rather than
+    bound it. A question offering one option is such a question — a group of one is a control the
+    member can only agree with, so its option guides words they write and can change."""
     if ask.allow_attachments:
         return None
     label = f"{ask.header} — {ask.question}" if ask.header else ask.question
@@ -1258,7 +1263,13 @@ def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
         "block_id": block_id,
         "label": {"type": "plain_text", "text": label[:SLACK_INPUT_LABEL_LIMIT]},
     }
-    if not ask.options or ask.free_text_only:
+    choices = () if ask.free_text_only else ask.options or ()
+    if choices and (
+        len(choices) > MAX_ANSWER_OPTIONS
+        or any(len(option.label) > SLACK_OPTION_TEXT_LIMIT for option in choices)
+    ):
+        return None
+    if len(choices) < MIN_ANSWER_OPTIONS:
         control["element"] = {
             "type": "plain_text_input",
             "action_id": block_id,
@@ -1271,14 +1282,10 @@ def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
             )
             control["hint"] = {"type": "plain_text", "text": suggested[:SLACK_INPUT_LABEL_LIMIT]}
         return control
-    if len(ask.options) > MAX_ANSWER_OPTIONS or any(
-        len(option.label) > SLACK_OPTION_TEXT_LIMIT for option in ask.options
-    ):
-        return None
     control["element"] = {
         "type": "checkboxes" if ask.multi_select else "radio_buttons",
         "action_id": block_id,
-        "options": [_ask_option(option) for option in ask.options],
+        "options": [_ask_option(option) for option in choices],
     }
     return control
 

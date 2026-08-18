@@ -301,6 +301,110 @@ test("a question taking several answers waits while the member picks them", asyn
   expect(document.querySelector("[data-slot=questionnaire-stepper]")!.textContent).toBe("1/2");
 });
 
+test("a question offering one answer draws no choice, and opens with it in the row", async () => {
+  const posts = asking({
+    title: "Create new app",
+    questions: [
+      { question: "What job is it for?", options: [{ label: "Watch x.com for AI keywords" }] },
+    ],
+  });
+
+  const written = (await screen.findByRole("textbox", {
+    name: "What job is it for?",
+  })) as HTMLInputElement;
+  expect(written.value).toBe("Watch x.com for AI keywords");
+  expect(screen.queryByRole("radio")).toBeNull();
+  expect(rowsOf().map((row) => row.getAttribute("data-slot"))).toEqual(["questionnaire-write"]);
+  expect(keyOf(rowsOf()[0])).toBe("A");
+
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+  await waitFor(() => expect(posts.length).toBe(1));
+  expect(posts[0].body).toBe("Watch x.com for AI keywords");
+});
+
+test("the run opens on the first question the turn does not already have the answer to", async () => {
+  asking({
+    title: "Create new app",
+    questions: [
+      {
+        question: "What job is it for?",
+        chosen: "Watch x.com for AI keywords",
+        options: [{ label: "Watch x.com for AI keywords" }],
+      },
+      { question: "How much on its own?", options: [{ label: "ask me" }, { label: "go ahead" }] },
+      { question: "Who sees it?", options: [{ label: "just me" }, { label: "the workspace" }] },
+    ],
+  });
+
+  await screen.findByRole("radio", { name: "ask me" });
+  const stepper = document.querySelector("[data-slot=questionnaire-stepper]")!;
+  expect(stepper.textContent).toBe("2/3");
+  expect(screen.queryByRole("textbox", { name: "What job is it for?" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(stepper.textContent).toBe("1/3");
+  const written = screen.getByRole("textbox", {
+    name: "What job is it for?",
+  }) as HTMLInputElement;
+  expect(written.value).toBe("Watch x.com for AI keywords");
+});
+
+test("a pressed answer moves the run past a question the turn already has", async () => {
+  asking({
+    title: "Three things",
+    questions: [
+      { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
+      {
+        question: "Second?",
+        chosen: "delta",
+        options: [{ label: "gamma" }, { label: "delta" }],
+      },
+      { question: "Third?", options: [{ label: "epsilon" }, { label: "zeta" }] },
+    ],
+  });
+
+  await userEvent.click(await screen.findByRole("radio", { name: "alpha" }));
+
+  await waitFor(() => expect(screen.getByRole("radio", { name: "epsilon" })).toBeTruthy());
+  expect(document.querySelector("[data-slot=questionnaire-stepper]")!.textContent).toBe("3/3");
+});
+
+test("an answer the run passed over is submitted with the rest", async () => {
+  const posts = asking({
+    title: "Two things",
+    questions: [
+      { question: "First?", chosen: "beta", options: [{ label: "alpha" }, { label: "beta" }] },
+      { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
+    ],
+  });
+
+  await userEvent.click(await screen.findByRole("radio", { name: "gamma" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+  await waitFor(() => expect(posts.length).toBe(2));
+  expect(posts.map((post) => post.body)).toEqual(["beta · First?", "gamma · Second?"]);
+});
+
+test("a question taking several answers is asked even with one of them chosen", async () => {
+  asking({
+    title: "Two things",
+    questions: [
+      {
+        question: "Which ones?",
+        multi_select: true,
+        chosen: "alpha",
+        options: [{ label: "alpha" }, { label: "beta" }],
+      },
+      { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
+    ],
+  });
+
+  const alpha = (await screen.findByRole("checkbox", { name: "alpha" })) as HTMLInputElement;
+  expect(alpha.checked).toBe(true);
+  expect(document.querySelector("[data-slot=questionnaire-stepper]")!.textContent).toBe("1/2");
+});
+
 test("a selection the member did not press does not carry them off the question", async () => {
   asking({
     title: "Two things",
