@@ -1799,6 +1799,9 @@ async def test_a_childs_activity_mirrors_onto_the_parents_stream(surface: Turns)
 async def test_subagent_bills_under_its_profile_model_not_the_parents(
     surface: Turns,
 ) -> None:
+    """An escalation rung ships as a sibling profile: `pinned` and `roundtrip` answer the same
+    input and output contract, and the pinned one alone moves the model. So the second half here
+    bills an unpinned sibling under the parent's model on the same run."""
     seed = await _bootstrap()
     parent = await surface.admit(seed, "spawn-pinned")
     _, terminal = await surface.consume(seed, parent)
@@ -1836,6 +1839,27 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
         ).scalar_one()
     assert child_model == PINNED_MODEL
     assert parent_model == "claude-opus-4-8"
+
+    sibling_parent = await surface.admit(seed, "spawn-subagent")
+    _, sibling_terminal = await surface.consume(seed, sibling_parent)
+    assert sibling_terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        sibling = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.subagent_profile).where(
+                    tables.turn.c.parent_turn_id == UUID(sibling_parent)
+                )
+            )
+        ).one()
+        sibling_model = (
+            await connection.execute(
+                sa.select(tables.ledger.c.model).where(tables.ledger.c.turn_id == sibling.id)
+            )
+        ).scalar_one()
+    assert sibling.subagent_profile == "roundtrip"
+    assert ROUNDTRIP_PROFILE.model is None
+    assert PINNED_PROFILE.output_model is ROUNDTRIP_PROFILE.output_model
+    assert sibling_model == "claude-opus-4-8"
 
 
 async def _child_echo(parent: str) -> int:

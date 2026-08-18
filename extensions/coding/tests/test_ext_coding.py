@@ -6,10 +6,14 @@ import ufo_ext_coding.manifest as coding
 
 from ufo.ext.loader import skill_registry
 from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
+from ufo.models.catalog import CORE_MODEL_SPECS
 from ufo.sandbox.exec_env import CONVERSATION_ID_ENV
 from ufo.tools.builtins import BUILTIN_TOOLS
 
 TOOL_NARRATION = "connecting their GitHub"
+PARENT_MODEL = "claude-opus-5"
+# The escalation prompt is hard-wrapped, so a whole sentence spans a line break.
+ESCALATION_PROMPT = " ".join(coding.FABLE_ESCALATION_PROMPT.split())
 
 
 def test_empty_github_app_registration_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,7 +54,7 @@ def test_coding_manifest_registers_the_coding_profile() -> None:
     manifest = coding.manifest()
     assert [tool.name for tool in manifest.tools] == ["connect_github"]
     profile = manifest.subagents[0]
-    assert [subagent.name for subagent in manifest.subagents] == ["coding"]
+    assert [subagent.name for subagent in manifest.subagents] == ["coding", "fable_escalation"]
     assert profile.name == "coding"
     assert (
         profile.input_model.model_validate(
@@ -203,6 +207,112 @@ def test_coding_profile_raises_the_round_budget() -> None:
     assert coding.CODING_PROFILE.max_rounds == 100
 
 
+def test_the_escalation_profile_reuses_the_coding_contract_and_raises_only_the_model() -> None:
+    """The last rung is the coding child on a stronger model: same tools, same round budget, same
+    payload and result schema, its own prompt. A caller escalates by naming the target, so any other
+    difference here would be a second contract to keep in step with the first."""
+    coding_profile, escalation = coding.manifest().subagents
+    assert escalation.name == coding.FABLE_ESCALATION_PROFILE_NAME == "fable_escalation"
+    assert escalation.tool_names == coding_profile.tool_names
+    assert escalation.input_model is coding_profile.input_model
+    assert escalation.output_model is coding_profile.output_model
+    assert escalation.max_rounds == coding_profile.max_rounds
+    assert coding_profile.model is None
+    assert escalation.model == coding.FABLE_ESCALATION_MODEL == "claude-fable-5"
+    assert escalation.prompt == coding.FABLE_ESCALATION_PROMPT != coding_profile.prompt
+
+
+def test_the_escalation_model_is_one_the_deploy_serves() -> None:
+    """Nothing checks a pinned id at boot, so an id no `ModelSpec` describes first fails inside the
+    child's own dispatch. The catalog is the check this profile gets."""
+    assert coding.FABLE_ESCALATION_MODEL in {spec.id for spec in CORE_MODEL_SPECS}
+
+
+def test_the_escalation_prompt_states_the_window_it_runs_under() -> None:
+    """The window is why the child reads what is already on disk instead of re-deriving the whole
+    repository. Both numbers come from the catalog: a re-specced model fails here rather than
+    teaching the child a budget it does not have."""
+    windows = {spec.id: spec.context_window for spec in CORE_MODEL_SPECS}
+    assert (
+        f"Your context window is {windows[coding.FABLE_ESCALATION_MODEL]:,} tokens against your "
+        f"parent's {windows[PARENT_MODEL]:,}."
+    ) in ESCALATION_PROMPT
+    assert "Read the files that decide the failure, not the repository." in ESCALATION_PROMPT
+
+
+def test_the_escalation_prompt_reads_the_workspace_before_github() -> None:
+    """The child shares the parent's workspace, so the checkout and the earlier workers' notes are
+    already on disk. GitHub answers only what no file can hold, and a stale file loses to it."""
+    assert "The checkout already in this workspace." in ESCALATION_PROMPT
+    assert "Never re-clone a repository that is already on disk." in ESCALATION_PROMPT
+    assert "/workspace/pr-babysitter/rules.md" in ESCALATION_PROMPT
+    assert "`git diff <base>...<head>` and `git log`, not from an API" in ESCALATION_PROMPT
+    assert (
+        "GitHub decides only what the workspace cannot: the head SHA, check runs, statuses, "
+        "review threads."
+    ) in ESCALATION_PROMPT
+    assert (
+        "Where a file on disk disagrees with GitHub about those, the file is stale."
+    ) in ESCALATION_PROMPT
+    assert "`gh` is not authenticated here, so reach the API with" in ESCALATION_PROMPT
+    assert 'curl -H "Authorization: $UFO_GITHUB_API_AUTH"' in ESCALATION_PROMPT
+
+
+def test_the_escalation_prompt_bounds_the_rung_to_one_attempt() -> None:
+    """The rung exists because two cheap attempts already failed: the child may read the whole
+    subsystem and name a different layer, but it stops after one attempt and it never widens the
+    change past the failure."""
+    assert (
+        "Two `coding` workers already failed on this pull request's one blocking failure."
+    ) in ESCALATION_PROMPT
+    assert "You get one attempt." in ESCALATION_PROMPT
+    assert "Never start a second approach." in ESCALATION_PROMPT
+    assert "Say plainly when they were working at the wrong layer." in ESCALATION_PROMPT
+    assert "Do not widen the change beyond what clears the failure." in ESCALATION_PROMPT
+    assert "Never treat a prior attempt as wrong merely because it failed." in ESCALATION_PROMPT
+    assert "Run the repository's own pre-push checks." in ESCALATION_PROMPT
+
+
+def test_the_escalation_prompt_ends_on_three_named_finishes() -> None:
+    """The parent routes on the first word, so the three finishes are the contract: a cleared
+    failure, a call for a person, or a failure with what the next reader needs. `DECISION:` is how
+    the rung refuses to push a patch past a question that was never technical."""
+    assert "Finish with exactly one of these, first word first:" in ESCALATION_PROMPT
+    assert "- `FIXED:` the failure is cleared." in ESCALATION_PROMPT
+    assert "- `DECISION:` clearing it needs a person." in ESCALATION_PROMPT
+    assert "- `STUCK:` you failed." in ESCALATION_PROMPT
+    assert "A report without one of those three is not a report." in ESCALATION_PROMPT
+
+
+def test_the_escalation_prompt_carries_the_coding_write_authority_and_no_more() -> None:
+    """A stronger model gets no wider authority. Merging stays with the parent, and a branch the
+    child did not write alone is adopted rather than overwritten."""
+    assert "Commit and push to this pull request's own branch." in ESCALATION_PROMPT
+    assert (
+        "Adopt a commit you did not create; never force-push and never discard one."
+    ) in ESCALATION_PROMPT
+    assert "Never push to `main` or another pull request's branch." in ESCALATION_PROMPT
+    assert (
+        "Never merge, close, arm auto-merge, dismiss a review, or change labels, reviewers, "
+        "assignees, or the base branch."
+    ) in ESCALATION_PROMPT
+    assert "Never weaken a test or edit CI to stop a check running." in ESCALATION_PROMPT
+    assert "Merging belongs to your parent." in ESCALATION_PROMPT
+    assert {"call_external_tool", "describe_external_tools", "share_file"}.isdisjoint(
+        coding.FABLE_ESCALATION_PROFILE.tool_names
+    )
+
+
+def test_the_escalation_prompt_wraps_with_the_shared_delivery_contract() -> None:
+    prompt = subagent_system_prompt(
+        coding.FABLE_ESCALATION_PROFILE, skills=(("extension-skill", "A coding workflow."),)
+    )
+    assert "{{skill_index}}" not in prompt
+    assert "- extension-skill: A coding workflow." in prompt
+    assert "A delivery crosses an agent boundary" in prompt
+    assert prompt.endswith(FINISH_CONTRACT)
+
+
 def test_both_prompt_ends_carry_the_source_through_the_objective() -> None:
     instructions = skill_registry((coding.manifest(),)).named("coding").instructions
     assert "requesting message's `<context>` carries a `source`" in instructions
@@ -313,7 +423,7 @@ def test_the_review_agent_spawns_the_profile_this_pack_registers() -> None:
     does not register is a review agent that can never spawn anything."""
     manifest = coding.manifest()
     (agent,) = manifest.agents
-    (profile,) = manifest.subagents
+    profile = manifest.subagents[0]
     assert agent.name == coding.CODE_REVIEW_AGENT_NAME
     assert f"`{profile.name}` subagents" in agent.spec.prompt
 

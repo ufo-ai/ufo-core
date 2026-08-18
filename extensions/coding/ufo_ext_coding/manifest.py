@@ -10,6 +10,12 @@ parent decides what reaches the member. Core wraps the prompt with the shared ci
 discipline and fills its skill index. The `coding` skill teaches the main agent to route repo work
 to that child.
 
+`spawn("fable_escalation", ...)` is the last rung on one pull-request blocker: the same tools and
+the same input contract on a stronger pinned model, with its own prompt for a worker that two
+`coding` children already failed in front of. It reads wider than the diff, makes one attempt, and
+reports. The model is pinned on the profile because the answer is always "this rung wants that
+model", and the caller escalates by naming the target.
+
 `code-review` is the durable agent the pack ships. One conversation tracks one pull request: it
 reads the page the source updates, spawns two `coding` children over the same head SHA with
 different focuses, coalesces their findings, and publishes one `ufo review` commit status. It runs
@@ -70,6 +76,11 @@ CODING_TOOL_NAMES = (
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 100
+FABLE_ESCALATION_PROFILE_NAME = "fable_escalation"
+FABLE_ESCALATION_MODEL = "claude-fable-5"
+FABLE_ESCALATION_PROMPT = (
+    Path(__file__).parent / "prompts" / "subagent_fable_escalation.md"
+).read_text()
 CODE_REVIEW_AGENT_NAME = "code-review"
 GITHUB_CONNECTOR = "github"
 CODE_REVIEW_PROMPT = (Path(__file__).parent / "prompts" / "agent_code_review.md").read_text()
@@ -170,6 +181,16 @@ CODING_PROFILE = SubagentProfile(
     max_rounds=CODING_ROUND_LIMIT,
 )
 
+FABLE_ESCALATION_PROFILE = SubagentProfile(
+    name=FABLE_ESCALATION_PROFILE_NAME,
+    prompt=FABLE_ESCALATION_PROMPT,
+    tool_names=CODING_TOOL_NAMES,
+    input_model=CodingInput,
+    output_model=CodingOutput,
+    max_rounds=CODING_ROUND_LIMIT,
+    model=FABLE_ESCALATION_MODEL,
+)
+
 CODE_REVIEW_SETUP = (
     "Connect the GitHub account this workspace reviews under. A connection binds to the agent "
     "whose conversation it is made in, so make it here, with you. Then ask the member to "
@@ -197,7 +218,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        subagents=(CODING_PROFILE,),
+        subagents=(CODING_PROFILE, FABLE_ESCALATION_PROFILE),
         agents=(CODE_REVIEW_AGENT,),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
         credentials=(GIT_INSTALLATION, GIT_CREDENTIAL, GITHUB_API_CREDENTIAL),

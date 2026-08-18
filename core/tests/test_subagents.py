@@ -311,7 +311,10 @@ def test_general_purpose_inherits_the_parent_model() -> None:
 
 def test_a_profile_can_pin_a_distinct_model() -> None:
     """The queue resolves `profile.model or agent.model`, so a set model overrides the parent's and
-    None falls back — proven end-to-end by the billing test; here the field carries the choice."""
+    None falls back — proven end-to-end by the billing test; here the field carries the choice. Two
+    profiles that share one contract and differ only in that field are an escalation rung: the
+    caller reaches the stronger model by naming the target, and nothing else about the child moves.
+    """
     pinned = SubagentProfile(
         name="pinned",
         prompt="p",
@@ -323,6 +326,13 @@ def test_a_profile_can_pin_a_distinct_model() -> None:
     assert pinned.model == "gpt-5.4"
     assert (pinned.model or "claude-opus-4-8") == "gpt-5.4"
     assert (_profile("a").model or "claude-opus-4-8") == "claude-opus-4-8"
+
+    escalation = replace(_profile("worker"), name="worker-escalation", model="gpt-5.4")
+    registry = SubagentRegistry((_profile("worker"), escalation))
+    assert registry.get("worker").model is None
+    assert registry.get("worker-escalation").model == "gpt-5.4"
+    assert registry.get("worker").tool_names == registry.get("worker-escalation").tool_names
+    assert registry.get("worker").input_model is registry.get("worker-escalation").input_model
 
 
 @dataclass
