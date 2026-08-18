@@ -117,12 +117,12 @@ export function Agents({
   );
 
   return (
-    <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-[var(--container-index)_1fr] max-narrow:grid-cols-1">
+    <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1">
       <nav
         aria-label="Agents"
         className={cn(
-          "flex min-h-0 flex-col gap-lg overflow-y-auto",
-          "border-r border-edge px-2xl py-2xl max-narrow:border-r-0",
+          "flex min-h-0 flex-col gap-sm overflow-y-auto",
+          "border-r border-edge bg-sidebar px-sm py-2xl max-narrow:border-r-0",
         )}
       >
         {newAgent && mainAgent ? (

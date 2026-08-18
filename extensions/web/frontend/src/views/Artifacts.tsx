@@ -37,7 +37,7 @@ const CURSOR_OLDER = "older";
 
 const OBJECT_PREFIX = "object/";
 const NOT_FOUND = 404;
-const SITE_FAMILY = "Sites";
+export const SITE_FAMILY = "Sites";
 const MEDIA: Record<string, string> = {
   Images: "image",
   Documents: "document",

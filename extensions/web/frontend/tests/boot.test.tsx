@@ -168,7 +168,7 @@ test("the top bar names the categories on the left and workspace and the member 
   const names = within(bar)
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
-  expect(names).toEqual(["Chat", "Apps", "Artifacts", "Radar", "Search apps", "Workspace"]);
+  expect(names).toEqual(["Chat", "Apps", "Artifacts", "Radar", "Search", "Workspace"]);
   const account = screen.getByRole("button", { name: MEMBER.email });
   expect(bar.contains(account)).toBe(false);
   expect(bar.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

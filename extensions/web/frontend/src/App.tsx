@@ -1,18 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  IconAdjustments,
-  IconBrandSlack,
-  IconSearch,
-  IconTerminal2,
-} from "@tabler/icons-react";
+import { IconAdjustments, IconBrandSlack, IconTerminal2 } from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -22,6 +11,7 @@ import { ChatPane } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { SignIn } from "@/views/SignIn";
+import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 import {
@@ -318,7 +308,6 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
               agents={agents}
               onHome={openHome}
               onAgents={openAgents}
-              onOpenAgent={openAgent}
               onSection={(section) => placeSection(section, {}, "push")}
               onWorkspace={() => placeWorkspace("team", {}, "push")}
               onAdmin={openAdmin}
@@ -382,7 +371,6 @@ function TopBar({
   agents,
   onHome,
   onAgents,
-  onOpenAgent,
   onSection,
   onWorkspace,
   onAdmin,
@@ -392,7 +380,6 @@ function TopBar({
   agents: Agent[];
   onHome: () => void;
   onAgents: () => void;
-  onOpenAgent: (agentId: string) => void;
   onSection: (section: Section) => void;
   onWorkspace: () => void;
   onAdmin: () => void;
@@ -431,7 +418,11 @@ function TopBar({
             </li>
           ))}
           <li>
-            <Spotlight agents={agents} onOpen={onOpenAgent} />
+            <Spotlight
+              agents={agents}
+              className={cn(BAR_BUTTON, "px-md")}
+              onOpen={(hash) => (location.hash = hash)}
+            />
           </li>
           <li className="ml-auto">
             <BarButton current={route.kind === "workspace"} onClick={onWorkspace}>
@@ -445,75 +436,6 @@ function TopBar({
   );
 }
 
-/** Search over the apps, opened from the bar rather than standing in a column: one box the whole
- *  width of the dialog and the apps that match under it, so the reach is the same from every
- *  category. Picking one opens it and shuts the dialog. */
-function Spotlight({
-  agents,
-  onOpen,
-}: {
-  agents: Agent[];
-  onOpen: (agentId: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const wanted = query.trim().toLowerCase();
-  const found = agents.filter((agent) => agent.name.toLowerCase().includes(wanted));
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (!next) setQuery("");
-      }}
-    >
-      <DialogTrigger asChild>
-        <button
-          type="button"
-          aria-label="Search apps"
-          className={cn(BAR_BUTTON, "px-md", open && "bg-fill")}
-        >
-          <IconSearch className="size-(--size-glyph)" aria-hidden />
-        </button>
-      </DialogTrigger>
-      <DialogContent className="w-spotlight top-1/4 gap-2xl p-2xl" aria-describedby={undefined}>
-        <DialogTitle className="sr-only">Search apps</DialogTitle>
-        <input
-          autoFocus
-          type="search"
-          aria-label="Search apps"
-          placeholder="Search apps"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          className="w-full border-0 bg-transparent p-0 text-title text-inherit outline-none placeholder:text-ink-soft"
-        />
-        <ul className="m-0 flex list-none flex-col gap-px p-0">
-          {found.map((agent) => (
-            <li key={agent.id}>
-              <button
-                type="button"
-                onClick={() => {
-                  setOpen(false);
-                  setQuery("");
-                  onOpen(agent.id);
-                }}
-                className="flex w-full items-baseline gap-sm rounded-control border-0 bg-transparent px-sm py-xs text-left text-label text-inherit hover:bg-fill"
-              >
-                <span className="min-w-0 truncate">{agent.name}</span>
-                <span className="ml-auto truncate font-mono text-small text-ink-soft">
-                  {agent.model}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-        {found.length ? null : (
-          <p className="m-0 text-label text-ink-soft">No app matches this search.</p>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 const BAR_BUTTON =
   "flex h-(--size-row) items-center whitespace-nowrap rounded-full border-0 bg-transparent px-lg text-label text-inherit hover:bg-fill";
@@ -926,7 +848,7 @@ function NewChat({
   if (agents.length === 1) {
     return (
       <Button variant="send" size="bar" className="w-full" onClick={() => onNewChat(mainAgent.id)}>
-        New chat
+        New conversation
       </Button>
     );
   }
@@ -943,7 +865,7 @@ function NewChat({
         aria-controls={PICKER_ID}
         onClick={() => setPicking((open) => !open)}
       >
-        New chat
+        New conversation
       </Button>
       {picking ? (
         <ul id={PICKER_ID} className="m-0 flex list-none flex-col gap-hair p-0 max-narrow:flex-row">

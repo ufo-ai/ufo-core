@@ -732,14 +732,14 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
 test("the new-conversation control targets the main agent, or picks among several", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   single.unmount();
 
   location.hash = "";
   wire({});
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
   await userEvent.click(await screen.findByRole("button", { name: "second" }));
   expect(location.hash).toBe("#/new/" + SECOND_ID);
   expect(await screen.findByText("Message second to start.")).toBeTruthy();
@@ -753,14 +753,14 @@ test("the agents index opens the agent's page, and chat starts the conversation"
   wire({ "/settings": () => json(SETTINGS), "/connections": () => json({ connections: [] }) });
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await screen.findByRole("main");
-  expect(screen.queryByRole("button", { name: "New chat" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "New conversation" })).toBeNull();
 
   location.hash = "#/agents";
   await openAgentRow("assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 
   await userEvent.click(screen.getByRole("button", { name: "Chat" }));
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByText("Message assistant to start.")).toBeTruthy();
 });
@@ -775,13 +775,13 @@ test("the conversations rail stands in chat and in no other category", async () 
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByRole("navigation", { name: "Conversations" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "New chat" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "New conversation" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
   await waitFor(() =>
     expect(screen.queryByRole("navigation", { name: "Conversations" })).toBeNull(),
   );
-  expect(screen.queryByRole("button", { name: "New chat" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "New conversation" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Chat" }));
   expect(await screen.findByRole("navigation", { name: "Conversations" })).toBeTruthy();

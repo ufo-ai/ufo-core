@@ -1258,7 +1258,8 @@ test("an agent's conversation search asks the server rather than the rows on the
   render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("Order more coffee")).toBeTruthy();
-  await userEvent.type(await screen.findByLabelText("Search"), "deploy{Enter}");
+  const column = within(await screen.findByRole("navigation", { name: "Conversations" }));
+  await userEvent.type(column.getByLabelText("Search"), "deploy{Enter}");
 
   expect(await screen.findByText("Rename the deploy job")).toBeTruthy();
   expect(screen.queryByText("Order more coffee")).toBeNull();

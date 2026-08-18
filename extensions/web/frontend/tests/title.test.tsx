@@ -47,8 +47,8 @@ beforeEach(() => {
 });
 
 test("every page names where the member is, innermost first, then the product", () => {
-  expect(titled({ kind: "home" })).toBe("New chat · assistant · ufo");
-  expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New chat · second · ufo");
+  expect(titled({ kind: "home" })).toBe("New conversation · assistant · ufo");
+  expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New conversation · second · ufo");
   expect(titled({ kind: "agents" })).toBe("Apps · ufo");
   expect(titled({ kind: "agent", agentId: AGENT_ID, tab: "home", ...PLACE })).toBe(
     "Home · assistant · ufo",

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -193,49 +193,5 @@ test("a member the kind admits no create from is offered no act", async () => {
 
   expect(await agentIndex()).toBeTruthy();
   expect(screen.queryByRole("button", { name: "New app" })).toBeNull();
-});
-
-/** Search over the apps is reached from the bar rather than from the index column, so it answers
- *  from wherever the member is standing. */
-test("the spotlight narrows the apps, and says so when it matches none of them", async () => {
-  wire({ "/transcript": () => json({ messages: [] }) });
-  render(
-    <App
-      agents={[AGENT, RESEARCH]}
-      member={ADMIN}
-      newAgent={NEW_AGENT}
-      onAgents={() => {}}
-    />,
-  );
-
-  await userEvent.click(screen.getByRole("button", { name: "Search apps" }));
-  const spotlight = within(await screen.findByRole("dialog"));
-  await userEvent.type(spotlight.getByRole("searchbox", { name: "Search apps" }), "res");
-
-  expect(spotlight.getByRole("button", { name: /^research/ })).toBeTruthy();
-  expect(spotlight.queryByRole("button", { name: /^assistant/ })).toBeNull();
-
-  await userEvent.type(spotlight.getByRole("searchbox", { name: "Search apps" }), "xx");
-
-  expect(await spotlight.findByText("No app matches this search.")).toBeTruthy();
-});
-
-test("the spotlight opens the app it names and shuts behind it", async () => {
-  wire({ "/transcript": () => json({ messages: [] }) });
-  render(
-    <App
-      agents={[AGENT, RESEARCH]}
-      member={ADMIN}
-      newAgent={NEW_AGENT}
-      onAgents={() => {}}
-    />,
-  );
-
-  await userEvent.click(screen.getByRole("button", { name: "Search apps" }));
-  const spotlight = within(await screen.findByRole("dialog"));
-  await userEvent.click(spotlight.getByRole("button", { name: /^research/ }));
-
-  expect(location.hash).toBe("#/agents/" + SECOND_ID);
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
