@@ -493,7 +493,13 @@ test("a private extension conversation opens the live chat", async () => {
   await userEvent.click(await screen.findByRole("button", { name: /Daily brief/ }));
 
   expect(await screen.findByText("Work to finish")).toBeTruthy();
-  expect(screen.getByText("claude-sonnet-5")).toBeTruthy();
+  const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
+  expect(crumb.getByText("Daily brief")).toBeTruthy();
+  // The agent holds the conversation but is not one this member can open, so it is named and not
+  // linked.
+  expect(crumb.getByText("daily-brief")).toBeTruthy();
+  expect(crumb.queryByRole("button", { name: "Back to daily-brief" })).toBeNull();
+  expect(screen.queryByText("claude-sonnet-5")).toBeNull();
   expect(screen.getByLabelText("Message the agent")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
@@ -584,7 +590,7 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
 });
 
 /** The pane a conversation another surface holds is read in is headed the way a portal chat's is:
- *  what the conversation is called and the model it ran on — never a list of conversations
+ *  the agent holding it and what it is called — never a list of conversations
  *  standing over the transcript in place of a header. */
 test("a Slack conversation is headed like a web thread, marked with its way out to Slack", async () => {
   location.hash = "#/c/" + CONVO_ID;
@@ -602,8 +608,8 @@ test("a Slack conversation is headed like a web thread, marked with its way out 
   const header = within(screen.getByRole("main"));
   const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Warehouse restock plan")).toBeTruthy();
-  expect(crumb.getByText(AGENT.model)).toBeTruthy();
-  expect(crumb.queryByText(AGENT.name)).toBeNull();
+  expect(crumb.getByText(AGENT.name)).toBeTruthy();
+  expect(crumb.queryByText(AGENT.model)).toBeNull();
   expect(header.queryByRole("heading", { name: "Warehouse restock plan" })).toBeNull();
   expect(header.queryByRole("button", { name: "All conversations" })).toBeNull();
 
@@ -729,7 +735,7 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
-test("the new-conversation control targets the main agent, or picks among several", async () => {
+test("the new-conversation control targets the main agent, and offers no other", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
@@ -740,12 +746,13 @@ test("the new-conversation control targets the main agent, or picks among severa
   wire({});
   render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
-  await userEvent.click(await screen.findByRole("button", { name: "second" }));
-  expect(location.hash).toBe("#/new/" + SECOND_ID);
-  expect(await screen.findByText("Message second to start.")).toBeTruthy();
-  expect(
-    within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByText("second"),
-  ).toBeTruthy();
+
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
+  expect(await screen.findByLabelText("Message the agent")).toBeTruthy();
+  // A conversation that does not exist yet is headed by nothing; the composer's own picker names
+  // the agent that would hold it.
+  expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
+  expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("assistant");
 });
 
 test("the agents index opens the agent's page, and chat starts the conversation", async () => {
@@ -762,7 +769,8 @@ test("the agents index opens the agent's page, and chat starts the conversation"
   await userEvent.click(screen.getByRole("button", { name: "Chat" }));
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
-  expect(await screen.findByText("Message assistant to start.")).toBeTruthy();
+  expect(await screen.findByLabelText("Message the agent")).toBeTruthy();
+  expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
 test("the conversations rail stands in chat and in no other category", async () => {
@@ -788,7 +796,7 @@ test("the conversations rail stands in chat and in no other category", async () 
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
 });
 
-test("the chat header names the conversation and its model, and leads nowhere", async () => {
+test("the chat header names the agent holding the conversation and what it is called, never the model", async () => {
   wire({
     "/api/chats": () => json({ chats: [CHAT_ROW] }),
     "/transcript": () => json({ messages: [] }),
@@ -799,9 +807,11 @@ test("the chat header names the conversation and its model, and leads nowhere", 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
   const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Pick one thread")).toBeTruthy();
-  expect(crumb.getByText(AGENT.model)).toBeTruthy();
-  expect(crumb.queryByText("assistant")).toBeNull();
-  expect(screen.queryByRole("button", { name: "Back to Agents" })).toBeNull();
+  expect(crumb.getByText("assistant")).toBeTruthy();
+  expect(crumb.queryByText(AGENT.model)).toBeNull();
+
+  await userEvent.click(crumb.getByRole("button", { name: "Back to assistant" }));
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
 });
 
 test("a deep link is not blamed while the rail is the thing that failed", async () => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
+import { AgentPicker } from "@/kernel/agentpick";
 import {
   Questionnaire,
   QuestionnaireActions,
@@ -58,6 +59,12 @@ export type ChatProps = {
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
   onSettled?: () => void;
+  /** Every agent the member may open a conversation with, and the act that switches to one. The
+   *  picker they feed stands in the composer of a conversation that has not started: which agent
+   *  answers is the last thing settled before the first message, and a conversation is bound to one
+   *  agent the moment it opens. */
+  agents?: Agent[];
+  onPickAgent?: (agentId: string) => void;
   onOpenArtifacts?: () => void;
 };
 
@@ -69,6 +76,8 @@ export function Chat({
   onActivity,
   onSettled,
   onOpenArtifacts,
+  agents,
+  onPickAgent,
 }: ChatProps) {
   const chatKey = conversationId ?? "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
@@ -126,75 +135,96 @@ export function Chat({
     state.earlier,
   );
   const messages = state.messages;
-  const showEmpty = messages !== null && !messages.length && !state.busy && !state.live;
+  const settled = !state.busy && !state.live;
+  /** A conversation nobody has said anything in yet. The transcript is the whole screen once one
+   *  exists, so until then the box stands in the middle of the pane, with the agent that would hold
+   *  it picked in the box's own toolbar. A message still loading counts as unsaid, or the first
+   *  paint would draw the log's layout and the composer would jump on the frame after it. */
+  const starting = conversationId === null && settled && !messages?.length;
+  const showEmpty = messages !== null && !messages.length && settled;
   const stalled = messages === null ? state.fault : null;
   const credentials = state.handoffs.credentials;
   const held = state.busy || state.messages === null;
 
   return (
     <TranscriptScroll>
-      <TranscriptPane className="flex-1">
-        <MessageLog
-          messages={messages ?? []}
-          earlier={earlier}
-          live={state.live}
-          className={cn(COLUMN, "p-2xl")}
-          question={(question) => (
-            <Question
-              target={target}
-              question={question}
-              held={held}
-              onAct={() => composer.current?.focus()}
-            />
-          )}
-          onOpenArtifacts={onOpenArtifacts}
-        >
-          {credentials ? (
-            <Handoff>
-              <div>{credentials.reason}</div>
-              {credentials.prompts.map((prompt) => (
-                <CredentialPromptForm
-                  key={prompt.slot}
-                  sealed={credentials.sealed}
-                  prompt={prompt}
-                  onStored={(slot) =>
-                    updateChat(chatKey, (current) => {
-                      const request = current.handoffs.credentials;
-                      if (!request) return current;
-                      return {
-                        ...current,
-                        handoffs: {
-                          ...current.handoffs,
-                          credentials: {
-                            ...request,
-                            prompts: request.prompts.map((entry) =>
-                              entry.slot === slot ? { ...entry, stored: true } : entry,
-                            ),
+      {starting ? null : (
+        <TranscriptPane className="flex-1">
+          <MessageLog
+            messages={messages ?? []}
+            earlier={earlier}
+            live={state.live}
+            className={cn(COLUMN, "p-2xl")}
+            question={(question) => (
+              <Question
+                target={target}
+                question={question}
+                held={held}
+                onAct={() => composer.current?.focus()}
+              />
+            )}
+            onOpenArtifacts={onOpenArtifacts}
+          >
+            {credentials ? (
+              <Handoff>
+                <div>{credentials.reason}</div>
+                {credentials.prompts.map((prompt) => (
+                  <CredentialPromptForm
+                    key={prompt.slot}
+                    sealed={credentials.sealed}
+                    prompt={prompt}
+                    onStored={(slot) =>
+                      updateChat(chatKey, (current) => {
+                        const request = current.handoffs.credentials;
+                        if (!request) return current;
+                        return {
+                          ...current,
+                          handoffs: {
+                            ...current.handoffs,
+                            credentials: {
+                              ...request,
+                              prompts: request.prompts.map((entry) =>
+                                entry.slot === slot ? { ...entry, stored: true } : entry,
+                              ),
+                            },
                           },
-                        },
-                      };
-                    })
-                  }
-                />
-              ))}
-            </Handoff>
-          ) : null}
-          {stalled ? (
-            <div className="m-auto max-w-empty text-center text-ink-soft">
-              <p>{stalled.title}</p>
-              {stalled.description ? <p>{stalled.description}</p> : null}
-            </div>
-          ) : null}
-          {showEmpty ? (
-            <div className="m-auto max-w-empty text-center text-ink-soft">
-              {conversationId === null
-                ? "Message " + agent.name + " to start."
-                : "No messages in this conversation yet."}
-            </div>
-          ) : null}
-        </MessageLog>
-      </TranscriptPane>
-      <Composer target={target} draftKey={draftKey} input={composer} />
+                        };
+                      })
+                    }
+                  />
+                ))}
+              </Handoff>
+            ) : null}
+            {stalled ? (
+              <div className="m-auto max-w-empty text-center text-ink-soft">
+                <p>{stalled.title}</p>
+                {stalled.description ? <p>{stalled.description}</p> : null}
+              </div>
+            ) : null}
+            {showEmpty ? (
+              <div className="m-auto max-w-empty text-center text-ink-soft">
+                No messages in this conversation yet.
+              </div>
+            ) : null}
+          </MessageLog>
+        </TranscriptPane>
+      )}
+      <Composer
+        target={target}
+        draftKey={draftKey}
+        input={composer}
+        starting={starting}
+        agent={agent}
+        agents={agents}
+        onPickAgent={
+          onPickAgent
+            ? (agentId) => {
+                moveDraft(draftKey, member.id + "/new:" + agentId);
+                onPickAgent(agentId);
+              }
+            : undefined
+        }
+      />
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
@@ -388,10 +418,18 @@ function Composer({
   target,
   draftKey,
   input,
+  starting,
+  agent,
+  agents,
+  onPickAgent,
 }: {
   target: ChatTarget;
   draftKey: string;
   input: RefObject<HTMLTextAreaElement | null>;
+  starting: boolean;
+  agent: Agent;
+  agents?: Agent[];
+  onPickAgent?: (agentId: string) => void;
 }) {
   const state = useChat(target.key);
   const toTheFoot = useTakeMeToTheFoot();
@@ -439,7 +477,14 @@ function Composer({
   }
 
   return (
-    <div className={cn(COLUMN, "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]")}>
+    <div
+      className={cn(
+        COLUMN,
+        starting
+          ? "flex flex-1 flex-col justify-center overflow-y-auto p-2xl"
+          : "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]",
+      )}
+    >
       <PromptInput onSend={send}>
         <PromptInputAttachments />
         <PromptInputTextarea
@@ -460,17 +505,23 @@ function Composer({
         />
         <PromptInputToolbar>
           <PromptInputAttach />
-          <PromptInputSubmit
-            stops={Boolean(running && state.busy && !text.trim())}
-            busy={stopping}
-            disabled={disabled}
-            onStop={() => {
-              if (stopping || !running) return;
-              void stop(running.id);
-            }}
-          />
+          <div className="flex items-center gap-sm">
+            {starting && agents && onPickAgent ? (
+              <AgentPicker agent={agent} agents={agents} onPick={onPickAgent} />
+            ) : null}
+            <PromptInputSubmit
+              stops={Boolean(running && state.busy && !text.trim())}
+              busy={stopping}
+              disabled={disabled}
+              onStop={() => {
+                if (stopping || !running) return;
+                void stop(running.id);
+              }}
+            />
+          </div>
         </PromptInputToolbar>
       </PromptInput>
     </div>
   );
 }
+

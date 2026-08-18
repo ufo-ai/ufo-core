@@ -13,11 +13,13 @@ import {
 
 export type ChatPaneProps = ChatProps & {
   /** What the conversation is called — the rail row's own title. Absent for a conversation not yet
-   *  opened, where the agent about to hold it is all there is to say. */
+   *  opened, which is headed by nothing: the agent is named by the picker in its own composer, and
+   *  a header over an empty screen states a conversation that does not exist yet. */
   title?: string;
   conversationOnly?: boolean;
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
+  onOpenAgent?: (agentId: string) => void;
 };
 
 export function ChatPane({
@@ -30,6 +32,9 @@ export function ChatPane({
   conversationOnly = false,
   slot,
   onSelectSlot,
+  onOpenAgent,
+  agents,
+  onPickAgent,
 }: ChatPaneProps) {
   const [slotReloads, setSlotReloads] = useState(0);
   const slots = usePanelRead<ConversationSlotsPayload>(
@@ -41,13 +46,17 @@ export function ChatPane({
   const selected =
     slots.phase === "ready" ? slots.payload.slots.find((entry) => entry.id === slot) : undefined;
   const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
-  const header = (
+  /** A conversation is headed by what it is called, under the agent holding it. A conversation not
+   *  yet opened is headed by nothing at all. */
+  const header = conversationId ? (
     <PaneHeader
+      parent={{
+        label: agent.name,
+        onGo: onOpenAgent && !conversationOnly ? () => onOpenAgent(agent.id) : undefined,
+      }}
       current={title ?? agent.name}
-      note={<span className="font-mono text-mono text-ink-soft">{agent.model}</span>}
       actions={
-        !conversationOnly &&
-        slots.phase === "ready" && slots.payload.slots.length ? (
+        !conversationOnly && slots.phase === "ready" && slots.payload.slots.length ? (
           <div className="flex items-center gap-sm" aria-label="Conversation slots">
             {slots.payload.slots.map((entry) => (
               <Button
@@ -68,7 +77,7 @@ export function ChatPane({
         ) : null
       }
     />
-  );
+  ) : null;
   return (
     <Pane>
       <div
@@ -86,6 +95,8 @@ export function ChatPane({
             onCreated={onCreated}
             onActivity={onActivity}
             onSettled={settled}
+            agents={agents}
+            onPickAgent={onPickAgent}
             onOpenArtifacts={
               conversationId && onSelectSlot ? () => onSelectSlot("artifacts") : undefined
             }

@@ -234,7 +234,7 @@ export function PaneHeader({
   note,
   actions,
 }: {
-  parent?: { label: string; onGo: () => void };
+  parent?: { label: string; onGo?: () => void };
   current: ReactNode;
   note?: ReactNode;
   actions?: ReactNode;
@@ -246,9 +246,13 @@ export function PaneHeader({
           {parent ? (
             <>
               <BreadcrumbItem>
-                <BreadcrumbLink aria-label={"Back to " + parent.label} onClick={parent.onGo}>
-                  {parent.label}
-                </BreadcrumbLink>
+                {parent.onGo ? (
+                  <BreadcrumbLink aria-label={"Back to " + parent.label} onClick={parent.onGo}>
+                    {parent.label}
+                  </BreadcrumbLink>
+                ) : (
+                  parent.label
+                )}
               </BreadcrumbItem>
               <BreadcrumbSeparator />
             </>

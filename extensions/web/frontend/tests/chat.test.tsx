@@ -18,6 +18,7 @@ import {
   StreamFake,
   TURN_ID,
   json,
+  pick,
   saying,
   useStreamFake,
   wire,
@@ -2385,7 +2386,7 @@ test("a send the composer cannot answer leaves the attachment where the member p
   wire({ ...transcript(), "/chat": () => new Promise<Response>(() => {}) });
   location.hash = "#/";
   open();
-  await screen.findByText("Message assistant to start.");
+  await screen.findByLabelText("Message the agent");
 
   const composer = document.querySelector("form[data-field-card]")!;
   const chips = () => within(composer as HTMLElement).queryAllByRole("listitem");
@@ -2694,4 +2695,41 @@ test("a turn the fleet picked back up says so among its steps", async () => {
   // once as the open disclosure's summary and once in the step list standing behind it.
   expect(await screen.findAllByText("Resumed after a restart")).toHaveLength(2);
   expect(screen.getByText("bash alembic upgrade head")).toBeTruthy();
+});
+
+test("the start screen picks the agent in its own composer, and carries what was typed to it", async () => {
+  wire({ ...transcript() });
+  location.hash = "#/";
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Message the agent");
+  expect(screen.queryByTestId("log")).toBeNull();
+  expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
+
+  await userEvent.type(screen.getByLabelText("Message the agent"), "draft this");
+  await pick("Agent", "second");
+
+  expect(location.hash).toBe("#/new/" + SECOND_ID);
+  await waitFor(() =>
+    expect((screen.getByLabelText("Message the agent") as HTMLTextAreaElement).value).toBe(
+      "draft this",
+    ),
+  );
+  expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("second");
+});
+
+test("a conversation that has opened fixes its agent, and the picker goes with the start screen", async () => {
+  wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  location.hash = "#/";
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("combobox", { name: "Agent" })).toBeTruthy();
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hello");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
 });

@@ -81,7 +81,6 @@ export type AppProps = {
 
 type Rail = { phase: "loading" | "failed" | "ready"; rows: ChatRow[] };
 
-const PICKER_ID = "new-conversation-agents";
 
 type Sought =
   | { kind: "answered" }
@@ -321,7 +320,6 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
             >
               {inChat(route.kind) ? (
                 <ChatSidebar
-                  agents={agents}
                   mainAgent={mainAgent}
                   rail={rail}
                   route={route}
@@ -343,6 +341,7 @@ export function App({ agents, member, newAgent, onAgents }: AppProps) {
                 onCreated={created}
                 onActivity={activity}
                 onOpenAgent={openAgent}
+                onNewChat={openNewChat}
                 onOpenSlot={openSlot}
                 onPlaceWorkspace={placeWorkspace}
                 onPlaceSection={placeSection}
@@ -516,7 +515,6 @@ function AccountMenu({ member, onAdmin }: { member: Member; onAdmin: () => void 
 }
 
 function ChatSidebar({
-  agents,
   mainAgent,
   rail,
   route,
@@ -526,7 +524,6 @@ function ChatSidebar({
   onOpen,
   onRetry,
 }: {
-  agents: Agent[];
   mainAgent: Agent | null;
   rail: Rail;
   route: Route;
@@ -543,7 +540,16 @@ function ChatSidebar({
     >
       <ul className="m-0 flex list-none flex-col gap-px px-sm py-0 max-narrow:flex-row max-narrow:items-center max-narrow:overflow-x-auto max-narrow:p-0">
         <li>
-          <NewChat agents={agents} mainAgent={mainAgent} onNewChat={onNewChat} />
+          {mainAgent ? (
+            <Button
+              variant="send"
+              size="bar"
+              className="w-full"
+              onClick={() => onNewChat(mainAgent.id)}
+            >
+              New conversation
+            </Button>
+          ) : null}
         </li>
       </ul>
       <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0">
@@ -572,6 +578,7 @@ function RoutedPane({
   onCreated,
   onActivity,
   onOpenAgent,
+  onNewChat,
   onOpenSlot,
   onPlaceWorkspace,
   onPlaceSection,
@@ -589,6 +596,7 @@ function RoutedPane({
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
+  onNewChat: (agentId: string) => void;
   onOpenSlot: (conversationId: string, slot: string | null) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
@@ -676,6 +684,7 @@ function RoutedPane({
           conversation={linkedConversation}
           slot={route.slot}
           onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
+          onOpenAgent={onOpenAgent}
         />
       );
     }
@@ -714,6 +723,7 @@ function RoutedPane({
         onActivity={onActivity}
         title={row.title}
         conversationOnly={!listedAgent}
+        onOpenAgent={onOpenAgent}
         slot={route.slot}
         onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
       />
@@ -732,12 +742,14 @@ function RoutedPane({
       conversationId={null}
       onCreated={(conversationId, title) => onCreated(agent, conversationId, title)}
       onActivity={onActivity}
+      agents={agents}
+      onPickAgent={onNewChat}
     />
   );
 }
 
 /** A conversation another surface holds, read in the portal: the thread pane a portal chat wears,
- *  headed the same way — what the conversation is called and the model it ran on — with the
+ *  headed the same way — the agent holding it and what it is called — with the
  *  surface it is happening on marked at the far end of that header, as the way out to it. The
  *  header states the name once, so the transcript under it draws no heading of its own. */
 function LinkedPane({
@@ -745,11 +757,13 @@ function LinkedPane({
   conversation,
   slot,
   onSelectSlot,
+  onOpenAgent,
 }: {
   agent: Agent;
   conversation: OwnedConversation;
   slot?: string;
   onSelectSlot: (slot: string | null) => void;
+  onOpenAgent: (agentId: string) => void;
 }) {
   const [disclosed, setDisclosed] = useState(false);
   const viewer = useViewer();
@@ -764,8 +778,8 @@ function LinkedPane({
       >
         <div className="flex min-h-0 min-w-0 flex-col">
           <PaneHeader
+            parent={{ label: agent.name, onGo: () => onOpenAgent(agent.id) }}
             current={subject(conversation, viewer)}
-            note={<span className="font-mono text-mono text-ink-soft">{agent.model}</span>}
             actions={<SurfaceMark conversation={conversation} />}
           />
           <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
@@ -814,78 +828,6 @@ function PaneNote({ children }: { children: React.ReactNode }) {
     <Pane className={COLUMN}>
       <div className="m-auto max-w-empty text-center text-ink-soft">{children}</div>
     </Pane>
-  );
-}
-
-function NewChat({
-  agents,
-  mainAgent,
-  onNewChat,
-}: {
-  agents: Agent[];
-  mainAgent: Agent | null;
-  onNewChat: (agentId: string) => void;
-}) {
-  const [picking, setPicking] = useState(false);
-  const held = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!picking) return;
-    const dismiss = (event: Event) => {
-      if (event instanceof KeyboardEvent && event.key !== "Escape") return;
-      if (event instanceof MouseEvent && held.current?.contains(event.target as Node)) return;
-      setPicking(false);
-    };
-    document.addEventListener("keydown", dismiss);
-    document.addEventListener("pointerdown", dismiss);
-    return () => {
-      document.removeEventListener("keydown", dismiss);
-      document.removeEventListener("pointerdown", dismiss);
-    };
-  }, [picking]);
-
-  if (!mainAgent) return null;
-  if (agents.length === 1) {
-    return (
-      <Button variant="send" size="bar" className="w-full" onClick={() => onNewChat(mainAgent.id)}>
-        New conversation
-      </Button>
-    );
-  }
-  return (
-    <div
-      ref={held}
-      className="flex flex-col gap-hair max-narrow:flex-row max-narrow:items-center"
-    >
-      <Button
-        variant="send"
-        size="bar"
-        className="w-full"
-        aria-expanded={picking}
-        aria-controls={PICKER_ID}
-        onClick={() => setPicking((open) => !open)}
-      >
-        New conversation
-      </Button>
-      {picking ? (
-        <ul id={PICKER_ID} className="m-0 flex list-none flex-col gap-hair p-0 max-narrow:flex-row">
-          {agents.map((agent) => (
-            <li key={agent.id}>
-              <button
-                type="button"
-                onClick={() => {
-                  setPicking(false);
-                  onNewChat(agent.id);
-                }}
-                className="block w-full rounded-full border-0 bg-transparent py-xs pl-4xl pr-sm text-left text-label text-inherit hover:bg-fill max-narrow:w-auto max-narrow:whitespace-nowrap"
-              >
-                {agent.name}
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
   );
 }
 
