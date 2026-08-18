@@ -248,8 +248,9 @@ data "kubectl_file_documents" "hosted" {
     termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60
     graceful_shutdown_seconds        = local.graceful_shutdown_seconds
 
-    region        = var.region
-    otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+    region               = var.region
+    otlp_endpoint        = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+    spectrum_phone_scope = "block:+17183167766"
 
     # The sandbox cache (RFC 0032). `cache_enabled` gates the daemon sidecar; `cache_s3_bucket` empty
     # runs it disk-only (cold on every pod roll). The bucket and IRSA role exist (created by the

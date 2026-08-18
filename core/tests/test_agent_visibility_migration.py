@@ -11,7 +11,7 @@ from ufo.db import MIGRATIONS_DIR
 
 def _update_statement() -> sa.TextClause:
     spec = importlib.util.spec_from_file_location(
-        "migration_0104", MIGRATIONS_DIR / "versions" / "0104_agent_visibility.py"
+        "migration_0105", MIGRATIONS_DIR / "versions" / "0105_agent_visibility.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -28,7 +28,7 @@ def _config(database_path: Path) -> Config:
     return config
 
 
-def test_0104_births_visibility_private_and_widens_main(tmp_path: Path) -> None:
+def test_0105_births_visibility_private_and_widens_main(tmp_path: Path) -> None:
     database_path = tmp_path / "agent-visibility.db"
     config = _config(database_path)
     command.upgrade(config, "0103")
@@ -49,14 +49,14 @@ def test_0104_births_visibility_private_and_widens_main(tmp_path: Path) -> None:
             )
         )
         connection.commit()
-    command.upgrade(config, "0104")
+    command.upgrade(config, "0105")
     with engine.connect() as connection:
         rows = connection.execute(sa.text("select id, visibility from agent order by id")).all()
     engine.dispose()
     assert rows == [("a", "workspace"), ("b", "private")]
 
 
-def test_0104_update_runs_on_postgres(database_url: str) -> None:
+def test_0105_update_runs_on_postgres(database_url: str) -> None:
     if not database_url.startswith("postgresql"):
         pytest.skip("Postgres migration proof runs on the Postgres database parameter")
     engine = sa.create_engine(database_url.replace("+asyncpg", "+psycopg"))

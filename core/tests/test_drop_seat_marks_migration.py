@@ -1,4 +1,4 @@
-"""0104 takes the seat shipper's day marks with it.
+"""0106 takes the seat shipper's day marks with it.
 
 Nothing ships a member count any more, so the marks that stopped the retired job shipping twice in
 one day are rows no code will ever read or clear again. Absence alone could not be the trigger — an
@@ -32,7 +32,7 @@ def _config(path: Path) -> Config:
 def test_the_seat_marks_go_and_another_extension_keeps_its_own(tmp_path: Path) -> None:
     database = tmp_path / "seat-marks.db"
     config = _config(database)
-    command.upgrade(config, "0103")
+    command.upgrade(config, "0105")
     workspace_id = uuid4()
     engine = sa.create_engine(f"sqlite:///{database}")
     with engine.connect() as connection:
@@ -62,7 +62,7 @@ def test_the_seat_marks_go_and_another_extension_keeps_its_own(tmp_path: Path) -
         connection.commit()
     engine.dispose()
 
-    command.upgrade(config, "0104")
+    command.upgrade(config, "0106")
 
     engine = sa.create_engine(f"sqlite:///{database}")
     with engine.connect() as connection:

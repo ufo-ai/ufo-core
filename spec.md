@@ -492,7 +492,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Terminal | `extensions/ufo` | live (held directive stream) | member token | session (private) |
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email/hex (private; a member opens any number of conversations per agent, each behind `conversation=new`; conversations that predate the rail keep bare agent/email keys, reachable by id) + intent/agent/email (the member's prepared-intent lane to that agent) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign. `surface_label` is `#name` off the `conversations.info` the audience decision already fetched (never a call of its own, and never an MPIM's member-naming name), `Direct message` for a DM, else null |
-| iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member (ten-minute reply confirmation requested in signed-in chat and bound to one direct provider conversation) | provider conversation id; DM = member, group = room |
+| iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member (ten-minute YES confirmation requested in signed-in chat and bound to one direct provider conversation) | provider conversation id; DM = member, group = room |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
@@ -726,7 +726,9 @@ identity with `auth.test`.
 
 iMessage setup is one chat tool. An admin binds the deploy's Spectrum project to the workspace;
 each signed-in member claims an E.164 phone number. Spectrum returns the shared line to message,
-and the first inbound message from the claimed phone links that phone to the requesting member.
+and a direct `YES` from the claimed phone and provider conversation proves that the phone can send
+to the assigned line. It does not prove that the phone received the confirmation, especially when
+iMessage falls back to SMS. That reply links the phone and is not admitted as a turn.
 The listener opens the live stream, buffers it while it replays from its extension-store sequence
 cursor, then drains the buffer; each provider message GUID is the admission idempotency key.
 

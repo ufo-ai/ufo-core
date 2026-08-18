@@ -251,6 +251,22 @@ def test_hosted_serve_receives_the_spectrum_project_credentials() -> None:
         )
 
 
+def test_hosted_serve_scopes_the_shared_spectrum_project_by_deploy() -> None:
+    assert (
+        '- {name: SPECTRUM_PHONE_SCOPE, value: "${spectrum_phone_scope}"}'
+        in HOSTED_TEMPLATE.read_text()
+    )
+    root = Path(__file__).resolve().parents[2]
+    assert (
+        'spectrum_phone_scope = "allow:+17183167766"'
+        in (root / "infra/envs/testing/ufo.tf").read_text()
+    )
+    assert (
+        'spectrum_phone_scope = "block:+17183167766"'
+        in (root / "infra/envs/prod/ufo.tf").read_text()
+    )
+
+
 def test_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None:
     """The shared app host fronts both the onboarding gateway and the serve fleet behind one
     ingress, so the sign-in flow is same-origin with the product it deposits members into. The

@@ -1182,7 +1182,9 @@ async def test_surface_listener_resolves_only_a_bound_installation(db: None, tmp
         assert resolved is surface_context
 
 
-async def test_surface_listener_has_one_live_owner_and_parks_a_failure(db: None) -> None:
+async def test_surface_listener_has_one_live_owner_and_parks_a_failure(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     first_id = UUID(int=1)
     second_id = UUID(int=2)
     now = datetime.now(UTC)
@@ -1208,6 +1210,14 @@ async def test_surface_listener_has_one_live_owner_and_parks_a_failure(db: None)
         )
     first_started = asyncio.Event()
     second_started = asyncio.Event()
+    parked = asyncio.Event()
+    metrics: list[tuple[str, dict[str, str]]] = []
+
+    def emit_metric(name: str, **dimensions: str) -> None:
+        metrics.append((name, dimensions))
+        parked.set()
+
+    monkeypatch.setattr(surface_module, "emit_metric", emit_metric)
 
     async def fail(_context: SurfaceListenerContext) -> None:
         first_started.set()
@@ -1243,6 +1253,8 @@ async def test_surface_listener_has_one_live_owner_and_parks_a_failure(db: None)
     second_task = asyncio.create_task(second.run())
     try:
         await asyncio.wait_for(first_started.wait(), timeout=1)
+        await asyncio.wait_for(parked.wait(), timeout=1)
+        assert metrics == [("surface_listener_parked_total", {"surface": SURFACE})]
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(second_started.wait(), timeout=0.05)
         assert not first_task.done()

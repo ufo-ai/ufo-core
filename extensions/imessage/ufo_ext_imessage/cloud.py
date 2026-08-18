@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -26,6 +27,7 @@ from ufo_ext_imessage.proto.photon.imessage.v1 import (
 from ufo_ext_imessage.provider import (
     InboundMessage,
     MessageAttachment,
+    PhoneNotAllowed,
     ProviderEvent,
     ProviderNotConfigured,
     RegisteredPhone,
@@ -33,11 +35,13 @@ from ufo_ext_imessage.provider import (
 
 SPECTRUM_PROJECT_ID_ENV = "SPECTRUM_PROJECT_ID"
 SPECTRUM_PROJECT_SECRET_ENV = "SPECTRUM_PROJECT_SECRET"
+SPECTRUM_PHONE_SCOPE_ENV = "SPECTRUM_PHONE_SCOPE"
 SPECTRUM_CLOUD_URL = "https://spectrum.photon.codes"
 SPECTRUM_IMESSAGE_ADDRESS = "imessage.spectrum.photon.codes:443"
 HTTP_TIMEOUT_SECONDS = 20.0
 RPC_TIMEOUT_SECONDS = 30.0
 TOKEN_REFRESH_MARGIN_SECONDS = 60
+E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
 
 
 class SpectrumCloudError(RuntimeError):
@@ -86,6 +90,8 @@ class SpectrumProject:
     client: httpx.AsyncClient
     lock: asyncio.Lock
     token_state: dict[str, object]
+    allowed_phone_numbers: frozenset[str] | None = None
+    blocked_phone_numbers: frozenset[str] = frozenset()
     _loops: dict[asyncio.AbstractEventLoop, SpectrumLoop] = field(
         default_factory=dict, compare=False
     )
@@ -137,6 +143,8 @@ class SpectrumProject:
             return state
 
     async def register_phone(self, phone_number: str, idempotency_key: str) -> RegisteredPhone:
+        if not self._phone_allowed(phone_number):
+            raise PhoneNotAllowed(phone_number)
         try:
             page = TypeAdapter(CloudEnvelope[UserPage]).validate_python(
                 await self._request("GET", f"/projects/{self.project_id}/users/")
@@ -246,7 +254,7 @@ class SpectrumProject:
                     yield ProviderEvent(
                         sequence=frame.sequence,
                         message=(
-                            _inbound_message(frame.message_changed)
+                            self._scoped_message(frame.message_changed)
                             if payload == "message_changed"
                             else None
                         ),
@@ -264,11 +272,22 @@ class SpectrumProject:
                 yield ProviderEvent(
                     sequence=frame.sequence if frame.HasField("sequence") else None,
                     message=(
-                        _inbound_message(frame.message_changed)
+                        self._scoped_message(frame.message_changed)
                         if frame.WhichOneof("payload") == "message_changed"
                         else None
                     ),
                 )
+
+    def _scoped_message(self, event: object) -> InboundMessage | None:
+        message = _inbound_message(event)
+        if message is None or not self._phone_allowed(message.sender):
+            return None
+        return message
+
+    def _phone_allowed(self, phone_number: str) -> bool:
+        return phone_number not in self.blocked_phone_numbers and (
+            self.allowed_phone_numbers is None or phone_number in self.allowed_phone_numbers
+        )
 
     async def send_text(self, conversation_id: str, text: str, idempotency_key: str) -> str:
         line = await self.line()
@@ -335,13 +354,38 @@ def spectrum_project() -> SpectrumProject:
         raise ProviderNotConfigured(
             f"Set {SPECTRUM_PROJECT_ID_ENV} and {SPECTRUM_PROJECT_SECRET_ENV}"
         )
+    allowed_phone_numbers, blocked_phone_numbers = _phone_scope(
+        os.environ.get(SPECTRUM_PHONE_SCOPE_ENV)
+    )
     return SpectrumProject(
         project_id=project_id,
         project_secret=project_secret,
         client=httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS),
         lock=asyncio.Lock(),
         token_state={},
+        allowed_phone_numbers=allowed_phone_numbers,
+        blocked_phone_numbers=blocked_phone_numbers,
     )
+
+
+def _phone_scope(value: str | None) -> tuple[frozenset[str] | None, frozenset[str]]:
+    if value is None or not value.strip():
+        return None, frozenset()
+    try:
+        mode, serialized = value.split(":", maxsplit=1)
+    except ValueError as error:
+        message = f"{SPECTRUM_PHONE_SCOPE_ENV} must start with allow: or block:"
+        raise RuntimeError(message) from error
+    phone_numbers = frozenset(phone.strip() for phone in serialized.split(",") if phone.strip())
+    if not phone_numbers or any(E164_PATTERN.fullmatch(phone) is None for phone in phone_numbers):
+        raise RuntimeError(f"{SPECTRUM_PHONE_SCOPE_ENV} must contain E.164 phone numbers")
+    match mode:
+        case "allow":
+            return phone_numbers, frozenset()
+        case "block":
+            return None, phone_numbers
+        case _:
+            raise RuntimeError(f"{SPECTRUM_PHONE_SCOPE_ENV} must start with allow: or block:")
 
 
 def rpc_metadata(token: str, idempotency_key: str | None = None) -> tuple[tuple[str, str], ...]:

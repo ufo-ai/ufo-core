@@ -9,15 +9,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from ufo.sdk.surfaces import SurfaceInstallationConflict
 from ufo.sdk.tools import TextContent, ToolContext, ToolResult
-from ufo_ext_imessage.provider import MessageProvider, ProviderNotConfigured
+from ufo_ext_imessage.provider import MessageProvider, PhoneNotAllowed, ProviderNotConfigured
 from ufo_ext_imessage.surface import SURFACE_IMESSAGE, PendingClaim, phone_key
 
 E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
 PROJECT_KEY = "project"
 PHONE_CLAIM_TTL = timedelta(minutes=10)
 CONFIRMATION_TEXT = (
-    "Reply to connect this number to your ufo account. If you did not request this, do not reply."
+    "Reply YES to connect this number to your ufo account. Reply STOP to stop messages."
 )
+CONFIRMATION_INSTRUCTION = "Check Messages and reply YES within 10 minutes."
 
 
 class ImessageConnectInput(BaseModel):
@@ -91,11 +92,12 @@ class ImessageConnect:
                     CONFIRMATION_TEXT,
                     existing.confirmation_idempotency_key,
                 )
-                return _result(
-                    "pending", "Check Messages and reply to the confirmation within 10 minutes."
-                )
+                return _result("pending", CONFIRMATION_INSTRUCTION)
         confirmation_idempotency_key = f"imessage-confirmation:{ctx.idempotency_key or uuid4()}"
-        user = await provider.register_phone(args.phone_number, confirmation_idempotency_key)
+        try:
+            user = await provider.register_phone(args.phone_number, confirmation_idempotency_key)
+        except PhoneNotAllowed:
+            return _result("not_connected", "This deploy does not allow that phone number.")
         claim = PendingClaim(
             member_id=ctx.speaker_member_id,
             phone_number=args.phone_number,
@@ -111,5 +113,5 @@ class ImessageConnect:
         )
         return _result(
             "pending",
-            "Check Messages and reply to the confirmation within 10 minutes.",
+            CONFIRMATION_INSTRUCTION,
         )

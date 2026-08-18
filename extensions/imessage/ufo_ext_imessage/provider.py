@@ -38,6 +38,10 @@ class ProviderNotConfigured(RuntimeError):
     pass
 
 
+class PhoneNotAllowed(RuntimeError):
+    pass
+
+
 class MessageProvider(Protocol):
     @property
     def installation_id(self) -> str: ...

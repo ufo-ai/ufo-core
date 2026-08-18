@@ -24,8 +24,8 @@ def manifest() -> Manifest:
                 name="imessage_connect",
                 description=(
                     "Connect the requesting member's iMessage phone. An admin connects the "
-                    "provider; each member confirms their own phone by replying to a direct "
-                    "message."
+                    "provider; each member proves that the phone can send to the assigned line "
+                    "by replying YES in the direct conversation."
                 ),
                 input_model=ImessageConnectInput,
                 handler=connect.run,

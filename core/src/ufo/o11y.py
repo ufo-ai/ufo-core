@@ -74,6 +74,7 @@ METRICS = (
     "model_round_tokens_total",
     "tool_call_total",
     "source_sync_failed_total",
+    "surface_listener_parked_total",
     "repl_run_total",
     "objective_step_recorded_total",
     "objective_condition_total",

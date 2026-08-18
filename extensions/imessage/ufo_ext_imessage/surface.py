@@ -40,6 +40,10 @@ RECONNECT_SECONDS = 2.0
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 LIVE_BUFFER_FRAMES = 1_000
 CONNECTED_TEXT = "Connected. Send your request."
+CONFIRMATION_REPLY_TEXT = "yes"
+OPT_OUT_REPLIES = frozenset(
+    {"cancel", "end", "optout", "quit", "revoke", "stop", "stopall", "unsubscribe"}
+)
 
 
 class PendingClaim(BaseModel):
@@ -249,8 +253,12 @@ class ImessageSurface:
             return None
         if link.confirmation_receipt_key is not None:
             return link.confirmation_receipt_key
+        ambient_text = message.text
+        if message.attachments:
+            names = ", ".join(attachment.filename for attachment in message.attachments)
+            ambient_text = f"{ambient_text}\nAttachments: {names}".strip()
         if not message.direct and not await ctx.ambient_reply_wanted(
-            AmbientMessage(speaker=message.sender, text=message.text), ()
+            AmbientMessage(speaker=message.sender, text=ambient_text), ()
         ):
             return None
         audience = (
@@ -306,6 +314,12 @@ class ImessageSurface:
             or claim.phone_number != message.sender
             or claim.conversation_id != message.conversation_id
         ):
+            return None
+        reply = message.text.strip().casefold()
+        if receipt is None and reply in OPT_OUT_REPLIES:
+            await store.delete(key)
+            return None
+        if receipt is None and (reply != CONFIRMATION_REPLY_TEXT or message.attachments):
             return None
         if receipt is None and not await store.put_if(receipt_key, stored, expected=None):
             return None

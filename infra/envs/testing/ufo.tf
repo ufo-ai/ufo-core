@@ -223,8 +223,9 @@ data "kubectl_file_documents" "hosted" {
     termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60
     graceful_shutdown_seconds        = local.graceful_shutdown_seconds
 
-    region        = var.region
-    otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+    region               = var.region
+    otlp_endpoint        = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+    spectrum_phone_scope = "allow:+17183167766"
 
     # The sandbox cache (RFC 0032), on for testing with the durable S3 tier so it survives pod rolls.
     cache_enabled     = local.cache_enabled

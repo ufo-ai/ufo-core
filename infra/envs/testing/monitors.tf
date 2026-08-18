@@ -97,6 +97,21 @@ resource "datadog_monitor" "source_sync_failed" {
   tags = ["env:testing", "managed-by:terraform"]
 }
 
+resource "datadog_monitor" "surface_listener_parked" {
+  name    = "ufo testing surface listener parked"
+  type    = "query alert"
+  query   = "sum(last_15m):sum:ufo.surface_listener_parked_total{env:testing} by {surface}.as_count() >= 1"
+  message = "{{surface.name}} listener parked after a failure. Inbound messages have stopped while its lease stays active. Search surface.listener_failed. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 1
+  }
+
+  require_full_window = false
+
+  tags = ["env:testing", "managed-by:terraform"]
+}
+
 # The database's own health, from CloudWatch. These answer capacity questions — is the instance
 # running out of something — which is a different question from whether a turn reached it, and a
 # slower one: a point lands well after the minute it describes, so none of these can catch an

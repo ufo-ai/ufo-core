@@ -3731,8 +3731,28 @@ def test_source_sync_failure_monitor_consumes_the_reported_metric(environment: s
 
 
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
+def test_surface_listener_park_monitor_consumes_the_reported_metric(environment: str) -> None:
+    assert _monitor_attribute("surface_listener_parked", "query", environment) == (
+        "sum(last_15m):sum:ufo.surface_listener_parked_total"
+        f"{{env:{environment}}} by {{surface}}.as_count() >= 1"
+    )
+    message = _monitor_attribute("surface_listener_parked", "message", environment)
+    assert "{{surface.name}}" in message
+    assert _monitor_attribute("surface_listener_parked", "critical", environment) == "1"
+    assert _monitor_attribute("surface_listener_parked", "require_full_window", environment) == (
+        "false"
+    )
+
+
+@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
 @pytest.mark.parametrize(
-    "monitor", ["db_tx_unavailable", "db_pool_exhausted", "source_sync_failed"]
+    "monitor",
+    [
+        "db_tx_unavailable",
+        "db_pool_exhausted",
+        "source_sync_failed",
+        "surface_listener_parked",
+    ],
 )
 def test_a_sparse_counters_alert_can_clear_itself(monitor: str, environment: str) -> None:
     assert _monitor_attribute(monitor, "require_full_window", environment) == "false"

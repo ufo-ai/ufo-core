@@ -91,6 +91,21 @@ resource "datadog_monitor" "source_sync_failed" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
+resource "datadog_monitor" "surface_listener_parked" {
+  name    = "ufo prod surface listener parked"
+  type    = "query alert"
+  query   = "sum(last_15m):sum:ufo.surface_listener_parked_total{env:prod} by {surface}.as_count() >= 1"
+  message = "{{surface.name}} listener parked after a failure. Inbound messages have stopped while its lease stays active. Search surface.listener_failed. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 1
+  }
+
+  require_full_window = false
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
 resource "datadog_monitor" "db_storage_low" {
   name    = "ufo prod database is low on storage"
   type    = "query alert"

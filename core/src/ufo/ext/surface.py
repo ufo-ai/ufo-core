@@ -100,7 +100,7 @@ from ufo.image_previews import (
 )
 from ufo.listings import page_of, page_query
 from ufo.models.interface import Message
-from ufo.o11y import log, warn
+from ufo.o11y import emit_metric, log, warn
 from ufo.sandbox.containment import contained_leaf
 from ufo.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES,
@@ -3840,6 +3840,7 @@ class SurfaceListenerRunner:
                     case sa.exc.SQLAlchemyError():
                         await asyncio.sleep(self.poll_seconds)
                     case _:
+                        emit_metric("surface_listener_parked_total", surface=self.surface)
                         await ownership
             finally:
                 for task in (listener, ownership):
