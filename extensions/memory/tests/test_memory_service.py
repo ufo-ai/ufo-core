@@ -6,6 +6,7 @@ threads onto the context. The embed client and the DefaultIndex are real depende
 asserted thing: every assertion reads the Recalled/SourceMatch values back."""
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,12 @@ from ufo.workspace import ws
 
 PAGE_DIGEST = "sha256:page"
 PAGE_REVISION = 1
+
+
+def _at_cosine(target: float) -> tuple[float, ...]:
+    """A unit vector whose cosine against `_at_cosine(1.0)` is `target`, so a test can sit a row an
+    exact distance either side of the recall floor rather than hand-rolling axes."""
+    return vec((0, target), (1, math.sqrt(max(0.0, 1.0 - target * target))))
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -976,6 +983,89 @@ def test_fuse_recall_folds_in_the_un_embedded_tail_leg() -> None:
     tail = (Hit("tail:T", OWNER_KIND_MEMORY_ITEM, "T", SHARED_SUBJECT, 0, "fresh", 2.0),)
     owners = [fused.owner_id for fused in fuse_recall(lexical, vector, tail, 10)]
     assert set(owners) == {"A", "T"}
+
+
+async def test_recall_answers_nothing_when_no_row_is_worded_or_near(db: None) -> None:
+    """End to end, the case the floor exists for: a query sharing no word with any memory, whose
+    embedding sits at right angles to all of them. The vector leg still answers — it always does,
+    returning its nearest chunks — and every row it returns is far. Recall comes back empty rather
+    than handing the turn whatever happened to sit closest."""
+    workspace_id = await _workspace()
+    await _seed_item(workspace_id, SHARED_SUBJECT, "budget review notes", vec((0, 1.0)))
+    await _seed_item(workspace_id, SHARED_SUBJECT, "hiring plan headcount", vec((0, 0.98)))
+
+    recalled = await _store(StubEmbed(vec((1, 1.0))), workspace_id).recall(
+        "zzqrfl mmbtwv",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
+
+    assert recalled == ()
+
+
+async def test_recall_admits_a_wordless_row_at_the_floor_and_drops_one_under_it(db: None) -> None:
+    """The floor is a bar on the raw query-chunk cosine, not on the blended score: two rows sharing
+    no word with the query, one just at the bar and one just under it, and only the first stands.
+    Pinning both sides keeps a later edit from flooring the blend instead, which would move with
+    whatever else came back."""
+    workspace_id = await _workspace()
+    near = await _seed_item(
+        workspace_id, SHARED_SUBJECT, "budget review notes", _at_cosine(RECALL_COSINE_FLOOR + 0.02)
+    )
+    await _seed_item(
+        workspace_id,
+        SHARED_SUBJECT,
+        "hiring plan headcount",
+        _at_cosine(RECALL_COSINE_FLOOR - 0.02),
+    )
+
+    recalled = await _store(StubEmbed(_at_cosine(1.0)), workspace_id).recall(
+        "zzqrfl mmbtwv",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
+
+    assert [item.memory_id for item in recalled] == [near]
+
+
+async def test_recall_keeps_a_worded_row_the_floor_would_have_dropped(db: None) -> None:
+    """The exemption, end to end: a row the lexical leg matched holds words the member typed, which
+    no meaningless string can fake, so it stands at a cosine far under the floor. This is what keeps
+    a one-word query answering — every short query measured against the live corpus matched
+    lexically and would otherwise have gone silent."""
+    workspace_id = await _workspace()
+    worded = await _seed_item(
+        workspace_id, SHARED_SUBJECT, "the refund window is thirty days", vec((1, 1.0))
+    )
+
+    recalled = await _store(StubEmbed(vec((0, 1.0))), workspace_id).recall(
+        "refund window",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
+
+    assert [item.memory_id for item in recalled] == [worded]
+
+
+async def test_recall_keeps_an_un_embedded_row_the_tail_leg_matched(db: None) -> None:
+    """A fact committed a moment ago has no chunk yet, so it carries no cosine at all and reaches
+    recall only through the lexical tail leg. The floor must not touch it: a bar written as "cosine
+    or nothing" would make every just-written memory invisible until the index job caught up."""
+    workspace_id = await _workspace()
+    store = _store(StubEmbed(_at_cosine(0.0)), workspace_id)
+    await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body="the refund window is thirty days"))
+
+    recalled = await store.recall(
+        "refund window",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
+
+    assert [item.body for item in recalled] == ["the refund window is thirty days"]
 
 
 async def test_recall_blend_promotes_the_semantically_closer_fact(db: None) -> None:
