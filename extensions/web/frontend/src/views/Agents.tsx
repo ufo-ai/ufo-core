@@ -69,9 +69,9 @@ function initialSpec(form: NewAgentForm): Record<string, ObjectValue> {
   );
 }
 
-/** The apps screen: a thin index — the New app act over one row per app, the open app's settings
- *  behind the gear beside it — next to a wide pane holding the selected app. On a narrow screen
- *  the index is the page and a hash-named app overlays it. */
+/** The apps screen: a thin index — the New application act over one row per app, the open app's
+ *  settings behind the gear beside it — next to a wide pane holding the selected app. On a narrow
+ *  screen the index is the page and a hash-named app overlays it. */
 export function Agents({
   agents,
   newAgent,
@@ -109,7 +109,7 @@ export function Agents({
         kind={AGENT_KIND}
         name={null}
         spec={initialSpec(newAgent)}
-        title="New app"
+        title="New application"
         options={{ [MODEL_FIELD]: newAgent.models }}
         onDone={(envelope) => create(mainAgent.id, envelope)}
         onClose={() => setCreating(false)}
@@ -129,7 +129,7 @@ export function Agents({
       >
         {newAgent && mainAgent ? (
           <Button variant="send" size="bar" className="shrink-0" onClick={() => setCreating(true)}>
-            New app
+            New application
           </Button>
         ) : null}
         <ul className="m-0 flex list-none flex-col gap-px p-0">

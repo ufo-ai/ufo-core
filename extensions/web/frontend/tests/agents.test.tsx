@@ -81,7 +81,7 @@ function boot(agents: unknown[], member: unknown, newAgent: unknown) {
 
 async function openCreate() {
   await userEvent.click(await screen.findByRole("button", { name: "Apps" }));
-  await userEvent.click(await screen.findByRole("button", { name: "New app" }));
+  await userEvent.click(await screen.findByRole("button", { name: "New application" }));
   return screen.findByLabelText("Name");
 }
 
@@ -211,7 +211,7 @@ test("a member the kind admits no create from is offered no act", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Apps" }));
 
   expect(await agentIndex()).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "New app" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "New application" })).toBeNull();
 });
 
 test("each row in the index draws its own app's mark, and states nothing by it", async () => {
