@@ -52,8 +52,12 @@
     "data": "{\"files\": [{\"filename\": \"quarterly report.pdf\", \"subject\": \"report\", \"media_type\": \"application/pdf\", \"size_bytes\": 2048, \"url\": \"https://ws.example/artifacts/a?exp=1&sig=2\", \"preview_url\": null}]}"
   },
   {
+    "event": "apps",
+    "data": "{\"apps\": [{\"id\": \"22222222-2222-4222-8222-222222222222\", \"name\": \"daily-digest\", \"model\": \"claude-sonnet-5\", \"icon\": \"notebook\"}]}"
+  },
+  {
     "event": "terminal",
-    "data": "{\"status\":\"done\",\"text\":\"Looked it over.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":40,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null}"
+    "data": "{\"status\":\"done\",\"text\":\"Looked it over.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":40,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
   },
   {
     "event": "parked",

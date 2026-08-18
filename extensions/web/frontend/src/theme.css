@@ -234,9 +234,6 @@
   --container-empty: 44ch;
   --container-control: 40ch;
   --container-control-row: 20ch;
-  /* Wide enough to hold "Question 4 of 4" without the line reflowing as the count climbs — a
-     progress line that changes width redraws the row under it on every step. */
-  --container-progress: 14ch;
   --container-search: 168px;
   /* The floor a file card holds, so a short name and a size still make a card the pointer can
      land on rather than a pill the width of its own text. */

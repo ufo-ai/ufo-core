@@ -1,11 +1,42 @@
 import type { ComponentProps } from "react";
+
+import { IconChevronDown, IconChevronUp, IconCornerDownLeft } from "@tabler/icons-react";
 import { Questionnaire as QuestionnairePrimitive } from "@shadcn/react/questionnaire";
 
 import { buttonVariants } from "@/components/ui/button";
-import { CONTROL } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 
 export type { QuestionnaireItemDefinition, QuestionnaireItemStatus } from "@shadcn/react/questionnaire";
+
+/** One answer, drawn as the whole row rather than as a mark with a label beside it: the member
+ *  presses anywhere in it, or types anywhere in it. */
+export const ROW = cn(
+  "relative flex min-h-(--size-touch) items-center gap-md rounded-panel border border-edge",
+  "bg-transparent px-lg py-sm text-start text-ui transition-colors hover:bg-fill",
+);
+
+/** The key a row is answered by, at its leading edge: the letter the run gives each answer in
+ *  order, which is also the key that presses it. */
+export const KEY = cn(
+  "pointer-events-none flex size-(--size-avatar) shrink-0 items-center justify-center",
+  "rounded-control border border-edge bg-fill",
+  "font-mono text-mono leading-none font-medium text-ink-soft",
+);
+
+/** One chevron of the stepper: a glyph in the control's own square, with no border of its own, so
+ *  the pair reads as one count rather than as two buttons standing beside a number. */
+const STEP = cn(
+  "flex size-(--size-control) items-center justify-center rounded-control",
+  "text-ink-soft transition-colors duration-100 ease-control hover:bg-fill hover:text-ink",
+);
+
+/** The act that takes the member on, and the key that takes them on without the pointer. */
+const ONWARD = (
+  <>
+    Continue
+    <IconCornerDownLeft aria-hidden className="size-icon" />
+  </>
+);
 
 /** What a turn asks of the member, taken one question at a time. It is a real form: every answer
  *  is a native control with a native name, so what the member chose survives a reload, reads back
@@ -14,34 +45,20 @@ export type { QuestionnaireItemDefinition, QuestionnaireItemStatus } from "@shad
  *
  *  Asking one at a time is the point. A turn may ask up to four things, and four stacked questions
  *  in a transcript is a wall the member has to parse before answering any of it; a step names one
- *  decision, says where it sits in the run, and lets them go back. */
+ *  decision, says where it sits in the run, and lets them go back.
+ *
+ *  Every answer carries a letter, so the run is answered from the keyboard as readily as from the
+ *  pointer and the key the member presses is drawn on the row it presses. */
 export function Questionnaire({
   className,
   ...props
-}: ComponentProps<typeof QuestionnairePrimitive.Root>) {
+}: Omit<ComponentProps<typeof QuestionnairePrimitive.Root>, "shortcuts">) {
   return (
     <QuestionnairePrimitive.Root
       data-slot="questionnaire"
       className={cn("flex w-full min-w-0 flex-col gap-2xl", className)}
       {...props}
-    />
-  );
-}
-
-/** Where the member is in the run. It holds one width whatever the numbers are, so the question
- *  beneath it does not shift as the count climbs. */
-export function QuestionnaireProgress({
-  className,
-  ...props
-}: ComponentProps<typeof QuestionnairePrimitive.Progress>) {
-  return (
-    <QuestionnairePrimitive.Progress
-      data-slot="questionnaire-progress"
-      className={cn(
-        "w-fit min-w-(--container-progress) font-mono text-small font-medium tabular-nums text-ink-soft",
-        className,
-      )}
-      {...props}
+      shortcuts="letters"
     />
   );
 }
@@ -61,6 +78,8 @@ export function QuestionnaireItem({
   );
 }
 
+/** The question itself, set larger than the answers under it: the member reads the decision first
+ *  and the options as what answers it. */
 export function QuestionnaireTitle({
   className,
   ...props
@@ -69,23 +88,10 @@ export function QuestionnaireTitle({
     <QuestionnairePrimitive.Title
       data-slot="questionnaire-title"
       className={cn(
-        "text-ui leading-chrome font-medium text-pretty",
-        "[&:not(:has(~[data-slot=questionnaire-description]))]:mb-2xl",
+        "text-subtitle leading-chrome text-pretty",
+        "mb-2xl",
         className,
       )}
-      {...props}
-    />
-  );
-}
-
-export function QuestionnaireDescription({
-  className,
-  ...props
-}: ComponentProps<typeof QuestionnairePrimitive.Description>) {
-  return (
-    <QuestionnairePrimitive.Description
-      data-slot="questionnaire-description"
-      className={cn("text-label text-pretty text-ink-soft", className)}
       {...props}
     />
   );
@@ -104,10 +110,9 @@ export function QuestionnaireChoices({
   );
 }
 
-/** One answer, drawn as the whole row rather than as a dot with a label beside it: the member
- *  presses anywhere in it. The native control is laid over the row invisibly and still carries the
- *  focus, the name and the value, so nothing here reimplements what a radio already is. Whether
- *  the mark is a circle or a box is read off the control's own type, never passed in twice. */
+/** One answer the member presses. The native control is laid over the row invisibly and still
+ *  carries the focus, the name and the value, so nothing here reimplements what a radio already
+ *  is; the key states which answer it is, and the row states that it is the chosen one. */
 export function QuestionnaireChoice({
   children,
   className,
@@ -117,11 +122,10 @@ export function QuestionnaireChoice({
     <QuestionnairePrimitive.Choice
       data-slot="questionnaire-choice"
       className={cn(
-        "group/questionnaire-choice relative flex min-h-(--size-touch) cursor-pointer items-start gap-md",
-        "rounded-panel border border-edge bg-transparent px-lg py-md",
-        "text-start text-ui transition-colors outline-none select-none hover:bg-fill",
+        ROW,
+        "group/questionnaire-choice cursor-pointer outline-none select-none",
         "has-[>input:focus-visible]:border-edge-strong",
-        "data-checked:border-primary data-checked:bg-fill",
+        "data-checked:border-edge-strong data-checked:bg-fill",
         "data-invalid:border-attention-ink",
         "data-disabled:pointer-events-none data-disabled:cursor-not-allowed",
         "data-disabled:opacity-(--disabled)",
@@ -133,61 +137,21 @@ export function QuestionnaireChoice({
         data-slot="questionnaire-choice-input"
         className="absolute inset-0 z-10 size-full cursor-pointer opacity-0"
       />
-      <span
-        aria-hidden
-        data-slot="questionnaire-choice-indicator"
-        className={cn(
-          "pointer-events-none relative flex size-(--size-glyph) shrink-0 translate-y-(--spacing-hair)",
-          "items-center justify-center rounded-sm border border-edge",
-          "group-data-[type=radio]/questionnaire-choice:rounded-full",
-          "group-data-checked/questionnaire-choice:border-primary",
-          "group-data-checked/questionnaire-choice:bg-primary",
-          "group-data-checked/questionnaire-choice:text-primary-foreground",
-        )}
-      >
-        <span
-          data-slot="questionnaire-choice-indicator-dot"
-          className={cn(
-            "hidden size-sm rounded-full bg-primary-foreground",
-            "group-data-[type=checkbox]/questionnaire-choice:hidden",
-            "group-data-checked/questionnaire-choice:block",
-          )}
-        />
-        <svg
-          viewBox="0 0 16 16"
-          data-slot="questionnaire-choice-indicator-check"
-          className={cn(
-            "hidden size-(--size-glyph)",
-            "group-data-[type=radio]/questionnaire-choice:hidden",
-            "group-data-checked/questionnaire-choice:block",
-          )}
-        >
-          <path
-            d="m4 8.5 2.5 2.5L12 5.5"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.75"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </span>
-      <QuestionnairePrimitive.ChoiceLabel
-        data-slot="questionnaire-choice-label"
-        className="flex min-w-0 flex-1 flex-col gap-hair leading-chrome"
-      >
-        {children}
-      </QuestionnairePrimitive.ChoiceLabel>
       <QuestionnairePrimitive.ChoiceShortcut
         data-slot="questionnaire-choice-shortcut"
         className={cn(
-          "pointer-events-none ms-auto hidden size-(--size-glyph) shrink-0",
-          "translate-y-(--spacing-hair) items-center justify-center",
-          "rounded-sm border border-edge bg-surface",
-          "font-mono text-mono leading-none font-medium text-ink-soft",
-          "group-data-[shortcut]/questionnaire-choice:inline-flex",
+          KEY,
+          "group-data-checked/questionnaire-choice:border-ink",
+          "group-data-checked/questionnaire-choice:bg-ink",
+          "group-data-checked/questionnaire-choice:text-surface",
         )}
       />
+      <QuestionnairePrimitive.ChoiceLabel
+        data-slot="questionnaire-choice-label"
+        className="flex min-w-0 flex-1 items-baseline gap-sm leading-chrome"
+      >
+        {children}
+      </QuestionnairePrimitive.ChoiceLabel>
     </QuestionnairePrimitive.Choice>
   );
 }
@@ -197,24 +161,51 @@ export function QuestionnaireChoiceDescription({ className, ...props }: Componen
   return (
     <span
       data-slot="questionnaire-choice-description"
-      className={cn("text-label text-ink-soft", className)}
+      className={cn("min-w-0 truncate text-label text-ink-soft", className)}
       {...props}
     />
   );
 }
 
-/** A question the options cannot answer. It is the portal's one field surface, so a box the member
- *  types an answer into is the same object as every other box they type into. */
+/** The answer the options do not hold, drawn as the last of them: a row with its own key that the
+ *  member types into. Words here are an answer like any other — filling the row settles the
+ *  question the way pressing a choice does, and the row states that as the choices state it. */
 export function QuestionnaireInput({
+  shortcut,
   className,
   ...props
-}: ComponentProps<typeof QuestionnairePrimitive.Input>) {
+}: ComponentProps<typeof QuestionnairePrimitive.Input> & { shortcut: string }) {
   return (
-    <QuestionnairePrimitive.Input
-      data-slot="questionnaire-input"
-      className={cn(CONTROL, "min-h-(--size-touch) w-full min-w-0 text-ui", className)}
-      {...props}
-    />
+    <label
+      data-slot="questionnaire-write"
+      className={cn(
+        ROW,
+        "group/questionnaire-write items-center",
+        "has-[input:focus-visible]:border-edge-strong",
+        "has-[input[data-filled]]:border-primary has-[input[data-filled]]:bg-fill",
+      )}
+    >
+      <span
+        aria-hidden
+        data-slot="questionnaire-write-shortcut"
+        className={cn(
+          KEY,
+          "group-has-[input[data-filled]]/questionnaire-write:border-primary",
+          "group-has-[input[data-filled]]/questionnaire-write:bg-primary",
+          "group-has-[input[data-filled]]/questionnaire-write:text-primary-foreground",
+        )}
+      >
+        {shortcut}
+      </span>
+      <QuestionnairePrimitive.Input
+        data-slot="questionnaire-input"
+        className={cn(
+          "min-w-0 flex-1 bg-transparent text-ui outline-none placeholder:text-ink-faint",
+          className,
+        )}
+        {...props}
+      />
+    </label>
   );
 }
 
@@ -231,15 +222,15 @@ export function QuestionnaireError({
   );
 }
 
-/** The acts, on one row: going back on the left, going on at the right, and skipping between them
- *  — so the act that moves the member forward is always in the same place whether this question is
- *  the last one or not. */
+/** The acts, on one row: where the member is in the run on the left, and what takes them out of
+ *  this question on the right — so the act that moves them forward is always in the same place
+ *  whether this question is the last one or not. */
 export function QuestionnaireActions({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
       data-slot="questionnaire-actions"
       className={cn(
-        "grid min-h-(--size-touch) w-full grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-sm",
+        "flex min-h-(--size-touch) w-full items-center justify-end gap-sm",
         className,
       )}
       {...props}
@@ -247,23 +238,41 @@ export function QuestionnaireActions({ className, ...props }: ComponentProps<"di
   );
 }
 
-export function QuestionnairePrevious({
-  children,
-  className,
-  ...props
-}: ComponentProps<typeof QuestionnairePrimitive.Previous>) {
+/** Where the member is in the run, and the two acts that move them through it. The count sits
+ *  between the chevrons in fixed tracks, so the digits hold one place whether or not there is a
+ *  question either side of this one. */
+export function QuestionnaireStepper({ className, ...props }: ComponentProps<"div">) {
   return (
-    <QuestionnairePrimitive.Previous
-      data-slot="questionnaire-previous"
+    <div
+      data-slot="questionnaire-stepper"
       className={cn(
-        buttonVariants({ variant: "outline" }),
-        "col-start-1 row-start-1 justify-self-start",
+        "me-auto grid grid-cols-[var(--size-control)_auto_var(--size-control)] items-center",
         className,
       )}
       {...props}
     >
-      {children ?? "Back"}
-    </QuestionnairePrimitive.Previous>
+      <QuestionnairePrimitive.Previous
+        data-slot="questionnaire-previous"
+        aria-label="Back"
+        className={cn(STEP, "col-start-1")}
+      >
+        <IconChevronUp aria-hidden className="size-icon" />
+      </QuestionnairePrimitive.Previous>
+      <QuestionnairePrimitive.Progress
+        data-slot="questionnaire-progress"
+        className="col-start-2 text-center font-mono text-mono font-medium tabular-nums text-ink-soft"
+        render={(rendered, state) => (
+          <div {...rendered}>{state.current + "/" + state.total}</div>
+        )}
+      />
+      <QuestionnairePrimitive.Next
+        data-slot="questionnaire-next"
+        aria-label="Next"
+        className={cn(STEP, "col-start-3")}
+      >
+        <IconChevronDown aria-hidden className="size-icon" />
+      </QuestionnairePrimitive.Next>
+    </div>
   );
 }
 
@@ -275,11 +284,7 @@ export function QuestionnaireSkip({
   return (
     <QuestionnairePrimitive.Skip
       data-slot="questionnaire-skip"
-      className={cn(
-        buttonVariants({ variant: "outline" }),
-        "col-start-2 row-start-1 justify-self-end",
-        className,
-      )}
+      className={cn(buttonVariants({ variant: "outline", size: "bar" }), className)}
       {...props}
     >
       {children ?? "Skip"}
@@ -287,22 +292,18 @@ export function QuestionnaireSkip({
   );
 }
 
-export function QuestionnaireNext({
+export function QuestionnaireOnward({
   children,
   className,
   ...props
 }: ComponentProps<typeof QuestionnairePrimitive.Next>) {
   return (
     <QuestionnairePrimitive.Next
-      data-slot="questionnaire-next"
-      className={cn(
-        buttonVariants({ variant: "send" }),
-        "col-start-3 row-start-1 justify-self-end",
-        className,
-      )}
+      data-slot="questionnaire-onward"
+      className={cn(buttonVariants({ variant: "send", size: "bar" }), className)}
       {...props}
     >
-      {children ?? "Next"}
+      {children ?? ONWARD}
     </QuestionnairePrimitive.Next>
   );
 }
@@ -315,14 +316,10 @@ export function QuestionnaireSubmit({
   return (
     <QuestionnairePrimitive.Submit
       data-slot="questionnaire-submit"
-      className={cn(
-        buttonVariants({ variant: "send" }),
-        "col-start-3 row-start-1 justify-self-end",
-        className,
-      )}
+      className={cn(buttonVariants({ variant: "send", size: "bar" }), className)}
       {...props}
     >
-      {children ?? "Answer"}
+      {children ?? ONWARD}
     </QuestionnairePrimitive.Submit>
   );
 }

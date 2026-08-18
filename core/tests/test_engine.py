@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
+import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from dbos._error import DBOSWorkflowCancelledError
 from opentelemetry.sdk.metrics import MeterProvider
@@ -76,6 +77,7 @@ from ufo.loop.engine import (
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
     MODEL_TRUNCATED_ERROR_CLASS,
+    OBJECT_APPLY_TOOL,
     OFFLOAD_NOTICE,
     PREEMPTED,
     REQUEST_CREDENTIALS_TOOL,
@@ -96,6 +98,7 @@ from ufo.loop.engine import (
     _BoundToolCall,
     _claim_turn,
     _claim_turn_with_handoff,
+    _created_refs,
     _dispatch_segments,
     _final_act,
     _loaded_skill_closures,
@@ -128,7 +131,8 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.spec import ReasoningSupport
-from ufo.objects import ObjectRef
+from ufo.object_name import ObjectRef
+from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
 from ufo.sandbox.session import (
     ExecResult,
     ProxyEndpoint,
@@ -3808,6 +3812,189 @@ async def test_terminal_answer_is_the_closing_rounds_text_never_mid_turn_narrati
     assert frame.status == "done"
     assert frame.text == "Given that, ship or hold?"
     assert frame.question is not None
+
+
+WIDGET_NARRATION = "Setting up the anvil widget."
+
+
+def _widget_call(call_id: str, color: str) -> tuple[ToolUseBlock, ...]:
+    return (
+        ToolUseBlock(
+            id=call_id,
+            name=OBJECT_APPLY_TOOL,
+            input={
+                "manifest": (f"kind: {sample.WIDGET_KIND}\nname: anvil\nspec:\n  color: {color}\n"),
+                "user_description": WIDGET_NARRATION,
+            },
+        ),
+    )
+
+
+@dataclass
+class AppliesTwiceThenAnswersModel:
+    """Applies one widget manifest under a name nothing holds, applies the same name again, then
+    answers — a create and an update of one object inside one turn."""
+
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls <= 2:
+            call = _widget_call(f"a{self.calls}", "teal" if self.calls == 1 else "red")[0]
+            yield ToolCallStart(id=call.id, name=call.name)
+            yield ToolCallDelta(id=call.id, partial_json=json.dumps(call.input))
+        else:
+            yield TextDelta(text="The anvil widget is set up.")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class AppliesThenBreaksModel:
+    """Applies one widget manifest under a name nothing holds, then dies — an object written by a
+    turn that does not reach an answer."""
+
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls == 1:
+            call = _widget_call("a1", "teal")[0]
+            yield ToolCallStart(id=call.id, name=call.name)
+            yield ToolCallDelta(id=call.id, partial_json=json.dumps(call.input))
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        raise RuntimeError("the model went away")
+
+
+async def test_a_turn_that_failed_still_names_what_it_created(db: None, tmp_path: Path) -> None:
+    """The object outlives the turn that wrote it, and nothing else ever tells the member it
+    exists — so a turn that created one and then failed names it on its terminal too."""
+    turn = await _seed_turn("queued", None)
+    registry = object_registry(
+        (
+            BoundKind(
+                kind=ObjectKind(
+                    name=sample.WIDGET_KIND,
+                    description="d",
+                    guidance="g",
+                    spec_model=sample.WidgetSpec,
+                    store=sample.WidgetStore(),
+                ),
+                extension=sample.NAME,
+                context=context_for(sample.NAME, frozenset()),
+            ),
+        )
+    )
+    engine = replace(
+        _engine(turn, AppliesThenBreaksModel(), tmp_path),
+        tools=ToolRegistry(tuple(ObjectVerbs(registry).tools())),
+    )
+    with ws(turn.workspace_id), pytest.raises(ModelStreamError, match="the model went away"):
+        await engine.run()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn.id
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    assert TerminalFrame.model_validate(row.terminal).created == (
+        ObjectRef(kind=sample.WIDGET_KIND, name="anvil"),
+    )
+
+
+async def test_terminal_frame_names_the_objects_the_turn_created(db: None, tmp_path: Path) -> None:
+    """A turn that applied a name no object held names it on the terminal; the second apply of
+    that same name is an update and adds nothing."""
+    turn = await _seed_turn("queued", None)
+    registry = object_registry(
+        (
+            BoundKind(
+                kind=ObjectKind(
+                    name=sample.WIDGET_KIND,
+                    description="d",
+                    guidance="g",
+                    spec_model=sample.WidgetSpec,
+                    store=sample.WidgetStore(),
+                ),
+                extension=sample.NAME,
+                context=context_for(sample.NAME, frozenset()),
+            ),
+        )
+    )
+    model = AppliesTwiceThenAnswersModel()
+    engine = replace(
+        _engine(turn, model, tmp_path),
+        tools=ToolRegistry(tuple(ObjectVerbs(registry).tools())),
+    )
+    with ws(turn.workspace_id):
+        frame = await engine.run()
+    assert frame.status == "done"
+    assert model.calls == 3
+    assert frame.created == (ObjectRef(kind=sample.WIDGET_KIND, name="anvil"),)
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert TerminalFrame.model_validate(stored).created == frame.created
+
+
+def test_created_objects_read_the_apply_results_never_the_calls() -> None:
+    calls = _widget_call("a1", "teal")
+    created = (
+        ToolResultBlock(
+            tool_use_id="a1",
+            content=json.dumps({"kind": sample.WIDGET_KIND, "name": "anvil", "result": "created"}),
+        ),
+    )
+    assert _created_refs(calls, created) == (ObjectRef(kind=sample.WIDGET_KIND, name="anvil"),)
+    targeted = (
+        ToolResultBlock(
+            tool_use_id="a1",
+            content=json.dumps(
+                {
+                    "kind": sample.WIDGET_KIND,
+                    "name": "anvil",
+                    "result": "created",
+                    "agent": "research",
+                }
+            ),
+        ),
+    )
+    assert _created_refs(calls, targeted) == (
+        ObjectRef(kind=sample.WIDGET_KIND, name="anvil", agent="research"),
+    )
+    updated = (
+        ToolResultBlock(
+            tool_use_id="a1",
+            content=json.dumps({"kind": sample.WIDGET_KIND, "name": "anvil", "result": "updated"}),
+        ),
+    )
+    assert _created_refs(calls, updated) == ()
+    assert (
+        _created_refs(
+            calls, (ToolResultBlock(tool_use_id="a1", content=created[0].content, is_error=True),)
+        )
+        == ()
+    )
+    assert (
+        _created_refs(
+            calls, (ToolResultBlock(tool_use_id="a1", content="a hook replaced this output"),)
+        )
+        == ()
+    )
+    assert _created_refs((ToolUseBlock(id="a1", name="bash", input={}),), created) == ()
+    malformed = (
+        ToolResultBlock(
+            tool_use_id="a1",
+            content=json.dumps({"kind": "Bad-Kind", "name": "anvil", "result": "created"}),
+        ),
+    )
+    assert _created_refs(calls, malformed) == ()
 
 
 def test_asked_question_reads_the_handlers_result_not_the_raw_call() -> None:

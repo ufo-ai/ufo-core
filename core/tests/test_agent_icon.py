@@ -1,6 +1,8 @@
-"""The closed icon set and the assignment a new agent's row is stamped from."""
+"""The icons a picker offers, the slugs the type admits, and the assignment a new agent's row is
+stamped from."""
 
-from typing import get_args
+import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from ufo.schema.records import (
     AGENT_ICON_KEYWORDS,
@@ -8,20 +10,31 @@ from ufo.schema.records import (
     AUTO_AGENT_ICONS,
     DEFAULT_AGENT_ICON,
     MAIN_AGENT_ICON,
-    AgentIcon,
+    TablerIcon,
     auto_agent_icon,
 )
 
 ICON_COUNT = 41
 
 
-def test_the_set_and_the_type_hold_the_same_icons() -> None:
-    assert AGENT_ICONS == get_args(AgentIcon)
+def test_the_picker_offers_a_shortlist_of_the_marks_the_type_admits() -> None:
+    admits = TypeAdapter(TablerIcon)
+    for icon in AGENT_ICONS:
+        assert admits.validate_python(icon) == icon
+    assert admits.validate_python("anchor") == "anchor"
     assert len(AGENT_ICONS) == ICON_COUNT
     assert len(set(AGENT_ICONS)) == ICON_COUNT
     assert AGENT_ICONS == (MAIN_AGENT_ICON, *AUTO_AGENT_ICONS)
     assert DEFAULT_AGENT_ICON in AUTO_AGENT_ICONS
     assert set(AGENT_ICON_KEYWORDS.values()) <= set(AUTO_AGENT_ICONS)
+
+
+@pytest.mark.parametrize(
+    "refused", ["Rocket", "", "rocket ship", "rocket-", "-rocket", "2fa", "a" * 65]
+)
+def test_a_slug_no_mark_could_be_named_by_is_refused(refused: str) -> None:
+    with pytest.raises(ValidationError):
+        TypeAdapter(TablerIcon).validate_python(refused)
 
 
 def test_the_first_keyword_token_of_the_name_wins() -> None:

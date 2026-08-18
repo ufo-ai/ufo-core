@@ -15,7 +15,6 @@ into transcripts, and echoed by `object_get`, so secrets are excluded by constru
 call to the owning kind's ExtensionContext."""
 
 import json
-import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -32,7 +31,6 @@ from pydantic import (
     SecretBytes,
     SecretStr,
     ValidationError,
-    field_validator,
     model_validator,
 )
 from pydantic.errors import PydanticInvalidForJsonSchema
@@ -40,8 +38,10 @@ from pydantic.errors import PydanticInvalidForJsonSchema
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
 from ufo.object_name import (
+    KIND_NAME_PATTERN,
     OBJECT_NAME_MAX_LENGTH,
     OBJECT_NAME_PATTERN,
+    ObjectRef,
     validate_object_name,
 )
 from ufo.object_scope import ObjectAgent, object_agent
@@ -49,7 +49,6 @@ from ufo.schema import tables
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 
-KIND_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 OBJECT_MANIFEST_MAX_BYTES = 65_536
 MATERIALIZE_MAX_BYTES = 33_554_432
 OBJECT_LIST_PAGE = 50
@@ -74,38 +73,6 @@ type AgentTargetVerb = Literal["list", "get", "create", "update", "delete"]
 type _SortRank = Literal[0, 1, 2, 3]
 
 AGENT_TARGET_VERBS = frozenset({"list", "get", "create", "update", "delete"})
-
-
-class ObjectRef(BaseModel):
-    """One object's canonical identity: a registered kind, that kind's own object name, and the
-    stable agent name when an agent-scoped ref crosses the main-agent control boundary. The
-    agent stays a separate field, never an alternate encoding of the object name."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    kind: str
-    name: str
-    agent: str | None = None
-
-    @field_validator("kind")
-    @classmethod
-    def validate_kind(cls, value: str) -> str:
-        if not KIND_NAME_PATTERN.fullmatch(value):
-            raise ValueError(f"object ref kind {value!r} must match {KIND_NAME_PATTERN.pattern}")
-        return value
-
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, value: str) -> str:
-        if len(value) > OBJECT_NAME_MAX_LENGTH or not OBJECT_NAME_PATTERN.fullmatch(value):
-            raise ValueError(
-                f"object ref name {value!r} must match {OBJECT_NAME_PATTERN.pattern} "
-                f"(at most {OBJECT_NAME_MAX_LENGTH} chars)"
-            )
-        return value
-
-    def __str__(self) -> str:
-        return f"{self.kind}/{self.name}"
 
 
 class ObjectLink(BaseModel):

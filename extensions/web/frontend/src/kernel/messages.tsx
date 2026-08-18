@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -21,7 +22,16 @@ import {
   PickedThumbnail,
   attachmentBadge,
 } from "@/components/ui/attachment";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
+import {
+  Item,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemSeparator,
+  ItemTitle,
+} from "@/components/ui/item";
 import { Marker, MarkerContent } from "@/components/ui/marker";
 import { Message, MessageContent, MessageHeader } from "@/components/ui/message";
 import {
@@ -34,16 +44,18 @@ import {
   useMessageScroller,
 } from "@/components/ui/message-scroller";
 import { Reveal } from "@/components/ui/reveal";
+import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { speakerName } from "@/lib/audience";
 import { brailleOf, randomCell } from "@/lib/braille";
 import { cn } from "@/lib/cn";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
+import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
-import type { ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
+import type { ChatApp, ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
 
 /** How far from the foot still counts as being at it. A reader is at the bottom of a conversation
  *  long before they are at the last pixel of it: a line lands, the composer grows by a row, the
@@ -303,6 +315,7 @@ export function MessageLog({
           {message.role === "user" || !message.files?.length ? null : (
             <Files files={message.files} onOpen={onOpenArtifacts} />
           )}
+          {message.role === "user" || !message.apps?.length ? null : <Apps apps={message.apps} />}
           {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
           {message.meta ? <Meta>{message.meta}</Meta> : null}
           {message.question && question ? question(message.question) : null}
@@ -338,6 +351,7 @@ export function MessageLog({
               {row.live.files.length ? (
                 <Files files={row.live.files} onOpen={onOpenArtifacts} />
               ) : null}
+              {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
               {row.live.connectUrl ? <ConnectLink url={row.live.connectUrl} /> : null}
               {row.live.meter ? <Meta>{row.live.meter}</Meta> : null}
               {row.live.meta ? <Meta>{row.live.meta}</Meta> : null}
@@ -447,6 +461,42 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
         </AttachmentGroup>
       ) : null}
     </>
+  );
+}
+
+/** The applications a reply's turn created, under the words that made them. One row per app — its
+ *  mark, its name, and the model it runs on — and the row is the link that opens it, so a member
+ *  reaches what they just asked for without going looking for it. Two apps read as two rows of one
+ *  card, never a card of cards: the reply is already a document in the reading column. */
+function Apps({ apps }: { apps: ChatApp[] }) {
+  return (
+    <ItemGroup className="mt-lg max-w-bubble">
+      {apps.map((app, index) => (
+        <Fragment key={app.id}>
+          {index ? <ItemSeparator /> : null}
+          <Item className="p-0">
+            <a
+              href={agentHash(app.id, "home")}
+              className={cn(
+                "flex min-w-0 flex-1 items-center gap-lg rounded-panel px-xl py-lg",
+                "text-inherit no-underline hover:bg-fill",
+              )}
+            >
+              <Avatar>
+                <AvatarFallback>
+                  <AgentIcon name={app.icon} />
+                </AvatarFallback>
+              </Avatar>
+              <ItemContent>
+                <ItemTitle>{agentName(app.name)}</ItemTitle>
+                <ItemDescription>{app.model}</ItemDescription>
+              </ItemContent>
+              <IconChevronRight aria-hidden className="size-icon shrink-0 text-ink-soft" />
+            </a>
+          </Item>
+        </Fragment>
+      ))}
+    </ItemGroup>
   );
 }
 

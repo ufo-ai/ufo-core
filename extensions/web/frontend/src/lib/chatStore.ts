@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import type { ToastState } from "@/components/ui/toast";
 import type {
   ActivityEvent,
+  ChatApp,
   ChatFile,
   ChatQuestion,
   CredentialRequest,
@@ -41,6 +42,8 @@ export type LiveTurn = {
   /** What the turn has shared so far. It settles on the reply that closes the turn, where the
    *  durable transcript states it. */
   files: ChatFile[];
+  /** The applications the turn created, settling on the same reply for the same reason. */
+  apps: ChatApp[];
   reconnecting: boolean;
 };
 
@@ -103,6 +106,7 @@ export function liveTurn(): LiveTurn {
     events: [],
     subagents: [],
     files: [],
+    apps: [],
     reconnecting: false,
   };
 }

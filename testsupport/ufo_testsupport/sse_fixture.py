@@ -40,6 +40,7 @@ ARRIVAL_ID = UUID("88888888-8888-4888-8888-888888888888")
 REPLY_ID = UUID("66666666-6666-4666-8666-666666666666")
 CONVERSATION_ID = "55555555-5555-4555-8555-555555555555"
 ATTEMPT = "44444444444444444444444444444444"
+APP_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def sse_frames() -> dict[type, LiveFrame]:
@@ -115,6 +116,19 @@ def _synthesized() -> list[bytes]:
                         "size_bytes": 2048,
                         "url": "https://ws.example/artifacts/a?exp=1&sig=2",
                         "preview_url": None,
+                    }
+                ]
+            },
+        ),
+        _event(
+            "apps",
+            {
+                "apps": [
+                    {
+                        "id": APP_ID,
+                        "name": "daily-digest",
+                        "model": "claude-sonnet-5",
+                        "icon": "notebook",
                     }
                 ]
             },

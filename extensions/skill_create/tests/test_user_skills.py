@@ -37,7 +37,8 @@ from ufo.ext.loader import turn_runtime_skills, turn_tools
 from ufo.loop.profiles import GENERAL_PURPOSE_PROFILE
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import subagent_system_prompt
-from ufo.objects import ObjectLink, ObjectListQuery, ObjectRef, UnknownObject
+from ufo.object_name import ObjectRef
+from ufo.objects import ObjectLink, ObjectListQuery, UnknownObject
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ProxyEndpoint,

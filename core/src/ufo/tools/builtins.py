@@ -972,6 +972,7 @@ async def ask_user_handler(ctx: ToolContext, args: AskUserCall) -> ToolResult:
     payload = {
         "awaiting": "question",
         "title": args.title,
+        **({"icon": args.icon} if args.icon else {}),
         "questions": [question.model_dump(exclude_none=True) for question in args.questions],
     }
     return ToolResult(content=(TextContent(text=f"{ASK_USER_DIRECTIVE}\n{json.dumps(payload)}"),))

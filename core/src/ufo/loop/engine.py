@@ -114,6 +114,7 @@ from ufo.o11y import (
     span,
     turn_profile,
 )
+from ufo.object_name import ObjectRef
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -190,6 +191,7 @@ COMMIT_RETRY_MAX_SECONDS = 30.0
 ASK_USER_TOOL = "ask_user"
 REQUEST_CREDENTIALS_TOOL = "request_credentials"
 CONNECT_ACCOUNT_TOOL = "connect_account"
+OBJECT_APPLY_TOOL = "object_apply"
 FINISH_TOOL = "finish"
 FINISH_DESCRIPTION = (
     "End the turn and return your final answer to the parent agent. Call it alone, once the work "
@@ -679,6 +681,41 @@ def _final_act[PayloadT: BaseModel](
         return None
 
 
+def _created_refs(
+    tool_calls: tuple[ToolUseBlock, ...], results: tuple[ToolResultBlock, ...]
+) -> tuple[ObjectRef, ...]:
+    """The objects a round created, read from each `object_apply` result's own JSON — the handler
+    reports `created` or `updated` for the same call, and only a create is one. Read from the
+    result rather than the call for the same reason `_final_act` is: a pre_tool_use hook may have
+    folded the manifest, and what landed is what the handler answered. A result a post hook
+    rewrote past recognition names nothing, exactly as it asks nothing — including one whose kind
+    or name no ref can express, which is a rewritten result rather than a turn to fail."""
+    outcomes = {result.tool_use_id: result for result in results}
+    created: list[ObjectRef] = []
+    for call in tool_calls:
+        result = outcomes.get(call.id)
+        if call.name != OBJECT_APPLY_TOOL or result is None or result.is_error:
+            continue
+        if not isinstance(result.content, str):
+            continue
+        try:
+            payload = json.loads(result.content.split("\n", 1)[0])
+        except json.JSONDecodeError:
+            continue
+        match payload:
+            case {"kind": str(kind), "name": str(name), "result": "created", **rest}:
+                agent = rest.get("agent")
+                try:
+                    created.append(
+                        ObjectRef(
+                            kind=kind, name=name, agent=agent if isinstance(agent, str) else None
+                        )
+                    )
+                except ValidationError:
+                    continue
+    return tuple(created)
+
+
 def _total_usage(usage_events: list[Usage]) -> Usage:
     return Usage(
         input_tokens=sum(u.input_tokens for u in usage_events),
@@ -1015,6 +1052,7 @@ class TurnEngine:
             model_specs=self.model_specs,
             auto_model=self.auto_model,
         )
+        created: dict[ObjectRef, None] = {}
         try:
             if not await self._mark_running():
                 return await self._resolve_unclaimed()
@@ -1082,6 +1120,7 @@ class TurnEngine:
                     requesters,
                     meter,
                     change_paths,
+                    created,
                 )
                 await self.hooks.fire(
                     "stop",
@@ -1098,6 +1137,7 @@ class TurnEngine:
                     question=question,
                     credential_request=credential_request,
                     connect_request=connect_request,
+                    created=tuple(created),
                     unless_arrivals=pending_guard,
                     absorbed=tuple(absorbed_ids),
                 )
@@ -1133,7 +1173,7 @@ class TurnEngine:
             await self._release_unabsorbed(tuple(absorbed_ids))
             raise
         except Exception as error:
-            await self._commit("failed", usage_events, meter, error=error)
+            await self._commit("failed", usage_events, meter, error=error, created=tuple(created))
             await self._release_unabsorbed(tuple(absorbed_ids))
             await self._persist_inbound(tuple(arrival_log), founding_denial)
             raise
@@ -1236,6 +1276,7 @@ class TurnEngine:
                     answer=result.text,
                     connect_request=connect_request,
                     credential_request=credential_request,
+                    created=_created_refs((call,), dispatched_result),
                 )
             await self._persist_transcript(await self._load_messages(), result.text, "", "")
             return frame
@@ -1316,6 +1357,7 @@ class TurnEngine:
         requesters: dict[UUID, ActiveMessage],
         meter: _TurnMeter,
         change_paths: dict[str, None],
+        created: dict[ObjectRef, None],
     ) -> tuple[
         tuple[Message, ...],
         str,
@@ -1348,7 +1390,8 @@ class TurnEngine:
         Also returns the
         structured question, credential request, or connect request left pending when its tool was
         the turn's final act — each round overwrites all three, so a turn that asked and then
-        worked on carries none.
+        worked on carries none. `created` instead accumulates: an object a round created stays
+        created however many rounds follow it, so the terminal names every one of them.
 
         A round whose stream dies at the max_tokens budget is dropped from the window — its
         partial tool calls cannot be replayed as a valid assistant message — but its already-paid
@@ -1487,6 +1530,7 @@ class TurnEngine:
                     *results,
                     *(o for o in dispatched if not isinstance(o, BaseException)),
                 )
+            created.update(dict.fromkeys(_created_refs(tool_calls, results)))
             question = _final_act(tool_calls, results, ASK_USER_TOOL, AskUserInput)
             credential_request = _final_act(
                 tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest
@@ -2588,6 +2632,7 @@ class TurnEngine:
         question: AskUserInput | None = None,
         credential_request: CredentialRequest | None = None,
         connect_request: ConnectRequest | None = None,
+        created: tuple[ObjectRef, ...] = (),
         unless_arrivals: bool = False,
         absorbed: tuple[UUID, ...] = (),
     ) -> TerminalFrame | None:
@@ -2612,6 +2657,7 @@ class TurnEngine:
                     question,
                     credential_request,
                     connect_request,
+                    created,
                     unless_arrivals,
                     absorbed,
                     meter.incomplete_reason,
@@ -2676,6 +2722,7 @@ class TurnEngine:
         question: AskUserInput | None,
         credential_request: CredentialRequest | None,
         connect_request: ConnectRequest | None,
+        created: tuple[ObjectRef, ...],
         unless_arrivals: bool,
         absorbed: tuple[UUID, ...],
         incomplete_reason: IncompleteReason | None,
@@ -2752,6 +2799,7 @@ class TurnEngine:
                 question=question,
                 credential_request=credential_request,
                 connect_request=connect_request,
+                created=created,
             )
             updated = await connection.execute(
                 sa.update(tables.turn)

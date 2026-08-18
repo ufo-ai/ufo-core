@@ -31,13 +31,12 @@ from ufo.grants import (
     grant_summaries,
     workspace_grant_summaries,
 )
-from ufo.object_name import OBJECT_NAME_MAX_LENGTH
+from ufo.object_name import OBJECT_NAME_MAX_LENGTH, ObjectRef
 from ufo.objects import (
     AdminRequired,
     GeneratedObjectOwner,
     ObjectDetail,
     ObjectListQuery,
-    ObjectRef,
     UnknownObject,
     VerbNotSupported,
 )

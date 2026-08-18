@@ -1206,7 +1206,7 @@ async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_nam
             )
         assert kept == "lifebuoy"
 
-        for slug in ("rocket", MAIN_AGENT_ICON):
+        for slug in ("rocket", MAIN_AGENT_ICON, "anchor"):
             applied = json.loads(
                 await _text(
                     tools,
@@ -1227,7 +1227,7 @@ async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_nam
                 apply_tool.input_model.model_validate(
                     {
                         "user_description": OBJECT_NARRATION,
-                        "manifest": manifest("support-desk", {**base, "icon": "unicorn"}),
+                        "manifest": manifest("support-desk", {**base, "icon": "Unicorn"}),
                     }
                 ),
             )

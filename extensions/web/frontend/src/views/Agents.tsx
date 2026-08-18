@@ -164,7 +164,7 @@ export function Agents({
                       rail. Size and the mono face carry the hierarchy instead. */}
                   <Avatar>
                     <AvatarFallback>
-                      <AgentIcon name={agent.icon} className="size-(--size-glyph)" />
+                      <AgentIcon name={agent.icon} />
                     </AvatarFallback>
                   </Avatar>
                   <span className="flex min-w-0 flex-1 flex-col gap-2xs">

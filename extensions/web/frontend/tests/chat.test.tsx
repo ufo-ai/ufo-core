@@ -1534,7 +1534,7 @@ test("a question submits its choice once, and says what is missing until there i
   });
   open();
 
-  const submit = await screen.findByRole("button", { name: "Answer" });
+  const submit = await screen.findByRole("button", { name: "Continue" });
   await userEvent.click(submit);
   expect(posts.length).toBe(0);
   const refusal = await screen.findByRole("alert");
@@ -1604,7 +1604,7 @@ test("a multi-select question sends every label it holds in one answer", async (
   await userEvent.click(screen.getByRole("checkbox", { name: "Team" }));
   await userEvent.click(screen.getByRole("checkbox", { name: "Home" }));
   await userEvent.click(screen.getByRole("checkbox", { name: "Team" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 
   await waitFor(() => expect(posts.length).toBe(1));
   expect(posts[0].body).toBe("Work, Home");
@@ -1646,7 +1646,7 @@ test("a form holding two answers delivers both, each against its entry", async (
   await userEvent.click(await screen.findByRole("radio", { name: "alpha" }));
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await userEvent.click(await screen.findByRole("radio", { name: "gamma" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 
   await waitFor(() => expect(posts.length).toBe(2));
   const first = posts[0].headers as Record<string, string>;
@@ -1660,8 +1660,10 @@ test("a form holding two answers delivers both, each against its entry", async (
 
   await waitFor(() => expect(screen.queryByRole("radio", { name: "gamma" })).toBeNull());
   const reply = screen.getByText("asking").closest("[data-slot=message]") as HTMLElement;
-  expect(within(reply).getByText("alpha · First?")).toBeTruthy();
-  expect(within(reply).getByText("gamma · Second?")).toBeTruthy();
+  expect(within(reply).getByText("First?")).toBeTruthy();
+  expect(within(reply).getByText("alpha")).toBeTruthy();
+  expect(within(reply).getByText("Second?")).toBeTruthy();
+  expect(within(reply).getByText("gamma")).toBeTruthy();
   expect(StreamFake.opened.length).toBe(1);
 });
 
@@ -1694,7 +1696,7 @@ test("an entry the form cannot hold stands as prose and gates nothing", async ()
   await screen.findByRole("radio", { name: "left" });
   expect(screen.getByText("Answer in the message box below.")).toBeTruthy();
   await userEvent.click(screen.getByRole("radio", { name: "left" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 
   await waitFor(() => expect(posts.length).toBe(1));
   const headers = posts[0].headers as Record<string, string>;
@@ -1708,24 +1710,24 @@ test("a lone question the form cannot hold says where the answer goes, with no c
 
   await screen.findByText("Send the file?");
   expect(screen.getByText("Answer in the message box below.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
 });
 
 test("an answered question states the words the surface confirmed it admitted", async () => {
   wire({
     ...transcript({ messages: [ASKING(ASKED)] }),
-    "/chat": () => json({ turn_id: REFUSED_TURN, body: "left · Which?" }),
+    "/chat": (_url, init) => json({ turn_id: REFUSED_TURN, body: String(init?.body ?? "") }),
   });
   open();
 
   await userEvent.click(await screen.findByRole("radio", { name: "left" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 
   await waitFor(() => expect(screen.queryByRole("radio", { name: "left" })).toBeNull());
   const reply = screen.getByText("asking").closest("[data-slot=message]") as HTMLElement;
   expect(within(reply).getByText("Which?")).toBeTruthy();
-  expect(within(reply).getByText("left · Which?")).toBeTruthy();
+  expect(within(reply).getByText("left")).toBeTruthy();
 });
 
 test("a question stands under the reply that asked it, not at the foot of the log", async () => {
@@ -1916,6 +1918,64 @@ test("a reloaded conversation draws files on the earlier reply that shared them"
   ) as HTMLElement;
   expect(reply.contains(picture)).toBe(true);
   expect(within(reply).getByRole("link", { name: "report.csv" })).toBeTruthy();
+  const rows = screen.getByTestId("log").querySelectorAll("[data-slot=message-scroller-item]");
+  expect(rows[rows.length - 1].textContent).toBe("Anything else?");
+});
+
+/** An application a turn created, as the surface names it on the reply that made it. */
+const CREATED_APP = { id: SECOND_ID, name: "second", model: "claude-sonnet-5", icon: "telescope" };
+
+test("an application the turn created stands on the reply that made it, and opens it", async () => {
+  wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "build me a digest");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  StreamFake.last().emit("message", { text: "Second is set up." });
+  StreamFake.last().emit("apps", { apps: [CREATED_APP] });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+
+  const reply = (await screen.findByText(saying("Second is set up."))).closest(
+    "[data-slot=message]",
+  ) as HTMLElement;
+  const card = within(reply).getByRole("link", { name: /Second/ });
+  expect(card.getAttribute("href")).toBe("#/agents/" + SECOND_ID);
+  expect(card.textContent).toContain("claude-sonnet-5");
+
+  await userEvent.click(card);
+  expect(location.hash).toBe("#/agents/" + SECOND_ID);
+  expect(await screen.findByRole("region", { name: "Second" })).toBeTruthy();
+});
+
+test("a reloaded conversation draws the app card on the reply that created it", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "build me a digest" },
+        { role: "assistant", text: "Second is set up.", apps: [CREATED_APP] },
+        { role: "user", text: "thanks" },
+        { role: "assistant", text: "Anything else?" },
+      ],
+    }),
+  );
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const reply = (await screen.findByText(saying("Second is set up."))).closest(
+    "[data-slot=message]",
+  ) as HTMLElement;
+  expect(within(reply).getByRole("link", { name: /Second/ }).getAttribute("href")).toBe(
+    "#/agents/" + SECOND_ID,
+  );
   const rows = screen.getByTestId("log").querySelectorAll("[data-slot=message-scroller-item]");
   expect(rows[rows.length - 1].textContent).toBe("Anything else?");
 });
@@ -2607,7 +2667,7 @@ test("answering a question while scrolled up re-pins the log to the bottom", asy
   fireEvent.scroll(log);
 
   await userEvent.click(screen.getByRole("radio", { name: "left" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
   await waitFor(() => expect(log.scrollTop).toBe(FOOT));
 });
 
@@ -2706,7 +2766,7 @@ test("answering a question returns focus to the composer", async () => {
   });
   open();
   await userEvent.click(await screen.findByRole("radio", { name: "left" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
   await waitFor(() =>
     expect(document.activeElement).toBe(screen.getByLabelText("Message the agent")),
   );
@@ -2740,7 +2800,7 @@ test("a second answer clicked mid-stream neither posts nor yanks the reader", as
   await userEvent.click(await screen.findByRole("radio", { name: "alpha" }));
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
   await waitFor(() => expect(posts.length).toBe(1));
 
   const log = screen.getByTestId("log");
@@ -2750,7 +2810,7 @@ test("a second answer clicked mid-stream neither posts nor yanks the reader", as
   fireEvent.scroll(log);
 
   await userEvent.click(await screen.findByRole("radio", { name: "gamma" }));
-  const submit = screen.getByRole("button", { name: "Answer" });
+  const submit = screen.getByRole("button", { name: "Continue" });
   expect(submit.hasAttribute("disabled")).toBe(true);
   await userEvent.click(submit);
   expect(posts.length).toBe(1);
@@ -2862,6 +2922,30 @@ test("the composer's agent picker draws each app's mark, and keeps the chosen on
       screen.getByRole("combobox", { name: "Agent" }).querySelector(".tabler-icon-telescope"),
     ).toBeTruthy(),
   );
+});
+
+test("a starter says its sentence on the press, and leaves with the start screen", async () => {
+  const said: string[] = [];
+  wire({
+    ...transcript(),
+    "/chat": (_url, init) => {
+      said.push(String(init?.body));
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" });
+    },
+  });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Message the agent");
+  await userEvent.click(screen.getByRole("button", { name: /Inbox triage/ }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(said).toEqual([
+    "I want an application that works my inbox: read new mail, draft a few replies for each one, and send nothing without me.",
+  ]);
+  expect((screen.getByLabelText("Message the agent") as HTMLTextAreaElement).value).toBe("");
+  expect(document.activeElement).toBe(screen.getByLabelText("Message the agent"));
+  expect(screen.queryByRole("button", { name: /Inbox triage/ })).toBeNull();
 });
 
 test("a conversation that has opened fixes its agent, and the picker goes with the start screen", async () => {

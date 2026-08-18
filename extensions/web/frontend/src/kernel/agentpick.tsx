@@ -45,7 +45,7 @@ export function AgentPicker({
             <span className="flex min-w-0 items-center gap-xs">
               <Avatar>
                 <AvatarFallback>
-                  <AgentIcon name={entry.icon} className="size-(--size-glyph)" />
+                  <AgentIcon name={entry.icon} />
                 </AvatarFallback>
               </Avatar>
               <span className="min-w-0 truncate">{agentName(entry.name)}</span>

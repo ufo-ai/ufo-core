@@ -84,7 +84,7 @@ SDK_PUBLIC_PREFIX = "ufo.sdk"
 MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
 SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "ufo_ext_sample.py"
 CORE_SKILLS_DIR = CORE_SRC / "skills"
-CORE_SKILL_NAMES = frozenset({"sandbox"})
+CORE_SKILL_NAMES = frozenset({"sandbox", "create-application"})
 SKILL_MANIFEST = "SKILL.md"
 DESIGN_SKILLS = Path("extensions/documents/ufo_ext_documents/skills")
 SITE_SKILL_SHARED = Path("extensions/sites/ufo_ext_sites/skills/website-building/shared")
@@ -1253,8 +1253,9 @@ def _rogue_skill_failures(present: frozenset[str]) -> list[str]:
 
 def _skill_failures() -> list[str]:
     """A skill ships with the thing it teaches, and core teaches only its own builtins, so core
-    ships exactly one skill — sandbox. This gate is scoped to `core/skills` alone: a second SKILL.md
-    folder there is an extension or a pack living in the wrong tree, a missing one is a broken
+    ships exactly the skills for those — the sandbox its tools run in, and the `agent` object a
+    member asks for in chat. This gate is scoped to `core/skills` alone: a SKILL.md folder there
+    outside that set is an extension or a pack living in the wrong tree, a missing one is a broken
     floor. Packs contribute any number of their own skills elsewhere, held only to the skill
     boundary gate."""
     root = ROOT / CORE_SKILLS_DIR

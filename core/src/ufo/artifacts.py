@@ -32,6 +32,7 @@ from ufo.blob import BlobNotFound
 from ufo.conversations import CONVERSATION_KIND
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
+from ufo.object_name import ObjectRef
 from ufo.object_scope import object_agent_id
 from ufo.objects import (
     MATERIALIZE_MAX_BYTES,
@@ -41,7 +42,6 @@ from ufo.objects import (
     ObjectLink,
     ObjectListQuery,
     ObjectPage,
-    ObjectRef,
     ObjectRow,
     UnknownObject,
     VerbNotSupported,

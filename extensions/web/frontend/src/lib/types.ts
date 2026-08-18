@@ -4,7 +4,8 @@ export type Agent = {
   name: string;
   model: string;
   main: boolean;
-  /** One slug of the closed set `AGENT_ICONS` holds. */
+  /** The tabler mark this app is drawn with. `AGENT_ICONS` is the ordered set the picker offers;
+   *  the mark itself may be any tabler outline icon. */
   icon: string;
   web_audience?: string[];
 };
@@ -89,8 +90,19 @@ export type ChatFile = {
   media_type: string;
 };
 
+/** One application a reply's turn created, as the card that opens it draws it: the app's own mark
+ *  and name, the model it runs on, and the id the portal opens it at. */
+export type ChatApp = {
+  id: string;
+  name: string;
+  model: string;
+  icon: string;
+};
+
 export type QuestionOption = { label: string; description?: string };
 
+/** One thing a turn asks. `chosen` is the answer already settled — the option the form opens
+ *  selected, or, where no option carries it, the words the row the member types into opens with. */
 export type QuestionEntry = {
   question: string;
   header?: string;
@@ -98,14 +110,17 @@ export type QuestionEntry = {
   multi_select?: boolean;
   free_text_only?: boolean;
   allow_attachments?: boolean;
+  chosen?: string;
 };
 
-/** What a turn asks of the member, named by the turn that asked. `answered` holds what the surface
- *  confirmed it admitted for each entry the member has submitted — the words the transcript will
- *  read back, so the entry states its answer rather than vanishing. */
+/** What a turn asks of the member, named by the turn that asked and marked with `icon`, any tabler
+ *  icon name. `answered` holds what the surface confirmed it admitted for each entry the member
+ *  has submitted — the words the transcript will read back, so the entry states its answer rather
+ *  than vanishing. */
 export type ChatQuestion = {
   turn_id: string;
   title?: string;
+  icon?: string;
   questions: QuestionEntry[];
   answered?: Record<number, string>;
 };
@@ -166,6 +181,8 @@ export type Message = {
   /** What this reply's turn shared, or what the member attached to their own words: carried by the
    *  message so the files stay where the words that carried them are. */
   files?: ChatFile[];
+  /** The applications this reply's turn created, carried by the reply that made them. */
+  apps?: ChatApp[];
 };
 
 export type Transcript = {

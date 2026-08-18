@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
-import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
+import { AGENT_ICONS } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 
 import {
@@ -277,10 +277,6 @@ test("a member picks another mark, and the pick rides one intent and comes back"
     ),
   );
   expect((screen.getByRole("radio", { name: "Robot" }) as HTMLInputElement).checked).toBe(false);
-});
-
-test("a mark outside the set raises rather than leaving a hole where a mark belongs", () => {
-  expect(() => AgentIcon({ name: "unicorn" })).toThrow("no app mark is drawn for unicorn");
 });
 
 test("a name is drawn word by word, and only a word written wholly in lowercase is raised", () => {

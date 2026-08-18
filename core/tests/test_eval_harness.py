@@ -173,8 +173,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.registry import ModelRegistry
-from ufo.object_name import validate_object_name
-from ufo.objects import ObjectRef
+from ufo.object_name import ObjectRef, validate_object_name
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, Usage
 from ufo.transcript import (
@@ -292,6 +291,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "object_tools",
             "daily_brief",
             "object_tools_flows",
+            "new_application",
             "document_visual",
             "response_register",
             "response_formatting",
@@ -312,6 +312,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
 
     assert scenario == {
         "object_tools_flows",
+        "new_application",
         "scenario_smoke",
         "scenario_env",
     }

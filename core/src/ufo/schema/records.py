@@ -5,11 +5,20 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Literal, get_args
+from typing import Annotated, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+from ufo.object_name import ObjectRef
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
@@ -41,7 +50,16 @@ INTENT_ADMISSION: TurnAdmissionSource = "intent"
 SPAWN_RESULT_KEY_PREFIX = "subagent-result:"
 SUBAGENT_SURFACE = "subagent"
 
-AgentIcon = Literal[
+TABLER_ICON_MAX_LENGTH = 64
+TABLER_ICON_PATTERN = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*"
+TablerIcon = Annotated[
+    str,
+    StringConstraints(pattern=rf"^{TABLER_ICON_PATTERN}$", max_length=TABLER_ICON_MAX_LENGTH),
+]
+"""A tabler outline icon name. Any of them draws: the mark reached for is whatever names the job,
+and a picker's own set is a shortlist of it rather than the whole of it."""
+
+AGENT_ICONS: tuple[TablerIcon, ...] = (
     "ufo",
     "robot",
     "rocket",
@@ -83,25 +101,24 @@ AgentIcon = Literal[
     "palette",
     "pencil",
     "gavel",
-]
-AGENT_ICONS: tuple[AgentIcon, ...] = get_args(AgentIcon)
-"""Every icon an agent may carry, in the order a picker shows them. The slugs are tabler icon
-names, so a surface renders one by name without a table of its own."""
+)
+"""The icons the portal's picker offers, in the order it shows them: the shortlist a member
+chooses from by eye and the set an unnamed icon is dealt from."""
 
-MAIN_AGENT_ICON: AgentIcon = "ufo"
+MAIN_AGENT_ICON: TablerIcon = "ufo"
 """The icon the workspace's main agent is created with, and the one a member reaches for to say
 an agent is the workspace itself."""
 
-DEFAULT_AGENT_ICON: AgentIcon = "robot"
+DEFAULT_AGENT_ICON: TablerIcon = "robot"
 """The icon a row inserted without one carries."""
 
-AUTO_AGENT_ICONS: tuple[AgentIcon, ...] = tuple(
+AUTO_AGENT_ICONS: tuple[TablerIcon, ...] = tuple(
     icon for icon in AGENT_ICONS if icon != MAIN_AGENT_ICON
 )
 """The icons an agent may be dealt automatically: every icon but the product's own mark, which a
 member applies deliberately or not at all."""
 
-AGENT_ICON_KEYWORDS: dict[str, AgentIcon] = {
+AGENT_ICON_KEYWORDS: dict[str, TablerIcon] = {
     "support": "lifebuoy",
     "help": "lifebuoy",
     "desk": "headset",
@@ -158,7 +175,7 @@ AGENT_ICON_KEYWORDS: dict[str, AgentIcon] = {
 NAME_TOKENS = re.compile(r"[^a-z0-9]+")
 
 
-def auto_agent_icon(name: str, taken: Collection[str]) -> AgentIcon:
+def auto_agent_icon(name: str, taken: Collection[str]) -> TablerIcon:
     """The icon a new agent starts with, drawn from `AUTO_AGENT_ICONS`: the first name token a
     keyword names, else the name's hash over the icons the workspace has not used yet, so agents of
     one workspace read apart at a glance and a given name always lands on the same icon. Once every
@@ -285,6 +302,15 @@ class AskQuestion(BaseModel):
     allow_attachments: bool | None = Field(
         default=None, description="Let the user attach files in their answer."
     )
+    chosen: str | None = Field(
+        default=None,
+        description=(
+            "The answer the member's own words already settle, so they read back what you took "
+            "them to mean and correct it in place rather than answering twice. An option's exact "
+            "label opens on that option; anything else opens in the row they type into. Leave it "
+            "unset where their words do not carry the answer — a guess costs them a correction."
+        ),
+    )
 
 
 class AskUserInput(BaseModel):
@@ -298,6 +324,13 @@ class AskUserInput(BaseModel):
     )
     questions: tuple[AskQuestion, ...] = Field(
         min_length=1, max_length=MAX_USER_QUESTIONS, description="1-4 questions to ask."
+    )
+    icon: TablerIcon | None = Field(
+        default=None,
+        description=(
+            "A tabler icon name drawing what the ask is about. It is the mark beside the title on "
+            "a surface that draws one."
+        ),
     )
 
 
@@ -350,6 +383,10 @@ class TerminalFrame(BaseModel):
     question: AskUserInput | None = None
     credential_request: CredentialRequest | None = None
     connect_request: ConnectRequest | None = None
+    created: tuple[ObjectRef, ...] = ()
+    """The workspace objects a completed turn created — an `object_apply` that landed on a name no
+    object held — in the order it created them. What happened, not how to draw it: a surface
+    decides which kinds it draws and what it draws them as."""
 
 
 class Agent(BaseModel):

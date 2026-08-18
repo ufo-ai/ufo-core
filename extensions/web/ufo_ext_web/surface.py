@@ -92,7 +92,7 @@ from ufo.sdk.manifest import (
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
-from ufo.sdk.objects import ObjectListQuery
+from ufo.sdk.objects import AGENT_KIND, ObjectListQuery, ObjectRef
 from ufo.sdk.scheduled_fire import scheduled_fire_task_id
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
@@ -1239,6 +1239,7 @@ def _rendered_messages(
     questions: Mapping[str, dict[str, object]] | None = None,
     asked: Mapping[str, str] | None = None,
     files: Mapping[str, list[dict[str, object]]] | None = None,
+    apps: Mapping[str, list[dict[str, object]]] | None = None,
     attach: Attach | None = None,
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
@@ -1265,6 +1266,8 @@ def _rendered_messages(
     `files` names what each turn shared, keyed like `questions`: the reply carries its own, so a
     file stands on the words that shared it and stays there when later turns run. A turn that
     shared and wrote nothing still renders its reply — the file needs the reply it belongs to.
+    `apps` names the applications each turn created and rides the reply the same way, so the card
+    that opens one stands under the words that made it.
 
     A member's own bubble carries what they attached the same way, off the note admission wrote at
     the foot of their words: `attach` turns each saved path into the file the bubble draws, so the
@@ -1283,6 +1286,7 @@ def _rendered_messages(
     questions = questions or {}
     asked = asked or {}
     files = files or {}
+    apps = apps or {}
     rendered: list[dict[str, object]] = []
     pending: list[dict[str, str]] = []
     answer = ""
@@ -1303,7 +1307,8 @@ def _rendered_messages(
         runs = [] if closing is None else subagents.get(closing, [])
         asked = None if closing is None else questions.get(closing)
         shared = [] if closing is None else files.get(closing, [])
-        if not answer and not pending and not runs and asked is None and not shared:
+        made = [] if closing is None else apps.get(closing, [])
+        if not answer and not pending and not runs and asked is None and not shared and not made:
             return
         reply: dict[str, object] = {"role": "assistant", "text": answer}
         if pending:
@@ -1314,6 +1319,8 @@ def _rendered_messages(
             reply["question"] = asked
         if shared:
             reply["files"] = shared
+        if made:
+            reply["apps"] = made
         rendered.append(reply)
         pending = []
         answer = ""
@@ -1370,9 +1377,9 @@ def _rendered_messages(
 @dataclass(frozen=True)
 class _TranscriptAids:
     """Everything the transcript renderer needs beside the messages themselves — subagent runs,
-    speaker and question attribution, shared files, where a member's own attachment is drawn from,
-    and whether the conversation ran a profile — gathered once so the live window and an earlier
-    page render one message identically."""
+    speaker and question attribution, shared files, the applications each turn created, where a
+    member's own attachment is drawn from, and whether the conversation ran a profile — gathered
+    once so the live window and an earlier page render one message identically."""
 
     subagents: SubagentRuns
     turn_ids: frozenset[str]
@@ -1380,6 +1387,7 @@ class _TranscriptAids:
     speakers: dict[str, str]
     asked: dict[str, str]
     files: dict[str, list[dict[str, object]]]
+    apps: dict[str, list[dict[str, object]]]
     attach: Attach
     run_conversation: bool
 
@@ -1397,6 +1405,7 @@ class _TranscriptAids:
             asking,
             self.asked,
             self.files,
+            self.apps,
             self.attach,
         )
         if self.run_conversation:
@@ -1414,6 +1423,7 @@ async def _transcript_aids(
     agent_origin: frozenset[str],
     speakers: dict[str, str],
     asked: dict[str, str],
+    opens: frozenset[UUID],
 ) -> _TranscriptAids:
     turns, spawned, shared = await asyncio.gather(
         ctx.list_turns(conversation_id),
@@ -1423,6 +1433,15 @@ async def _transcript_aids(
     files: dict[str, list[dict[str, object]]] = {}
     for entry in reversed(shared):
         files.setdefault(str(entry.turn_id), []).append(_file_payload(ctx, entry.artifact))
+    drawn = await _created_apps(
+        ctx,
+        {
+            str(turn.id): turn.terminal.created
+            for turn in turns
+            if turn.terminal is not None and turn.terminal.created
+        },
+        opens,
+    )
     return _TranscriptAids(
         subagents=await _subagent_nodes(ctx, spawned),
         turn_ids=frozenset(str(turn.id) for turn in turns),
@@ -1442,13 +1461,18 @@ async def _transcript_aids(
             if turn.context is not None and turn.context.question is not None
         },
         files=files,
+        apps=drawn,
         attach=partial(_attachment_preview, agent_id, conversation_id),
         run_conversation=any(turn.subagent_profile is not None for turn in turns),
     )
 
 
 async def _conversation_messages(
-    ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID
+    ctx: SurfaceContext,
+    agent_id: UUID,
+    conversation_id: UUID,
+    viewer: UUID,
+    opens: frozenset[UUID],
 ) -> tuple[list[dict[str, object]], Turn | None, int]:
     """One conversation as every portal surface renders it — the live chat, the read-only
     transcript an agent's conversations open, and a subagent run's own page: the engine's
@@ -1527,7 +1551,7 @@ async def _conversation_messages(
         earlier = 0
     else:
         aids = await _transcript_aids(
-            ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked
+            ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked, opens
         )
         rendered = aids.render(recorded.messages, asking)
         earlier = await _verified_earlier(ctx, conversation_id, compactions, recorded.messages)
@@ -1586,7 +1610,12 @@ async def _verified_earlier(
 
 
 async def _history_messages(
-    ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID, index: int
+    ctx: SurfaceContext,
+    agent_id: UUID,
+    conversation_id: UUID,
+    viewer: UUID,
+    index: int,
+    opens: frozenset[UUID],
 ) -> tuple[list[dict[str, object]], int] | None:
     """One earlier page of a compacted conversation and the index of the page above it (0 when
     none), or None when this index holds no record.
@@ -1617,7 +1646,7 @@ async def _history_messages(
         str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
     }
     aids = await _transcript_aids(
-        ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked
+        ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked, opens
     )
     above = await _verified_earlier(ctx, conversation_id, tuple(range(1, index)), record.before)
     return aids.render(window), above
@@ -1649,7 +1678,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     ):
         return Response("no such conversation", status_code=404)
     rendered, turn, earlier = await _conversation_messages(
-        ctx, agent_id, conversation_id, member_id
+        ctx, agent_id, conversation_id, member_id, _opens(audience)
     )
     payload: dict[str, object] = {"messages": rendered}
     if earlier:
@@ -1667,8 +1696,9 @@ async def _open_handoffs(
 ) -> dict[str, object]:
     """What the conversation's newest committed turn still asks of the member, so a reload
     re-renders the same affordances the live stream drew: credential prompts still awaiting
-    values. A question and a shared file are not among them — each rides the reply it belongs
-    to, which is where the member answers one and reads the other."""
+    values. A question, a shared file, and the card of an app the turn created are not among
+    them — each rides the reply it belongs to, which is where the member answers one, reads
+    another, and opens the third."""
     handoffs: dict[str, object] = {}
     if terminal.credential_request is not None:
         prompts = await _pending_prompts(ctx, terminal.credential_request)
@@ -2184,7 +2214,7 @@ async def _readable_conversation(
         conversation_id, agent_id, member_id, admin=audience.admin
     ):
         return Response("no such conversation", status_code=404)
-    return agent_id, conversation_id, SlotViewer(member_id, audience.admin)
+    return agent_id, conversation_id, SlotViewer(member_id, audience.admin, _opens(audience))
 
 
 async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Response:
@@ -2197,7 +2227,7 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
         return authorized
     agent_id, conversation_id, viewer = authorized
     rendered, _turn, earlier = await _conversation_messages(
-        ctx, agent_id, conversation_id, viewer.member_id
+        ctx, agent_id, conversation_id, viewer.member_id, viewer.opens
     )
     payload: dict[str, object] = {"messages": rendered}
     if earlier:
@@ -2227,7 +2257,7 @@ async def _member_chat_page(
     )
     if chat is None:
         return Response("no such conversation", status_code=404)
-    return agent_id, conversation_id, SlotViewer(member_id, audience.admin)
+    return agent_id, conversation_id, SlotViewer(member_id, audience.admin, _opens(audience))
 
 
 async def conversation_history(ctx: SurfaceContext, request: Request) -> Response:
@@ -2246,7 +2276,9 @@ async def conversation_history(ctx: SurfaceContext, request: Request) -> Respons
     index = request.path_params["index"]
     if not index.isdigit() or int(index) < 1:
         return Response("no such page", status_code=404)
-    page = await _history_messages(ctx, agent_id, conversation_id, viewer.member_id, int(index))
+    page = await _history_messages(
+        ctx, agent_id, conversation_id, viewer.member_id, int(index), viewer.opens
+    )
     if page is None:
         return Response("no such page", status_code=404)
     rendered, above = page
@@ -2317,6 +2349,9 @@ async def conversation_attachment(ctx: SurfaceContext, request: Request) -> Resp
 class SlotViewer:
     member_id: UUID
     admin: bool
+    opens: frozenset[UUID] = frozenset()
+    """The applications this reader may open, which is what decides whether a card for one is
+    drawn: a conversation they may read can still name an application they may not."""
 
 
 @dataclass(frozen=True)
@@ -2932,11 +2967,11 @@ async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(payload)
 
 
-async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID] | Response:
-    """One turn this member may reach, as the member and the turn, or the refusal to answer with.
-    The turn must belong to the member AND its agent must still be in their web audience, so a
-    revocation ends tailing and stopping alongside chat and transcript — an out-of-audience
-    agent's turn is not-found."""
+async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID, str] | Response:
+    """One turn this member may reach, as the member, the turn, and the email their audience is
+    resolved from, or the refusal to answer with. The turn must belong to the member AND its agent
+    must still be in their web audience, so a revocation ends tailing and stopping alongside chat
+    and transcript — an out-of-audience agent's turn is not-found."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -2968,17 +3003,17 @@ async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUI
         is None
     ):
         return absent
-    return member_id, turn_id
+    return member_id, turn_id, email
 
 
 async def stream(ctx: SurfaceContext, request: Request) -> Response:
     reached = await _member_turn(ctx, request)
     if isinstance(reached, Response):
         return reached
-    member_id, turn_id = reached
+    member_id, turn_id, email = reached
     since = request.headers.get("last-event-id", "")
     return StreamingResponse(
-        _events(ctx, turn_id, member_id, since), media_type="text/event-stream"
+        _events(ctx, turn_id, member_id, since, email), media_type="text/event-stream"
     )
 
 
@@ -3022,9 +3057,50 @@ def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, ob
     }
 
 
+def _opens(audience: WebAudience) -> frozenset[UUID]:
+    return frozenset(agent.id for agent in audience.agents)
+
+
+async def _created_apps(
+    ctx: SurfaceContext, created: Mapping[str, tuple[ObjectRef, ...]], opens: frozenset[UUID]
+) -> dict[str, list[dict[str, object]]]:
+    """The applications each turn created, keyed by that turn: the mark, the name, and the model
+    the card draws, beside the id the portal opens the app at. A terminal frame names every kind
+    the turn created and the surface draws the one it has a card for; the id an app is opened by is
+    the workspace's to answer, so the names are resolved against it here and one the workspace no
+    longer holds draws nothing. `opens` is the reader's own audience: an application defaults to
+    private, and a conversation they may read can name one they may not, so a card is drawn only
+    for an application the card would open for them."""
+    wanted = {ref.name for refs in created.values() for ref in refs if ref.kind == AGENT_KIND}
+    if not wanted:
+        return {}
+    known = {
+        agent.name: agent
+        for agent in await ctx.list_agents()
+        if agent.name in wanted and agent.id in opens
+    }
+    drawn: dict[str, list[dict[str, object]]] = {
+        turn_id: [
+            {
+                "id": str(known[ref.name].id),
+                "name": known[ref.name].name,
+                "model": known[ref.name].model,
+                "icon": known[ref.name].icon,
+            }
+            for ref in refs
+            if ref.kind == AGENT_KIND and ref.name in known
+        ]
+        for turn_id, refs in created.items()
+    }
+    return {turn_id: cards for turn_id, cards in drawn.items() if cards}
+
+
 async def _events(
-    ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str
+    ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str, email: str
 ) -> AsyncIterator[bytes]:
+    """The turn as the live chat draws it. A created application is gated on the audience read at
+    the terminal frame, not the one the stream opened on: the streamed turn is itself what creates
+    the application, so the reader's audience holds it only once that turn has ended."""
     async with ctx.tail(turn_id, since) as frames:
         async for cursor, frame in frames:
             if isinstance(frame, Terminal):
@@ -3059,6 +3135,13 @@ async def _events(
                 ]
                 if files:
                     yield _event("files", {"files": files})
+                if frame.frame.created:
+                    audience = await web_audience(ctx, web_extension(), email)
+                    apps = await _created_apps(
+                        ctx, {str(turn_id): frame.frame.created}, _opens(audience)
+                    )
+                    if apps:
+                        yield _event("apps", {"apps": apps[str(turn_id)]})
             yield _sse(cursor, frame)
 
 

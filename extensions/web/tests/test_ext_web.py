@@ -133,6 +133,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.registry import ModelRegistry
+from ufo.object_name import ObjectRef
 from ufo.objects import OBJECT_LIST_PAGE
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
@@ -5572,6 +5573,7 @@ async def _seed_web_turn(
     terminal: TerminalFrame,
     title: str = "a seeded conversation",
     context: TurnContext | None = None,
+    audience: str | None = None,
 ) -> tuple[UUID, UUID]:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -5582,8 +5584,9 @@ async def _seed_web_turn(
                 agent_id=agent_id,
                 surface="web",
                 queue_key=f"{agent_id}/{email}/{uuid4().hex}",
-                member_id=member_id,
+                member_id=None if audience is not None else member_id,
                 title=title,
+                **({"audience": audience} if audience is not None else {}),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -6039,6 +6042,227 @@ async def test_shared_files_stream_and_reload_as_download_links(
     assert reloaded["report.pdf"]["preview_url"] is None
     assert reloaded["portrait.jpg"]["media_type"] == "image/jpeg"
     assert reloaded["portrait.jpg"]["preview_url"].startswith("/artifacts/")
+
+
+async def test_a_created_app_streams_and_reloads_as_a_card_on_the_reply_that_made_it(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The turn that created an application names it on its terminal, so the stream draws the card
+    on the reply that made it and a reload draws the same card in the same place. A kind the chat
+    has no card for is passed over, and a turn that created nothing — one that only updated an
+    app — draws none."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    digest_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=digest_id,
+                workspace_id=workspace_id,
+                name="daily-digest",
+                prompt="summarise the day",
+                model="claude-sonnet-5",
+                icon="notebook",
+                visibility="workspace",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(
+            status="done",
+            text="daily-digest is set up.",
+            created=(
+                ObjectRef(kind="agent", name="daily-digest"),
+                ObjectRef(kind="scheduled_task", name="every-morning"),
+            ),
+        ),
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nbuild me a digest",
+                ),
+                Message(role="assistant", content="daily-digest is set up."),
+            ),
+        ),
+    )
+    events = dict(await _collect_events(client, token, turn_id))
+    assert events["apps"] == {
+        "apps": [
+            {
+                "id": str(digest_id),
+                "name": "daily-digest",
+                "model": "claude-sonnet-5",
+                "icon": "notebook",
+            }
+        ]
+    }
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+    payload = loaded.json()
+    assert "apps" not in payload
+    reply = payload["messages"][-1]
+    assert reply["role"] == "assistant"
+    assert reply["apps"] == events["apps"]["apps"]
+
+    _second, updated_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="daily-digest now runs at 07:00."),
+    )
+    assert "apps" not in dict(await _collect_events(client, token, updated_turn))
+
+
+async def test_a_created_app_streams_as_a_card_on_the_turn_that_created_it(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The member opens the stream while the turn is still running, so the application the turn
+    creates is a row that lands after the open — and the card is still drawn, on an application
+    private to the member who asked for it. The gate is armed, so the first delta publishes only
+    once the tail drains: the row is written after the stream is open, not before."""
+    client, workspace_id, agent_id = web
+    _config, hub, _blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=False)
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Ready."),
+    )
+    running = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="create an app for support",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    STREAM_GATE.arm()
+    tailing = asyncio.ensure_future(_collect_events(client, token, running))
+    await hub.publish(running, TextDelta(text="support-desk is set up."))
+    desk_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=desk_id,
+                workspace_id=workspace_id,
+                name="support-desk",
+                prompt="work the support inbox",
+                model="claude-sonnet-5",
+                icon="notebook",
+                visibility="private",
+                owner_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await hub.publish(
+        running,
+        Terminal(
+            frame=TerminalFrame(
+                status="done",
+                text="support-desk is set up.",
+                created=(ObjectRef(kind="agent", name="support-desk"),),
+            )
+        ),
+    )
+    events = dict(await tailing)
+    assert events["apps"] == {
+        "apps": [
+            {
+                "id": str(desk_id),
+                "name": "support-desk",
+                "model": "claude-sonnet-5",
+                "icon": "notebook",
+            }
+        ]
+    }
+
+
+async def test_a_card_is_drawn_only_for_an_application_the_reader_may_open(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """An application is private by default, and a conversation another member may read can name
+    one they may not open. The card is gated by the reader's own audience, so it never states the
+    name, model or mark of an application the portal would refuse to show them."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    owner_id, _owner_token = await _seed_member(workspace_id, "owner@example.com", admin=False)
+    _other_id, other_token = await _seed_member(workspace_id, "other@example.com", admin=False)
+    private_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=private_id,
+                workspace_id=workspace_id,
+                name="payroll-inbox",
+                prompt="work the payroll inbox",
+                model="claude-sonnet-5",
+                icon="receipt",
+                visibility="private",
+                owner_member_id=owner_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id, _turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        owner_id,
+        "owner@example.com",
+        TerminalFrame(
+            status="done",
+            text="payroll-inbox is set up.",
+            created=(ObjectRef(kind="agent", name="payroll-inbox"),),
+        ),
+        audience=str(SHARED_AUDIENCE),
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content="build me one"),
+                Message(role="assistant", content="payroll-inbox is set up."),
+            ),
+        ),
+    )
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+    )
+    assert loaded.status_code == 200
+    assert str(private_id) not in loaded.text
+    assert all("apps" not in message for message in loaded.json()["messages"])
 
 
 async def test_transcript_reply_keeps_its_files_after_a_later_turn(
@@ -8449,7 +8673,7 @@ async def test_a_member_repicks_the_agent_icon_through_the_intent_lane(
     assert tuple(row) == ("chart-line", "be useful", "claude-opus-4-8", True, "high", "large")
 
 
-async def test_an_icon_outside_the_closed_set_is_refused(
+async def test_an_icon_no_mark_could_be_named_by_is_refused(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     client, workspace_id, agent_id = web
@@ -8460,7 +8684,7 @@ async def test_an_icon_outside_the_closed_set_is_refused(
             "verb": "apply",
             "kind": "agent",
             "name": "assistant",
-            "spec": {"icon": "unicorn"},
+            "spec": {"icon": "Unicorn"},
         },
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )

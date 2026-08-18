@@ -11,6 +11,7 @@ import {
   CHAT_ROW,
   CONVO_ID,
   MEMBER,
+  SECOND_ID,
   StreamFake,
   TURN_ID,
   json,
@@ -404,6 +405,27 @@ test("a connect frame offers the consent link, and a connect_error states the fa
   expect(await screen.findByText("The provider refused the request.")).toBeTruthy();
 });
 
+test("an apps frame draws the application the turn created, pressable to its own screen", async () => {
+  const stream = await streaming();
+  stream.emit("apps", {
+    apps: [{ id: SECOND_ID, name: "daily-digest", model: "claude-sonnet-5", icon: "notebook" }],
+  });
+  const card = await screen.findByRole("link", { name: /Daily-Digest/ });
+  expect(card.getAttribute("href")).toBe("#/agents/" + SECOND_ID);
+  expect(card.textContent).toContain("claude-sonnet-5");
+
+  stream.emit("terminal", {
+    status: "done",
+    text: "daily-digest is set up.",
+    model: "opus",
+    tokens: 4,
+    cost_micro_usd: 1_000_000,
+  });
+  await waitFor(() =>
+    expect(screen.getAllByRole("link", { name: /Daily-Digest/ })).toHaveLength(1),
+  );
+});
+
 test("a credentials frame arriving mid-stream renders the prompt it asks for", async () => {
   const stream = await streaming();
   stream.emit("credentials", {
@@ -613,7 +635,7 @@ test("an answer whose response is not json ends the wait rather than hanging", a
   });
 
   await userEvent.click(await screen.findByRole("radio", { name: "Work" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
 
@@ -625,7 +647,7 @@ test("an answer the server refuses states its status rather than hanging", async
   });
 
   await userEvent.click(await screen.findByRole("radio", { name: "Work" }));
-  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
   expect(await screen.findByText("Error 503 — try again.")).toBeTruthy();
 });
 

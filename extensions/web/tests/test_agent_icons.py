@@ -10,13 +10,13 @@ COMPONENT_MAP = re.compile(r"\bAGENT_ICONS\b.*?=\s*\{\n(.*?)\n\}", re.DOTALL)
 MAPPED_SLUG = re.compile(r'^\s+"?([a-z0-9][a-z0-9-]*)"?:', re.MULTILINE)
 
 
-def test_the_portal_draws_exactly_the_icons_an_agent_may_carry() -> None:
-    """An agent's icon is one slug from the closed set core assigns and validates against, and the
-    portal turns that slug into a drawn mark through one hand-written component map. Nothing else
-    holds the two together: a slug core admits that the map omits reaches a member as an empty
-    square, and a component the set never names is a picker entry no agent can hold. Equality in
-    order keeps them one list rather than two that happen to share members, and makes the failure
-    name the position that drifted."""
+def test_the_portal_bundles_exactly_the_marks_its_picker_offers() -> None:
+    """An agent may carry any tabler mark, and any of them draws — but the marks the picker offers
+    are the ones the bundle holds, so those are drawn without a fetch and in the order the picker
+    shows them. Core names that shortlist and the portal bundles it; nothing else holds the two
+    together, and a slug in one and not the other is either a picker entry with no mark or a mark
+    the picker never offers. Equality in order keeps them one list rather than two that happen to
+    share members, and makes the failure name the position that drifted."""
     source = ICON_COMPONENTS.read_text()
     literal = COMPONENT_MAP.search(source)
     assert literal is not None, f"{ICON_COMPONENTS}: no AGENT_ICONS object literal to read"

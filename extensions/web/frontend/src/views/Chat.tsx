@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
+import { IconCheck } from "@tabler/icons-react";
+
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { AgentPicker } from "@/kernel/agentpick";
 import {
@@ -8,18 +10,19 @@ import {
   QuestionnaireChoice,
   QuestionnaireChoiceDescription,
   QuestionnaireChoices,
-  QuestionnaireDescription,
   QuestionnaireError,
   QuestionnaireInput,
   QuestionnaireItem,
-  QuestionnaireNext,
-  QuestionnairePrevious,
-  QuestionnaireProgress,
+  QuestionnaireOnward,
   QuestionnaireSkip,
+  QuestionnaireStepper,
   QuestionnaireSubmit,
   QuestionnaireTitle,
+  KEY,
+  ROW,
   type QuestionnaireItemDefinition,
 } from "@/components/ui/questionnaire";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   PromptInput,
   PromptInputAttach,
@@ -37,11 +40,12 @@ import {
   useTakeMeToTheFoot,
 } from "@/kernel/messages";
 import { COLUMN } from "@/kernel/pane";
+import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
-import { takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
+import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 import {
   answerQuestions,
   refreshTranscript,
@@ -268,10 +272,76 @@ function typed(entry: QuestionEntry): boolean {
   return !entry.allow_attachments && (Boolean(entry.free_text_only) || !(entry.options ?? []).length);
 }
 
-/** What a turn asks, standing under the reply that asked it and taken one question at a time. A
- *  turn may ask up to four things; four of them stacked in a transcript is a wall the member has
- *  to read before answering any of it, and the answers to the later ones often depend on the
- *  earlier. A step names one decision, says where it sits in the run, and can be gone back to.
+/** The keys the answers are drawn under and pressed by, in the order they are read: the choices
+ *  take the first of them, and the row the member types into takes the one after. */
+const KEYS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+type SettledRow = { entry: QuestionEntry; answer: string };
+
+/** The key one answer is drawn under: the choice's own place in the list, or the row after the
+ *  last of them for words the member typed. One rule, so the key a settled answer states is the
+ *  key the member pressed to give it. */
+function answerKey(entry: QuestionEntry, words: string): string {
+  const at = (entry.options ?? []).findIndex((option) => option.label === words);
+  return KEYS[at === -1 ? (entry.options ?? []).length : at];
+}
+
+/** How long a pressed answer stands before the run moves on: long enough to read as chosen, short
+ *  enough that the member is not waiting on it. A press that lands on the last question moves
+ *  nowhere, and a question taking several answers waits for the member to say they are done.
+ *
+ *  The press is what moves the run, never the selection: arrowing through a radio group selects
+ *  each option it passes, and a member reading the options that way would be carried off the
+ *  question mid-read. They go on with the act that says so. */
+const ANSWERED_MS = 320;
+
+/** What the row the member types into opens with: the answer already settled, wherever no drawn
+ *  choice carries it. A member who has already said what they want reads it back and changes it
+ *  rather than being asked for it again. */
+function written(entry: QuestionEntry): string | undefined {
+  if (choosable(entry) && (entry.options ?? []).some((option) => option.label === entry.chosen)) {
+    return undefined;
+  }
+  return entry.chosen;
+}
+
+/** Everything the member has answered, drawn as one filled block: each question as it was asked
+ *  and under it the one answer they gave, in the soft ink of a record rather than a control, each
+ *  row closed by a check. One block rather than one per question — the run is over and these are
+ *  its summary, so a gap between them would state a boundary the answers do not have. Nothing here
+ *  is pressable: the answers are admitted and the turn has them, so a row that still looked like a
+ *  control would offer a change the conversation cannot take. */
+function Settled({ rows, restated }: { rows: SettledRow[]; restated: boolean }) {
+  return (
+    <div className="flex flex-col gap-md rounded-panel bg-fill p-lg">
+      {rows.map(({ entry, answer }, index) => {
+        const words = restated ? answer.slice(0, -(entry.question.length + 3)) : answer;
+        return (
+          <div key={index} className="flex flex-col gap-sm">
+            <div className="text-ui leading-chrome font-medium text-pretty">{entry.question}</div>
+            <div className={cn(ROW, "bg-surface text-ink-soft")}>
+              <span aria-hidden className={KEY}>
+                {answerKey(entry, words)}
+              </span>
+              <span className="min-w-0 flex-1 truncate">{words}</span>
+              <IconCheck aria-hidden className="size-icon shrink-0" />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** What a turn asks, drawn as one card under the reply that asked it: what the turn is about and
+ *  the mark of the agent asking, then the question, its answers, and the acts that commit them.
+ *  The card is the boundary of the ask — everything inside it is the turn waiting on the member,
+ *  and the transcript reads on beneath it.
+ *
+ *  It is taken one question at a time. A turn may ask up to four things; four of them stacked in a
+ *  transcript is a wall the member has to read before answering any of it, and the answers to the
+ *  later ones often depend on the earlier. A step names one decision, says where it sits in the
+ *  run, and can be gone back to.
  *
  *  It is a real form, so each answer is a native control carrying a native name and the member's
  *  choice arrives as form data rather than as state a component was holding. An entry the member
@@ -294,6 +364,9 @@ function Question({
   const open = asked
     .map((entry, index) => ({ entry, index }))
     .filter(({ index }) => landed[index] === undefined);
+  const settled = asked
+    .map((entry, index) => ({ entry, answer: landed[index] }))
+    .filter((row): row is SettledRow => row.answer !== undefined);
   // An entry the form cannot carry — a file to attach, a list too long to read — stands as prose
   // naming where the answer goes. In the form it would be a step demanding a choice it offers no
   // control for, gating the answers the member did give behind an error nothing on screen resolves.
@@ -307,20 +380,25 @@ function Question({
       ? { choices: (entry.options ?? []).map((option) => ({ value: option.label })) }
       : {}),
   }));
-  // No card around this. Every answer is already a bordered row, and a card holding a stack of
-  // cards states a boundary twice — the question belongs in the reply's own column, exactly where
-  // the words that asked it are.
+  const names = items.map((item) => item.name);
+  const [at, setAt] = useState(names[0]);
+  const moving = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => clearTimeout(moving.current ?? undefined), []);
   return (
-    <div className="mt-lg flex max-w-bubble flex-col gap-lg">
-      {question.title ? <div>{question.title}</div> : null}
-      {asked.map((entry, index) =>
-        landed[index] === undefined ? null : (
-          <div key={index} className="flex flex-col gap-xs">
-            <div>{entry.header ? entry.header + " — " + entry.question : entry.question}</div>
-            <Meta>{landed[index]}</Meta>
-          </div>
-        ),
-      )}
+    <div className="mt-lg flex max-w-bubble flex-col gap-lg rounded-panel border border-edge p-xl">
+      {question.title || question.icon ? (
+        <div className="flex items-center gap-lg">
+          <div className="min-w-0 flex-1 text-label font-medium text-ink-soft">{question.title}</div>
+          {question.icon ? (
+            <Avatar>
+              <AvatarFallback>
+                <AgentIcon name={question.icon} />
+              </AvatarFallback>
+            </Avatar>
+          ) : null}
+        </div>
+      ) : null}
+      {settled.length ? <Settled rows={settled} restated={asked.length !== 1} /> : null}
       {prose.map(({ entry, index }) => (
         <div key={index} className="flex flex-col gap-xs">
           <div>{entry.header ? entry.header + " — " + entry.question : entry.question}</div>
@@ -339,6 +417,8 @@ function Question({
       {steppable.length ? (
         <Questionnaire
           items={items}
+          item={at}
+          onItemChange={setAt}
           onSubmit={(event) => {
             event.preventDefault();
             const answers = new FormData(event.currentTarget);
@@ -347,18 +427,25 @@ function Question({
             void deliver(target, question, asked, steppable, answers);
           }}
         >
-          {steppable.length > 1 ? <QuestionnaireProgress /> : null}
           {steppable.map(({ entry, index }) => (
             <QuestionnaireItem key={index} name={String(index)} multiple={entry.multi_select}>
-              <QuestionnaireTitle>{entry.header ?? entry.question}</QuestionnaireTitle>
-              {entry.header ? (
-                <QuestionnaireDescription>{entry.question}</QuestionnaireDescription>
-              ) : null}
+              <QuestionnaireTitle>{entry.question}</QuestionnaireTitle>
               <QuestionnaireChoices>
                 {choosable(entry)
                   ? (entry.options ?? []).map((option) => (
-                      <QuestionnaireChoice key={option.label} value={option.label}>
-                        <span className="font-medium">{option.label}</span>
+                      <QuestionnaireChoice
+                        key={option.label}
+                        value={option.label}
+                        defaultChecked={option.label === entry.chosen}
+                        onClick={() => {
+                          if (entry.multi_select) return;
+                          const next = names[names.indexOf(String(index)) + 1];
+                          if (next === undefined) return;
+                          clearTimeout(moving.current ?? undefined);
+                          moving.current = setTimeout(() => setAt(next), ANSWERED_MS);
+                        }}
+                      >
+                        <span className="shrink-0">{option.label}</span>
                         {option.description ? (
                           <QuestionnaireChoiceDescription>
                             {option.description}
@@ -373,17 +460,20 @@ function Question({
                           : option.label}
                       </Meta>
                     ))}
-                {typed(entry) ? (
-                  <QuestionnaireInput aria-label={entry.question} placeholder="Your answer" />
-                ) : null}
+                <QuestionnaireInput
+                  aria-label={entry.question}
+                  placeholder="Your answer"
+                  shortcut={KEYS[choosable(entry) ? (entry.options ?? []).length : 0]}
+                  defaultValue={written(entry)}
+                />
               </QuestionnaireChoices>
               <QuestionnaireError />
             </QuestionnaireItem>
           ))}
           <QuestionnaireActions>
-            <QuestionnairePrevious />
+            {steppable.length > 1 ? <QuestionnaireStepper /> : null}
             <QuestionnaireSkip />
-            <QuestionnaireNext />
+            <QuestionnaireOnward />
             <QuestionnaireSubmit disabled={held} />
           </QuestionnaireActions>
         </Questionnaire>
@@ -461,8 +551,9 @@ function Composer({
   // and these words stay in the box rather than opening a conversation of their own.
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
 
-  // An ask handed over while this composer is already mounted — the palette hands one from the
-  // chat screen itself — reaches the box here rather than waiting for a mount that never comes.
+  // An ask handed over while this composer is already mounted — a starter and the palette both hand
+  // one from the chat screen itself — reaches the box here rather than waiting for a mount that
+  // never comes.
   useEffect(() => {
     if (!founding) return;
     return watchPendingAsk(() => {
@@ -556,6 +647,53 @@ function Composer({
           </div>
         </PromptInputToolbar>
       </PromptInput>
+      {starting ? <Starters agentId={target.agentId} /> : null}
+    </div>
+  );
+}
+
+/** What a member can ask for before they have asked for anything: three applications named for the
+ *  job each does and the decision each leaves with them. Creating one is the same act whichever app
+ *  is being asked, so every start screen carries them. */
+const STARTERS = [
+  {
+    title: "Inbox triage",
+    body: "Reads new mail and drafts a few replies for each. You pick one, and nothing sends itself.",
+    ask: "I want an application that works my inbox: read new mail, draft a few replies for each one, and send nothing without me.",
+  },
+  {
+    title: "Research routing",
+    body: "Reads the sources you name, keeps what matters, and routes each lead to whoever owns it.",
+    ask: "I want an application that reads the sources I name, keeps the findings worth acting on, and routes each one to whoever owns it.",
+  },
+  {
+    title: "Draft review",
+    body: "Holds drafts against your own voice and publishes nothing until you approve it.",
+    ask: "I want an application that reviews my drafts against how I actually write, and publishes nothing until I approve it.",
+  },
+];
+
+/** A press is the whole act: the starter's sentence is said and the conversation opens on it. The
+ *  member chose these words by pressing them, the way they choose the palette's row, and the
+ *  sentence commits nothing but itself — what it asks for is decided later, in the conversation it
+ *  opens. */
+function Starters({ agentId }: { agentId: string }) {
+  return (
+    <div className="mt-2xl grid grid-cols-3 gap-lg max-narrow:grid-cols-1">
+      {STARTERS.map((starter) => (
+        <button
+          key={starter.title}
+          type="button"
+          onClick={() => setPendingAsk(agentId, starter.ask, true)}
+          className={cn(
+            "flex flex-col gap-xs rounded-panel border border-edge bg-transparent px-lg py-md",
+            "text-start text-inherit hover:bg-fill",
+          )}
+        >
+          <span className="text-ui font-medium">{starter.title}</span>
+          <span className="text-small text-ink-soft">{starter.body}</span>
+        </button>
+      ))}
     </div>
   );
 }

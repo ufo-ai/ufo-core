@@ -236,9 +236,11 @@ export function Settings({ agent }: { agent: Agent }) {
             </Group>
 
             <Group title="Icon">
-              {/* The set is closed and every mark in it is drawn, so the member picks by eye from
-                  all of them at once rather than opening a list of names. A mark carries no name
-                  the member reads; what a screen reader is given is the mark's own word. */}
+              {/* The shortlist is drawn whole, so the member picks by eye rather than opening a
+                  list of names, and the app's own mark leads it when the agent carries one from
+                  outside — a mark the picker did not offer is still the mark it has, and a grid
+                  with nothing selected would state otherwise. A mark carries no name the member
+                  reads; what a screen reader is given is the mark's own word. */}
               <form onSubmit={saveIcon}>
                 <fieldset
                   className={cn(
@@ -247,7 +249,10 @@ export function Settings({ agent }: { agent: Agent }) {
                   )}
                 >
                   <legend className="sr-only">Icon</legend>
-                  {Object.keys(AGENT_ICONS).map((slug) => {
+                  {[
+                    ...(icon && !(icon in AGENT_ICONS) ? [icon] : []),
+                    ...Object.keys(AGENT_ICONS),
+                  ].map((slug) => {
                     const word = slug.replaceAll("-", " ");
                     const label =
                       slug === UFO_ICON ? UFO_ICON : word[0].toUpperCase() + word.slice(1);
@@ -276,7 +281,7 @@ export function Settings({ agent }: { agent: Agent }) {
                           }}
                           className="absolute inset-0 size-full cursor-pointer opacity-0"
                         />
-                        <AgentIcon name={slug} className="size-(--size-glyph)" />
+                        <AgentIcon name={slug} />
                       </label>
                     );
                   })}

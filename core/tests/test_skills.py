@@ -54,6 +54,13 @@ def test_core_ships_exactly_the_fixed_skills() -> None:
     assert {skill.name for skill in CORE_SKILLS} == set(CORE_SKILL_NAMES)
 
 
+def test_create_application_reaches_the_skill_index_as_a_routing_trigger() -> None:
+    index = dict(CORE_SKILL_REGISTRY.index())
+    description = index["create-application"]
+    assert description.startswith("Load when a member asks for a new application")
+    assert len(description.split()) <= 50
+
+
 def test_skill_named_unknown_fails_loud_and_lists_the_available() -> None:
     with pytest.raises(ValueError, match="unknown skill 'ghost'"):
         CORE_SKILL_REGISTRY.named("ghost")

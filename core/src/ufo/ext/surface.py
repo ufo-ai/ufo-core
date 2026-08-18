@@ -128,10 +128,10 @@ from ufo.schema.records import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
-    AgentIcon,
     AgentVisibility,
     ReasoningEffort,
     SandboxSize,
+    TablerIcon,
     TerminalFrame,
     ToolIntent,
     Turn,
@@ -551,7 +551,7 @@ class AgentSummary(BaseModel):
     model: str
     internet_access_allowed: bool
     visibility: AgentVisibility
-    icon: AgentIcon
+    icon: TablerIcon
     owner_member_id: UUID | None = None
 
 
@@ -576,7 +576,7 @@ class AgentDetail(BaseModel):
     reasoning: ReasoningEffort
     sandbox_size: SandboxSize
     visibility: AgentVisibility
-    icon: AgentIcon
+    icon: TablerIcon
     prompt: str
     prompt_digest: str
     surfaces: tuple[str, ...]

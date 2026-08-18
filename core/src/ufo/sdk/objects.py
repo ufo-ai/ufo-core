@@ -16,6 +16,9 @@ from ufo.conversations import (
 from ufo.credential_kind import (
     CREDENTIAL_KIND as CREDENTIAL_KIND,
 )
+from ufo.object_name import (
+    ObjectRef as ObjectRef,
+)
 from ufo.object_scope import (
     object_agent_id as object_agent_id,
 )
@@ -63,9 +66,6 @@ from ufo.objects import (
 )
 from ufo.objects import (
     ObjectPage as ObjectPage,
-)
-from ufo.objects import (
-    ObjectRef as ObjectRef,
 )
 from ufo.objects import (
     ObjectRow as ObjectRow,

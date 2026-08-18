@@ -550,11 +550,32 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("create-skill",),
     ),
     SkillLoadCase(
+        "application-invoice-inbox",
+        "I want a separate app that reads the invoices landing in our shared inbox and files the "
+        "totals, so it stays out of this chat.",
+        expected="create-application",
+        forbidden=("create-skill", "task-scheduling"),
+    ),
+    SkillLoadCase(
+        "application-support-desk",
+        "Set the support team up with something of its own that answers the common product "
+        "questions and passes anything else to a person.",
+        expected="create-application",
+        forbidden=("create-skill",),
+    ),
+    SkillLoadCase(
+        "application-private-recruiting",
+        "Can I have my own agent just for recruiting, with its own instructions and nobody else "
+        "seeing it?",
+        expected="create-application",
+        forbidden=("create-skill",),
+    ),
+    SkillLoadCase(
         "createskill-capture-workflow",
         "Capture the weekly-report process described in notes/weekly-report-process.md as a "
         "reusable custom skill for this agent so its future turns produce the report the same way.",
         expected="create-skill",
-        forbidden=("research-report",),
+        forbidden=("research-report", "create-application"),
         workspace_files=(REPORT_PROCESS,),
     ),
     SkillLoadCase(
@@ -577,7 +598,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Create a reusable skill from this process: inspect a GitHub pull request, list blocking "
         "findings, and publish the result. Do not review a pull request now.",
         expected="create-skill",
-        forbidden=("coding",),
+        forbidden=("coding", "create-application"),
     ),
     SkillLoadCase(
         "explore-customers-profile",
@@ -906,6 +927,13 @@ CASES: tuple[SkillLoadCase, ...] = (
         "schedule-one-time-reminder",
         "Remind me once tomorrow afternoon to submit the permit application.",
         expected="task-scheduling",
+    ),
+    SkillLoadCase(
+        "schedule-morning-price-check",
+        "Set something up that checks our competitor's pricing page every morning and messages "
+        "me when it changes.",
+        expected="task-scheduling",
+        forbidden=("create-application",),
     ),
     SkillLoadCase(
         "theme-board-materials",

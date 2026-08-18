@@ -9,7 +9,7 @@ import {
   type Bubble,
   type LiveTurn,
 } from "@/lib/chatStore";
-import type { ChatFile, SubagentRun, Transcript } from "@/lib/types";
+import type { ChatApp, ChatFile, SubagentRun, Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const MALFORMED_REPLY = "Malformed reply — try again.";
@@ -233,9 +233,10 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
   const onLive = (change: (live: LiveTurn) => LiveTurn) =>
     updateChat(chatKey, (state) => ({ ...state, live: change(state.live ?? liveTurn()) }));
 
-  /** The reply this turn settles into, carrying what the turn still asks of the member and what
-   *  it shared: the question stands under the words that asked it and a file on the words that
-   *  shared it, so the reply is recorded for either alone even when the turn wrote nothing else. */
+  /** The reply this turn settles into, carrying what the turn still asks of the member, what it
+   *  shared, and what it created: the question stands under the words that asked it, a file on the
+   *  words that shared it, and an app's card on the words that made it, so the reply is recorded
+   *  for any of them alone even when the turn wrote nothing else. */
   const record = () =>
     updateChat(chatKey, (state) => {
       const live = state.live;
@@ -243,7 +244,11 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       const question = asked && asked.turn_id === turnId ? asked : null;
       if (
         !live ||
-        (!live.text && !live.subagents.length && !live.files.length && question === null)
+        (!live.text &&
+          !live.subagents.length &&
+          !live.files.length &&
+          !live.apps.length &&
+          question === null)
       ) {
         return state;
       }
@@ -257,6 +262,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
           ...(live.events.length ? { events: live.events } : {}),
           ...(live.subagents.length ? { subagents: live.subagents } : {}),
           ...(live.files.length ? { files: live.files } : {}),
+          ...(live.apps.length ? { apps: live.apps } : {}),
           ...(question ? { question } : {}),
         }),
       };
@@ -300,6 +306,11 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
   source.addEventListener("files", (event) => {
     const files = JSON.parse((event as MessageEvent).data).files as ChatFile[];
     onLive((live) => ({ ...live, files }));
+  });
+
+  source.addEventListener("apps", (event) => {
+    const apps = JSON.parse((event as MessageEvent).data).apps as ChatApp[];
+    onLive((live) => ({ ...live, apps }));
   });
 
   source.addEventListener("credentials", (event) => {

@@ -63,8 +63,9 @@ Two of these running at once need different `[serve] port` values in their `$UFO
   restart and nothing else. `uv sync` earns a re-run when `pyproject.toml` moves an entry point or
   a dependency, never after an edit.
 - `npm ci` earns a re-run when `package-lock.json` changes.
-- `npm run build` earns a re-run only for something that reads the built tree: `docker compose`, or
-  the four `test_ext_web.py` tests below.
+- `npm run build` earns a re-run only for something that reads the built tree: `docker compose`,
+  the four `test_ext_web.py` tests below, and `tests/agenticon.test.tsx`, which reads the built
+  page and serves the icon sprites out of `static/assets`.
 
 ### Focused checks
 

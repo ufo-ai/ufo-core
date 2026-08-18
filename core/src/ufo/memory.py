@@ -6,7 +6,7 @@ from typing import Protocol
 
 from ufo.ext.context import SourceReader
 from ufo.listings import ListingCursor, ListingPage
-from ufo.objects import ObjectRef
+from ufo.object_name import ObjectRef
 
 DEFAULT_MEMORY_SEARCH_PROVIDER = "default"
 

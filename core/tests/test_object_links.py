@@ -36,10 +36,10 @@ from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.models.interface import Message, ToolUseBlock
+from ufo.object_name import ObjectRef
 from ufo.objects import (
     BoundKind,
     ObjectLink,
-    ObjectRef,
     ObjectVerbs,
     UnknownKind,
     UnknownObject,

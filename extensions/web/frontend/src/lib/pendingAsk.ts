@@ -9,10 +9,11 @@
  *  answer. Handing the words to the chat screen keeps one path: the conversation is founded by the
  *  composer that is on the screen the member is looking at, like any other.
  *
- *  `send` is for words the member composed themselves and has already committed — the palette's row
- *  is their own line, and they pressed Enter on it. Words a panel wrote for them are handed over
- *  unsent: a setup ask binds its grants to the speaker in that conversation, so the member reads
- *  what they are about to say before it becomes theirs.
+ *  `send` turns on what the words commit, not on who composed them. The palette's row and the start
+ *  screen's starters are both lines the member chose by pressing them, and each only asks for
+ *  something the conversation goes on to decide, so both are said at once. An ask that commits an
+ *  act the moment it lands is handed over unsent: a setup ask binds its grants to the speaker in
+ *  that conversation, so the member reads what they are about to say before it becomes theirs.
  *
  *  It is held in memory and taken once. A draft would outlive the press and reappear later under a
  *  key the member never typed into. */
