@@ -83,6 +83,7 @@ from ufo.schema.records import (
     MEMBER_ADMISSION,
     SUBAGENT_SURFACE,
     AgentChange,
+    AgentVisibility,
     ProposalRef,
     TurnStatus,
     Usage,
@@ -1099,6 +1100,20 @@ class ExtensionContext:
             )
             for row in rows
         )
+
+    async def agent_visibilities(self) -> dict[UUID, AgentVisibility]:
+        """Every agent's portal visibility by id — the audience floor a thing attached to an
+        agent (its homepage) answers on. Workspace shape, not member data, so it is not gated on
+        `member_context_read`."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id, tables.agent.c.visibility).where(
+                        tables.agent.c.workspace_id == self.workspace_id
+                    )
+                )
+            ).all()
+        return {row.id: row.visibility for row in rows}
 
     async def earliest_seated_admin(self) -> UUID | None:
         """The workspace's earliest-seated admin — the deterministic member an ownerless agent's

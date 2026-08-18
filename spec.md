@@ -496,11 +496,12 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
-The web surface is the member portal and its own audience authority: every member reaches the
-workspace's main agent — the agent every surface routes an unbound member to — and beyond it the
-portal lists and admits exactly the non-main agents whose web audience holds the signed-in
-member — a row they own joins by ownership alone, the rest by grants kept in the web extension's
-own store, granted and revoked in chat
+The web surface is the member portal and its own audience authority: every member reaches every
+agent whose `visibility` is `workspace` — an agent-kind spec field, `private` by default; main is
+born `workspace` and refuses to narrow, since every surface routes an unbound member to it — and
+beyond those the portal lists and admits exactly the private agents whose web audience holds the
+signed-in member — a row they own joins by ownership alone, the rest by grants kept in the web
+extension's own store, granted and revoked in chat
 (`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent). A
 member-private extension conversation is listed as a chat and admits that member's replies, but
 does not grant another conversation or an agent panel. A workspace admin reaches and administers
@@ -520,14 +521,18 @@ invoices, and payment methods stay chat acts (`manage_billing`), and caps have n
 yet, so the billing view is a read. The agents screen is master-detail: a thin index of the
 agents themselves beside one selected agent's tabbed record — the bare route shows the main
 agent — with the topology graph as the index's other reading of the same pane. The record lands
-on Home: the agent's homepage — the hosted site its binding names, framed whole through the sites
-frame's own per-visit visibility gate — or one line stating the agent has not built one. Beside
+on Home: the agent's homepage — the hosted site its binding names, framed bare (no site header)
+through the sites frame's per-visit gate, which for a homepage answers the agent's visibility —
+or one line stating the agent has not built one. Beside
 chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its homepage (the frame link
-of the hosted site `set_homepage` bound, resolved through the site kind's own member gate — a
-background job seeds one homepage-build turn per agent, ever, in the acting member's own room, so
-a homepage is born its creator's and widens only by a member's act — the main agent's excepted:
-binding it makes the creator's site readable by the workspace main already answers), its
+of the hosted site `set_homepage` bound — a background job seeds one homepage-build turn per
+agent, ever, in the acting member's own room; the homepage's audience IS the agent's, resolved at
+every read and frame visit from the agent's `visibility` rather than copied onto the site row, so
+a private agent's homepage answers its owner and admins, a workspace agent's answers every
+member, and flipping the agent is what moves the page — the bind itself is the re-gating act, so
+it takes the site's creator acting and a live speaker unless the same turn deployed the site,
+the seed's deploy-and-bind shape), its
 loadable skills (the
 composition a turn loads), its conversations, and its settings
 (prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,

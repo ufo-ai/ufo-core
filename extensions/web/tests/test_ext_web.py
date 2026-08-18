@@ -822,6 +822,7 @@ async def _seed_workspace() -> tuple[UUID, UUID]:
                 model="claude-opus-4-8",
                 reasoning="high",
                 is_main=True,
+                visibility="workspace",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2286,6 +2287,7 @@ async def test_boot_read_carries_the_create_form_for_every_member(
         "model",
         "prompt",
         "reasoning",
+        "visibility",
     ]
     assert sorted(form["spec_schema"]["required"]) == [
         "internet_access_allowed",
@@ -2293,6 +2295,7 @@ async def test_boot_read_carries_the_create_form_for_every_member(
         "prompt",
         "reasoning",
     ]
+    assert form["spec_schema"]["properties"]["visibility"]["enum"] == ["private", "workspace"]
     assert form["spec_schema"]["properties"]["reasoning"]["enum"] == [
         "auto",
         "off",
@@ -7342,12 +7345,17 @@ async def test_homepage_read_carries_the_bound_site(
     assert set(payload) == {"state", "url"}
 
 
-async def test_homepage_read_answers_a_private_homepage_to_its_creator_alone(
+async def test_homepage_read_follows_the_agents_visibility(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
+    """A workspace-visible agent's homepage answers every member even while the bound row's own
+    column says private; a private agent's answers its owner and an admin, and a member the agent
+    reaches only by grant gets the absent state — the same set the frame would admit."""
     client, workspace_id, agent_id = web
     creator_id, creator_token = await _seed_member(workspace_id, "home-creator@example.com")
+    _member_id, member_token = await _seed_member(workspace_id, "home-member@example.com")
     _admin_id, admin_token = await _seed_member(workspace_id, "home-admin@example.com", admin=True)
+    owner_id, owner_token = await _seed_member(workspace_id, "home-owner@example.com")
     conversation_id = uuid4()
     with ws(workspace_id):
         sites = HostedSites(workspace_id, workspace_tx)
@@ -7355,16 +7363,46 @@ async def test_homepage_read_answers_a_private_homepage_to_its_creator_alone(
             conversation_id, "own", 8000, creator_id, "private", SHARED_AUDIENCE, True
         )
         assert await sites.set_homepage(agent_id, conversation_id, "own") is not None
-    mine = await client.get(
-        f"/surface/web/agents/{agent_id}/homepage",
-        headers={"cookie": f"{SESSION_COOKIE}={creator_token}"},
-    )
-    assert mine.json()["state"] == "set"
-    inspected = await client.get(
-        f"/surface/web/agents/{agent_id}/homepage",
-        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
-    )
-    assert inspected.json() == {"state": "none"}
+    for token in (creator_token, member_token, admin_token):
+        opened = await client.get(
+            f"/surface/web/agents/{agent_id}/homepage",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert opened.json()["state"] == "set"
+
+    private_agent = uuid4()
+    _granted_id, granted_token = await _seed_member(workspace_id, "home-granted@example.com")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=private_agent,
+                workspace_id=workspace_id,
+                name="private-host",
+                prompt="be narrow",
+                model="claude-opus-4-8",
+                owner_member_id=owner_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _grant_web_access(workspace_id, private_agent, "home-granted@example.com")
+    private_conversation = uuid4()
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        await sites.register(
+            private_conversation, "own", 8001, owner_id, "private", SHARED_AUDIENCE, True
+        )
+        assert await sites.set_homepage(private_agent, private_conversation, "own") is not None
+    path = f"/surface/web/agents/{private_agent}/homepage"
+    assert (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={owner_token}"})).json()[
+        "state"
+    ] == "set"
+    assert (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"})).json()[
+        "state"
+    ] == "set"
+    assert (
+        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={granted_token}"})
+    ).json() == {"state": "none"}
 
 
 async def test_homepage_read_is_not_found_out_of_audience(
@@ -8063,6 +8101,7 @@ async def test_settings_projects_spec_schema_ceiling_and_admin_audience(
         "model": "claude-opus-4-8",
         "internet_access_allowed": True,
         "reasoning": "high",
+        "visibility": "workspace",
         "input_schema": None,
         "output_schema": None,
     }
@@ -8070,6 +8109,7 @@ async def test_settings_projects_spec_schema_ceiling_and_admin_audience(
         "model",
         "internet_access_allowed",
         "reasoning",
+        "visibility",
     }
     assert data["audience"] == []
     granted_view = await client.get(
@@ -10204,7 +10244,10 @@ async def test_sites_slot_preserves_private_site_visibility_on_a_shared_conversa
         "public-dashboard",
         "workspace-dashboard",
     }
-    assert admin.json()["sites"] == viewer.json()["sites"]
+    assert admin.status_code == 200
+    assert len(admin.json()["sites"]) == 100
+    assert admin.json()["truncated"] is True
+    assert all(site["name"].startswith("aaa-hidden-") for site in admin.json()["sites"])
     assert next(slot for slot in inventory.json()["slots"] if slot["id"] == "sites")["count"] == 2
 
 

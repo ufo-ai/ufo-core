@@ -252,12 +252,42 @@ def test_a_signup_the_form_never_described_keeps_the_default_agent(
     assert asyncio.run(_main_agent_prompt(gateway_postgres, "plainco.io")) == DEFAULT_AGENT_PROMPT
 
 
+def test_a_hosted_signup_seats_a_workspace_visible_main_agent(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The main agent is the agent every surface routes an unbound member to, and the portal admits
+    it on the row's own `visibility`. A hosted signup that left the column at its `private` default
+    would hand every non-admin member of that workspace an empty portal."""
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    _verify_through(monkeypatch)
+    asyncio.run(_grant(gateway_postgres, 35, "founder@portalco.io"))
+    with TestClient(gateway_app()) as client:
+        assert "Signed in: founder@portalco.io" in _walk(
+            client, "portal-flow", "founder@portalco.io"
+        )
+
+    assert asyncio.run(_main_agent_visibility(gateway_postgres, "portalco.io")) == "workspace"
+
+
 async def _main_agent_prompt(dsn: str, domain: str) -> str:
     connection = await asyncpg.connect(dsn)
     try:
         return str(
             await connection.fetchval(
                 "select prompt from agent where workspace_id = $1 and is_main",
+                uuid.uuid5(uuid.NAMESPACE_DNS, domain),
+            )
+        )
+    finally:
+        await connection.close()
+
+
+async def _main_agent_visibility(dsn: str, domain: str) -> str:
+    connection = await asyncpg.connect(dsn)
+    try:
+        return str(
+            await connection.fetchval(
+                "select visibility from agent where workspace_id = $1 and is_main",
                 uuid.uuid5(uuid.NAMESPACE_DNS, domain),
             )
         )

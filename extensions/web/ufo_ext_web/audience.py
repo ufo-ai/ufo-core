@@ -6,9 +6,9 @@ Grants live in the extension's own store, one row per `(agent, email)` — the e
 surface's identity axis, the claim its bearer proves. The chat verbs here are admin-only and apply
 to the executing agent, so granting access to an agent
 happens in that agent's own conversation — which a workspace admin can always open, because an
-admin reaches every agent. Everyone else reaches the workspace's main agent — the agent every
-surface routes an unbound member to, so the portal answers a member the way the CLI and an
-unbound Slack install already do — plus non-main agents granted to their email or holding their
+admin reaches every agent. Everyone else reaches the agents whose `visibility` is `workspace` —
+main is born one, so the portal answers a member the way the CLI and an unbound Slack install
+already do — plus private agents granted to their email, owned by them, or holding their
 member-private extension conversations."""
 
 from dataclasses import dataclass
@@ -62,7 +62,7 @@ async def _granted_agent_ids(store: ScopedStore, email: str) -> frozenset[UUID]:
 @dataclass(frozen=True)
 class WebAudience:
     """One member's view of the portal: whether they administer the workspace (and so see every
-    agent), and the agents their web audience holds — the main agent by construction, an explicit
+    agent), and the agents their web audience holds — every workspace-visible agent, an explicit
     grant, or a row they own, since the member who created an agent must be able to open it; a
     member-private extension conversation grants only its agent chat."""
 
@@ -106,7 +106,7 @@ async def web_audience(
         agents=tuple(
             a
             for a in agents
-            if a.main
+            if a.visibility == "workspace"
             or a.id in granted
             or (member_id is not None and a.owner_member_id == member_id)
         ),

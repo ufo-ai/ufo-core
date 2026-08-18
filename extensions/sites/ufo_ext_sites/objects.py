@@ -4,13 +4,16 @@ column the in-frame selector writes.
 One object per registered site, named `<site-name>-<conversation-digest>` (`dashboard-9f21c0a4e3b7`,
 carried in the deploy result), because two conversations may each host a `dashboard` and each keeps
 its own link. A site belongs to the member who deployed it: its creator sees it whatever its
-visibility, every other member sees it once it is no longer private, and only the creator may change
-who can open it — a workspace admin may narrow a site to private but never widen one. Create is
-refused naming `deploy_website`: a site exists by serving a port, and only a deploy knows which
-port. Delete unregisters it, and the link stops resolving."""
+visibility, workspace admins see every site, every other member sees it once it is no longer
+private, and only the creator may change who can open it — a workspace admin may narrow a site to
+private but never widen one. A site bound as an agent's homepage answers to the agent instead: its
+effective visibility is the agent's, its own column lies dormant until unbind, and an apply naming
+another level is refused toward the agent object. Create is refused naming `deploy_website`: a
+site exists by serving a port, and only a deploy knows which port. Delete unregisters it, and the
+link stops resolving."""
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import ClassVar
 from uuid import UUID
@@ -32,7 +35,13 @@ from ufo.sdk.objects import (
     owner_emails,
 )
 from ufo.sdk.tools import ToolContext
-from ufo_ext_sites.store import SITE_VISIBILITY_GATE, HostedSite, HostedSites, Visibility
+from ufo_ext_sites.store import (
+    SITE_VISIBILITY_GATE,
+    HostedSite,
+    HostedSites,
+    Visibility,
+    visibility_level,
+)
 from ufo_ext_sites.surface import site_url
 
 SITE_KIND = "site"
@@ -41,6 +50,10 @@ SITES_ARE_DEPLOYED = (
 )
 VISIBILITY_GATE = f"{SITE_VISIBILITY_GATE}; a workspace admin may only make it private"
 UNHOST_GATE = "only the member who deployed a site, or a workspace admin, may unhost it"
+HOMEPAGE_FOLLOWS_AGENT = (
+    "this site is an agent's homepage: its visibility follows the agent, so change the agent "
+    "object's visibility instead"
+)
 CONVERSATION_DIGEST_HEX = 12
 
 
@@ -48,8 +61,9 @@ class SiteSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     visibility: Visibility = Field(
         description=(
-            "Who may open the site's link: private (its creator alone), workspace (any member of "
-            "the workspace, signed in), or public (anyone holding the link)."
+            "Who may open the site's link: private (its creator and workspace admins), workspace "
+            "(any member of the workspace, signed in), or public (anyone holding the link). A "
+            "site bound as an agent's homepage follows the agent's visibility instead."
         )
     )
 
@@ -85,15 +99,25 @@ def _sites(ext: ExtensionContext | None) -> HostedSites:
     return HostedSites(scoped.store.workspace_id, scoped.transaction)
 
 
-def _summary(site: HostedSite) -> str:
-    return f"{site.name} · {site.visibility} · sandbox port {site.port}"
+def effective_visibility(site: HostedSite, agents: Mapping[UUID, str]) -> Visibility:
+    """The level a viewer is actually gated on: the agent's visibility for a homepage-bound site —
+    indexed, not defaulted, because a binding naming an absent agent is a broken row, never a
+    quieter one — and the site's own column otherwise."""
+    if site.homepage_agent_id is None:
+        return site.visibility
+    return visibility_level(agents[site.homepage_agent_id])
+
+
+def _summary(site: HostedSite, visibility: Visibility) -> str:
+    return f"{site.name} · {visibility} · sandbox port {site.port}"
 
 
 @dataclass(frozen=True)
 class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
     """Read, re-gate, and unhost handlers over the workspace's registered sites. Ownership is the
     site's creator and disclosure is its own `visibility` column — the gate the frame enforces per
-    visit, read here through the one registry both surfaces write."""
+    visit, read here through the one registry both surfaces write — except a homepage-bound row,
+    whose effective visibility is its agent's."""
 
     kind_name: ClassVar[str] = SITE_KIND
     mutate_gate: ClassVar[str] = VISIBILITY_GATE
@@ -110,20 +134,21 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
         scoped = _workspace(ext)
         base = scoped.public_base_url
         named = _named(await _sites(ext).all())
+        agents = await scoped.agent_visibilities()
         emails = await owner_emails(site.creator_member_id for site in named.values())
         return tuple(
             OwnedRow(
                 name=name,
-                summary=_summary(site),
+                summary=_summary(site, effective_visibility(site, agents)),
                 owner=GeneratedObjectOwner(
                     member_id=site.creator_member_id,
-                    shared=site.visibility != "private",
+                    shared=effective_visibility(site, agents) != "private",
                     generation=site.generation,
                 ),
                 fields={
                     "conversation": str(site.conversation_id),
                     "created_at": site.created_at.isoformat(),
-                    "visibility": site.visibility,
+                    "visibility": effective_visibility(site, agents),
                     "owner_email": emails.get(site.creator_member_id),
                     "mine": site.creator_member_id == member_id,
                 }
@@ -154,14 +179,22 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
         admin: bool,
         limit: int,
     ) -> tuple[ConversationObjectGrant, ...]:
-        del admin
+        agents = await _workspace(ext).agent_visibilities()
         return tuple(
             ConversationObjectGrant(
                 name=site_object_name(site.conversation_id, site.name),
                 generation=site.generation,
                 content_visible=True,
             )
-            for site in await _sites(ext).visible_conversation(conversation_id, member_id, limit)
+            for site in await _sites(ext).visible_conversation(
+                conversation_id,
+                member_id,
+                limit,
+                admin=admin,
+                homepage_agents=frozenset(
+                    agent_id for agent_id, level in agents.items() if level == "workspace"
+                ),
+            )
         )
 
     async def _member_object(
@@ -176,7 +209,9 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
         if site is None:
             return None
         return ObjectDetail(
-            spec=SiteSpec(visibility=site.visibility),
+            spec=SiteSpec(
+                visibility=effective_visibility(site, await _workspace(ext).agent_visibilities())
+            ),
             created_at=site.created_at,
             updated_at=site.updated_at,
             links=(
@@ -218,8 +253,11 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
         site = await self._find(ctx.ext, name)
         if site is None:
             raise ValueError(f"site {name!r} was unhosted while its visibility was changing")
-        if spec.visibility == site.visibility:
+        effective = effective_visibility(site, await _workspace(ctx.ext).agent_visibilities())
+        if spec.visibility == effective:
             return
+        if site.homepage_agent_id is not None:
+            raise ValueError(HOMEPAGE_FOLLOWS_AGENT)
         await _sites(ctx.ext).set_visibility(site.conversation_id, site.name, spec.visibility)
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
@@ -243,18 +281,21 @@ SITE_OBJECT = ObjectKind(
     guidance=(
         "Sites a deploy left hosted, one object per site and conversation, named "
         "<site-name>-<conversation-digest> (the deploy result carries the name). A site is visible "
-        "to the member who deployed it, and to every member once it is workspace or public. "
+        "to the member who deployed it, to workspace admins, and to every member once it is "
+        "workspace or public. "
         "Each listed site carries its creator (`owner_email`) and its hosted `site_url`, the link "
         "absent only on a deploy that configures "
         "no public base URL and therefore hosts no reachable link. Listings filter and order on "
         "`conversation`, `created_at`, `visibility`, and `mine` — filter on this conversation's "
         "id for the sites it hosts, or order by `created_at` desc for the newest. "
         "A site bound as an agent's homepage by set_homepage carries `homepage_agent` — that "
-        "agent's id, absent on every other site and filterable. "
+        "agent's id, absent on every other site and filterable — and its visibility follows the "
+        "agent's, so the listed level is the agent's and an apply naming another is refused. "
         "object_get returns its visibility, and its status carries the hosted site_url, the "
         "sandbox port serving it, and its creator; the `created_in` link names the conversation "
         "that built it. Apply a manifest whose spec changes only `visibility` — private (creator "
-        "alone), workspace (any signed-in member), or public (anyone with the link) — the same act "
+        "and admins), workspace (any signed-in member), or public (anyone with the link) — the "
+        "same act "
         "the member can perform in the site's own frame. Create and any other spec change are "
         "refused: a site exists by serving a port, so build it and deploy_website it. Delete "
         "unregisters the site and its link stops resolving; the sandbox keeps the port until its "

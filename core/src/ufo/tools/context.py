@@ -49,7 +49,7 @@ from ufo.models.spec import ModelSpec
 from ufo.o11y import log
 from ufo.sandbox.session import SandboxSession
 from ufo.schema import tables
-from ufo.schema.records import Agent, TerminalFrame, Turn
+from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
 from ufo.search import SearchProvider
 from ufo.seats import member_is_admin
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
@@ -359,6 +359,20 @@ class ToolContext:
                     )
                 ).scalar_one_or_none()
             )
+
+    async def agent_visibility(self) -> AgentVisibility:
+        async with workspace_tx() as connection:
+            stored = (
+                await connection.execute(
+                    sa.select(tables.agent.c.visibility).where(
+                        tables.agent.c.id == self.turn.agent_id,
+                        tables.agent.c.workspace_id == self.turn.workspace_id,
+                    )
+                )
+            ).scalar_one()
+        if stored not in ("private", "workspace"):
+            raise RuntimeError(f"agent visibility {stored!r} is not a level the column serves")
+        return stored
 
     async def begin_credential_authorization(self, slot: str, payload: str) -> str:
         requests, member_id = await self._credential_authorization(slot)

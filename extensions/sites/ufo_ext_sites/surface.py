@@ -6,7 +6,10 @@ so the shared fleet resolves the workspace from the URL alone before a row is re
 it expires. Every visit passes the gate again: the token is verified, the site resolved, the viewer
 authenticated from the `ufo_session` cookie the web surface binds, and the site's `visibility`
 decides. A public site skips authentication; a workspace site admits any authenticated member; a
-private one admits its creator alone. Anything else is a 404 with the same body as an unknown token,
+private one admits its creator and workspace admins. A site bound as an agent's homepage answers
+on the agent instead: a workspace-visible agent's homepage admits any authenticated member, a
+private agent's its owner and admins — and it renders bare, no header, because the portal frames
+it as the agent's own page. Anything else is a 404 with the same body as an unknown token,
 so the frame is no oracle for which sites exist. An unauthenticated viewer of a non-public site is
 told exactly that and sent to `/login`: the shared host routes that prefix to the onboarding
 gateway rather than to this fleet, so it is same-origin with the frame, and the walk it starts ends
@@ -38,6 +41,7 @@ from ufo.sdk.http import (
     Request,
     Response,
 )
+from ufo.sdk.seats import Seats
 from ufo.sdk.surface_token import mint_surface_token, verify_surface_token
 from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo_ext_sites.store import HostedSite, HostedSites, Visibility, visibility_level
@@ -59,6 +63,7 @@ HOSTING_UNCONFIGURED = (
 NOT_FOUND_BODY = "no such site"
 UNCONFIGURED_BODY = "Site hosting is not configured on this deployment."
 CSRF_REJECTED_BODY = "the visibility form did not match this session; reload the page and retry"
+HOMEPAGE_FOLLOWS_AGENT_BODY = "this site is an agent's homepage; its visibility follows the agent's"
 LOGIN_PATH = "/login"
 NOT_SIGNED_IN_PAGE = (
     "<main><p>This site is not public, and this browser is not signed in to the workspace that "
@@ -145,38 +150,63 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
 
     Whatever trails the token is the site path to open at, so a member can be handed a link to one
     page of a site rather than only its front door — the site's own paths live at the embedded
-    origin and are reachable from outside no other way. The gate is the site's either way: a deep
-    link proves no more than the bare one, and both pass through the same visibility check."""
+    origin and are reachable from outside no other way. A deep link proves no more than the bare
+    one: both pass the same gate — the agent's visibility for a homepage, the row's own for any
+    other site."""
     site = await _resolve(ctx, request)
     if site is None:
         return _not_found()
     viewer = await _viewer(ctx, request)
-    if site.visibility != "public" and viewer is None:
-        return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE))
-    if site.visibility == "private" and viewer != site.creator_member_id:
-        return _not_found()
+    if site.homepage_agent_id is not None:
+        if viewer is None:
+            return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE))
+        agent = next((a for a in await ctx.list_agents() if a.id == site.homepage_agent_id), None)
+        if agent is None:
+            return _not_found()
+        if (
+            agent.visibility != "workspace"
+            and viewer != agent.owner_member_id
+            and not await _viewer_is_admin(ctx, viewer)
+        ):
+            return _not_found()
+    else:
+        if site.visibility != "public" and viewer is None:
+            return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE))
+        if (
+            site.visibility == "private"
+            and viewer != site.creator_member_id
+            and not await _viewer_is_admin(ctx, viewer)
+        ):
+            return _not_found()
     embedded = ctx.ingress_url(
         site.conversation_id, site.port, f"/{request.path_params.get(PATH_PARAM, '')}"
     )
     csrf = (
         mint_surface_token(SURFACE_SITES, {CSRF_CLAIM: _session_digest(request)})
-        if viewer is not None and viewer == site.creator_member_id
+        if site.homepage_agent_id is None
+        and viewer is not None
+        and viewer == site.creator_member_id
         else ""
     )
     frame_path = f"{FRAME_PATH}/{request.path_params[TOKEN_PARAM]}"
-    return HTMLResponse(_frame_page(site, embedded, frame_path, csrf))
+    return HTMLResponse(
+        _frame_page(site, embedded, frame_path, csrf, bare=site.homepage_agent_id is not None)
+    )
 
 
 async def set_visibility(ctx: SurfaceContext, request: Request) -> Response:
     """Move a site between visibility levels for its creator alone. A viewer who is not the creator
     gets the same 404 an unknown site does; a request whose CSRF token is not this session's is
-    refused outright, since the creator is proven and the form is not."""
+    refused outright, since the creator is proven and the form is not. A homepage-bound site has no
+    level of its own to move — its viewers follow the agent — so the post is refused whole."""
     site = await _resolve(ctx, request)
     if site is None:
         return _not_found()
     viewer = await _viewer(ctx, request)
     if viewer is None or viewer != site.creator_member_id:
         return _not_found()
+    if site.homepage_agent_id is not None:
+        return PlainTextResponse(HOMEPAGE_FOLLOWS_AGENT_BODY, status_code=409)
     form = await request.form()
     if not _csrf_holds(request, str(form.get(CSRF_FIELD, ""))):
         return PlainTextResponse(CSRF_REJECTED_BODY, status_code=403)
@@ -197,6 +227,14 @@ async def _resolve(ctx: SurfaceContext, request: Request) -> HostedSite | None:
 
 def _sites(ctx: SurfaceContext) -> HostedSites:
     return HostedSites(ctx.workspace_id, ctx.transaction)
+
+
+async def _viewer_is_admin(ctx: SurfaceContext, viewer: UUID | None) -> bool:
+    if viewer is None:
+        return False
+    async with ctx.transaction() as connection:
+        snapshot = await Seats(ctx.workspace_id).snapshot(connection)
+    return any(entry.admin and entry.id == viewer for entry in snapshot.members)
 
 
 async def _viewer(ctx: SurfaceContext, request: Request) -> UUID | None:
@@ -236,9 +274,13 @@ def _page(title: str, style: str, body: str) -> str:
     )
 
 
-def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: str) -> str:
+def _frame_page(
+    site: HostedSite, embedded: str | None, frame_path: str, csrf: str, *, bare: bool = False
+) -> str:
     """The site inside the app's own chrome: its name, the creator's selector or a viewer's badge,
-    and the site itself at its own origin, freshly addressed every render. `referrerpolicy` keeps
+    and the site itself at its own origin, freshly addressed every render. A homepage renders
+    `bare` — no header at all — because the portal frames it as the agent's own page and a
+    visibility control would name a level the row no longer answers to. `referrerpolicy` keeps
     the frame's address — which is the site token — out of every request the embedded site makes,
     and the `sandbox` list withholds `allow-top-navigation`: the framed bytes are model-authored,
     so a page built from an injected brief must not be able to navigate the member off the app
@@ -262,6 +304,8 @@ def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: s
         if embedded is not None
         else f"<main><p>{UNCONFIGURED_BODY}</p></main>"
     )
+    if bare:
+        return _page(html.escape(site.name), _STYLE + _FRAME_STYLE, site_view)
     return _page(
         html.escape(site.name),
         _STYLE + _FRAME_STYLE,

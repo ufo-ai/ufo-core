@@ -151,6 +151,7 @@ class Onboarding:
                     prompt=DEFAULT_AGENT_PROMPT,
                     model=self.model,
                     is_main=True,
+                    visibility="workspace",
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

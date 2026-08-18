@@ -209,7 +209,7 @@ The audience atom is one rule; what each projection does with an admin differs b
 | Artifacts, portal listing | files of readable conversations | **every conversation's files, rooms and foreign included, no disclosure record** — the one read where private content reaches an admin unaudited; the `shared` scope toggle re-applies reader audiences even for admins |
 | Artifacts, `artifact` object kind | `audience_subjects` of own audience | same — the `admin` flag is accepted and ignored |
 | Radar / scheduled-runs feed | `readable_audiences`, unconditional | same — the projection takes no admin parameter |
-| Agent homepage, portal Home tab | the bound site's own `visibility` | **narrower than the listing** — a private homepage answers its creator alone, so the read hands an admin no link the frame would refuse |
+| Agent homepage, portal Home tab | the agent's own `visibility`: `workspace` → every member, `private` → the agent's owner | + private-agent homepages — admins reach every agent, so the frame admits them and the read hands out the link |
 | Memory (portal + `memory` kind) | `{shared, member:<me>}` | same — admin ignored |
 | Usage | own window, no other member or agent named | + workspace rollup |
 | Roster, portal team view | full roster to every signed-in member | same |
@@ -226,13 +226,17 @@ question is asked (`audience_subjects`, `ToolContext.read_subjects`):
 | Foreign (`foreign:*`) anywhere | never reads `shared`; automatic recall reads only the sealed subject itself |
 
 Sites are the outlier by design: a hosted site carries its own `visibility` column —
-`private` (creator alone), `workspace` (any signed-in member), `public` (anyone with the link) —
-taken from the deploying member's request, defaulted from the conversation audience when unnamed
-(member or foreign audience → `private`, else `workspace`), and managed thereafter by its
-creator; an admin may only narrow to private. An agent's homepage is a pointer to one such site:
-`set_homepage` binds it, needs no live speaker, and gates on neither the site's creator nor its
-visibility, because the pointer discloses nothing — every homepage read re-applies the site's own
-visibility, and widening one stays the creator's act.
+`private` (creator and workspace admins), `workspace` (any signed-in member), `public` (anyone
+with the link) — taken from the deploying member's request, defaulted from the conversation
+audience when unnamed (member or foreign audience → `private`, else `workspace`), and managed
+thereafter by its creator; an admin may only narrow to private. An agent's homepage is a pointer
+to one such site, and while bound the site's own column lies dormant: the frame, the read, and
+the `site` kind's listing all answer the agent's `visibility` instead — `workspace` admits every
+member, `private` the agent's owner and admins — so flipping the agent object is what moves the
+page. The bind itself is the re-gating act, so `set_homepage` gates like a visibility change:
+only the site's creator acting may bind it — another member's site would widen or narrow out
+from under its creator — and a standing site needs a live speaker, a speakerless turn reaching
+only the site its own turn deployed, which is the seed's deploy-and-bind shape.
 
 ## Grants — what an agent may use
 
@@ -285,10 +289,12 @@ declaration carries no member scope, and no read discloses a value. The portal's
 prepares that same sealed prompt.
 Operators fill slots with `ufoctl credential set`, limited to the same member-fillable subset.
 
-**Web audience.** Which agents a member reaches in the portal is the web extension's own grant
-store: every member reaches the main agent; `grant_web_access`/`revoke_web_access` (admin-only,
-in chat, or the admin view's intent lane) govern the rest; admins reach every agent. An
-out-of-audience agent is not-found on every portal route.
+**Web audience.** Which agents a member reaches in the portal starts from the agent's own
+`visibility` (agent-kind spec field): every member reaches every `workspace` agent — main is born
+one and refuses to narrow. A `private` agent reaches its owner, and beyond that the web
+extension's own grant store: `grant_web_access`/`revoke_web_access` (admin-only, in chat, or the
+admin view's intent lane) govern per-member access; admins reach every agent. An out-of-audience
+agent is not-found on every portal route.
 
 Sharing semantics differ by object:
 

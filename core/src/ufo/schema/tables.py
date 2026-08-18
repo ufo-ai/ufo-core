@@ -83,6 +83,7 @@ agent = sa.Table(
     sa.Column("model", sa.Text, nullable=False),
     sa.Column("reasoning", sa.Text, nullable=False, server_default=sa.text("'auto'")),
     sa.Column("is_main", sa.Boolean, nullable=False, server_default=sa.false()),
+    sa.Column("visibility", sa.Text, nullable=False, server_default=sa.text("'private'")),
     sa.Column("internet_access_allowed", sa.Boolean, nullable=False, server_default=sa.true()),
     sa.Column("sandbox_size", sa.Text, nullable=False, server_default=sa.text("'small'")),
     sa.Column("tools", sa.JSON, nullable=True),
@@ -99,6 +100,7 @@ agent = sa.Table(
         "reasoning in ('auto', 'off', 'low', 'medium', 'high')", name="agent_reasoning"
     ),
     sa.CheckConstraint("sandbox_size in ('small', 'medium', 'large')", name="agent_sandbox_size"),
+    sa.CheckConstraint("visibility in ('private', 'workspace')", name="agent_visibility"),
     sa.CheckConstraint(
         "(provisioned_by is null) = (provisioned_name is null) "
         "and (provisioned_by is null) = (provisioned_version is null)",

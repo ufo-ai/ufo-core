@@ -123,6 +123,7 @@ async def _seed_workspace() -> tuple[UUID, UUID]:
                 prompt="be brief",
                 model="claude-opus-4-8",
                 is_main=True,
+                visibility="workspace",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

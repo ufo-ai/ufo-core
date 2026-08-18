@@ -878,6 +878,7 @@ async def _agent_row(
                 prompt=prompt,
                 model=model,
                 is_main=is_main,
+                visibility="workspace" if is_main else "private",
                 internet_access_allowed=internet_access_allowed,
                 reasoning=reasoning,
                 created_at=datetime(2026, 7, 1, tzinfo=UTC),
@@ -912,6 +913,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
             "internet_access_allowed": True,
             "reasoning": "high",
             "sandbox_size": "small",
+            "visibility": "workspace",
             "prompt": "be brief",
             "input_schema": None,
             "output_schema": None,
@@ -1045,6 +1047,105 @@ async def test_agent_kind_round_trips_sandbox_size(db: None) -> None:
             await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name="assistant")
         )
         assert fetched["spec"]["sandbox_size"] == "large"
+
+
+async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        main = await _agent_row(workspace_id, name="ufo", is_main=True)
+        await _agent_row(workspace_id, name="research")
+        ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=main)
+        ctx = replace(ctx, turn=ctx.turn.model_copy(update={"admission_source": "intent"}))
+
+        fetched = yaml.safe_load(
+            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="research")
+        )
+        assert fetched["spec"]["visibility"] == "private"
+        widen = yaml.safe_dump(
+            {
+                "kind": AGENT_KIND,
+                "name": "research",
+                "spec": {
+                    "model": "claude-opus-4-8",
+                    "internet_access_allowed": True,
+                    "reasoning": "high",
+                    "visibility": "workspace",
+                },
+            }
+        )
+        applied = json.loads(await _text(tools, "object_apply", ctx, manifest=widen))
+        assert applied["result"] == "updated"
+        async with workspace_tx() as connection:
+            stored = await connection.scalar(
+                sa.select(tables.agent.c.visibility).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.name == "research",
+                )
+            )
+        assert stored == "workspace"
+
+        apply_tool = tools["object_apply"]
+        narrow_main = apply_tool.input_model.model_validate(
+            {
+                "user_description": OBJECT_NARRATION,
+                "manifest": yaml.safe_dump(
+                    {
+                        "kind": AGENT_KIND,
+                        "name": "ufo",
+                        "spec": {
+                            "model": "claude-opus-4-8",
+                            "internet_access_allowed": True,
+                            "reasoning": "high",
+                            "visibility": "private",
+                        },
+                    }
+                ),
+            }
+        )
+        with pytest.raises(ValueError, match="answers every member"):
+            await apply_tool.handler(ctx, narrow_main)
+
+        omitting = apply_tool.input_model.model_validate(
+            {
+                "user_description": OBJECT_NARRATION,
+                "manifest": yaml.safe_dump(
+                    {
+                        "kind": AGENT_KIND,
+                        "name": "ufo",
+                        "spec": {
+                            "model": "claude-opus-4-8",
+                            "internet_access_allowed": True,
+                            "reasoning": "high",
+                        },
+                    }
+                ),
+            }
+        )
+        await apply_tool.handler(ctx, omitting)
+        async with workspace_tx() as connection:
+            kept = await connection.scalar(
+                sa.select(tables.agent.c.visibility).where(tables.agent.c.id == main)
+            )
+        assert kept == "workspace"
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .where(tables.agent.c.id == main)
+                .values(visibility="private", prompt="drifted")
+            )
+        await apply_tool.handler(ctx, omitting)
+        async with workspace_tx() as connection:
+            repaired = (
+                await connection.execute(
+                    sa.select(tables.agent.c.visibility, tables.agent.c.prompt).where(
+                        tables.agent.c.id == main
+                    )
+                )
+            ).one()
+        assert repaired == ("workspace", "drifted")
 
 
 async def test_a_child_agent_is_scoped_to_the_main_agent(db: None) -> None:

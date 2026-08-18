@@ -65,6 +65,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
                     prompt="be brief",
                     model="claude-opus-4-8",
                     is_main=main,
+                    visibility="workspace" if main else "private",
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -215,6 +216,29 @@ async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_pa
         assert not revoked.is_error
         remaining = await web_audience(surface, extension, MEMBER_EMAIL)
         assert [agent.id for agent in remaining.agents] == [main_agent]
+
+
+async def test_a_workspace_visible_agent_joins_the_roster_without_a_grant(
+    db: None, tmp_path
+) -> None:
+    """The workspace rung is the agent's own: flipping `visibility` to workspace puts the agent
+    in every member's roster with no grant row, and flipping it back removes it."""
+    workspace_id, main_agent, second_agent = await _seed()
+    await _member(workspace_id, MEMBER_EMAIL)
+    with ws(workspace_id):
+        surface = _surface(workspace_id, tmp_path)
+        extension = context_for(NAME, frozenset())
+        before = await web_audience(surface, extension, MEMBER_EMAIL)
+        assert [agent.id for agent in before.agents] == [main_agent]
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .where(tables.agent.c.id == second_agent)
+                .values(visibility="workspace")
+            )
+        widened = await web_audience(surface, extension, MEMBER_EMAIL)
+        assert [agent.id for agent in widened.agents] == [main_agent, second_agent]
+        assert await granted_emails(web_extension().store) == {}
 
 
 async def test_a_private_extension_conversation_grants_only_its_chat_agent(

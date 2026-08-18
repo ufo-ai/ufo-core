@@ -541,11 +541,11 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     day-bucketed idempotency key retries it tomorrow. The turn rides on behalf of the agent's
     owner — the earliest-seated admin for an ownerless row — because a deploy needs an acting
     member, and it runs in that member's own room, the shape every on-behalf invocation takes, so
-    the authority it carries stays inside a room its member already reads. The homepage is
-    therefore born its creator's — the site defaults private, matching an ungranted agent's own
-    audience — and widens only by a member's act: the frame's selector, or the agent asked in
-    chat when its audience grows. The main agent is the exception: `set_homepage` makes the
-    creator's own site workspace-readable, since main answers every member by construction.
+    the authority it carries stays inside a room its member already reads. The homepage answers
+    the agent's audience from birth: the frame gates a bound site on the agent's visibility, so a
+    workspace-visible agent's homepage (main is born one) reaches every member at once, a private
+    agent's reaches its owner and admins, and flipping the agent object's visibility is what
+    widens the page — no site row is rewritten.
     An agent whose allowlist withholds the site tools is marked
     settled rather than handed a turn it cannot finish — chat is its recovery if the allowlist
     grows — and an ownerless agent in a workspace with no seated admin waits, unmarked, for one.
@@ -3246,29 +3246,35 @@ async def settings(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def homepage(ctx: SurfaceContext, request: Request) -> Response:
-    """The selected agent's homepage: the frame link of the hosted site `set_homepage` bound,
-    resolved through the site kind's own member gate — a site this viewer may not see, a binding
-    that no longer resolves, and an agent that never bound one all answer the same absent state
-    the Home tab renders. A private homepage answers its creator alone, admins included: the
-    frame's own gate would refuse everyone else, so the read never hands out a link that renders
-    a refusal."""
+    """The selected agent's homepage: the frame link of the hosted site `set_homepage` bound.
+    Its audience is the agent's — every member for a workspace-visible agent, the owner and
+    admins for a private one — the same rule the frame gates each visit on, so the read never
+    hands out a link that renders a refusal. The binding is read past the row gate (the row's
+    own column is dormant while bound) and this handler applies the agent rule itself; a binding
+    that no longer resolves and an agent that never bound one answer the same absent state the
+    Home tab renders."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     member_id, _email, audience, agent_id = gated
+    summary = next(a for a in audience.agents if a.id == agent_id)
+    if (
+        summary.visibility != "workspace"
+        and member_id != summary.owner_member_id
+        and not audience.admin
+    ):
+        return JSONResponse({"state": "none"})
     page = await ctx.list_member_objects(
         SITE_KIND,
         agent_id,
         member_id,
-        admin=audience.admin,
+        admin=True,
         query=ObjectListQuery(filters={"homepage_agent": str(agent_id)}),
     )
     if page is None:
         return JSONResponse({"state": "none"})
     bound = next((row for row in page.rows if "site_url" in row.fields), None)
     if bound is None:
-        return JSONResponse({"state": "none"})
-    if bound.fields.get("visibility") == "private" and bound.fields.get("mine") is not True:
         return JSONResponse({"state": "none"})
     return JSONResponse({"state": "set", "url": bound.fields["site_url"]})
 

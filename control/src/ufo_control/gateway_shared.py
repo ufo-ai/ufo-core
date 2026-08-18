@@ -239,6 +239,7 @@ class SharedWorkspaces:
                         prompt=agent_prompt(profile),
                         model=DEFAULT_AGENT_MODEL,
                         is_main=True,
+                        visibility="workspace",
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )

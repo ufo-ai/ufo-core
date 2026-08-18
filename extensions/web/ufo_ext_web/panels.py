@@ -471,6 +471,7 @@ async def agent_settings(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
                 internet_access_allowed=detail.internet_access_allowed,
                 reasoning=detail.reasoning,
                 sandbox_size=detail.sandbox_size,
+                visibility=detail.visibility,
             ).model_dump(
                 mode="json",
                 exclude={"prompt"} if ctx.sandbox_sizes else {"prompt", "sandbox_size"},

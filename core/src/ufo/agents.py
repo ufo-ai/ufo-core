@@ -1,11 +1,11 @@
 """The core-registered `agent` object kind: the workspace's agent as a workspace object.
 
-The spec holds the prompt, model, reasoning effort, sandbox size, public-internet policy, and the
-optional I/O contract a spawn of the agent validates against. `object_apply` is their one member
-write path. Any speaking member creates agents and owns the ones they created; an owner or a
-workspace admin edits, and an ownerless row — the main agent, a provisioned agent — answers to
-admins alone. Create never copies grants, credentials, sources, or derived data. Delete raises; a
-mutation by anyone else raises `AdminRequired`."""
+The spec holds the prompt, model, reasoning effort, sandbox size, public-internet policy, portal
+visibility, and the optional I/O contract a spawn of the agent validates against. `object_apply`
+is their one member write path. Any speaking member creates agents and owns the ones they created;
+an owner or a workspace admin edits, and an ownerless row — the main agent, a provisioned agent —
+answers to admins alone. Create never copies grants, credentials, sources, or derived data. Delete
+raises; a mutation by anyone else raises `AdminRequired`."""
 
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -34,7 +34,9 @@ from ufo.objects import (
 )
 from ufo.schema import tables
 from ufo.schema.records import (
+    DEFAULT_AGENT_VISIBILITY,
     DEFAULT_SANDBOX_SIZE,
+    AgentVisibility,
     ReasoningEffort,
     SandboxSize,
 )
@@ -46,6 +48,7 @@ AGENT_UNDELETABLE = "agents cannot be deleted through objects"
 AGENT_EDIT_GATE = "editing an agent requires its owner or a workspace admin"
 AGENT_CREATE_GATE = "creating an agent requires a speaking member"
 AGENT_PROMPT_REQUIRED = "creating an agent requires a prompt"
+MAIN_AGENT_STAYS_WORKSPACE = "the main agent answers every member; its visibility cannot change"
 
 
 def _effective_model(ctx: ToolContext, stored: str) -> str:
@@ -83,6 +86,15 @@ class AgentSpec(BaseModel):
             "The cpu/memory tier a new conversation's sandbox is provisioned at, on a deploy "
             "whose sandbox backend offers sizes; a single-shape backend stores and ignores it. "
             "An existing conversation keeps the size its sandbox was created at."
+        ),
+    )
+    visibility: AgentVisibility = Field(
+        default=DEFAULT_AGENT_VISIBILITY,
+        description=(
+            "Who reaches this agent in the member portal and may open its homepage: 'workspace' "
+            "(every member) or 'private' (its owner, workspace admins, and members granted web "
+            "access in chat — grants open chat, not the homepage). The main agent is always "
+            "'workspace'."
         ),
     )
     prompt: str | None = Field(
@@ -180,6 +192,7 @@ class AgentObjects:
             internet_access_allowed=row.internet_access_allowed,
             reasoning=row.reasoning,
             sandbox_size=row.sandbox_size,
+            visibility=row.visibility,
             prompt=row.prompt,
             input_schema=row.input_schema,
             output_schema=row.output_schema,
@@ -243,6 +256,13 @@ class AgentObjects:
         next_sandbox_size = (
             spec.sandbox_size if "sandbox_size" in spec.model_fields_set else row.sandbox_size
         )
+        next_visibility = (
+            spec.visibility if "visibility" in spec.model_fields_set else row.visibility
+        )
+        if row.is_main:
+            if "visibility" in spec.model_fields_set and spec.visibility != "workspace":
+                raise ValueError(MAIN_AGENT_STAYS_WORKSPACE)
+            next_visibility = "workspace"
         next_input_schema = (
             spec.input_schema if "input_schema" in spec.model_fields_set else row.input_schema
         )
@@ -254,6 +274,7 @@ class AgentObjects:
             spec.internet_access_allowed,
             spec.reasoning,
             next_sandbox_size,
+            next_visibility,
             next_input_schema,
             next_output_schema,
         ) != (
@@ -261,6 +282,7 @@ class AgentObjects:
             row.internet_access_allowed,
             row.reasoning,
             row.sandbox_size,
+            row.visibility,
             row.input_schema,
             row.output_schema,
         )
@@ -277,6 +299,7 @@ class AgentObjects:
                     internet_access_allowed=spec.internet_access_allowed,
                     reasoning=spec.reasoning,
                     sandbox_size=next_sandbox_size,
+                    visibility=next_visibility,
                     input_schema=next_input_schema,
                     output_schema=next_output_schema,
                     updated_at=sa.func.now(),
@@ -310,6 +333,7 @@ class AgentObjects:
                         internet_access_allowed=spec.internet_access_allowed,
                         reasoning=spec.reasoning,
                         sandbox_size=spec.sandbox_size,
+                        visibility=spec.visibility,
                         input_schema=spec.input_schema,
                         output_schema=spec.output_schema,
                         owner_member_id=ctx.speaker_member_id,
@@ -342,6 +366,7 @@ class AgentObjects:
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.reasoning,
                         tables.agent.c.sandbox_size,
+                        tables.agent.c.visibility,
                         tables.agent.c.tools,
                         tables.agent.c.input_schema,
                         tables.agent.c.output_schema,
@@ -369,10 +394,10 @@ class AgentObjects:
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "A workspace agent: its prompt, model, reasoning effort, public-internet policy, and the "
-        "I/O contract a spawn of it validates against — readable by all members, creatable by any "
-        "member, updatable by its owner or a workspace admin. It cannot be deleted through "
-        "objects."
+        "A workspace agent: its prompt, model, reasoning effort, public-internet policy, portal "
+        "visibility, and the I/O contract a spawn of it validates against — readable by all "
+        "members, creatable by any member, updatable by its owner or a workspace admin. It "
+        "cannot be deleted through objects."
     ),
     guidance=(
         "A workspace agent as an object. Any member may create one and owns what they created; "
@@ -384,7 +409,10 @@ AGENT_OBJECT = ObjectKind(
         "default elsewhere; a fixed level pins it. Sandbox size ('small', 'medium', 'large') "
         "picks the cpu/memory tier a new conversation's sandbox is provisioned at, where the "
         "deploy's sandbox backend offers sizes; existing conversations keep the sandbox they "
-        "have. input_schema and output_schema (raw JSON Schema, top-level type 'object') fix the "
+        "have. Visibility 'workspace' answers every member in the portal, 'private' answers its "
+        "owner, workspace admins, and members granted web access in chat; the agent's homepage "
+        "follows it, and the main agent stays 'workspace'. "
+        "input_schema and output_schema (raw JSON Schema, top-level type 'object') fix the "
         "contract a spawn of this agent validates against; unset means {task} in and {result} "
         "out. Applying a name no agent holds "
         "creates one — the spec then requires `prompt`; a new "

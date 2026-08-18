@@ -173,6 +173,23 @@ async def test_workspace_agents_carry_the_roster_with_owners(db: None) -> None:
     assert [tools for agent_id, tools in allowlists.items() if agent_id != sweep_id] == [None, None]
 
 
+async def test_agent_visibilities_answer_by_id_without_member_context(db: None) -> None:
+    workspace_id, _member_id, _other_member_id, sweep_id = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == sweep_id)
+            .values(visibility="workspace")
+        )
+    with ws(workspace_id):
+        context = context_for("sweep", frozenset())
+        visibilities = await context.agent_visibilities()
+    assert visibilities[sweep_id] == "workspace"
+    assert {level for agent_id, level in visibilities.items() if agent_id != sweep_id} == {
+        "private"
+    }
+
+
 async def test_agent_roster_reads_are_gated_on_member_context(db: None) -> None:
     workspace_id, _member_id, _other_member_id, _sweep_id = await _seed()
     with ws(workspace_id):

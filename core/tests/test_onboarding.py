@@ -79,6 +79,7 @@ async def test_onboarding_creates_the_initial_admin_and_main_agent(
     )
     assert agent.workspace_id == onboarded.workspace_id
     assert agent.is_main
+    assert agent.visibility == "workspace"
 
 
 async def test_re_running_against_an_initialized_workspace_fails_loud(

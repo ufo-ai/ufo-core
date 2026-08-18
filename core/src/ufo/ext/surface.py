@@ -128,6 +128,7 @@ from ufo.schema.records import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
+    AgentVisibility,
     ReasoningEffort,
     SandboxSize,
     TerminalFrame,
@@ -539,13 +540,15 @@ class AgentSummary(BaseModel):
     `internet_access_allowed` is the agent's narrowing of the deploy's sandbox public-internet
     capability, carried for the administration view. `owner_member_id` is the member who created
     the row (None for the main agent and provisioned rows), so an audience can give an owner
-    their own agent without a separate grant."""
+    their own agent without a separate grant. `visibility` is the agent's own audience floor:
+    `workspace` answers every member, `private` its owner and admins plus per-surface grants."""
 
     id: UUID
     name: str
     main: bool
     model: str
     internet_access_allowed: bool
+    visibility: AgentVisibility
     owner_member_id: UUID | None = None
 
 
@@ -569,6 +572,7 @@ class AgentDetail(BaseModel):
     internet_access_allowed: bool
     reasoning: ReasoningEffort
     sandbox_size: SandboxSize
+    visibility: AgentVisibility
     prompt: str
     prompt_digest: str
     surfaces: tuple[str, ...]
@@ -1916,6 +1920,7 @@ class SurfaceContext:
                         tables.agent.c.is_main,
                         tables.agent.c.model,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.visibility,
                         tables.agent.c.owner_member_id,
                     )
                     .where(tables.agent.c.workspace_id == self.workspace_id)
@@ -1929,6 +1934,7 @@ class SurfaceContext:
                 main=row.is_main,
                 model=row.model,
                 internet_access_allowed=row.internet_access_allowed,
+                visibility=row.visibility,
                 owner_member_id=row.owner_member_id,
             )
             for row in rows
@@ -1965,6 +1971,7 @@ class SurfaceContext:
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.reasoning,
                         tables.agent.c.sandbox_size,
+                        tables.agent.c.visibility,
                         tables.agent.c.prompt,
                         tables.agent.c.updated_at,
                     ).where(
@@ -1996,6 +2003,7 @@ class SurfaceContext:
             internet_access_allowed=row.internet_access_allowed,
             reasoning=row.reasoning,
             sandbox_size=row.sandbox_size,
+            visibility=row.visibility,
             prompt=row.prompt,
             prompt_digest=prompt_digest(row.prompt),
             surfaces=tuple(surfaces),
