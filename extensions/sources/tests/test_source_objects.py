@@ -191,6 +191,7 @@ def _context(
     direct_fallback: bool = True,
     no_speaker: bool = False,
     open_namespace: bool = False,
+    agent_id: UUID | None = None,
 ) -> ToolContext:
     ext = context_for(NAME, DECLARED_PROVIDERS)
     speaker = None if no_speaker else (speaker_id or state.owner_id)
@@ -201,7 +202,7 @@ def _context(
             id=uuid4(),
             workspace_id=state.workspace_id,
             conversation_id=state.conversation_id,
-            agent_id=state.agent_id,
+            agent_id=agent_id or state.agent_id,
             seq=1,
             status="running",
             inbound="connect a source",
@@ -322,6 +323,149 @@ def test_manifest_declares_the_source_kind() -> None:
     assert "page_change" in {hook.event for hook in declared.hooks}
     assert {slot.name for slot in declared.credentials} == set(CONNECTORS)
     assert {source.backend for source in declared.sources} == set(CONNECTORS)
+
+
+async def _shipped_agent(state: _Workspace, name: str) -> UUID:
+    agent_id = uuid4()
+    created_at = datetime(2026, 7, 9, tzinfo=UTC)
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=agent_id,
+                    workspace_id=state.workspace_id,
+                    name=name,
+                    prompt="p",
+                    model="claude-opus-4-8",
+                    is_main=False,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+    return agent_id
+
+
+async def _granted_agents(state: _Workspace) -> set[UUID]:
+    with ws(state.workspace_id), agent(state.agent_id):
+        async with workspace_tx() as connection:
+            return set(
+                (
+                    await connection.execute(
+                        sa.select(tables.source_grant.c.agent_id).where(
+                            tables.source_grant.c.workspace_id == state.workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+
+async def _readable_sources(state: _Workspace, ctx: ToolContext) -> frozenset[UUID]:
+    """Which source rows this turn's agent reaches — the gate its pages come through, so a grant
+    row that leaves the agent with nothing to read proves nothing."""
+    with ws(state.workspace_id):
+        return await context_for(NAME, DECLARED_PROVIDERS).readable_source_ids(ctx.source_reader())
+
+
+async def test_a_source_the_workspace_holds_is_granted_to_the_agent_that_asks(db: None) -> None:
+    """A shipped agent asks for the feed it needs and the workspace already watches that account —
+    the case the whole point of shipping an agent runs into. The binding settles where it is, one
+    row syncing once, and the asking agent leaves holding it.
+
+    Before this, the apply found the binding, returned ahead of registering, and wrote no grant: no
+    error, no feed, and no verb that could give it one. The member's only route was to delete the
+    binding and register it again, which tombstones every page the first source synced."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    name = binding_name(ASANA, "acct-one", None)
+    streams = ("workspaces", "projects")
+
+    with ws(state.workspace_id), agent(state.agent_id):
+        assert (
+            await _apply(
+                _context(state, grants, brokered=(ASANA,)), _manifest_text(ASANA, streams, name)
+            )
+        )["result"] == "created"
+
+    assert await _granted_agents(state) == {state.agent_id}
+    rows = await _rows(state, ASANA)
+
+    shipped = await _shipped_agent(state, "code-review")
+    with ws(state.workspace_id), agent(shipped):
+        # The connection half of the same setup already had its verb; the source half did not.
+        assert await grants.attach(
+            provider=ASANA,
+            account_id="acct-one",
+            conversation_id=state.conversation_id,
+            actor_member_id=state.owner_id,
+            shared=False,
+        )
+        applied = await _apply(
+            _context(state, grants, brokered=(ASANA,), agent_id=shipped),
+            _manifest_text(ASANA, streams, name),
+        )
+
+    assert applied == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
+    assert await _granted_agents(state) == {state.agent_id, shipped}
+    # One binding, not two: the second agent reads the rows the first one's sync already fills.
+    assert [row["id"] for row in await _rows(state, ASANA)] == [row["id"] for row in rows]
+
+
+async def test_the_agent_asking_for_a_held_source_is_granted_it_by_the_identical_submit(
+    db: None,
+) -> None:
+    """The submit that names the account the binding already carries is identical to the stored
+    spec, so it settles on the rows that exist and registers nothing — the path a manifest written
+    from a read of the binding takes. The grant is still what the asking agent came for."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    name = binding_name(ASANA, "acct-one", None)
+    submitted = _manifest_text(ASANA, ("workspaces", "projects"), name, account_id="acct-one")
+
+    with ws(state.workspace_id), agent(state.agent_id):
+        assert (await _apply(_context(state, grants, brokered=(ASANA,)), submitted))[
+            "result"
+        ] == "created"
+
+    rows = await _rows(state, ASANA)
+    shipped = await _shipped_agent(state, "code-review")
+    shipped_ctx = _context(state, grants, brokered=(ASANA,), agent_id=shipped)
+    assert await _readable_sources(state, shipped_ctx) == frozenset()
+    with ws(state.workspace_id), agent(shipped):
+        applied = await _apply(shipped_ctx, submitted)
+
+    assert applied == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
+    assert await _granted_agents(state) == {state.agent_id, shipped}
+    assert await _readable_sources(state, shipped_ctx) == {row["id"] for row in rows}
+    assert [row["id"] for row in await _rows(state, ASANA)] == [row["id"] for row in rows]
+
+
+async def test_a_source_another_member_holds_privately_is_not_granted_away(db: None) -> None:
+    """A grant decides which agent reaches a feed, never who may read what it syncs — the subject on
+    each page still does that. What it does carry is the authority behind the feed, which belongs to
+    the member whose connection serves it, so a second member cannot hand it to an agent."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    name = binding_name(ASANA, "acct-one", None)
+
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state, grants, brokered=(ASANA,)), _manifest_text(ASANA, ("workspaces",), name)
+        )
+    source_id = (await _rows(state, ASANA))[0]["id"]
+    shipped = await _shipped_agent(state, "code-review")
+
+    with ws(state.workspace_id), agent(shipped):
+        with pytest.raises(ValueError, match="privately"):
+            await context_for(NAME, DECLARED_PROVIDERS).grant_source(
+                source_id, agent_id=shipped, actor_member_id=state.member_id
+            )
+
+    assert await _granted_agents(state) == {state.agent_id}
 
 
 async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:

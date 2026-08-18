@@ -371,15 +371,40 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
     ) -> None:
         """A resync is the registering member's or an admin's and changes nothing else. Re-applying
         the identical spec of a source the caller can already see (`old` is non-None only for a
-        visible source, since the base `get` hides the rest) is the documented no-op. Every other
+        visible source, since the base `get` hides the rest) registers nothing and stays outside the
+        base's gate: all it does is grant the calling agent the binding it names. Every other
         apply — register, share-flip, restream, rewindow — goes through the base's member/admin
         gate."""
         if spec.resync:
             await self._resync(ctx, name, spec, old)
             return
         if old is not None and _binding_identity(spec) == _binding_identity(old):
+            await self._grant_settled(ctx, name)
             return
         await super().apply(ctx, name, spec, old, expected_generation=expected_generation)
+
+    async def _grant_settled(self, ctx: ToolContext, name: str) -> None:
+        """Grant the calling agent the binding its identical submit settles on. Registration is what
+        grants an agent a feed, and a submit that names what the workspace already holds registers
+        nothing, so the grant is the whole of what this path owes the agent that asked for the
+        source — without it the agent reads back `updated`, holds no feed, and sees no error.
+
+        The grant is the registering member's own or a shared binding's: the authority behind a
+        private feed belongs to the member whose connection serves it, so an admin re-applying it
+        grants nothing, and a speakerless turn grants nothing either — a granting act takes a live
+        member."""
+        speaker = ctx.speaker_member_id
+        owner = await self._owner(ctx, name)
+        if speaker is None or owner is None or not (owner.shared or self._owned(owner, speaker)):
+            return
+        binding = await _binding_named(ctx.ext, name)
+        if binding is None:
+            return
+        ext = _require_ext(ctx.ext)
+        for stream in binding.streams:
+            await ext.grant_source(
+                stream.source_id, agent_id=ctx.turn.agent_id, actor_member_id=speaker
+            )
 
     async def _resync(
         self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None
@@ -540,6 +565,15 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         registered_at = datetime.now(UTC)
         for stream in streams:
             if stream in held:
+                # The row is settled — same account, same authority, same window — so registering
+                # it again would grant nothing and this agent would hold no feed and see no error.
+                # A workspace that already watches an account is exactly where a shipped agent
+                # asks for one, so the grant is what the apply owes it.
+                await ext.grant_source(
+                    held[stream].source_id,
+                    agent_id=ctx.turn.agent_id,
+                    actor_member_id=ctx.speaker_member_id,
+                )
                 continue
             days = (
                 effective_days(spec.backfill_days, declared[stream]) if stream in windowed else None

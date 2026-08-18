@@ -90,6 +90,7 @@ from ufo.schema.records import (
 )
 from ufo.seats import workspace_domain
 from ufo.sources.sync import PageFeed, SourceRowConfig, source_row_id
+from ufo.subjects import SHARED_SUBJECT
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.workspace import ws_current
 
@@ -2203,6 +2204,64 @@ class ExtensionContext:
                 )
             )
         return source_id
+
+    async def grant_source(self, source_id: UUID, *, agent_id: UUID, actor_member_id: UUID) -> None:
+        """Grant an agent a source this workspace already holds, so a second agent reads a feed
+        without a second row syncing the same account twice.
+
+        `register_source` grants as it registers, and it is the only path that did. A source the
+        workspace already holds is settled there — same authority, same window — so registering it
+        again grants nothing new and the asking agent is left with no feed and no error.
+
+        The actor must own the source or the source must be workspace-shared, the rule
+        `GrantStore.attach` holds for connections. What a grant decides is which agent may reach a
+        source; whether its pages may be read at all stays with the subject each page carries, so
+        this widens no disclosure on its own — the refusal is about the authority behind the feed,
+        which belongs to the member whose connection serves it."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.source.c.owner_member_id, tables.source.c.subject)
+                    .where(
+                        tables.source.c.workspace_id == self.store.workspace_id,
+                        tables.source.c.id == source_id,
+                        tables.source.c.removed_at.is_(None),
+                    )
+                    .with_for_update(read=True)
+                )
+            ).one_or_none()
+            if row is None:
+                raise ValueError("no such source in this workspace")
+            if row.owner_member_id != actor_member_id and row.subject != SHARED_SUBJECT:
+                raise ValueError("member cannot grant a source another member holds privately")
+            target = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id).where(
+                        tables.agent.c.workspace_id == self.store.workspace_id,
+                        tables.agent.c.id == agent_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if target is None:
+                raise ValueError("the source target agent is outside this workspace")
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.source_grant)
+                .values(
+                    workspace_id=self.store.workspace_id,
+                    source_id=source_id,
+                    agent_id=agent_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        tables.source_grant.c.workspace_id,
+                        tables.source_grant.c.source_id,
+                        tables.source_grant.c.agent_id,
+                    ]
+                )
+            )
 
     def source_id(
         self, backend: str, config: BaseModel, *, connection_id: UUID | None = None
