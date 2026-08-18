@@ -3,6 +3,7 @@ import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -957,13 +958,33 @@ def test_the_connect_page_is_small_and_fetches_only_its_own_mark() -> None:
     assert "color-scheme:light dark" in page
 
 
+def test_the_connect_mark_is_the_portals_own_file_byte_for_byte() -> None:
+    """A logo is drawn artwork, so core copies it rather than rewriting it. Hand-minifying this one
+    drew it wrongly: the counters in the letters are cut by the `fill-rule: evenodd` that its
+    `<defs>` stylesheet carries, and rounding the coordinates moved the shapes against each other.
+    Nothing about a rendered glyph fails a size assertion, so this compares the bytes instead — and
+    it is also what keeps the two copies from drifting apart as the brand changes."""
+    portal = (
+        Path(__file__).resolve().parents[2]
+        / "extensions"
+        / "web"
+        / "frontend"
+        / "src"
+        / "assets"
+        / "ufo-logo.svg"
+    )
+
+    assert portal.is_file(), "the portal's logo moved — core's copy is now unanchored"
+    assert CONNECT_LOGO_FILE.read_bytes() == portal.read_bytes()
+
+
 def test_the_connect_mark_is_served_immutably_from_core() -> None:
     """The page is reached with no session and no frontend build behind it, so the mark cannot be
     the portal's copy: that one is fingerprinted by its bundler and its name changes every build.
     Core serves its own, and says it never changes, so a member who connects a second account pays
     for it once."""
     assert CONNECT_LOGO_FILE.is_file()
-    assert CONNECT_LOGO_FILE.read_bytes().startswith(b"<svg")
+    assert b"<svg" in CONNECT_LOGO_FILE.read_bytes()[:200]
     assert "immutable" in CONNECT_LOGO_CACHE
 
 
