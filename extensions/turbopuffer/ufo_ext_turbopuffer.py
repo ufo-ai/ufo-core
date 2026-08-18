@@ -36,6 +36,11 @@ EXPORT_PAGE = 1200
 NAMESPACE_PREFIX = "ufo-"
 ATTRIBUTES = ("owner_kind", "owner_id", "subject", "ordinal", "text")
 MAX_FULL_TEXT_QUERY_BYTES = 1024
+MIN_TERM_CHARS = 2
+"""A term BM25 can rank by: a run of two or more letters or digits. The run is what counts, not the
+tally — the index splits on everything else, so `3$2` is the two one-character terms `3` and `2`,
+each of which the whole corpus holds."""
+TERM_RUN = re.compile(rf"[^\W_]{{{MIN_TERM_CHARS},}}", re.UNICODE)
 SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 ENCODED_ID_LEN = 43
 
@@ -83,8 +88,15 @@ def upsert_body(chunks: tuple[Chunk, ...]) -> dict[str, Any]:
 def bm25_query(text: str) -> str:
     """The lexical query bounded to Turbopuffer's 1024-byte full-text query limit — a longer one is
     rejected as a malformed request, and the text is a member's or a model's of any length. The cut
-    drops the term it lands in, so the bounded query carries whole terms."""
-    query = text.strip()
+    drops the term it lands in, so the bounded query carries whole terms.
+
+    A token with fewer than `MIN_TERM_CHARS` of its own characters is dropped, and text left holding
+    none answers the empty query — which the caller reads as no lexical leg at all. BM25 ranks by
+    term, so a query of punctuation or lone letters gives it nothing to rank by and every chunk in
+    the namespace ties: the index answers "all of these match" for text that means nothing, and a
+    search would then carry the whole namespace past any relevance bar it applies. Dropping the
+    query here leaves such a search standing on its vector leg, where the recall floor governs."""
+    query = " ".join(token for token in text.split() if TERM_RUN.search(token))
     encoded = query.encode()
     if len(encoded) <= MAX_FULL_TEXT_QUERY_BYTES:
         return query

@@ -19,6 +19,7 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import (
     FACT,
+    RECALL_COSINE_FLOOR,
     RECALL_ITEM_MAX_CHARS,
     MemoryIndexer,
     MemoryStore,
@@ -917,6 +918,54 @@ def test_fuse_recall_blends_cosine_to_break_a_rrf_tie() -> None:
     )
     assert [fused.owner_id for fused in fuse_hits(lexical, vector, 10)] == ["A", "B"]
     assert [fused.owner_id for fused in fuse_recall(lexical, vector, (), 10)] == ["B", "A"]
+
+
+def test_fuse_hits_holds_a_source_page_to_the_same_floor() -> None:
+    """Source-page search answers the same portal box and the same tool as recall, so a page the
+    lexical leg never matched earns its place the same way. Without this a meaningless query still
+    returns pages: the vector leg always answers, and pure fused rank is relative to whatever came
+    back."""
+    far = (Hit("f", OWNER_KIND_PAGE, "F", SHARED_SUBJECT, 0, "far", RECALL_COSINE_FLOOR / 2),)
+    assert fuse_hits((), far, 10) == ()
+
+    near = (Hit("n", OWNER_KIND_PAGE, "N", SHARED_SUBJECT, 0, "near", RECALL_COSINE_FLOOR),)
+    assert [fused.owner_id for fused in fuse_hits((), near, 10)] == ["N"]
+
+    # A page the lexical leg matched holds the member's own words, so no cosine bars it.
+    worded = (Hit("w", OWNER_KIND_PAGE, "W", SHARED_SUBJECT, 0, "worded", 3.0),)
+    barely = (Hit("w", OWNER_KIND_PAGE, "W", SHARED_SUBJECT, 0, "worded", 0.1),)
+    assert [fused.owner_id for fused in fuse_hits(worded, barely, 10)] == ["W"]
+
+
+def test_fuse_recall_drops_a_vector_only_row_no_nearer_than_the_floor() -> None:
+    """A nearest-neighbour search always answers: ask it about a random string and it returns its
+    closest chunks, however far away they are. A row the lexical legs never matched has to earn its
+    place on closeness alone, so one under the floor is dropped rather than ranked. Measured
+    against the live corpus, meaningless queries reach `RECALL_COSINE_FLOOR` and no further."""
+    far = (
+        Hit("f", OWNER_KIND_MEMORY_ITEM, "F", SHARED_SUBJECT, 0, "far", RECALL_COSINE_FLOOR / 2),
+    )
+    assert fuse_recall((), far, (), 10) == ()
+
+
+def test_fuse_recall_keeps_a_lexically_matched_row_however_far_its_embedding() -> None:
+    """The floor governs the vector leg alone. A row a lexical leg matched holds words the member
+    typed, which a random string cannot fake, so it stands whatever its cosine — this is what keeps
+    a one-word query like `pricing` answering."""
+    near_none = 0.0
+    lexical = (Hit("l", OWNER_KIND_MEMORY_ITEM, "L", SHARED_SUBJECT, 0, "priced", 4.0),)
+    vector = (Hit("l", OWNER_KIND_MEMORY_ITEM, "L", SHARED_SUBJECT, 0, "priced", near_none),)
+    assert [fused.owner_id for fused in fuse_recall(lexical, vector, (), 10)] == ["L"]
+
+    tail_only = (Hit("tail:T", OWNER_KIND_MEMORY_ITEM, "T", SHARED_SUBJECT, 0, "fresh", 2.0),)
+    assert [fused.owner_id for fused in fuse_recall((), (), tail_only, 10)] == ["T"]
+
+
+def test_fuse_recall_keeps_a_vector_only_row_at_the_floor() -> None:
+    """A query worded nothing like the memory it wants — no shared word to match — still recalls
+    it, so the floor admits a row that reaches it."""
+    near = (Hit("n", OWNER_KIND_MEMORY_ITEM, "N", SHARED_SUBJECT, 0, "near", RECALL_COSINE_FLOOR),)
+    assert [fused.owner_id for fused in fuse_recall((), near, (), 10)] == ["N"]
 
 
 def test_fuse_recall_folds_in_the_un_embedded_tail_leg() -> None:

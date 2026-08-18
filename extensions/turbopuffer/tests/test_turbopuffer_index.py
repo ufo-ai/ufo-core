@@ -86,6 +86,23 @@ def test_turbopuffer_id_passes_through_a_non_sha256_id() -> None:
     assert tpuf.chunk_digest_from_id("d-alpha") == "d-alpha"
 
 
+def test_bm25_query_is_empty_for_text_holding_no_term_to_match() -> None:
+    """BM25 over a query whose every token is punctuation or a lone character matches the whole
+    namespace: there is no term to rank by, so every chunk ties. Measured on the testing corpus, a
+    punctuation string drew 200 rows and four single letters drew 200 — the index answering "these
+    all match" for text that means nothing. Such a query is no lexical query, so it is dropped here
+    and the search stands on its vector leg alone, where the recall floor governs."""
+    assert tpuf.bm25_query('3$2`."|$') == ""
+    assert tpuf.bm25_query("a b c d") == ""
+    assert tpuf.bm25_query("   ") == ""
+    assert tpuf.bm25_query("!!! ??? ...") == ""
+
+    # A token carrying two or more of its own characters is a term, however odd it looks.
+    assert tpuf.bm25_query("401k") == "401k"
+    assert tpuf.bm25_query("G64 build") == "G64 build"
+    assert tpuf.bm25_query("what is a sandbox?") == "what is sandbox?"
+
+
 def test_bm25_query_bounds_a_long_query_to_the_full_text_limit() -> None:
     assert tpuf.bm25_query("  orbital widget  ") == "orbital widget"
     words = " ".join(f"term{number}" for number in range(400))
