@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 
+import logo from "@/assets/ufo-logo.svg";
 import { App } from "@/App";
 import { FAULTS, SignIn } from "@/views/SignIn";
-import { BASE, sessionFault, type SessionFault } from "@/lib/api";
+import { BASE, SIGN_IN_PATH, sessionFault, type SessionFault } from "@/lib/api";
+import { parseHash } from "@/lib/route";
 import { titled } from "@/lib/title";
 import type { AgentsPayload } from "@/lib/types";
 
@@ -43,7 +45,14 @@ export function Portal() {
   }, []);
 
   useEffect(() => {
-    if (boot.phase === "signed-out") document.title = titled(FAULTS[boot.fault].title);
+    if (boot.phase !== "signed-out") return;
+    if (boot.fault === "expired") {
+      const route = parseHash(window.location.hash);
+      const carried = "conversationId" in route ? "?c=" + route.conversationId : "";
+      window.location.assign(SIGN_IN_PATH + carried);
+      return;
+    }
+    document.title = titled(FAULTS[boot.fault].title);
   }, [boot]);
 
   /** A re-read after an agent is created lands the new row everywhere the audience is read — the
@@ -57,7 +66,20 @@ export function Portal() {
 
   if (boot.phase === "loading")
     return <div className="m-auto max-w-empty text-center text-ink-soft">Loading…</div>;
-  if (boot.phase === "signed-out") return <SignIn fault={boot.fault} />;
+  if (boot.phase === "signed-out" && boot.fault === "no-member")
+    return (
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4xl p-2xl">
+        <span
+          role="img"
+          aria-label="ufo"
+          className="h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current"
+          style={{ mask: `url(${logo}) center / contain no-repeat` }}
+        />
+        <SignIn fault={boot.fault} />
+      </div>
+    );
+  if (boot.phase === "signed-out")
+    return <div className="m-auto max-w-empty text-center text-ink-soft">Loading…</div>;
   if (boot.phase === "failed") {
     return (
       <div className="m-auto max-w-empty text-center text-ink-soft">

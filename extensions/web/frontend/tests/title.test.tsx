@@ -100,10 +100,16 @@ test("the tab follows the hash the member opens", async () => {
   await waitFor(() => expect(document.title).toBe("Apps · ufo"));
 });
 
-test("a tab whose session ended says so", async () => {
-  wire({ "/api/agents": () => new Response("unauthorized", { status: 401 }) });
+test("a tab whose email holds no member row says so", async () => {
+  wire({
+    "/api/agents": () =>
+      new Response("no member with this email in this workspace", {
+        status: 401,
+        headers: { "x-ufo-session-fault": "no-member" },
+      }),
+  });
   render(<Portal />);
 
-  expect(await screen.findByText("Session ended")).toBeTruthy();
-  await waitFor(() => expect(document.title).toBe("Session ended · ufo"));
+  expect(await screen.findByText("Not a member of this workspace")).toBeTruthy();
+  await waitFor(() => expect(document.title).toBe("Not a member of this workspace · ufo"));
 });

@@ -887,7 +887,9 @@ function RoutedPane({
       if (outcome.kind === "signed-out") {
         return (
           <Pane className={COLUMN}>
-            <SignIn />
+            <div className="m-auto">
+              <SignIn />
+            </div>
           </Pane>
         );
       }

@@ -22,6 +22,8 @@ use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 
+use crate::web::LOGO_PATH;
+
 pub const WORKOS_API_KEY_ENV: &str = "WORKOS_API_KEY";
 pub const WORKOS_CLIENT_ID_ENV: &str = "WORKOS_CLIENT_ID";
 pub const WORKOS_REDIRECT_URI_ENV: &str = "WORKOS_REDIRECT_URI";
@@ -370,22 +372,69 @@ fn encode_query(value: &str) -> String {
     encoded
 }
 
+/// The card the sign-in pages share: the same palette the portal paints, so a member crosses from
+/// either screen into their workspace without the surface changing under them.
+const CONSOLE_STYLE: &str = r#"
+  :root { color-scheme: light dark;
+          --surface: light-dark(#FAF9F7, #191A1A); --fill: light-dark(#F4F3F2, #262929);
+          --edge: light-dark(#EBEAE9, #323535); --ink: light-dark(#191A1A, #F5F5F5);
+          --ink-soft: light-dark(#919090, #A7A9A9); --radius: 4px; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100svh; display: flex; align-items: center;
+         justify-content: center; padding: 24px 16px;
+         background: var(--surface); color: var(--ink);
+         font: 15px/1.5 system-ui, sans-serif; }
+  main { width: min(440px, 100%); display: flex; flex-direction: column; gap: 20px; }
+  header { display: flex; justify-content: center; }
+  header img { display: block; width: 72px; height: 18px; }
+  @media (prefers-color-scheme: dark) { header img { filter: invert(1); } }
+  .card { display: flex; flex-direction: column; gap: 16px; padding: 20px;
+          border: 1px solid var(--edge); border-radius: var(--radius);
+          background: var(--surface); }
+  .head { display: flex; flex-direction: column; gap: 6px; }
+  h1 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1; }
+  p { margin: 0; font-size: 14px; color: var(--ink-soft); }
+  form { display: flex; flex-direction: column; gap: 16px; }
+  .field { display: flex; flex-direction: column; gap: 8px; }
+  label { font-size: 14px; font-weight: 600; color: var(--ink); }
+  input { width: 100%; padding: 10px 12px; border-radius: var(--radius);
+          background: var(--fill); color: var(--ink); font: inherit; font-size: 16px;
+          border: 1px solid var(--edge); }
+  button { width: 100%; padding: 10px 18px; border-radius: var(--radius);
+           border: 1px solid transparent; background: var(--ink); color: var(--surface);
+           font: inherit; font-weight: 500; cursor: pointer; }
+"#;
+
 /// The stand-in the Google hop lands on in `WORKOS_MODE=console`: a plain email form whose GET
 /// reaches the same callback a real return does, carrying the state it was handed and the typed
-/// address as the code the console verifier reads straight back.
+/// address as the code the console verifier reads straight back. The card names the bypass and the
+/// code the email step takes, both read off `CONSOLE_CODE`, so the screen cannot state a code the
+/// verifier no longer accepts.
 pub fn console_signin_page(state: &str) -> String {
     format!(
         "<!doctype html>\n\
-         <html lang=\"en\"><head><meta charset=\"utf-8\"><title>Dev sign-in · ufo</title></head>\n\
-         <body>\n\
-         <h1>Dev sign-in</h1>\n\
-         <p>WorkOS is off (WORKOS_MODE=console). Enter a work email to sign in.</p>\n\
+         <html lang=\"en\"><head><meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>Developer sign-in · ufo</title>\n\
+         <style>{CONSOLE_STYLE}</style></head>\n\
+         <body><main>\n\
+         <header><img src=\"{LOGO_PATH}\" alt=\"ufo\" width=\"72\" height=\"18\"></header>\n\
+         <section class=\"card\">\n\
+         <div class=\"head\">\n\
+         <h1>Developer sign-in</h1>\n\
+         <p>Enter your local development email. Authentication is bypassed with code \
+         {CONSOLE_CODE}.</p>\n\
+         </div>\n\
          <form action=\"{AUTH_CALLBACK_PATH}\" method=\"get\">\n\
          <input type=\"hidden\" name=\"state\" value=\"{}\">\n\
-         <input name=\"code\" type=\"email\" placeholder=\"email@work.com\" autofocus required>\n\
-         <button type=\"submit\">Sign in</button>\n\
+         <div class=\"field\">\n\
+         <label for=\"code\">Email</label>\n\
+         <input id=\"code\" name=\"code\" type=\"email\" placeholder=\"email@work.com\" autofocus required>\n\
+         </div>\n\
+         <button type=\"submit\">Continue</button>\n\
          </form>\n\
-         </body></html>\n",
+         </section>\n\
+         </main></body></html>\n",
         escape_html(state)
     )
 }

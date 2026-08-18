@@ -859,6 +859,26 @@ def _stripped_dump(tree: ast.Module, function: str) -> str | None:
     return ast.dump(ast.Module(body=body, type_ignores=[]))
 
 
+def _drawn_mark_failures() -> list[str]:
+    """A logo is drawn artwork, so a package that serves one copies the file rather than rewriting
+    it: hand-minifying this mark drew it wrongly, because the `fill-rule: evenodd` its `<defs>`
+    stylesheet carries is what cuts the counters in the letters. Nothing about a rendered glyph
+    fails a size assertion, so the bytes are compared — which is also what keeps the copies from
+    drifting apart as the brand changes."""
+    portal = Path("extensions/web/frontend/src/assets/ufo-logo.svg")
+    if not portal.exists():
+        return [f"mark: {portal} is missing — every served copy is taken from it"]
+    drawn = portal.read_bytes()
+    return [
+        f"mark: {copy} is not {portal} byte for byte — a logo is copied, never rewritten"
+        for copy in (
+            Path("control/src/assets/ufo-logo.svg"),
+            Path("core/src/ufo/surfaces/assets/ufo-logo.svg"),
+        )
+        if not copy.exists() or copy.read_bytes() != drawn
+    ]
+
+
 def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """The two directive wires stay closed vocabularies with both ends held: every verb a producer
     emits is in its wire's table, every table verb is emitted, and every client of a wire handles
@@ -1611,6 +1631,7 @@ def main() -> int:
     failures.extend(_live_frame_failures(trees))
     failures.extend(_live_frame_consumer_failures(trees))
     failures.extend(_directive_wire_failures(trees))
+    failures.extend(_drawn_mark_failures())
     failures.extend(_to_thread_failures(trees))
     ingress_trees = {
         **trees,

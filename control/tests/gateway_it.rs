@@ -18,8 +18,8 @@ use ufo_control::gateway::{
 use ufo_control::invite::InviteCodes;
 use ufo_control::shared::SharedWorkspaces;
 use ufo_control::store::OnboardStore;
-use ufo_control::web::ONBOARD_SESSION_COOKIE;
-use ufo_control::workos::{Verifier, WorkosVerifier};
+use ufo_control::web::{LOGO_PATH, ONBOARD_SESSION_COOKIE};
+use ufo_control::workos::{Verifier, WorkosVerifier, CONSOLE_CODE};
 
 const SECRET: &str = "local-dev-token-secret";
 const APEX: &str = "flyingobject.ai";
@@ -684,7 +684,14 @@ async fn the_console_stand_in_is_mounted_only_under_console_mode() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.text().await.unwrap().contains("Dev sign-in"));
+    let page = response.text().await.unwrap();
+    assert!(page.contains("<h1>Developer sign-in</h1>"), "{page}");
+    // The code the console verifier accepts is named on the screen rather than typed from memory.
+    assert!(page.contains(CONSOLE_CODE), "{page}");
+    assert!(
+        page.contains(&format!("<img src=\"{LOGO_PATH}\"")),
+        "{page}"
+    );
 }
 
 #[test]

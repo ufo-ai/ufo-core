@@ -5,80 +5,139 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in · ufo</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --surface: light-dark(#FAF9F7, #191A1A);
+    --fill: light-dark(#F4F3F2, #262929);
+    --edge: light-dark(#EBEAE9, #323535);
+    --ink: light-dark(#191A1A, #F5F5F5);
+    --ink-soft: light-dark(#919090, #A7A9A9);
+    --danger: #c33636;
+    --radius: 4px;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: Canvas; color: CanvasText; }
-  header { padding: 12px 16px; font-weight: 600;
-           border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
-  main { max-width: 560px; margin: 0 auto; padding: 32px 16px; display: flex;
-         flex-direction: column; gap: 16px; }
-  .card { border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
-          border-radius: 12px; padding: 20px; }
-  .card h1 { margin: 0 0 4px; font-size: 18px; }
-  .hint { font-size: 13px; opacity: 0.75; }
-  #log { display: flex; flex-direction: column; gap: 4px; margin: 14px 0 0; }
+  body { margin: 0; min-height: 100svh; display: flex; align-items: center;
+         justify-content: center; padding: 24px 16px;
+         background: var(--surface); color: var(--ink);
+         font: 15px/1.5 system-ui, sans-serif; }
+  main { width: min(440px, 100%); display: flex; flex-direction: column; gap: 20px; }
+  header { display: flex; justify-content: center; }
+  header img { display: block; width: 72px; height: 18px; }
+  @media (prefers-color-scheme: dark) { header img { filter: invert(1); } }
+  .card { display: flex; flex-direction: column; gap: 16px; padding: 20px;
+          border: 1px solid var(--edge); border-radius: var(--radius);
+          background: var(--surface); }
+  .head { display: flex; flex-direction: column; gap: 6px; font-size: 14px;
+          color: var(--ink-soft); }
+  #prompt-say strong { font-weight: 600; color: var(--ink); }
+  .card h1 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1; color: var(--ink); }
+  .hint { font-size: 13px; color: var(--ink-soft); }
+  .stack { display: flex; flex-direction: column; gap: 8px; }
+  #log { display: flex; flex-direction: column; gap: 4px; font-size: 14px;
+         color: var(--ink-soft); }
+  #log:empty { display: none; }
   #log div { white-space: pre-wrap; word-wrap: break-word; }
-  .error { color: #c33636; }
-  #prompt-row { display: none; margin-top: 14px; }
-  #prompt-label { display: block; font-size: 13px; margin-bottom: 4px; }
-  .row { display: flex; gap: 8px; }
-  input, select { flex: 1; padding: 10px 12px; border-radius: 8px; background: Field;
-                  color: FieldText;
-                  border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
-  button { padding: 10px 18px; border: 0; border-radius: 8px; background: CanvasText; color: Canvas;
-           font-weight: 600; cursor: pointer; }
+  .error { color: var(--danger); }
+  #alert { display: none; border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+           border-radius: var(--radius); padding: 12px 16px; font-size: 14px;
+           color: var(--danger); }
+  #prompt-row { display: none; }
+  #prompt-say:empty { display: none; }
+  .field { display: flex; flex-direction: column; gap: 8px; }
+  #box { position: relative; }
+  #slots { display: none; }
+  .otp #slots { display: flex; }
+  .otp .slot { position: relative; display: flex; flex: 1; align-items: center;
+               justify-content: center; height: 44px; font-size: 16px;
+               background: var(--fill); color: var(--ink);
+               border: 1px solid var(--edge); border-left-width: 0;
+               transition: border-color 0.1s, box-shadow 0.1s; }
+  .otp .slot:first-child { border-left-width: 1px;
+                           border-radius: var(--radius) 0 0 var(--radius); }
+  .otp .slot:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+  .otp .slot.active { z-index: 1; border-color: var(--ink);
+                      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 20%, transparent); }
+  .otp .slot.active.empty::after { content: ""; position: absolute; width: 1px; height: 16px;
+                                   background: var(--ink);
+                                   animation: caret 1s steps(1) infinite; }
+  @keyframes caret { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+  .otp #answer { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0;
+                 border: 0; background: transparent; color: transparent;
+                 caret-color: transparent; }
+  .otp #answer:hover { border: 0; }
+  .otp #answer:focus-visible { outline: none; }
+  @media (prefers-reduced-motion: reduce) { .otp .slot.active.empty::after { animation: none; } }
+  #prompt-label { font-size: 14px; font-weight: 600; color: var(--ink); }
+  input, select { width: 100%; padding: 10px 12px; border-radius: var(--radius);
+                  background: var(--fill); color: var(--ink); font: inherit; font-size: 16px;
+                  border: 1px solid var(--edge); }
+  input:hover, select:hover { border-color: var(--ink-soft); }
+  input:focus-visible, select:focus-visible, button:focus-visible, a.button:focus-visible {
+    outline: 2px solid var(--ink); outline-offset: 2px; }
+  button, a.button { display: block; width: 100%; padding: 10px 18px; border-radius: var(--radius);
+                     border: 1px solid transparent; background: var(--ink); color: var(--surface);
+                     font: inherit; font-weight: 500; text-align: center; text-decoration: none;
+                     cursor: pointer; transition: opacity 0.1s, background-color 0.1s; }
+  button:hover, a.button:hover { opacity: 0.7; }
   button:disabled { opacity: 0.4; cursor: default; }
-  a.button { display: inline-block; padding: 10px 18px; border-radius: 8px; background: CanvasText;
-             color: Canvas; font-weight: 600; text-decoration: none; }
-  a.button.secondary { display: block; text-align: center; background: transparent;
-                       color: CanvasText;
-                       border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
-  #google-group { margin-top: 14px; }
-  .divider { text-align: center; font-size: 13px; opacity: 0.6; margin: 0 0 10px; }
+  a.button.secondary, button.secondary { background: transparent; color: var(--ink);
+                                         border-color: var(--edge); }
+  a.button.secondary:hover, button.secondary:hover { opacity: 1; background: var(--fill); }
+  #go { margin-top: 16px; }
+  #google { display: none; }
   #home { display: none; }
-  #portal-row { margin-top: 14px; }
-  #debugger-row { display: none; margin-top: 14px; }
+  #slack-line { display: none; }
+  #debugger-row { display: none; }
   code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
-         background: color-mix(in srgb, CanvasText 8%, transparent);
-         padding: 1px 5px; border-radius: 5px; }
-  pre { overflow-x: auto; padding: 12px; border-radius: 8px; margin: 8px 0 0;
-        background: color-mix(in srgb, CanvasText 6%, transparent);
+         background: var(--fill); padding: 1px 5px; border-radius: var(--radius); }
+  pre { overflow-x: auto; margin: 0; padding: 12px; border-radius: var(--radius);
+        background: var(--fill);
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  @media (min-width: 768px) { body { padding: 40px; } }
 </style>
 </head>
 <body>
-<header>ufo</header>
 <main>
+  <header><img src="/login/logo.svg" alt="ufo" width="72" height="18"></header>
+
   <section class="card" id="board">
-    <h1>Sign in</h1>
-    <div id="log"></div>
-    <form id="prompt-row">
-      <label id="prompt-label" for="answer"></label>
-      <div class="row">
-        <input id="answer" autocomplete="off" autofocus>
-        <select id="choice" style="display:none"></select>
-        <button type="submit" id="go">Continue</button>
-      </div>
-    </form>
-    <div id="google-group">
-      <div class="divider">or</div>
-      <a class="button secondary" id="google">Continue with Google</a>
+    <div class="head">
+      <h1 id="title">Sign in</h1>
+      <div id="log"></div>
+      <div id="prompt-say"></div>
     </div>
+    <div id="alert" role="alert"></div>
+    <form id="prompt-row">
+      <div class="field">
+        <label id="prompt-label" for="answer"></label>
+        <div id="box">
+          <div id="slots"></div>
+          <input id="answer" autocomplete="off" autofocus>
+          <select id="choice" style="display:none"></select>
+        </div>
+      </div>
+      <button type="submit" id="go">Continue</button>
+    </form>
+    <a class="button secondary" id="google">Continue with Google</a>
   </section>
 
   <section class="card" id="home">
-    <h1>Signed in</h1>
-    <div class="hint"><code id="member-email"></code> · <code id="workspace-url"></code></div>
+    <div class="head">
+      <h1>Signed in</h1>
+      <div class="hint"><code id="member-email"></code> · <code id="workspace-url"></code></div>
+    </div>
     <form id="portal-row" method="post">
       <input type="hidden" name="token" id="portal-token">
       <button type="submit">Open your workspace</button>
     </form>
-    <div class="hint" id="slack-line" style="margin-top:10px"></div>
-    <div class="hint" style="margin-top:10px">From your terminal:</div>
-    <pre id="curl-line"></pre>
+    <div class="hint" id="slack-line"></div>
+    <div class="stack">
+      <div class="hint">From your terminal:</div>
+      <pre id="curl-line"></pre>
+    </div>
     <form id="debugger-row" method="post">
       <input type="hidden" name="token" id="debugger-token">
-      <button type="submit">Session debugger</button>
+      <button type="submit" class="secondary">Session debugger</button>
     </form>
   </section>
 </main>
@@ -89,11 +148,16 @@ const params = new URLSearchParams(location.search);
 const fault = params.get('error');
 const log = document.getElementById('log');
 const promptRow = document.getElementById('prompt-row');
+const title = document.getElementById('title');
+const promptSay = document.getElementById('prompt-say');
 const promptLabel = document.getElementById('prompt-label');
 const answer = document.getElementById('answer');
 const choice = document.getElementById('choice');
+const box = document.getElementById('box');
+const slots = document.getElementById('slots');
 const go = document.getElementById('go');
-const googleGroup = document.getElementById('google-group');
+const google = document.getElementById('google');
+const banner = document.getElementById('alert');
 const target = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(
   new URLSearchParams(location.search).get('c') || '');
 const artifactRaw = new URLSearchParams(location.search).get('a') || '';
@@ -103,7 +167,9 @@ let workspace = null;
 let debuggerUrl = null;
 let slackAsk = null;
 let email = null;
+let member = null;
 let choosing = false;
+let filled = false;
 let finished = false;
 let lastPrompt = null;
 
@@ -115,27 +181,124 @@ function line(text, cls) {
   return el;
 }
 
+const SLOTS = 6;
+
+for (let index = 0; index < SLOTS; index += 1) {
+  slots.appendChild(document.createElement('div')).className = 'slot';
+}
+
+/* The code reads as one box per digit, drawn under the single input that holds the whole value —
+   so a pasted or autofilled code still lands in one control, and the boxes only mirror it. */
+function drawSlots() {
+  if (!box.classList.contains('otp')) return;
+  const typed = answer.value;
+  const at = Math.min(typed.length, SLOTS - 1);
+  [...slots.children].forEach((slot, index) => {
+    slot.textContent = typed[index] || '';
+    slot.classList.toggle('empty', !typed[index]);
+    slot.classList.toggle('active', index === at && document.activeElement === answer);
+  });
+}
+
+answer.addEventListener('input', () => {
+  const otp = box.classList.contains('otp');
+  if (otp) {
+    answer.value = answer.value.replace(/\D/g, '').slice(0, SLOTS);
+    go.disabled = answer.value.length !== SLOTS;
+  }
+  drawSlots();
+  /* A whole code needs no second act, so the field commits itself — once, so a correction after a
+     refusal is the member's to send. */
+  if (otp && !go.disabled && !filled) {
+    filled = true;
+    promptRow.requestSubmit();
+  }
+});
+answer.addEventListener('focus', drawSlots);
+answer.addEventListener('blur', drawSlots);
+
+/* The lines the machine sent with its last answer, taken off the transcript as they are read. */
+function said() {
+  const lines = [...log.children].map((entry) => entry.textContent).join(' ');
+  log.replaceChildren();
+  return lines;
+}
+
+function step(text) {
+  if (text.includes('email')) {
+    return {
+      order: 0,
+      title: 'Sign in',
+      label: 'Email',
+      say: 'Enter your work email to continue.',
+    };
+  }
+  if (text.includes('code')) {
+    const sent = 'Enter the verification code we sent to your email address';
+    return {
+      order: 1,
+      title: 'Verify your login',
+      label: 'Verification code',
+      say: member ? sent + ': ' : sent + '.',
+      strong: member,
+    };
+  }
+  return { order: 2, title: 'Sign in', label: 'Workspace', say: 'Choose a workspace to open.' };
+}
+
 function prompt(text, options) {
   if (finished) return;
+  const stated = step(text);
+  const previous = lastPrompt ? step(lastPrompt) : null;
   lastPrompt = text;
-  promptLabel.textContent = text;
-  promptRow.style.display = 'block';
+  title.textContent = stated.title;
+  promptSay.replaceChildren(stated.say);
+  if (stated.strong) {
+    const named = document.createElement('strong');
+    named.textContent = stated.strong;
+    promptSay.append(named, '.');
+  }
+  promptLabel.textContent = stated.label;
   choosing = Boolean(options && options.length);
   promptLabel.htmlFor = choosing ? 'choice' : 'answer';
+  /* A machine that asks again for what it just asked has refused what was sent, so the line that
+     came with it is the refusal and stands in the alert. One that moves the member on has nothing
+     left to state — the step it moved to says where they are. A page that opens already past the
+     first step was reloaded mid-walk, and the line that met it is a refusal too; one that opens on
+     the first step was met by the machine's own banner, which the mark above the card already says.
+  */
+  const carried = said();
+  if (carried && (previous ? stated.order <= previous.order : stated.order > 0)) {
+    banner.textContent = carried;
+    banner.style.display = 'block';
+  } else if (previous) {
+    banner.textContent = '';
+    banner.style.display = 'none';
+  }
+  promptRow.style.display = 'block';
   answer.type = text.includes('email') ? 'email' : 'text';
   answer.inputMode = text.includes('code') ? 'numeric' : 'text';
+  answer.placeholder = text.includes('email') ? 'email@work.com' : '';
+  const otp = !choosing && text.includes('code');
+  box.classList.toggle('otp', otp);
+  answer.autocomplete = otp ? 'one-time-code' : 'off';
+  if (otp) answer.maxLength = SLOTS;
+  else answer.removeAttribute('maxlength');
+  filled = false;
+  drawSlots();
   answer.style.display = choosing ? 'none' : 'block';
   choice.style.display = choosing ? 'block' : 'none';
   choice.replaceChildren(...(options || []).map((option) => new Option(option, option)));
-  googleGroup.style.display = !choosing && text.includes('email') ? 'block' : 'none';
-  go.disabled = false;
+  google.style.display = !choosing && text.includes('email') ? 'block' : 'none';
+  go.disabled = otp;
   (choosing ? choice : answer).focus();
 }
 
 function complete() {
   finished = true;
   promptRow.style.display = 'none';
-  googleGroup.style.display = 'none';
+  google.style.display = 'none';
+  document.getElementById('board').style.display = 'none';
   document.getElementById('member-email').textContent = email || '';
   document.getElementById('workspace-url').textContent = workspace;
   const portal = document.getElementById('portal-row');
@@ -155,7 +318,7 @@ function complete() {
     document.getElementById('debugger-token').value = token;
     row.style.display = 'block';
   }
-  document.getElementById('home').style.display = 'block';
+  document.getElementById('home').style.display = 'flex';
   document.title = 'Signed in · ufo';
 }
 
@@ -180,6 +343,7 @@ function handle(directive) {
 
 async function advance(body) {
   go.disabled = true;
+  log.replaceChildren();
   let res;
   try {
     res = await fetch('/v1/onboard/web', { method: 'POST', body: body || '' });
@@ -197,13 +361,22 @@ async function advance(body) {
   const payload = await res.json();
   for (const directive of payload.directives) handle(directive);
   if (token && workspace && !finished) complete();
+  else if (finished) {
+    /* The walk ended with no session — an invite that expired or was used. Nothing follows it, so
+       what the machine said is the whole answer and stands where every other refusal stands. */
+    banner.textContent = said();
+    banner.style.display = banner.textContent ? 'block' : 'none';
+  }
 }
 
 promptRow.addEventListener('submit', (event) => {
   event.preventDefault();
   const value = (choosing ? choice.value : answer.value).trim();
   if (!value) return;
+  if (lastPrompt && lastPrompt.includes('email')) member = value;
   answer.value = '';
+  drawSlots();
+  promptSay.textContent = '';
   promptRow.style.display = 'none';
   advance(value);
 });
@@ -211,22 +384,13 @@ promptRow.addEventListener('submit', (event) => {
 const gq = new URLSearchParams();
 if (target) gq.set('c', target[0]);
 if (artifact) gq.set('a', artifact);
-document.getElementById('google').href = START + (gq.size ? '?' + gq : '');
+google.href = START + (gq.size ? '?' + gq : '');
 
 if (fault) {
-  line(fault, 'error');
-  const again = document.createElement('a');
-  again.className = 'button';
-  again.style.alignSelf = 'flex-start';
-  again.textContent = 'Sign in again';
-  const q = new URLSearchParams();
-  if (target) q.set('c', target[0]);
-  if (artifact) q.set('a', artifact);
-  again.href = '/login' + (q.size ? '?' + q : '');
-  log.appendChild(again);
-} else {
-  advance('');
+  banner.textContent = fault;
+  banner.style.display = 'block';
 }
+advance('');
 </script>
 </body>
 </html>

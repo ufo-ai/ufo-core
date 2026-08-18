@@ -8,6 +8,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
+import { chatHash } from "@/lib/route";
 import { webAudienceLabel } from "@/lib/audience";
 
 import {
@@ -87,21 +88,40 @@ test("the built bundle mounts into the served page and asks for the session's ag
       return new Response("unauthorized", { status: 401 });
     }),
   );
+  const went: string[] = [];
+  vi.stubGlobal("location", { ...window.location, hash: "", assign: (to: string) => went.push(to) });
   document.body.innerHTML = builtPage().replace(/<script[\s\S]*?<\/script>/g, "");
 
   await import(pathToFileURL(join(STATIC, entryAsset())).href);
   await waitFor(() => expect(asked).toContain("/surface/web/api/agents"));
-  await waitFor(() => expect(document.body.textContent).toContain("Session ended"));
+  await waitFor(() => expect(went).toEqual(["/login"]));
+  vi.unstubAllGlobals();
 });
 
-test("a session that ends under the open page offers the one sign-in page", async () => {
+test("a session that ends under the open page goes straight to the sign-in page", async () => {
+  const went: string[] = [];
+  vi.stubGlobal("location", { ...window.location, hash: "", assign: (to: string) => went.push(to) });
   wire({ "/api/agents": () => new Response("unauthorized", { status: 401 }) });
   render(<Portal />);
 
-  expect(await screen.findByText("Session ended")).toBeTruthy();
-  expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/login");
-  expect(screen.getByText("ufoctl portal")).toBeTruthy();
-  expect(screen.queryByRole("textbox")).toBeNull();
+  await waitFor(() => expect(went).toEqual(["/login"]));
+  expect(screen.queryByText("Session ended")).toBeNull();
+  vi.unstubAllGlobals();
+});
+
+test("a session that ends over a conversation carries it onto the sign-in page", async () => {
+  const went: string[] = [];
+  const conversation = "8f14e45f-ceea-467a-9b3e-1a2b3c4d5e6f";
+  vi.stubGlobal("location", {
+    ...window.location,
+    hash: chatHash(conversation),
+    assign: (to: string) => went.push(to),
+  });
+  wire({ "/api/agents": () => new Response("unauthorized", { status: 401 }) });
+  render(<Portal />);
+
+  await waitFor(() => expect(went).toEqual(["/login?c=" + conversation]));
+  vi.unstubAllGlobals();
 });
 
 test("a live session whose email holds no member row is told that, not to sign in again", async () => {

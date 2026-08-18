@@ -6,6 +6,10 @@ export type Fetched<T> = { ok: true; payload: T } | { ok: false; message: string
 
 export const SESSION_FAULT_HEADER = "x-ufo-session-fault";
 
+/** The one sign-in door. A session that has ended sends the member here rather than stating that
+ *  it ended: signing in again is the only act left, and the page they land on asks for it. */
+export const SIGN_IN_PATH = "/login";
+
 export type SessionFault = "expired" | "no-member";
 
 /** Which of the two 401s the surface answered: a bearer it could not read, or a live bearer whose

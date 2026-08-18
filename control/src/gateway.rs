@@ -24,7 +24,10 @@ use crate::invite::{InviteCodes, InviteError, Redemption, SignupProfile};
 use crate::shared::{EnsuredWorkspace, SeatError, SharedWorkspaces, WorkspaceChoice};
 use crate::store::{OnboardClaim, OnboardStore};
 use crate::token;
-use crate::web::{parse_directives, LOGIN_PAGE, ONBOARD_SESSION_COOKIE, WEB_CHANNEL};
+use crate::web::{
+    parse_directives, LOGIN_PAGE, LOGO_BYTES, LOGO_CACHE, LOGO_PATH, ONBOARD_SESSION_COOKIE,
+    WEB_CHANNEL,
+};
 use crate::workos::{
     console_signin_page, open_session, pack_state, seal_session, unpack_state, AuthCarry, Verifier,
     AUTH_CALLBACK_PATH, AUTH_CONSOLE_PATH, AUTH_START_PATH, SIGN_IN_FAILED,
@@ -449,6 +452,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/ufo/bin/{target}", get(client_binary))
         .route("/fleet", get(fleet))
         .route("/login", get(login))
+        .route(LOGO_PATH, get(logo))
         .route(AUTH_START_PATH, get(auth_start))
         .route(AUTH_CALLBACK_PATH, get(auth_callback))
         .route("/v1/onboard/web", post(onboard_web))
@@ -534,6 +538,19 @@ async fn login() -> Response {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         LOGIN_PAGE,
+    )
+        .into_response()
+}
+
+/// The mark both sign-in pages draw. It is the one thing they fetch, on the connection already open
+/// and cached for good after that.
+async fn logo() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, LOGO_CACHE),
+        ],
+        LOGO_BYTES,
     )
         .into_response()
 }

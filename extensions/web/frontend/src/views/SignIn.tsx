@@ -1,5 +1,5 @@
 import { buttonVariants } from "@/components/ui/button";
-import type { SessionFault } from "@/lib/api";
+import { SIGN_IN_PATH, type SessionFault } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 export const FAULTS: Record<SessionFault, { title: string; cause: string; action: string }> = {
@@ -19,17 +19,19 @@ export const FAULTS: Record<SessionFault, { title: string; cause: string; action
 export function SignIn({ fault = "expired" }: { fault?: SessionFault }) {
   const stated = FAULTS[fault];
   return (
-    <section className="m-auto w-card rounded-card border border-edge bg-card text-card-foreground p-4xl">
-      <h1 className="m-0 mb-2xs text-title font-medium">{stated.title}</h1>
-      <div className="mb-xl text-label text-ink-soft">{stated.cause}</div>
-      <a
-        href="/login"
-        className={cn(buttonVariants({ variant: "send" }), "inline-block no-underline")}
-      >
-        {stated.action}
-      </a>
-      <div className="mt-xl text-label text-ink-soft">
-        On a self-hosted node, run <code>ufoctl portal</code> on the host instead.
+    <section className="flex w-card flex-col gap-4xl rounded-card border border-edge bg-card text-card-foreground p-4xl">
+      <div className="flex flex-col gap-xs">
+        <h1 className="m-0 text-subtitle font-strong leading-none">{stated.title}</h1>
+        <div className="text-ui text-ink-soft">{stated.cause}</div>
+      </div>
+      <div className="flex flex-col gap-lg">
+        <a href={SIGN_IN_PATH} className={cn(buttonVariants({ variant: "send" }), "w-full no-underline")}>
+          {stated.action}
+        </a>
+        <div className="text-center text-label text-ink-soft">
+          On a self-hosted node, run <code className="font-mono text-mono">ufoctl portal</code> on
+          the host instead.
+        </div>
       </div>
     </section>
   );

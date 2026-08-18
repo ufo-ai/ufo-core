@@ -12,7 +12,10 @@
 //! and bound to this browser from the submit that starts it.
 //!
 //! The page itself is `login.html`, held beside this module and compiled in. It carries no
-//! interpolation, so it stays HTML rather than becoming a string literal a reader has to unescape.
+//! interpolation, so it stays HTML rather than becoming a string literal a reader has to
+//! unescape. It words its own steps and reads the machine's question only to know which step
+//! is standing, so the terminal keeps its own wording and neither surface is worded for the
+//! other. It fetches one file, the mark, and carries its style and script itself.
 
 use serde::Serialize;
 
@@ -20,6 +23,14 @@ pub const WEB_CHANNEL: &str = "web";
 pub const ONBOARD_SESSION_COOKIE: &str = "__Host-ufo_onboard";
 
 pub const LOGIN_PAGE: &str = include_str!("login.html");
+
+/// The mark both sign-in pages draw, compiled in and served rather than inlined: the artwork is
+/// 20 KB against a 15 KB page, and nothing in front of this deploy compresses a response. It is the
+/// portal's own file byte for byte — a logo is drawn artwork, so it is copied rather than rewritten,
+/// and a test holds the two copies identical.
+pub const LOGO_PATH: &str = "/login/logo.svg";
+pub const LOGO_BYTES: &[u8] = include_bytes!("assets/ufo-logo.svg");
+pub const LOGO_CACHE: &str = "public, max-age=31536000, immutable";
 
 /// One directive line, as the page's JSON reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -136,13 +147,50 @@ mod tests {
     }
 
     #[test]
-    fn the_login_page_is_self_contained_and_carries_the_craft() {
-        // The ASCII craft is the mark and stays; a test is what holds it on the page.
+    fn the_login_page_fetches_its_mark_and_nothing_else() {
+        // The page carries its own style and script and reaches for one file: the mark, on the
+        // connection already open. Inlined, the artwork would be 20 KB on a 15 KB page.
         assert!(LOGIN_PAGE.starts_with("<!doctype html>"));
         assert!(LOGIN_PAGE.contains("</html>"));
         assert!(
             !LOGIN_PAGE.contains("http://") && !LOGIN_PAGE.contains("https://"),
             "the page must load nothing from another origin"
         );
+        assert_eq!(LOGIN_PAGE.matches("src=").count(), 1);
+        assert!(LOGIN_PAGE.contains(&format!("<img src=\"{LOGO_PATH}\" alt=\"ufo\"")));
+    }
+
+    #[test]
+    fn the_login_page_words_every_step_itself() {
+        // The card states each step in its own words and reads the machine's question only to know
+        // which step it stands on, so the terminal keeps its own wording and neither copies the
+        // other's fragments.
+        assert!(LOGIN_PAGE.contains("'Enter your work email to continue.'"));
+        assert!(LOGIN_PAGE
+            .contains("const sent = 'Enter the verification code we sent to your email address';"));
+        assert!(!LOGIN_PAGE.contains("Enter your work email:"));
+        assert!(!LOGIN_PAGE.contains("Enter the code:"));
+    }
+
+    #[test]
+    fn the_code_step_takes_only_a_whole_code_and_sends_it_without_a_second_act() {
+        // A code is digits and nothing else; the act stays shut until the row is whole, and a whole
+        // row commits itself once, so a correction after a refusal is the member's own to send.
+        assert!(LOGIN_PAGE.contains("const SLOTS = 6;"));
+        assert!(LOGIN_PAGE.contains(r"answer.value.replace(/\D/g, '').slice(0, SLOTS)"));
+        assert!(LOGIN_PAGE.contains("go.disabled = answer.value.length !== SLOTS;"));
+        assert!(LOGIN_PAGE.contains("promptRow.requestSubmit();"));
+    }
+
+    #[test]
+    fn the_login_page_states_every_refusal_in_one_alert() {
+        // Which lines are a refusal comes off the step order rather than the sentence: a machine
+        // that did not move the member on refused what they sent.
+        assert!(LOGIN_PAGE.contains(r#"<div id="alert" role="alert"></div>"#));
+        assert!(LOGIN_PAGE.contains(
+            "if (carried && (previous ? stated.order <= previous.order : stated.order > 0)) {"
+        ));
+        assert!(LOGIN_PAGE.contains("banner.textContent = said();"));
+        assert!(!LOGIN_PAGE.contains("Sign in again"));
     }
 }
