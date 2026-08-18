@@ -348,7 +348,7 @@ test("the agent's own section states what is shared with that agent", async () =
   expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
 });
 
-/** The agent's own dialog holds three reads of it, and the connectors are one of them — reached by
+/** The agent's own dialog holds four reads of it, and the connectors are one of them — reached by
  *  their own tab rather than scrolled past under the spec form. */
 test("the agent's connectors stand on their own tab of its settings dialog", async () => {
   location.hash = "#/agents/" + AGENT_ID;
@@ -359,6 +359,7 @@ test("the agent's connectors stand on their own tab of its settings dialog", asy
   expect(dialog.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
     "Settings",
     "Connectors",
+    "Scheduled",
     "Skills",
   ]);
   expect(dialog.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(

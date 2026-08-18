@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, expect, test } from "vitest";
@@ -22,6 +22,7 @@ import {
   NO_TRIGGERS,
   SECOND,
   SECOND_ID,
+  SETTINGS,
   SITE_KIND,
   TASK_KIND,
   TRIGGER_KIND,
@@ -31,6 +32,7 @@ import {
   pageFits,
   owned,
   pick,
+  openAgentSettings,
   openRow,
   refusedNotice,
   useStreamFake,
@@ -801,6 +803,32 @@ test("the radar section is reached by its own hash and leads with the feed", asy
   await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
   expect(await screen.findByText("weekly-roll")).toBeTruthy();
   expect(listed[0]).not.toContain("agent=");
+});
+
+test("an app's Scheduled tab lists that app's tasks, and a row opens inside the dialog", async () => {
+  const listed: string[] = [];
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
+    "/objects/scheduled_task": (url) => {
+      listed.push(url);
+      return objectIndex(TASK_KIND, [TASK_ROW]);
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const dialog = await openAgentSettings("assistant", "Scheduled");
+
+  expect(await within(dialog).findByText("daily-brief")).toBeTruthy();
+  expect(listed.every((read) => read.includes("agent=" + AGENT_ID))).toBe(true);
+  expect(within(dialog).queryByRole("columnheader", { name: "Agent" })).toBeNull();
+
+  await openRow("daily-brief");
+
+  expect(await within(dialog).findByRole("complementary", { name: "daily-brief" })).toBeTruthy();
+  expect(within(dialog).getByText("write the daily brief")).toBeTruthy();
 });
 
 test("a row opens under the agent that owns it, and closing returns to the whole index", async () => {

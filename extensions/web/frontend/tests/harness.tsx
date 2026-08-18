@@ -313,10 +313,10 @@ export async function openAgentRow(name: string): Promise<void> {
 }
 
 /** An agent's settings, which stand in a dialog the index's gear opens rather than on a tab of the
- *  agent's page. The dialog opens on Settings; `tab` reaches the other two. */
+ *  agent's page. The dialog opens on Settings; `tab` reaches the other three. */
 export async function openAgentSettings(
   name = "assistant",
-  tab: "Settings" | "Connectors" | "Skills" = "Settings",
+  tab: "Settings" | "Connectors" | "Skills" | "Scheduled" = "Settings",
 ): Promise<HTMLElement> {
   const index = await agentIndex();
   await userEvent.click(within(index).getByRole("button", { name: "Settings for " + name }));

@@ -4,7 +4,7 @@ import { IconSettings } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
-import { SpecPanel, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
+import { ObjectPane, SpecPanel, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
 import { BesideHost, useBeside } from "@/kernel/beside";
 import { BANDS } from "@/kernel/pane";
 import { outcomeNotice, type NoticeState } from "@/kernel/panel";
@@ -37,13 +37,20 @@ const AGENT_KIND = "agent";
 const MODEL_FIELD = "model";
 const MAIN = "Main";
 
-/** What an app's own dialog holds: the spec the member edits, the accounts the app reaches, and
- *  the skills it carries. Three reads of one app, none of which heads a page of its own. */
-const SETTINGS_TABS = ["settings", "connectors", "skills"] as const;
+/** The clock-fired tasks the app holds. Radar reads them across the workspace, beside what they
+ *  did; here they are read and written for the one app they run on, which is where a member sets
+ *  one up. */
+const TASK_KIND = "scheduled_task";
+
+/** What an app's own dialog holds: the spec the member edits, the accounts the app reaches, the
+ *  tasks that run it on a clock, and the skills it carries. Four reads of one app, none of which
+ *  heads a page of its own. */
+const SETTINGS_TABS = ["settings", "connectors", "scheduled", "skills"] as const;
 type SettingsTab = (typeof SETTINGS_TABS)[number];
 const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
   settings: "Settings",
   connectors: "Connectors",
+  scheduled: "Scheduled",
   skills: "Skills",
 };
 
@@ -207,6 +214,9 @@ export function Agents({
               <TabPanel group="agent-settings" current={settingsTab} className={BANDS}>
                 {settingsTab === "settings" ? <Settings key={shown.id} agent={shown} /> : null}
                 {settingsTab === "connectors" ? <AgentConnectors agent={shown} /> : null}
+                {settingsTab === "scheduled" ? (
+                  <ObjectPane key={shown.id} agentId={shown.id} kind={TASK_KIND} />
+                ) : null}
                 {settingsTab === "skills" ? <AgentSkills key={shown.id} agent={shown} /> : null}
               </TabPanel>
             </BesideHost>
