@@ -214,6 +214,12 @@ as a portfolio, not a single bet:
 
 ## Commits
 
-- Terse messages (`add turn loop`, `wire slack surface`). No AI attribution, ever.
+- Terse messages (`add turn loop`, `wire slack surface`). No AI attribution, ever — the ban covers
+  the whole message, subject line and body alike. No `Co-authored-by:` or `Signed-off-by:` trailer
+  naming a model, agent, or tool, and no agent address (`noreply@anthropic.com` and its like). No
+  generator credit in any form: a `Generated with …` line, an emoji-marked credit, a tool's name
+  or URL, a "written by" footer. A PR body holds to the same ban, because a squash merge copies it
+  into the commit message; the conversation id a coding subagent stamps points at the record that
+  asked for the change, names no author, and stays.
 - Always a branch; PR when ready; never merge without approval.
 - Split into independently reviewable units; squash fixups within a unit.
