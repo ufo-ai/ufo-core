@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import warnings
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1684,6 +1684,54 @@ async def test_a_teardown_that_failed_before_its_cancel_landed_still_raises_on_t
     task = asyncio.ensure_future(step())
     with pytest.raises(RuntimeError, match="the commit lost the race"):
         await task
+
+
+async def test_a_stop_the_acquisition_reported_as_a_database_error_still_ends_the_caller_cancelled(
+    tx_engine: AsyncEngine,
+) -> None:
+    """A cancellation delivered while the driver holds the greenlet is swallowed there and comes
+    back out of SQLAlchemy as a database error. A caller that survives database errors — the surface
+    listener's claim tick — would read its own stop as a blip and poll on forever, so what the
+    driver reports cannot outrank what was asked of the task."""
+
+    def fail_the_begin(connection: sa.Connection) -> None:
+        raise sa.exc.OperationalError("begin immediate", None, Exception("database is locked"))
+
+    sa.event.listen(tx_engine.sync_engine, "begin", fail_the_begin)
+
+    async def step() -> None:
+        with suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        async with _opened(tx_engine, "workspace") as connection:
+            await _add_workspace(connection, uuid4())
+
+    task = asyncio.ensure_future(step())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
+async def test_a_stop_the_body_reported_as_a_database_error_still_ends_the_caller_cancelled(
+    tx_engine: AsyncEngine,
+) -> None:
+    def fail_the_statement(*_arguments: object) -> None:
+        raise sa.exc.OperationalError("insert into workspace", None, Exception("disk I/O error"))
+
+    async def step() -> None:
+        with suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        async with _opened(tx_engine, "workspace") as connection:
+            sa.event.listen(tx_engine.sync_engine, "before_cursor_execute", fail_the_statement)
+            await _add_workspace(connection, uuid4())
+
+    task = asyncio.ensure_future(step())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
 
 
 def test_the_unavailable_count_is_a_registered_metric() -> None:

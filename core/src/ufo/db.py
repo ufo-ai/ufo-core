@@ -286,6 +286,16 @@ async def dispose_loop_engines() -> None:
                 await engine.dispose()
 
 
+def _stopping() -> bool:
+    """Whether this task has been asked to stop. A cancellation delivered while the driver holds the
+    greenlet comes back out of SQLAlchemy as a database error, so every `except SQLAlchemyError`
+    over a transaction would read a stop as a blip the caller survives and keep working — a listener
+    that can never be shut down. The request outlives the disguise: `cancelling` counts what was
+    asked and only an `uncancel` takes it back."""
+    task = asyncio.current_task()
+    return task is not None and bool(task.cancelling())
+
+
 @asynccontextmanager
 async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]:
     """Begin a transaction, timing the acquisition and counting the ones that never begin. A
@@ -312,6 +322,8 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
         if isinstance(error, sa.exc.TimeoutError):
             emit_metric("db_pool_exhausted_total", path=path)
         emit_metric("db_tx_unavailable_total", path=path, error_class=type(error).__name__)
+        if _stopping():
+            raise asyncio.CancelledError from error
         raise
     finally:
         elapsed = round((time.monotonic() - started) * 1000)
@@ -336,6 +348,8 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
     if cancelled is not None:
         raise cancelled
     if caught is not None:
+        if _stopping() and not isinstance(caught, asyncio.CancelledError):
+            raise asyncio.CancelledError from caught
         raise caught
 
 
