@@ -3841,6 +3841,26 @@ class SurfaceListenerRunner:
             return None
 
     async def _owns(self) -> bool:
+        """The claim transaction runs to completion even when this task is cancelled meanwhile: an
+        abort mid-driver-call invalidates the connection, and on sqlite the hard-closed handle
+        keeps its open write transaction — a lock every later writer waits out. The cancellation
+        is re-raised once the transaction has committed or rolled back."""
+        claim: asyncio.Future[bool] = asyncio.ensure_future(self._claim())
+        cancelled: asyncio.CancelledError | None = None
+        while not claim.done():
+            try:
+                await asyncio.shield(claim)
+            except asyncio.CancelledError as cancel:
+                cancelled = cancel
+            except Exception:
+                continue
+        if cancelled is not None:
+            if not claim.cancelled():
+                claim.exception()
+            raise cancelled
+        return claim.result()
+
+    async def _claim(self) -> bool:
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=self.lease_seconds)
         async with owner_tx() as connection:
