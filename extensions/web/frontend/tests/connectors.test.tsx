@@ -14,6 +14,7 @@ import {
   SETTINGS,
   fact,
   json,
+  openAgentSettings,
   pageFits,
   pick,
   pressRow,
@@ -102,9 +103,10 @@ test("the pool fits the desktop it is read on, so the row's act never scrolls of
 });
 
 test("the agent's own edges fit that same desktop", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   connectors();
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   const across = (await screen.findByText("github")).closest("table")!.style.minWidth;
   expect(pageFits(across)).toBe(true);
@@ -114,9 +116,10 @@ test("the agent's own edges fit that same desktop", async () => {
 });
 
 test("the agent's settings read its attached connections", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   const { calls } = connectors();
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/connections"))).toBe(true);
@@ -180,7 +183,7 @@ test("the pool's record shares and revokes into the lane of the agent already ho
 
 test("a grant change is admitted into the lane of the agent whose settings hold it", async () => {
   const posted: string[] = [];
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
     "/settings": () => json(SETTINGS),
@@ -191,6 +194,7 @@ test("a grant change is admitted into the lane of the agent whose settings hold 
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   await pressRow("github");
 
@@ -205,7 +209,7 @@ test("a grant change is admitted into the lane of the agent whose settings hold 
 
 test("the agent's record revokes the grant it stands on", async () => {
   const posted: string[] = [];
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   wire({
     "/connections": () => json({ connections: [grant("github", true, "g1")] }),
     "/settings": () => json(SETTINGS),
@@ -216,6 +220,7 @@ test("the agent's record revokes the grant it stands on", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
@@ -227,7 +232,7 @@ test("the agent's record revokes the grant it stands on", async () => {
 
 test("a revoked connection stays shut when the grant comes back on a later read", async () => {
   let served = 0;
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   wire({
     "/connections": (url) => {
       if (!url.includes("/agents/"))
@@ -240,6 +245,7 @@ test("a revoked connection stays shut when the grant comes back on a later read"
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   await pressRow("github");
   expect(await screen.findByRole("complementary", { name: "acct" })).toBeTruthy();
@@ -257,7 +263,7 @@ test("a revoked connection stays shut when the grant comes back on a later read"
 });
 
 test("the attach picker names the provider and the account, not the broker id", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   wire({
     "/connections": (url) =>
       json({
@@ -269,6 +275,7 @@ test("the attach picker names the provider and the account, not the broker id", 
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   await userEvent.click(await screen.findByRole("combobox", { name: "Connection" }));
 
@@ -306,7 +313,7 @@ test("an empty pool states that no connector is connected yet", async () => {
 
 test("the bar is drawn while the first read is still in flight", async () => {
   const pending = new Map<string, (value: Response) => void>();
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -320,6 +327,7 @@ test("the bar is drawn while the first read is still in flight", async () => {
     }),
   );
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   expect(await screen.findByRole("combobox", { name: "Connection" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Add connector" })).toBeTruthy();
@@ -327,33 +335,39 @@ test("the bar is drawn while the first read is still in flight", async () => {
 });
 
 test("the agent's own section states what is shared with that agent", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   wire({
     "/connections": () => json({ connections: [grant("github", true, "g1")] }),
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
 });
 
-test("the agent's connectors are a section of its settings and no tab of their own", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+/** The agent's own dialog holds three reads of it, and the connectors are one of them — reached by
+ *  their own tab rather than scrolled past under the spec form. */
+test("the agent's connectors stand on their own tab of its settings dialog", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
   connectors();
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const settings = within(await screen.findByRole("tabpanel"));
-  expect(settings.getByText("Connectors")).toBeTruthy();
-  expect(await settings.findByRole("cell", { name: "github" })).toBeTruthy();
-  expect(settings.getByRole("button", { name: "Add connector" })).toBeTruthy();
-  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
-
-  location.hash = "#/agents/" + AGENT_ID + "/connectors";
-  window.dispatchEvent(new HashChangeEvent("hashchange"));
-
-  await waitFor(() =>
-    expect(screen.getByRole("tab", { name: "Home" }).getAttribute("aria-selected")).toBe("true"),
+  const dialog = within(await openAgentSettings("assistant", "Connectors"));
+  expect(dialog.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+    "Settings",
+    "Connectors",
+    "Skills",
+  ]);
+  expect(dialog.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
+    "true",
   );
+  expect(await dialog.findByRole("cell", { name: "github" })).toBeTruthy();
+  expect(dialog.getByRole("button", { name: "Add connector" })).toBeTruthy();
+
+  await userEvent.click(dialog.getByRole("tab", { name: "Settings" }));
+  expect(await dialog.findByLabelText("Prompt")).toBeTruthy();
+  expect(dialog.queryByRole("button", { name: "Add connector" })).toBeNull();
 });

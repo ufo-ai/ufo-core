@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { REFUSAL_HEADER } from "@/lib/api";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
 import {
@@ -24,6 +23,7 @@ import {
   TURN_ID,
   fact,
   json,
+  openAgentSettings,
   objectIndex,
   opened,
   owned,
@@ -79,8 +79,9 @@ test("the settings page states the agent's facts, renders its schema, and submit
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings();
   expect(await screen.findByText("Main agent")).toBeTruthy();
   expect(fact("Installations")).toBe("Portal, Terminal");
   expect(fact("Updated")).toBe("Jul 30 2026");
@@ -88,7 +89,8 @@ test("the settings page states the agent's facts, renders its schema, and submit
   expect(fact("Web audience")).toBe("Every member");
   expect(fact("Usage")).toBe("Workspace usage");
   expect(screen.queryByRole("tab", { name: "Usage" })).toBeNull();
-  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
+  // Connectors have a tab of their own in this dialog; the spec form states none of them.
+  expect(screen.queryByRole("button", { name: "Add connector" })).toBeNull();
   expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("be useful");
 
   await pick("reasoning", "low");
@@ -134,8 +136,9 @@ test("the settings usage fact opens the workspace usage tab", async () => {
         workspace: null,
       }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings();
 
   await userEvent.click(await screen.findByRole("link", { name: "Workspace usage" }));
 
@@ -158,10 +161,11 @@ test("switching agents discards unsaved settings edits", async () => {
     "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(
     <App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
+  await openAgentSettings();
   await userEvent.clear(await screen.findByLabelText("Prompt"));
   await userEvent.type(screen.getByLabelText("Prompt"), "do not carry this");
 
@@ -199,10 +203,12 @@ test("settings polling preserves dirty edits", async () => {
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   vi.useFakeTimers();
   try {
     render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+    // The gear, not `openAgentSettings`: this test drives fake timers, which userEvent waits on.
+    fireEvent.click(screen.getByRole("button", { name: "Settings for assistant" }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
       await Promise.resolve();
@@ -250,8 +256,9 @@ test("a non-admin reads an agent prompt but cannot edit it", async () => {
     "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings();
   expect(await screen.findByText("be useful")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save prompt" })).toBeNull();
 });
@@ -297,8 +304,9 @@ test("a settings read that fails states the error and offers no form", async () 
     "/settings": () => new Response("nope", { status: 503 }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings();
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
@@ -339,13 +347,14 @@ test("the scheduled index leads with both runs, and its detail pauses through th
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/radar?chip=scheduled_task";
+  location.hash = "#/radar?chip=scheduled_task";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const listed = (await screen.findByText("digest")).closest("tr");
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
   expect(said[0]).toBe("digestActive");
-  expect(said[1]).toBe("You");
+  // The workspace feed crosses agents, so the row names the one that holds the task.
+  expect(said[1]).toBe("assistant");
   expect(said[2]).toBe("Jul 31 2026 · done");
   expect(said[3]).toContain("in ");
   expect(screen.queryByText("summarize")).toBeNull();
@@ -403,140 +412,6 @@ test("a detail whose kind the lane refuses offers no control and no prose about 
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
 
-test("skills name where each came from, and save posts one skill file", async () => {
-  const posted: unknown[] = [];
-  wire({
-    "/skills/community": () => json({ skills: [] }),
-    "/skills": () =>
-      json({
-        skills: [
-          { name: "mine", description: "member skill", origin: "member", instructions: "a" },
-          { name: "shipped", description: "deploy skill", origin: "deploy", instructions: "b" },
-        ],
-      }),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Saved." });
-    },
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents/" + AGENT_ID + "/skills";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  const skills = within(await screen.findByTestId("panel"));
-  expect(skills.queryByRole("tab", { name: "All" })).toBeNull();
-  await userEvent.click(skills.getByRole("tab", { name: "Installed" }));
-  expect(await screen.findByText("mine")).toBeTruthy();
-  expect(screen.queryByText("member skill")).toBeNull();
-  expect(skills.queryByRole("columnheader")).toBeNull();
-  expect(screen.getByPlaceholderText("Search skills")).toBeTruthy();
-  expect(skills.queryByRole("heading", { name: "Skills" })).toBeNull();
-  expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
-  expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
-  expect(skills.queryByRole("button", { name: "Delete" })).toBeNull();
-
-  await userEvent.click(skills.getByRole("button", { name: "New skill" }));
-  await userEvent.type(await screen.findByLabelText("Name"), "fresh");
-  await userEvent.type(screen.getByLabelText("Description"), "Load when: asked.");
-  await userEvent.type(screen.getByLabelText("Instructions"), "body");
-  await userEvent.click(screen.getByRole("button", { name: "Save" }));
-
-  await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toMatchObject({
-    verb: "apply",
-    kind: "skill",
-    name: "fresh",
-    spec: {
-      files: {
-        "SKILL.md": '---\nname: fresh\ndescription: "Load when: asked."\n---\n\nbody\n',
-      },
-    },
-  });
-});
-
-test("the skills tab opens on the directory and install files the fetched document", async () => {
-  const posted: unknown[] = [];
-  const DOCUMENT = '---\nname: release-notes\ndescription: "Drafts notes."\n---\n\nRead the tags.\n';
-  const POPULAR = [
-    { name: "release-notes", source: "acme/kit", installs: 12400 },
-    { name: "mine", source: "acme/kit", installs: 900 },
-  ];
-  wire({
-    "/skills/community/acme/kit/release-notes": () =>
-      json({
-        name: "release-notes",
-        description: "Drafts notes.",
-        instructions: "Read the tags.",
-        document: DOCUMENT,
-      }),
-    "/skills/community?q=": (url) => {
-      expect(url).toContain("q=release");
-      return json({ skills: [POPULAR[0]] });
-    },
-    "/skills/community": () => json({ skills: POPULAR }),
-    "/skills": () =>
-      json({
-        skills: [
-          { name: "mine", description: "member skill", origin: "member", instructions: "a" },
-        ],
-      }),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Saved." });
-    },
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents/" + AGENT_ID + "/skills";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  expect(await screen.findByText("release-notes")).toBeTruthy();
-  expect(screen.getByText("acme/kit · 12.4K installs")).toBeTruthy();
-  expect(document.querySelector("code")).toBeNull();
-  const held = screen.getByText("mine").closest("li");
-  const state = within(held as HTMLElement).getByRole("button", { name: "Installed" });
-  expect((state as HTMLButtonElement).disabled).toBe(true);
-  expect(within(held as HTMLElement).queryByRole("button", { name: "Install" })).toBeNull();
-  const source = within(held as HTMLElement).getByRole("link", { name: "Source ↗" });
-  expect(source.getAttribute("href")).toBe("https://github.com/acme/kit");
-  expect(source.getAttribute("target")).toBe("_blank");
-  expect(source.getAttribute("rel")).toBe("noopener noreferrer");
-
-  await userEvent.type(screen.getByPlaceholderText("Search skills"), "release{Enter}");
-  await waitFor(() => expect(screen.queryByText("mine")).toBeNull());
-
-  await userEvent.click(screen.getByRole("button", { name: "Install" }));
-  const dialog = await screen.findByRole("dialog");
-  expect(within(dialog).getByLabelText("Description")).toHaveProperty("value", "Drafts notes.");
-  expect(within(dialog).getByLabelText("Instructions")).toHaveProperty("value", "Read the tags.");
-
-  await userEvent.click(within(dialog).getByRole("button", { name: "Install" }));
-  await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toMatchObject({
-    verb: "apply",
-    kind: "skill",
-    name: "release-notes",
-    spec: { files: { "SKILL.md": DOCUMENT } },
-  });
-});
-
-test("a directory read the member cannot correct is stated as a toast", async () => {
-  const LIMITED = "The skill directory limits reads to 60 an hour and this deploy has reached it.";
-  wire({
-    "/skills/community/acme/kit/release-notes": () =>
-      new Response(LIMITED, { status: 502, headers: { [REFUSAL_HEADER]: "1" } }),
-    "/skills/community": () =>
-      json({ skills: [{ name: "release-notes", source: "acme/kit", installs: 3 }] }),
-    "/skills": () => json({ skills: [] }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents/" + AGENT_ID + "/skills";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-
-  await userEvent.click(await screen.findByRole("button", { name: "Install" }));
-  const toast = await screen.findByRole("status");
-  expect(toast.textContent).toContain("release-notes did not open.");
-  expect(toast.textContent).toContain("60 an hour");
-  expect(screen.queryByRole("dialog", { name: "release-notes" })).toBeNull();
-});
-
 test("a private grant is shared with the agent from the settings connectors section", async () => {
   const posted: unknown[] = [];
   wire({
@@ -562,8 +437,9 @@ test("a private grant is shared with the agent from the settings connectors sect
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
   expect(await screen.findByText("Only you")).toBeTruthy();
   await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
@@ -601,8 +477,9 @@ test("the agent's own section lists what is shared with it and not what is held 
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.queryByText("notion")).toBeTruthy();
@@ -893,7 +770,7 @@ test("a Slack transcript heads itself with its channel, and those words are the 
   const heading = await screen.findByRole("heading", {
     name: "Slack ↗ · take a look at the failing deploy",
   });
-  const out = screen.getAllByRole("link", { name: "Slack ↗" });
+  const out = within(heading).getAllByRole("link", { name: "Slack ↗" });
   expect(out).toHaveLength(1);
   expect(out[0].getAttribute("href")).toBe(root);
   expect(out[0].getAttribute("target")).toBe("_blank");
@@ -908,14 +785,14 @@ test("a Slack transcript heads itself with its channel, and those words are the 
     expect(within(bubble as HTMLElement).queryByRole("link")).toBeNull();
   }
 
-  await userEvent.click(screen.getByRole("button", { name: "All conversations" }));
   await userEvent.click(
     await screen.findByText("Rename the deploy job", { selector: "[data-part='primary']" }),
   );
 
-  expect(await screen.findByText("Rename the deploy job")).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "Portal · Rename the deploy job" })).toBeTruthy();
-  expect(screen.queryByRole("link", { name: /↗/ })).toBeNull();
+  const portalHeading = await screen.findByRole("heading", {
+    name: "Portal · Rename the deploy job",
+  });
+  expect(within(portalHeading).queryByRole("link")).toBeNull();
 });
 
 test("a conversation nobody shared offers no opener", async () => {
@@ -1098,7 +975,7 @@ test("a member with no rollup sees only their own figure and no workspace sectio
   expect(screen.queryByText("Members")).toBeNull();
 });
 
-test("the sidebar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
+test("the top bar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
   wire({
     "/transcript": () => json({ messages: [] }),
     "/settings": () => json(SETTINGS),
@@ -1114,13 +991,13 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   expect(location.hash).toBe("#/agents");
-  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
+  expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-current")).toBe("true");
 
   await openAgentRow("second");
   expect(location.hash).toBe("#/agents/" + SECOND.id);
-  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
+  expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-current")).toBe("true");
 
   await userEvent.click(screen.getByRole("button", { name: "Radar" }));
   expect(location.hash).toBe("#/radar");
@@ -1161,7 +1038,7 @@ test("the agents index lists agents only, whatever subagent profiles the deploy 
     />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   const index = within(await screen.findByRole("navigation", { name: "Agents" }));
   expect(index.getByText("assistant")).toBeTruthy();
   expect(index.queryByText("deep_research")).toBeNull();
@@ -1170,25 +1047,28 @@ test("the agents index lists agents only, whatever subagent profiles the deploy 
   expect(screen.queryByText("general_purpose")).toBeNull();
 });
 
-test("a member who is not an admin is offered no administration control", () => {
+test("a member who is not an admin is offered no administration control", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
+  expect(await screen.findByRole("menuitem", { name: /Theme/ })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Administration" })).toBeNull();
 });
 
 test("the agent tab strip opens the tab named in the hash, and Home takes the bare hash", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
   wire({
-    "/settings": () => json(SETTINGS),
-    "/connections": () => json({ connections: [] }),
+    "/conversations": () => json({ conversations: [] }),
+    "/homepage": () => json({ state: "none" }),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("No account is connected to assistant yet.")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Settings" }).getAttribute("aria-selected")).toBe(
+  expect(await screen.findByText("No conversation with assistant yet.")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Conversations" }).getAttribute("aria-selected")).toBe(
     "true",
   );
+  expect(screen.queryByRole("tab", { name: "Settings" })).toBeNull();
 
   await userEvent.click(screen.getByRole("tab", { name: "Home" }));
 
@@ -1203,8 +1083,9 @@ test("the model field offers the deploy's models, which its schema alone cannot 
     "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings();
   expect((await opened("model")).map((option) => option.textContent)).toEqual([
     "opus",
     "sonnet",
@@ -1268,8 +1149,9 @@ test("a refusal after a consent link supersedes the link with the toned message"
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),
@@ -1335,8 +1217,9 @@ test("an applied grant change keeps a live consent link on screen", async () => 
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),

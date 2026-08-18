@@ -12,7 +12,9 @@ import {
 } from "@/views/ConversationSlotPane";
 
 export type ChatPaneProps = ChatProps & {
-  onAgentsIndex: () => void;
+  /** What the conversation is called — the rail row's own title. Absent for a conversation not yet
+   *  opened, where the agent about to hold it is all there is to say. */
+  title?: string;
   conversationOnly?: boolean;
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
@@ -24,7 +26,7 @@ export function ChatPane({
   conversationId,
   onCreated,
   onActivity,
-  onAgentsIndex,
+  title,
   conversationOnly = false,
   slot,
   onSelectSlot,
@@ -41,8 +43,7 @@ export function ChatPane({
   const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
   const header = (
     <PaneHeader
-      parent={{ label: "Agents", onGo: onAgentsIndex }}
-      current={agent.name}
+      current={title ?? agent.name}
       note={<span className="font-mono text-mono text-ink-soft">{agent.model}</span>}
       actions={
         !conversationOnly &&

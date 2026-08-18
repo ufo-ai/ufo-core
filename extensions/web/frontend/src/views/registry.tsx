@@ -39,10 +39,7 @@ function declared<Payload, Row>(label: string, spec: ListingSpec<Payload, Row>):
 
 export const AGENT_TAB_LABELS: Record<AgentTab, string> = {
   home: "Home",
-  settings: "Settings",
   conversations: "Conversations",
-  radar: "Radar",
-  skills: "Skills",
 };
 
 export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
@@ -78,9 +75,7 @@ export const SECTION_VIEWS: Record<Section, PaneView> = {
     label: "Radar",
     remountOnPlace: false,
     ownsHeader: true,
-    render: (place, onPlace) => (
-      <Radar agentId={null} title="Radar" place={place} onPlace={onPlace} />
-    ),
+    render: (place, onPlace) => <Radar title="Radar" place={place} onPlace={onPlace} />,
   },
   artifacts: {
     label: "Artifacts",

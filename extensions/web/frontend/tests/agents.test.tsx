@@ -61,8 +61,8 @@ function boot(agents: unknown[], member: unknown, newAgent: unknown) {
 }
 
 async function openCreate() {
-  await userEvent.click(await screen.findByRole("button", { name: "Agents" }));
-  await userEvent.click(await screen.findByRole("button", { name: "New agent" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Apps" }));
+  await userEvent.click(await screen.findByRole("button", { name: "New app" }));
   return screen.findByLabelText("Name");
 }
 
@@ -189,13 +189,15 @@ test("a member the kind admits no create from is offered no act", async () => {
     <App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
 
-  expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "New agent" })).toBeNull();
+  expect(await agentIndex()).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "New app" })).toBeNull();
 });
 
-test("the search narrows the rows, and says so when it matches none of them", async () => {
+/** Search over the apps is reached from the bar rather than from the index column, so it answers
+ *  from wherever the member is standing. */
+test("the spotlight narrows the apps, and says so when it matches none of them", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(
     <App
@@ -207,35 +209,35 @@ test("the search narrows the rows, and says so when it matches none of them", as
     />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  const index = within(await agentIndex());
-  await userEvent.type(screen.getByLabelText("Search agents"), "res");
+  await userEvent.click(screen.getByRole("button", { name: "Search apps" }));
+  const spotlight = within(await screen.findByRole("dialog"));
+  await userEvent.type(spotlight.getByRole("searchbox", { name: "Search apps" }), "res");
 
-  expect(index.getByText("research")).toBeTruthy();
-  expect(index.queryByText("assistant")).toBeNull();
+  expect(spotlight.getByRole("button", { name: /^research/ })).toBeTruthy();
+  expect(spotlight.queryByRole("button", { name: /^assistant/ })).toBeNull();
 
-  await userEvent.type(screen.getByLabelText("Search agents"), "xx");
+  await userEvent.type(spotlight.getByRole("searchbox", { name: "Search apps" }), "xx");
 
-  expect(await index.findByText("No agent matches this search.")).toBeTruthy();
+  expect(await spotlight.findByText("No app matches this search.")).toBeTruthy();
 });
 
-test("Refresh re-reads the one answer to what agents this member holds", async () => {
-  let reads = 0;
-  wire({
-    "/api/agents": () => {
-      reads += 1;
-      return boot(reads > 1 ? [AGENT, RESEARCH] : [AGENT], ADMIN, NEW_AGENT);
-    },
-    "/transcript": () => json({ messages: [] }),
-  });
-  render(<Portal />);
+test("the spotlight opens the app it names and shuts behind it", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  render(
+    <App
+      agents={[AGENT, RESEARCH]}
+      subagents={[]}
+      member={ADMIN}
+      newAgent={NEW_AGENT}
+      onAgents={() => {}}
+    />,
+  );
 
-  await userEvent.click(await screen.findByRole("button", { name: "Agents" }));
-  const index = within(await agentIndex());
-  expect(index.queryByText("research")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Search apps" }));
+  const spotlight = within(await screen.findByRole("dialog"));
+  await userEvent.click(spotlight.getByRole("button", { name: /^research/ }));
 
-  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
-
-  expect(await index.findByText("research")).toBeTruthy();
+  expect(location.hash).toBe("#/agents/" + SECOND_ID);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 

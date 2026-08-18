@@ -6,6 +6,8 @@ import { cn } from "@/lib/cn";
 
 export const Dialog = DialogPrimitive.Root;
 
+export const DialogTrigger = DialogPrimitive.Trigger;
+
 export function DialogContent({
   className,
   children,

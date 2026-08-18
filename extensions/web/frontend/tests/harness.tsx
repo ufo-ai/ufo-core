@@ -312,6 +312,21 @@ export async function openAgentRow(name: string): Promise<void> {
   await userEvent.click(within(index).getByRole("button", { name: new RegExp("^" + name) }));
 }
 
+/** An agent's settings, which stand in a dialog the index's gear opens rather than on a tab of the
+ *  agent's page. The dialog opens on Settings; `tab` reaches the other two. */
+export async function openAgentSettings(
+  name = "assistant",
+  tab: "Settings" | "Connectors" | "Skills" = "Settings",
+): Promise<HTMLElement> {
+  const index = await agentIndex();
+  await userEvent.click(within(index).getByRole("button", { name: "Settings for " + name }));
+  const dialog = await screen.findByRole("dialog");
+  if (tab !== "Settings") {
+    await userEvent.click(within(dialog).getByRole("tab", { name: tab }));
+  }
+  return dialog;
+}
+
 /** Press a record's own row, where the row itself is the control that opens it. */
 export async function pressRow(name: string): Promise<void> {
   const row = (await screen.findAllByText(name)).map((node) => node.closest("tr")).find(Boolean);

@@ -11,7 +11,6 @@ import { newChatHash, workspaceHash } from "@/lib/route";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { Moment } from "@/lib/moments";
-import { AgentConnectors } from "@/views/Connectors";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
 
@@ -198,10 +197,6 @@ export function Settings({ agent }: { agent: Agent }) {
                   },
                 ]}
               />
-            </Group>
-
-            <Group title="Connectors">
-              <AgentConnectors agent={agent} />
             </Group>
 
             <Group title="Settings">

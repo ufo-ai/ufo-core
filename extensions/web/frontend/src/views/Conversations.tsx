@@ -359,6 +359,88 @@ export function Conversations({
   );
 }
 
+/** An app's conversations, read the way chat is: the threads in a column on the left, the one
+ *  picked open beside them. The column is the index, so a row press replaces what stands to its
+ *  right rather than covering the list. */
+export function ConversationsPane({
+  agent,
+  place,
+  onPlace,
+}: {
+  agent: Agent;
+  place: WorkspacePlace;
+  onPlace: (place: WorkspacePlace) => void;
+}) {
+  const [disclosed, setDisclosed] = useState<string | null>(null);
+  const [typed, setTyped] = useState("");
+  const [searched, setSearched] = useState("");
+  const viewer = useViewer();
+  const state = usePanelRead<{ conversations: Conversation[] }>(
+    "/agents/" + agent.id + "/conversations" + (searched ? "?q=" + encodeURIComponent(searched) : ""),
+  );
+  const rows = state.phase === "ready" ? state.payload.conversations : [];
+  const opened = place.open ? rows.find((entry) => entry.id === place.open) : undefined;
+  const readable = opened && (opened.readable || disclosed === opened.id);
+
+  return (
+    <div className="grid min-h-0 flex-1 grid-cols-[var(--container-threads)_1fr] max-narrow:grid-cols-1">
+      <nav
+        aria-label="Conversations"
+        className="flex min-h-0 flex-col gap-md overflow-y-auto border-r border-edge p-2xl max-narrow:border-r-0"
+      >
+        <Search
+          label="Search"
+          placeholder="Search"
+          className="w-full shrink-0"
+          value={typed}
+          onChange={(event) => setTyped(event.target.value)}
+          onSubmit={() => setSearched(typed.trim())}
+        />
+        {/* A read that failed is stated where the rows would stand. The column carries the whole
+            answer to what conversations there are, so an empty one is read as "none" — and a
+            projection that refused must never be read as an app nobody has spoken to. */}
+        {state.phase === "failed" ? (
+          <p className="m-0 text-label text-ink-soft">{state.message}</p>
+        ) : (
+          <>
+            <RowLines
+              rows={rows}
+              rowKey={(entry) => entry.id}
+              primary={(entry) => subject(entry, viewer)}
+              meta={(entry) => metaParts(entry, viewer)}
+              when={moment}
+              open={(entry) =>
+                entry.readable || entry.disclosable ? () => onPlace({ open: entry.id }) : null
+              }
+            />
+            {state.phase === "ready" && !rows.length ? (
+              <p className="m-0 text-label text-ink-soft">
+                {"No conversation with " + agent.name + " yet."}
+              </p>
+            ) : null}
+          </>
+        )}
+      </nav>
+      <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-2xl">
+        {!opened ? (
+          <p className="m-auto max-w-empty text-center text-ink-soft">
+            Pick a conversation to read it.
+          </p>
+        ) : readable ? (
+          <ConversationDetail agent={agent} conversation={opened} />
+        ) : (
+          <Disclose
+            key={opened.id}
+            agent={agent}
+            conversation={opened}
+            onOpened={() => setDisclosed(opened.id)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** What a content read that refused says, wherever one is drawn: a conversation this member may
  *  not read is not a status code. */
 export function unreadable(message: string): ReactNode {
@@ -382,7 +464,7 @@ export function ConversationTranscript({
   earlier,
   onOpenArtifacts,
 }: {
-  title: ReactNode;
+  title?: ReactNode;
   messages: Message[];
   earlier?: EarlierMessages;
   onOpenArtifacts?: () => void;
@@ -406,7 +488,7 @@ export function ConversationDetail({
   agent,
   conversation,
   onBack,
-  title,
+  headed = false,
   onOpenArtifacts,
 }: {
   agent: Agent;
@@ -414,10 +496,9 @@ export function ConversationDetail({
   /** Absent where the pane above already leads back out — a header naming the agent is one, and a
    *  way out under it would be a second. */
   onBack?: () => void;
-  /** Absent where the transcript is headed the way the row that opened it named it. A pane that
-   *  states where the conversation came from in its own header passes what the conversation is
-   *  called instead, so the origin is stated once. */
-  title?: ReactNode;
+  /** True where the pane's own header already states what the conversation is called, so the
+   *  transcript draws no heading of its own — the name is stated once. */
+  headed?: boolean;
   onOpenArtifacts?: () => void;
 }) {
   const path = "/agents/" + agent.id + "/conversations/" + conversation.id;
@@ -434,7 +515,7 @@ export function ConversationDetail({
       <Panel state={state} failed={unreadable}>
         {(payload) => (
           <ConversationTranscript
-            title={title ?? conversationTitle(conversation, viewer)}
+            title={headed ? undefined : conversationTitle(conversation, viewer)}
             messages={payload.messages}
             earlier={earlier}
             onOpenArtifacts={onOpenArtifacts}

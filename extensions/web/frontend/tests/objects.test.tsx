@@ -192,7 +192,6 @@ function PlacedRadar() {
   const [place, setPlace] = useState<Placement>({});
   return (
     <Radar
-      agentId={null}
       title="Radar"
       place={place}
       onPlace={(patch) => setPlace((held) => ({ ...held, ...patch }))}
@@ -802,63 +801,6 @@ test("the radar section is reached by its own hash and leads with the feed", asy
   await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
   expect(await screen.findByText("weekly-roll")).toBeTruthy();
   expect(listed[0]).not.toContain("agent=");
-});
-
-test("the radar tab of an agent narrows the feed and both kinds to its namespace", async () => {
-  const reads: string[] = [];
-  wire({
-    "/workspace/radar": (url) => {
-      reads.push(url);
-      return json({ runs: [RUN], older: null, newer: null });
-    },
-    "/objects/scheduled_task": (url) => {
-      reads.push(url);
-      return objectIndex(TASK_KIND, [TASK_ROW]);
-    },
-    "/objects/source_trigger": (url) => {
-      reads.push(url);
-      return objectIndex(TRIGGER_KIND, []);
-    },
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents/" + AGENT_ID + "/radar";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-
-  expect(await screen.findByText("roll-up.pdf")).toBeTruthy();
-  expect(reads[0]).toContain("agent=" + AGENT_ID);
-  expect(screen.queryByRole("heading", { level: 1, name: "Radar" })).toBeNull();
-
-  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
-  expect(await screen.findByText("daily-brief")).toBeTruthy();
-  await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
-  await waitFor(() =>
-    expect(reads.some((read) => read.includes("/objects/source_trigger"))).toBe(true),
-  );
-  expect(reads.every((read) => read.includes("agent=" + AGENT_ID))).toBe(true);
-  expect(screen.getByRole("button", { name: "Radar" }).getAttribute("aria-current")).toBe(
-    "false",
-  );
-});
-
-test("landing on another agent's radar tab leaves the first agent's detail behind", async () => {
-  wire({
-    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
-    "/objects/scheduled_task": (url) =>
-      objectIndex(TASK_KIND, url.includes(AGENT_ID) ? [TASK_ROW] : [SECOND_TASK_ROW]),
-    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents/" + AGENT_ID + "/radar?chip=scheduled_task";
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-
-  await openRow("daily-brief");
-  await screen.findByRole("heading", { name: "daily-brief" });
-
-  location.hash = "#/agents/" + SECOND_ID + "/radar?chip=scheduled_task";
-  window.dispatchEvent(new HashChangeEvent("hashchange"));
-
-  expect(await screen.findByText("weekly-roll")).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "daily-brief" })).toBeNull();
 });
 
 test("a row opens under the agent that owns it, and closing returns to the whole index", async () => {

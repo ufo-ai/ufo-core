@@ -61,25 +61,22 @@ function objectAt(open: string | undefined): ObjectAddress | null {
   return cut < 0 ? null : { kind: rest.slice(0, cut), name: rest.slice(cut + 1) };
 }
 
-/** Every agent's radar, or one agent's. The section names no agent, so its feed answers across the
- *  viewer's whole audience; the agent tab is already headed and named, so it passes no title. A
- *  story's task name opens that task's record beside the feed — `place.agent` remembers whose
- *  namespace the record lives in, since the section's feed crosses agents. Another panel taking the
- *  pane's one column clears the record out of the place as displaced, so the route stays on the
- *  screen the member is standing on rather than stepping back off the panel they just opened. */
+/** The workspace's radar: the feed answers across the viewer's whole audience. A story's task name
+ *  opens that task's record beside the feed — `place.agent` remembers whose namespace the record
+ *  lives in, since the feed crosses agents. Another panel taking the pane's one column clears the
+ *  record out of the place as displaced, so the route stays on the screen the member is standing
+ *  on rather than stepping back off the panel they just opened. */
 export function Radar({
-  agentId,
   title,
   place,
   onPlace,
 }: {
-  agentId: string | null;
   title?: string;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
   const at = objectAt(place.open);
-  const owner = agentId ?? place.agent ?? null;
+  const owner = place.agent ?? null;
   const detail = useBeside(
     at !== null && at.name !== null && owner !== null ? (
       <ObjectDetail
@@ -99,7 +96,7 @@ export function Radar({
       <>
         <ObjectPane
           key={family}
-          agentId={agentId}
+          agentId={null}
           kind={family}
           title={title}
           lead={<Lead value={family} onPlace={onPlace} />}
@@ -115,7 +112,7 @@ export function Radar({
         <Lead value="" onPlace={onPlace} />
       </PageToolbar>
       <Section>
-        <Feed agentId={agentId} place={place} onPlace={onPlace} />
+        <Feed place={place} onPlace={onPlace} />
       </Section>
       {detail}
     </>
@@ -134,16 +131,13 @@ function Lead({ value, onPlace }: { value: string; onPlace: (place: Placement) =
 }
 
 function Feed({
-  agentId,
   place,
   onPlace,
 }: {
-  agentId: string | null;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
   const params = new URLSearchParams();
-  if (agentId) params.set("agent", agentId);
   if (place.after) params.set("after", place.after);
   const state = usePanelRead<RadarPayload>(
     "/workspace/radar" + (params.size ? "?" + params.toString() : ""),

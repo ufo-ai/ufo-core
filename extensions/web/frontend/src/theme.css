@@ -202,10 +202,16 @@
 
   --container-sidebar: 240px;
   --container-index: 272px;
-  --container-rail: 48px;
+  /* The column an app's conversations are read in: wider than the app index beside it, because a
+     thread row carries a subject, its meta line, and the moment it last moved. */
+  --container-threads: 360px;
   --container-drawer: min(520px, 100vw);
   --container-card: min(440px, calc(100vw - 32px));
   --container-dialog: min(560px, calc(100vw - 32px));
+  /* An app's whole settings form, read in one dialog rather than a page: wider than a dialog that
+     asks one question, and the width the spotlight search opens at. */
+  --container-settings: min(880px, calc(100vw - 32px));
+  --container-spotlight: min(50vw, calc(100vw - 32px));
   --container-bubble: 70ch;
   --container-section: 728px;
   --container-page: calc(var(--container-section) + 2 * var(--spacing-2xl));

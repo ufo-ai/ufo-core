@@ -576,12 +576,16 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
     screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
   ).toBeTruthy();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
-  expect(screen.getByRole("heading", { name: "Warehouse restock plan" })).toBeTruthy();
+  expect(
+    within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByText(
+      "Warehouse restock plan",
+    ),
+  ).toBeTruthy();
 });
 
 /** The pane a conversation another surface holds is read in is headed the way a portal chat's is:
- *  the agent it ran under, the model it ran on, and the way back to the agents index — never a way
- *  out to a list of conversations standing over the transcript in place of a header. */
+ *  what the conversation is called and the model it ran on — never a list of conversations
+ *  standing over the transcript in place of a header. */
 test("a Slack conversation is headed like a web thread, marked with its way out to Slack", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
@@ -596,8 +600,11 @@ test("a Slack conversation is headed like a web thread, marked with its way out 
 
   await screen.findByText("from Slack");
   const header = within(screen.getByRole("main"));
-  expect(header.getByText(AGENT.name)).toBeTruthy();
-  expect(header.getByText(AGENT.model)).toBeTruthy();
+  const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
+  expect(crumb.getByText("Warehouse restock plan")).toBeTruthy();
+  expect(crumb.getByText(AGENT.model)).toBeTruthy();
+  expect(crumb.queryByText(AGENT.name)).toBeNull();
+  expect(header.queryByRole("heading", { name: "Warehouse restock plan" })).toBeNull();
   expect(header.queryByRole("button", { name: "All conversations" })).toBeNull();
 
   const out = header.getByRole("link", { name: "Open #ops-warehouse in Slack" });
@@ -608,8 +615,7 @@ test("a Slack conversation is headed like a web thread, marked with its way out 
   const mark = out.querySelector("svg");
   expect(mark?.getAttribute("class")).toContain("size-(--size-surface-mark)");
 
-  await userEvent.click(header.getByRole("button", { name: "Back to Agents" }));
-  expect(location.hash).toBe("#/agents");
+  expect(header.queryByRole("button", { name: "Back to Agents" })).toBeNull();
 });
 
 /** A terminal session is not a place a link can land, so the same mark states the surface and goes
@@ -634,7 +640,7 @@ test("a terminal conversation is marked with its surface and no way out", async 
 
   await screen.findByText("from the CLI");
   const header = within(screen.getByRole("main"));
-  expect(header.getByRole("heading", { name: "Deploy the branch" })).toBeTruthy();
+  expect(header.getByText("Deploy the branch")).toBeTruthy();
   expect(header.getByText("Terminal")).toBeTruthy();
   expect(header.queryByRole("link")).toBeNull();
   expect(
@@ -726,38 +732,63 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
 test("the new-conversation control targets the main agent, or picks among several", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   single.unmount();
 
   location.hash = "";
   wire({});
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   await userEvent.click(await screen.findByRole("button", { name: "second" }));
   expect(location.hash).toBe("#/new/" + SECOND_ID);
   expect(await screen.findByText("Message second to start.")).toBeTruthy();
+  expect(
+    within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByText("second"),
+  ).toBeTruthy();
 });
 
-test("the agents index opens the agent's page, and the sidebar starts the conversation", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/settings";
+test("the agents index opens the agent's page, and chat starts the conversation", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
   wire({ "/settings": () => json(SETTINGS), "/connections": () => json({ connections: [] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await screen.findByRole("main");
-  expect(
-    within(screen.getByRole("main")).queryByRole("button", { name: "New conversation" }),
-  ).toBeNull();
+  expect(screen.queryByRole("button", { name: "New chat" })).toBeNull();
 
   location.hash = "#/agents";
   await openAgentRow("assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 
-  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chat" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByText("Message assistant to start.")).toBeTruthy();
 });
 
-test("the chat header names the agent and leads back to the agents index", async () => {
+test("the conversations rail stands in chat and in no other category", async () => {
+  wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    "/transcript": () => json({ messages: [] }),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/objects/site": () => objectIndex(SITE_KIND, []),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("navigation", { name: "Conversations" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "New chat" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("navigation", { name: "Conversations" })).toBeNull(),
+  );
+  expect(screen.queryByRole("button", { name: "New chat" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Chat" }));
+  expect(await screen.findByRole("navigation", { name: "Conversations" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+});
+
+test("the chat header names the conversation and its model, and leads nowhere", async () => {
   wire({
     "/api/chats": () => json({ chats: [CHAT_ROW] }),
     "/transcript": () => json({ messages: [] }),
@@ -766,14 +797,11 @@ test("the chat header names the agent and leads back to the agents index", async
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
-  const header = within(screen.getByRole("main"));
-  // The agent is what this pane is about, so it is the page rather than a link out of it.
-  expect(header.getByText("assistant")).toBeTruthy();
-  expect(header.queryByRole("button", { name: "assistant" })).toBeNull();
-
-  await userEvent.click(header.getByRole("button", { name: "Back to Agents" }));
-
-  expect(location.hash).toBe("#/agents");
+  const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
+  expect(crumb.getByText("Pick one thread")).toBeTruthy();
+  expect(crumb.getByText(AGENT.model)).toBeTruthy();
+  expect(crumb.queryByText("assistant")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Back to Agents" })).toBeNull();
 });
 
 test("a deep link is not blamed while the rail is the thing that failed", async () => {
@@ -832,7 +860,7 @@ test("a hash naming an agent this member cannot reach reports it", async () => {
   expect(screen.queryByRole("tab", { name: "Settings" })).toBeNull();
 });
 
-test("the sidebar marks the section the member is in and leaves the others off", async () => {
+test("the top bar marks the category the member is in and leaves the others off", async () => {
   wire({
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/workspace/radar": () => json({ runs: [] }),
@@ -847,9 +875,11 @@ test("the sidebar marks the section the member is in and leaves the others off",
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const marked = () =>
-    ["Agents", "Radar", "Artifacts", "Workspace"].filter(
+    ["Chat", "Apps", "Artifacts", "Radar", "Workspace"].filter(
       (name) => screen.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
+
+  expect(marked()).toEqual(["Chat"]);
 
   await userEvent.click(screen.getByRole("button", { name: "Radar" }));
   await waitFor(() => expect(marked()).toEqual(["Radar"]));
@@ -863,8 +893,8 @@ test("the sidebar marks the section the member is in and leaves the others off",
   await waitFor(() => expect(marked()).toEqual(["Artifacts"]));
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  expect(marked()).toEqual(["Agents"]);
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
+  expect(marked()).toEqual(["Apps"]);
   const index = within(await screen.findByRole("navigation", { name: "Agents" }));
   expect(index.getByText("assistant")).toBeTruthy();
   expect(index.getByText("second")).toBeTruthy();

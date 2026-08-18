@@ -14,6 +14,7 @@ import {
   TASK_KIND,
   TRIGGER_KIND,
   json,
+  openAgentSettings,
   objectIndex,
   useStreamFake,
 } from "./harness";
@@ -31,7 +32,7 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("switching tabs discards the read left behind rather than painting it", async () => {
+test("leaving a view discards the read left behind rather than painting it", async () => {
   let releaseConnectors: ((value: Response) => void) | null = null;
   vi.stubGlobal(
     "fetch",
@@ -50,12 +51,14 @@ test("switching tabs discards the read left behind rather than painting it", asy
     }),
   );
 
-  location.hash = "#/agents/" + AGENT.id + "/settings";
+  location.hash = "#/agents/" + AGENT.id;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   await waitFor(() => expect(releaseConnectors).not.toBeNull());
 
-  await userEvent.click(screen.getByRole("tab", { name: "Radar" }));
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(screen.getByRole("button", { name: "Radar" }));
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
 
   releaseConnectors!(json({ connections: [STALE_CONNECTION] }));

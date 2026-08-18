@@ -6,9 +6,9 @@ import { AGENT_TAB_LABELS, SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/regist
 
 const PRODUCT = "ufo";
 const TRAIL = " · ";
-const NEW_CONVERSATION = "New conversation";
+const NEW_CHAT = "New chat";
 const WORKSPACE = "Workspace";
-const AGENTS = "Agents";
+const APPS = "Apps";
 const ADMINISTRATION = "Administration";
 const INVALID_LINK = "Invalid link";
 
@@ -40,9 +40,9 @@ function where(
   const named = (agentId: string) => agents.find((agent) => agent.id === agentId)?.name;
   switch (route.kind) {
     case "home":
-      return [NEW_CONVERSATION, main?.name];
+      return [NEW_CHAT, main?.name];
     case "new-chat":
-      return [NEW_CONVERSATION, named(route.agentId)];
+      return [NEW_CHAT, named(route.agentId)];
     case "chat": {
       const row = rows.find(
         (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
@@ -54,7 +54,7 @@ function where(
     case "conversation-slot":
       return [route.slot, named(route.agentId)];
     case "agents":
-      return [AGENTS];
+      return [APPS];
     case "agent":
       return [AGENT_TAB_LABELS[route.tab], named(route.agentId)];
     case "workspace":

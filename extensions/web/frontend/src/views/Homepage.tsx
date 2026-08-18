@@ -10,7 +10,7 @@ export function Homepage({ agent }: { agent: Agent }) {
   const read = usePanelRead<HomepageRead>("/agents/" + agent.id + "/homepage");
   if (read.phase === "loading") return null;
   if (read.phase === "failed") return <PanelEmpty>{read.message}</PanelEmpty>;
-  if (read.payload.state === "none") {
+  if (read.payload.state !== "set") {
     return <PanelEmpty>{agent.name} has not built its homepage.</PanelEmpty>;
   }
   return (

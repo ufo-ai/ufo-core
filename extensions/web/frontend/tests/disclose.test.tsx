@@ -96,7 +96,7 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
   let release: ((value: Response) => void) | null = null;
   wire({
     "/transcript": () => json({ messages: [] }),
-    ...conversations([PRIVATE]),
+    ...conversations([PRIVATE, { ...WALLED, disclosable: true }]),
     "/intents": () =>
       new Promise<Response>((resolve) => {
         release = resolve;
@@ -104,16 +104,17 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(await disclosable());
+  const rows = await screen.findAllByRole("button", { name: /Private/ });
+  await userEvent.click(rows[0]);
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
   await waitFor(() => expect(release).not.toBeNull());
-  await userEvent.click(screen.getByRole("button", { name: "All conversations" }));
+  await userEvent.click(screen.getByRole("button", { name: /Private channel/ }));
 
   release!(Response.json({ applied: true, message: "Recorded." }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
-  expect(screen.getByRole("button", { name: /Private/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Open transcript" })).toBeTruthy();
 });
 
 test("an acknowledgement in flight for one conversation never opens over another", async () => {
@@ -134,7 +135,6 @@ test("an acknowledgement in flight for one conversation never opens over another
   await userEvent.click(openers[0]);
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
   await waitFor(() => expect(release).not.toBeNull());
-  await userEvent.click(screen.getByRole("button", { name: "All conversations" }));
   const again = await screen.findAllByRole("button", { name: /Private/ });
   await userEvent.click(again[1]);
 
@@ -199,12 +199,25 @@ test("a permalink to a conversation naming no member is unshared, not missing", 
   expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
 });
 
-test("leaving the acknowledgement returns to the listing without reading", async () => {
-  wire(conversations([PRIVATE]));
+/** A read that failed is not an app with no conversations: the column states the error, or the
+ *  member takes an empty list for the answer and never learns the projection refused. */
+test("a failed conversations read states the error rather than an empty column", async () => {
+  wire({ "/conversations": () => new Response("nope", { status: 503 }) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+
+  expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
+  expect(screen.queryByText("No conversation with assistant yet.")).toBeNull();
+});
+
+/** The acknowledgement stands beside the listing rather than over it, so the row that raised it is
+ *  still there to leave by — and nothing is read until the member takes it. */
+test("the listing stands beside the acknowledgement, which reads nothing until it is taken", async () => {
+  const { calls } = wire(conversations([PRIVATE]));
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
-  await userEvent.click(screen.getByRole("button", { name: "All conversations" }));
 
+  expect(await screen.findByRole("button", { name: "Open transcript" })).toBeTruthy();
   expect(await disclosable()).toBeTruthy();
+  expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
 });

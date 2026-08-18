@@ -39,6 +39,11 @@ beforeEach(() => {
   useStreamFake();
 });
 
+async function openAdministration() {
+  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Administration" }));
+}
+
 test("the built page names a hashed module and stylesheet under this surface", () => {
   const page = builtPage();
   for (const ref of page.matchAll(/(?:src|href)="([^"]+)"/g)) {
@@ -147,7 +152,7 @@ test("an admin is offered administration, which reads the admin projection", asy
   });
   render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
+  await openAdministration();
   expect(await screen.findByText("Seated")).toBeTruthy();
   expect(screen.getByText("Every member")).toBeTruthy();
   expect(screen.getByText("No spend caps are set.")).toBeTruthy();
@@ -155,41 +160,30 @@ test("an admin is offered administration, which reads the admin projection", asy
   expect(document.querySelectorAll("h1").length).toBe(1);
 });
 
-test("the workspace entry stands at the foot of the sidebar, under the rail and over the member", () => {
+test("the top bar names the categories on the left and workspace and the member on the right", () => {
   wire({});
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const workspace = screen.getByRole("button", { name: "Workspace" });
-  const nav = screen.getByRole("navigation", { name: "Workspace" });
-  const footer = nav.querySelector("footer")!;
-  expect(footer.contains(workspace)).toBe(false);
-  expect(workspace.closest("ul")!.nextElementSibling).toBe(footer);
-  expect(within(nav).getByRole("button", { name: "Agents" }).closest("ul")!.contains(workspace)).toBe(
-    false,
-  );
+  const bar = screen.getByRole("navigation", { name: "Primary" });
+  const names = within(bar)
+    .getAllByRole("button")
+    .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
+  expect(names).toEqual(["Chat", "Apps", "Artifacts", "Radar", "Search apps", "Workspace"]);
+  const account = screen.getByRole("button", { name: MEMBER.email });
+  expect(bar.contains(account)).toBe(false);
+  expect(bar.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
-test("a collapsed sidebar keeps the admin entry for the narrow strip", async () => {
-  wire({});
-  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
-
-  await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
-
-  const gear = screen.getByRole("button", { name: "Administration", hidden: true });
-  expect(gear.className).toContain("max-narrow:block");
-});
-
-test("a collapsed sidebar drops the wordmark and expands from the header toggle", async () => {
+test("the member's menu states who is signed in and offers the theme choice", async () => {
   wire({});
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
 
-  expect(screen.getByRole("img", { name: "ufo", hidden: true }).getAttribute("class")).toContain(
-    "hidden",
-  );
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
-  expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
+  expect(await screen.findByText(MEMBER.email)).toBeTruthy();
+  expect(screen.getByText("Member")).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: /Theme/ })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Administration" })).toBeNull();
 });
 
 const SECOND_AGENT = {
@@ -229,7 +223,7 @@ async function administration(routes: Record<string, Route>) {
       onAgents={() => {}}
     />,
   );
-  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
+  await openAdministration();
 }
 
 /** Revoking is destructive, so it arms on the first press and commits on the second, as every other
@@ -279,7 +273,7 @@ test("an agent's record carries its surfaces and the web access grant, and the r
     />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
+  await openAdministration();
   await screen.findByText("second");
   expect(screen.queryByPlaceholderText("email@work.com")).toBeNull();
   expect(screen.queryByText("Slack, Terminal")).toBeNull();
@@ -416,7 +410,7 @@ test("a failed administration read stays inside the scrolling frame the view own
   });
   render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
+  await openAdministration();
   const message = await screen.findByText("Error 500 — reload to retry.");
   expect(message.closest("main")).not.toBeNull();
 });

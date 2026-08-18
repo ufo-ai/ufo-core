@@ -3,9 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import { agentHash } from "@/lib/route";
 
-import { AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import { AGENT, MEMBER, json, openAgentSettings, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -23,9 +22,12 @@ const SKILLS = [
 
 const NO_COMMUNITY = { "/skills/community": () => json({ skills: [] }) };
 
-function renderSkills() {
-  location.hash = agentHash(AGENT.id, "skills");
-  return render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+/** The skills stand on a tab of the app's own settings dialog, which the index's gear opens. */
+async function renderSkills() {
+  location.hash = "#/agents/" + AGENT.id;
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings();
+  await userEvent.click(await screen.findByRole("tab", { name: "Skills" }));
 }
 
 /** The tab opens on the directory, so every read of the agent's own skills starts with the pick
@@ -36,12 +38,12 @@ async function openInstalled() {
 
 test("the agent skills tab renders items without a picker or Refresh", async () => {
   wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  renderSkills();
+  await renderSkills();
   await openInstalled();
 
   expect(await screen.findByText("mine")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
-  const panel = within(screen.getByTestId("panel"));
+  const panel = within(screen.getByRole("tabpanel"));
   expect(panel.queryByRole("combobox", { name: "Agent" })).toBeNull();
   expect(panel.queryByRole("button", { name: "Refresh" })).toBeNull();
   expect(panel.queryByRole("columnheader")).toBeNull();
@@ -52,7 +54,7 @@ test("the agent skills tab renders items without a picker or Refresh", async () 
 
 test("an item opens the whole skill read-only, and states its description there", async () => {
   wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  renderSkills();
+  await renderSkills();
   await openInstalled();
 
   expect(screen.queryByText("member skill")).toBeNull();
@@ -70,7 +72,7 @@ test("an item opens the whole skill read-only, and states its description there"
 
 test("items sort custom ahead of built-in", async () => {
   wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  renderSkills();
+  await renderSkills();
   await openInstalled();
 
   expect(await screen.findByText("mine")).toBeTruthy();
@@ -82,13 +84,13 @@ test("items sort custom ahead of built-in", async () => {
 
 test("an item states where its skill came from, and the filter names collections", async () => {
   wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  renderSkills();
+  await renderSkills();
   await openInstalled();
 
   expect(await screen.findByText("mine")).toBeTruthy();
   expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
   expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
-  const tabs = within(screen.getByTestId("panel"));
+  const tabs = within(screen.getByRole("tabpanel"));
   expect(tabs.queryByRole("tab", { name: "Custom" })).toBeNull();
   expect(tabs.queryByRole("tab", { name: "Built-in" })).toBeNull();
   expect(tabs.queryByRole("tab", { name: "All" })).toBeNull();
@@ -106,7 +108,7 @@ test("New skill posts the prepared skill intent for the pane's agent", async () 
     },
     "/transcript": () => json({ messages: [] }),
   });
-  renderSkills();
+  await renderSkills();
 
   await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
   await userEvent.type(await screen.findByLabelText("Name"), "fresh");
@@ -134,7 +136,7 @@ test("Delete stands in the skill's own dialog, and only for a custom skill", asy
     },
     "/transcript": () => json({ messages: [] }),
   });
-  renderSkills();
+  await renderSkills();
   await openInstalled();
 
   expect(await screen.findByText("mine")).toBeTruthy();
@@ -162,7 +164,7 @@ test("Delete stands in the skill's own dialog, and only for a custom skill", asy
 
 test("the blank names the agent, and the bar holds the only New skill act", async () => {
   wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
-  renderSkills();
+  await renderSkills();
   await openInstalled();
 
   expect(await screen.findByText("No skill has been saved onto assistant yet.")).toBeTruthy();

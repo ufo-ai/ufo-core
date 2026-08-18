@@ -47,14 +47,14 @@ beforeEach(() => {
 });
 
 test("every page names where the member is, innermost first, then the product", () => {
-  expect(titled({ kind: "home" })).toBe("New conversation · assistant · ufo");
-  expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New conversation · second · ufo");
-  expect(titled({ kind: "agents" })).toBe("Agents · ufo");
+  expect(titled({ kind: "home" })).toBe("New chat · assistant · ufo");
+  expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New chat · second · ufo");
+  expect(titled({ kind: "agents" })).toBe("Apps · ufo");
   expect(titled({ kind: "agent", agentId: AGENT_ID, tab: "home", ...PLACE })).toBe(
     "Home · assistant · ufo",
   );
-  expect(titled({ kind: "agent", agentId: AGENT_ID, tab: "skills", ...PLACE })).toBe(
-    "Skills · assistant · ufo",
+  expect(titled({ kind: "agent", agentId: AGENT_ID, tab: "conversations", ...PLACE })).toBe(
+    "Conversations · assistant · ufo",
   );
   expect(titled({ kind: "workspace", view: "team", ...PLACE })).toBe("Team · Workspace · ufo");
   expect(titled({ kind: "workspace", view: "credentials", ...PLACE })).toBe(
@@ -97,7 +97,7 @@ test("the tab follows the hash the member opens", async () => {
   await waitFor(() => expect(document.title).toBe("Pick one thread · assistant · ufo"));
 
   location.hash = "#/agents";
-  await waitFor(() => expect(document.title).toBe("Agents · ufo"));
+  await waitFor(() => expect(document.title).toBe("Apps · ufo"));
 });
 
 test("a tab whose session ended says so", async () => {

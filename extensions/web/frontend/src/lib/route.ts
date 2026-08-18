@@ -1,10 +1,4 @@
-export const AGENT_TABS = [
-  "home",
-  "settings",
-  "conversations",
-  "radar",
-  "skills",
-] as const;
+export const AGENT_TABS = ["home", "conversations"] as const;
 
 export const WORKSPACE_TABS = [
   "team",
@@ -15,7 +9,7 @@ export const WORKSPACE_TABS = [
   "usage",
 ] as const;
 
-export const SECTIONS = ["radar", "artifacts"] as const;
+export const SECTIONS = ["artifacts", "radar"] as const;
 
 export type AgentTab = (typeof AGENT_TABS)[number];
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];

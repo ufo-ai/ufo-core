@@ -240,7 +240,7 @@ export function PaneHeader({
   actions?: ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-md border-b border-edge px-2xl py-lg">
+    <div className="box-content flex min-h-(--size-control) items-center gap-md border-b border-edge px-2xl py-lg">
       <Breadcrumb className="min-w-0">
         <BreadcrumbList className="flex-nowrap">
           {parent ? (

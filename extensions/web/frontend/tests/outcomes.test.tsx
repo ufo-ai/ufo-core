@@ -14,6 +14,7 @@ import {
   TRIGGER_KIND,
   TURN_ID,
   json,
+  openAgentSettings,
   objectIndex,
   useStreamFake,
   wire,
@@ -42,13 +43,14 @@ beforeEach(() => {
 });
 
 test("a connect intent opens the stream for the turn it reports and shows the consent link", async () => {
-  location.hash = "#/agents/" + AGENT.id + "/settings";
+  location.hash = "#/agents/" + AGENT.id;
   wire({
     "/connections": () => json({ connections: [] }),
     "/settings": () => json(SETTINGS),
     "/intents": () => json({ applied: true, message: "Requested.", turn_id: TURN_ID }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings("assistant", "Connectors");
 
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
@@ -385,10 +387,10 @@ test("a refused store states the reason the server gave and keeps the field", as
   expect(screen.getByLabelText("the key")).toBeTruthy();
 });
 
-test("the scheduled, settings, and skills refusals tone their notices", async () => {
+test("the scheduled and settings refusals tone their notices", async () => {
   const refuse = () => json({ applied: false, message: "The workspace refuses it." });
 
-  location.hash = "#/agents/" + AGENT.id + "/radar?chip=scheduled_task";
+  location.hash = "#/radar?chip=scheduled_task";
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
@@ -402,7 +404,7 @@ test("the scheduled, settings, and skills refusals tone their notices", async ()
   await refusedNotice("The workspace refuses it.");
   first.unmount();
 
-  location.hash = "#/agents/" + AGENT.id + "/settings";
+  location.hash = "#/agents/" + AGENT.id;
   wire({
     "/settings": () => json(SETTINGS),
     "/connections": () => json({ connections: [] }),
@@ -410,18 +412,8 @@ test("the scheduled, settings, and skills refusals tone their notices", async ()
     "/intents": refuse,
   });
   const second = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await openAgentSettings();
   await userEvent.click(await screen.findByRole("button", { name: "Save" }));
   await refusedNotice("The workspace refuses it.");
   second.unmount();
-
-  location.hash = "#/agents/" + AGENT.id + "/skills";
-  wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }), "/intents": refuse });
-  const third = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
-  await userEvent.type(await screen.findByLabelText("Name"), "triage");
-  await userEvent.type(screen.getByLabelText("Description"), "Load when triaging.");
-  await userEvent.type(screen.getByLabelText("Instructions"), "steps");
-  await userEvent.click(screen.getByRole("button", { name: "Save" }));
-  await refusedNotice("The workspace refuses it.");
-  third.unmount();
 });

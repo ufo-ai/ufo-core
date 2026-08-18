@@ -164,11 +164,11 @@ test("the agent hash defaults to Home, and every other tab takes its own segment
     tab: "home",
     place: {},
   });
-  expect(agentHash(AGENT.id, "settings")).toBe("#/agents/" + AGENT.id + "/settings");
-  expect(parseHash("#/agents/" + AGENT.id + "/settings")).toEqual({
+  expect(agentHash(AGENT.id, "conversations")).toBe("#/agents/" + AGENT.id + "/conversations");
+  expect(parseHash("#/agents/" + AGENT.id + "/conversations")).toEqual({
     kind: "agent",
     agentId: AGENT.id,
-    tab: "settings",
+    tab: "conversations",
     place: {},
   });
 });
