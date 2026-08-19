@@ -340,6 +340,18 @@ test("the app the last phase creates reaches the rail when the turn settles", as
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
+test("the New application act stands under the app rows, at the foot of the index", async () => {
+  location.hash = "#/agents";
+  wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
+  render(<Portal />);
+
+  const index = await agentIndex();
+  const act = within(index).getByRole("button", { name: "New application" });
+  const last = within(index).getByRole("button", { name: /^Research/ });
+
+  expect(last.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
 /** A phone screen has no width for a column beside the page, so the nav drawer holds the index
  *  there and the app's own pane is the page — the main app's until the member picks another. */
 test("the drawer holds the apps index at a phone width, and a pick shuts it", async () => {

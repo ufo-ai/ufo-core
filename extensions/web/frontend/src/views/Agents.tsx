@@ -54,7 +54,7 @@ const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
   skills: "Skills",
 };
 
-/** The apps screen: a thin index — the New application act over one row per app, the open app's
+/** The apps screen: a thin index — one row per app under the New application act, the open app's
  *  settings behind the gear beside it — next to a wide pane holding the selected app, or the
  *  app-building wizard while a run is open. On a narrow screen the pane is the page and the nav
  *  drawer holds the index. */
@@ -97,19 +97,14 @@ export function Agents({
   const index = useDrawerList(
     <div
       className={cn(
-        "flex min-h-0 flex-col gap-2xl overflow-y-auto",
-        "border-r border-edge bg-sidebar px-sm py-2xl max-narrow:border-r-0 max-narrow:py-0",
+        "flex min-h-0 flex-col",
+        "border-r border-edge bg-sidebar py-2xl max-narrow:border-r-0 max-narrow:py-0",
       )}
     >
-      <nav aria-label="Agents" className="flex shrink-0 flex-col gap-sm">
-        {/* Every member is offered the act: the `agent` kind admits a create from any speaking
-            member and stamps them the owner, and the wizard rides the main agent's own chat. */}
-        {mainAgent ? (
-          <Button variant="send" size="bar" className="shrink-0" onClick={build}>
-            New application
-          </Button>
-        ) : null}
-        <ul className="m-0 flex list-none flex-col gap-px p-0">
+      {/* The list carries the column's scroll so the act below it stands at the bottom edge
+          however many apps the workspace holds. */}
+      <nav aria-label="Agents" className="flex min-h-0 flex-1 flex-col gap-sm">
+        <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-px overflow-y-auto px-sm py-0">
           {/* The run in flight, named the way the wizard's own pane is until the conversation has
               a title of its own. While the pane shows it states where the member already is;
               while an app holds the pane instead, the row is the way back to the run. It is not
@@ -193,6 +188,13 @@ export function Agents({
             );
           })}
         </ul>
+        {/* Every member is offered the act: the `agent` kind admits a create from any speaking
+            member and stamps them the owner, and the wizard rides the main agent's own chat. */}
+        {mainAgent ? (
+          <Button variant="send" size="bar" className="mx-sm shrink-0" onClick={build}>
+            New application
+          </Button>
+        ) : null}
       </nav>
     </div>,
   );
