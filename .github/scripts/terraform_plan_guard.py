@@ -7,6 +7,7 @@ import sys
 REGENERABLE_RESOURCE_TYPES = frozenset(
     {
         "aws_acm_certificate",
+        "aws_acm_certificate_validation",
         "aws_ecr_lifecycle_policy",
         "aws_elasticache_subnet_group",
         "aws_s3_bucket_server_side_encryption_configuration",
@@ -31,6 +32,7 @@ REGENERABLE_RESOURCE_TYPES = frozenset(
     }
 )
 REGENERABLE_MODULE_RESOURCE_TYPES: dict[str, frozenset[str]] = {
+    "module.platform": frozenset({"cloudflare_dns_record"}),
     "module.platform.module.eks": frozenset(
         {
             "aws_ec2_tag",

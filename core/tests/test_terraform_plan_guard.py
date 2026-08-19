@@ -49,6 +49,10 @@ PERSISTENT_DELETIONS = (
 )
 REGENERABLE_TYPE_DELETIONS = (
     ("module.platform.aws_acm_certificate.sandbox_proxy_public", "aws_acm_certificate"),
+    (
+        "module.platform.aws_acm_certificate_validation.sandbox_proxy_public",
+        "aws_acm_certificate_validation",
+    ),
     ("module.platform.aws_ecr_lifecycle_policy.this", "aws_ecr_lifecycle_policy"),
     ("module.platform.aws_elasticache_subnet_group.redis", "aws_elasticache_subnet_group"),
     (
@@ -78,6 +82,10 @@ REGENERABLE_TYPE_DELETIONS = (
     ("module.platform.tls_self_signed_cert.egress_ca", "tls_self_signed_cert"),
 )
 REGENERABLE_MODULE_DELETIONS = (
+    (
+        'module.platform.cloudflare_dns_record.sandbox_proxy_validation["sandbox-proxy.testing.flyingobject.ai"]',
+        "cloudflare_dns_record",
+    ),
     (
         'module.platform.module.eks.aws_ec2_tag.cluster_primary_security_group["Environment"]',
         "aws_ec2_tag",
@@ -210,16 +218,22 @@ def test_regenerable_cases_cover_the_guard_tables() -> None:
     assert {resource_type for _, resource_type in REGENERABLE_TYPE_DELETIONS} == (
         guard.REGENERABLE_RESOURCE_TYPES
     )
+
+    def owner(address: str) -> str | None:
+        matches = [
+            prefix
+            for prefix in guard.REGENERABLE_MODULE_RESOURCE_TYPES
+            if address.startswith(f"{prefix}.")
+        ]
+        return max(matches, key=len) if matches else None
+
     for prefix, resource_types in guard.REGENERABLE_MODULE_RESOURCE_TYPES.items():
         assert {
             resource_type
             for address, resource_type in REGENERABLE_MODULE_DELETIONS
-            if address.startswith(f"{prefix}.")
+            if owner(address) == prefix
         } == resource_types
-    assert all(
-        any(address.startswith(f"{prefix}.") for prefix in guard.REGENERABLE_MODULE_RESOURCE_TYPES)
-        for address, _ in REGENERABLE_MODULE_DELETIONS
-    )
+    assert all(owner(address) is not None for address, _ in REGENERABLE_MODULE_DELETIONS)
 
 
 def test_local_cases_name_declared_resources() -> None:
