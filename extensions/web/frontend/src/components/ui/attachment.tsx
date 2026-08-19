@@ -95,13 +95,29 @@ export function AttachmentGroup({ className, ...props }: ComponentProps<"div">) 
   );
 }
 
-const PDF_MEDIA_TYPE = "application/pdf";
+const ATTACHMENT_BADGES: Record<string, string> = {
+  pdf: "PDF",
+  docx: "DOCX",
+  xlsx: "XLSX",
+  pptx: "PPTX",
+  csv: "CSV",
+  md: "MD",
+  svg: "SVG",
+  mp4: "MP4",
+  mov: "MOV",
+  webm: "WEBM",
+  mkv: "MKV",
+};
 
 /** What a card says it is a picture of, or nothing for a file that is its own picture. A rendered
- *  page is a picture of a document and reads as one only while something names the document type it
- *  came from; an image needs no label, because the label would be the picture. */
-export function attachmentBadge(mediaType: string): string | null {
-  return mediaType === PDF_MEDIA_TYPE ? "PDF" : null;
+ *  page or a video's first frame is a picture of a document and reads as one only while something
+ *  names the kind of file it came from; the name carries that where the browser's media type does
+ *  not (empty for `.md`, inconsistent for office types), so the badge is read off the extension. An
+ *  image needs no label, because the label would be the picture — a raster type maps to nothing. */
+export function attachmentBadgeFor(filename: string): string | null {
+  const dot = filename.lastIndexOf(".");
+  const ext = dot === -1 ? "" : filename.slice(dot + 1).toLowerCase();
+  return ATTACHMENT_BADGES[ext] ?? null;
 }
 
 /** One file drawn as the thing it is rather than as its name: a thumbnail card holding the picture,
@@ -118,7 +134,6 @@ export function AttachmentThumbnail({
   filename,
   previewUrl,
   loading = false,
-  mediaType,
   className,
   children,
 }: {
@@ -127,7 +142,6 @@ export function AttachmentThumbnail({
   /** The picture is still being rendered — draw a shimmer over the card so the member sees a
    *  preview is coming rather than a bare name that may or may not gain one. */
   loading?: boolean;
-  mediaType: string;
   className?: string;
   /** What the card carries over its picture beside the badge — the act that takes the file back
    *  off the message being written. */
@@ -136,7 +150,7 @@ export function AttachmentThumbnail({
   const [failed, setFailed] = useState<string | null>(null);
   const drawn = previewUrl !== null && failed !== previewUrl ? previewUrl : null;
   const shimmering = loading && drawn === null;
-  const badge = attachmentBadge(mediaType);
+  const badge = attachmentBadgeFor(filename);
   return (
     <div
       data-slot="attachment-thumbnail"
@@ -192,18 +206,23 @@ export function AttachmentBadge({ className, ...props }: ComponentProps<"span">)
 
 const PICKED_PICTURE_MAX_BYTES = 10 * 1024 * 1024;
 const PICKED_PICTURE_TYPES = /^image\/(gif|jpeg|png|webp)$/;
-const PICKED_DOCUMENT_MAX_BYTES = 25 * 1024 * 1024;
+// One ceiling for every file the preview route renders, document and video alike. The route refuses
+// a body over MAX_REQUEST_BYTES (25 MB, `preview` in ufo_ext_web/surface.py), so a file admitted
+// over that is uploaded whole only to earn a 413 and fall back to a bare name.
+const PICKED_RENDER_MAX_BYTES = 25 * 1024 * 1024;
 const PICKED_DOCUMENT_TYPES = /\.(pdf|docx|xlsx|pptx|csv|md|svg)$/i;
+const PICKED_VIDEO_TYPES = /\.(mp4|mov|webm|mkv)$/i;
 
 /** The picture of a file the member has picked but not sent yet.
  *
  *  A raster image is read straight off the file into a `data:` URL — the page's policy admits those
- *  and no `blob:` at all, and a browser draws them safely. A document (pdf, office, csv, md, svg) is
- *  sent to the preview service, which renders its first page to a PNG and hands it straight back;
- *  the page draws that PNG, never the document's own bytes, so even an SVG — a document that can
- *  carry script — is safe here because the page never draws it, only the raster the service made of
- *  it. Anything else, or a file over the ceiling, is left as a named card. Nothing is stored while
- *  the member is still writing the message. */
+ *  and no `blob:` at all, and a browser draws them safely. A document (pdf, office, csv, md, svg) or
+ *  a video (mp4, mov, webm, mkv) is sent to the preview service, which renders its first page — or a
+ *  video's first frame — to a PNG and hands it straight back; the page draws that PNG, never the
+ *  file's own bytes, so even an SVG — a document that can carry script — is safe here because the
+ *  page never draws it, only the raster the service made of it. Anything else, or a file over its
+ *  ceiling, is left as a named card. Nothing is stored while the member is still writing the
+ *  message. */
 type PickedPicture = { preview: string | null; loading: boolean };
 
 function usePickedPicture(file: File): PickedPicture {
@@ -222,10 +241,13 @@ function usePickedPicture(file: File): PickedPicture {
       };
       reader.readAsDataURL(blob);
     };
+    const rendered =
+      (PICKED_DOCUMENT_TYPES.test(file.name) || PICKED_VIDEO_TYPES.test(file.name)) &&
+      file.size <= PICKED_RENDER_MAX_BYTES;
     if (PICKED_PICTURE_TYPES.test(file.type) && file.size <= PICKED_PICTURE_MAX_BYTES) {
       setState({ preview: null, loading: false });
       draw(file);
-    } else if (PICKED_DOCUMENT_TYPES.test(file.name) && file.size <= PICKED_DOCUMENT_MAX_BYTES) {
+    } else if (rendered) {
       // The card shows a shimmer until the render lands, so the member sees a preview is coming
       // rather than a bare name that may or may not gain a picture.
       setState({ preview: null, loading: true });
@@ -267,7 +289,6 @@ export function PickedThumbnail({
       filename={file.name}
       previewUrl={preview}
       loading={loading}
-      mediaType={file.type}
       className={className}
     >
       {children}

@@ -20,7 +20,7 @@ import {
   AttachmentThumbnail,
   AttachmentTitle,
   PickedThumbnail,
-  attachmentBadge,
+  attachmentBadgeFor,
 } from "@/components/ui/attachment";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
@@ -516,7 +516,6 @@ function Attached({ files, picked }: { files: ChatFile[]; picked: File[] }) {
               key={file.filename}
               filename={file.filename}
               previewUrl={file.preview_url}
-              mediaType={file.media_type}
             />
           ))}
     </AttachmentGroup>
@@ -527,7 +526,7 @@ function Attached({ files, picked }: { files: ChatFile[]; picked: File[] }) {
  *  document was rendered to, which wears a badge naming the kind of document it came from. A pane
  *  with no sidebar to open draws it as a link to the file itself. */
 function Picture({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
-  const badge = attachmentBadge(file.media_type);
+  const badge = attachmentBadgeFor(file.filename);
   const drawn = (
     <span className="relative block w-fit">
       <img

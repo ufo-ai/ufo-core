@@ -3631,6 +3631,10 @@ PREVIEW_KINDS = {
     ".csv": "csv",
     ".md": "md",
     ".svg": "svg",
+    ".mp4": "mp4",
+    ".mov": "mov",
+    ".webm": "webm",
+    ".mkv": "mkv",
 }
 
 

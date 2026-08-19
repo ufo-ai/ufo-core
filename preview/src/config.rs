@@ -20,6 +20,7 @@ pub struct Config {
     pub token: String,
     pub pdfium_lib: String,
     pub soffice_bin: String,
+    pub ffmpeg_bin: String,
     pub max_input_bytes: u64,
     pub max_output_bytes: u64,
     pub max_box_px: u32,
@@ -49,6 +50,7 @@ impl Config {
             token: req(m, "UFO_PREVIEW_TOKEN")?,
             pdfium_lib: req(m, "UFO_PREVIEW_PDFIUM_LIB")?,
             soffice_bin: opt(m, "UFO_PREVIEW_SOFFICE_BIN").unwrap_or_else(|| "soffice".into()),
+            ffmpeg_bin: opt(m, "UFO_PREVIEW_FFMPEG_BIN").unwrap_or_else(|| "ffmpeg".into()),
             max_input_bytes: parse_or(m, "UFO_PREVIEW_MAX_INPUT_MB", DEFAULT_MAX_INPUT_MB)?
                 .saturating_mul(1024 * 1024),
             max_output_bytes: parse_or(
@@ -153,6 +155,7 @@ mod tests {
         assert_eq!(c.max_output_bytes, 20 * 1024 * 1024);
         assert_eq!(c.max_pages, 20);
         assert_eq!(c.soffice_bin, "soffice");
+        assert_eq!(c.ffmpeg_bin, "ffmpeg");
         assert!(!c.allow_local);
         assert!(
             c.concurrency <= 4,

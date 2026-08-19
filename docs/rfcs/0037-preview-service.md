@@ -10,8 +10,8 @@ date: 2026-08-18
 > Document previews are rendered inside the sandbox at share time, and only there — a file that
 > never passes through a live sandbox (a composer upload, a re-render after a failed share-time
 > attempt) can never get a preview. This RFC adds `ufo-preview`: a standalone, share-nothing Rust
-> service that turns a document (`pdf docx xlsx pptx csv md svg`) into PNG page rasters, and swaps
-> it in as the **one** preview producer. Bytes never enter the core process: sources arrive at the
+> service that turns a document (`pdf docx xlsx pptx csv md svg`) or a video (`mp4 mov webm mkv`,
+> one extracted frame) into PNG page rasters, and swaps it in as the **one** preview producer. Bytes never enter the core process: sources arrive at the
 > service by presigned GET or direct multipart, and the finished PNG leaves by a presigned PUT the
 > caller supplies in the request — one hop each way, no call back into core. The presigned URL is
 > itself the store capability, so a sandbox needs no service credential.
@@ -74,7 +74,7 @@ fetches.
 
 | `request` field | Meaning |
 |---|---|
-| `kind` | `pdf\|docx\|xlsx\|pptx\|csv\|md\|svg`; cross-checked against magic bytes, mismatch refused |
+| `kind` | `pdf\|docx\|xlsx\|pptx\|csv\|md\|svg\|mp4\|mov\|webm\|mkv`; cross-checked against magic bytes, mismatch refused |
 | `source_url` | presigned GET, exclusive with the `file` part |
 | `max_width`, `max_height` | pixel box; pages render to fit, aspect preserved |
 | `pages` | page count from page 1; default 1, capped |
@@ -118,12 +118,18 @@ and the render is answered 502 inside the tunnel. Turn liveness is checked at CO
 | Kind | To PDF | Then |
 |---|---|---|
 | `pdf` | — | `preview-worker` |
-| `docx xlsx pptx csv svg` | `soffice --headless --convert-to pdf`, per-request `-env:UserInstallation` profile — the recipe `builtins.py:112` proves | `preview-worker` |
-| `md` | `pulldown-cmark` in-process (pure Rust on untrusted text) → HTML → `soffice` | `preview-worker` |
+| `docx xlsx pptx svg` | `soffice --headless --convert-to pdf`, per-request `-env:UserInstallation` profile — the recipe `builtins.py:112` proves | `preview-worker` |
+| `md csv` | rendered to an HTML document in-process (pure Rust on untrusted text — `pulldown-cmark` for markdown, a `csv`-crate parse into a bordered `<table>` for CSV) → `soffice` | `preview-worker` |
+| `mp4 mov webm mkv` | — | `ffmpeg` extracts one frame to PNG directly |
+
+CSV goes through the controlled HTML table rather than Calc's delimiter-guessing gridless print, so
+the preview is an actual grid. A spreadsheet (`csv`, `xlsx`) renders to a full sheet it does not
+fill, so `preview-worker` crops those pages to their content box — the grid, not a grid marooned in
+white.
 
 `preview-worker` is a second bin target in the crate wrapping `pdfium-render`: reads the PDF,
-renders pages 1..n into the box, writes PNGs, exits. A malformed document kills its child, never
-the service.
+renders pages 1..n into the box, crops to content when asked, writes PNGs, exits. A video skips it —
+`ffmpeg` writes the frame PNG directly. A malformed document kills its child, never the service.
 
 ### Isolation and caps
 
@@ -179,7 +185,7 @@ the service's contractual reply. The full sandbox → proxy → service → S3 l
 The web composer shows a member a picture of a document they have picked but not yet sent, and the
 picture is the service's, not a client-side renderer's — one renderer for every surface. A raster
 image is still drawn straight off the file (the browser does that safely); a document
-(`pdf docx xlsx pptx csv md svg`) goes to the service.
+(`pdf docx xlsx pptx csv md svg`) or a video (`mp4 mov webm mkv`) goes to the service.
 
 - Core exposes `SurfaceContext.render_preview(kind, data) -> bytes | None`: it posts the bytes to the
   service's `inline` sink with the deploy's `UFO_PREVIEW_TOKEN` and hands the PNG straight back,

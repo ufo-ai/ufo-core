@@ -28,6 +28,7 @@ fn renders_first_page_within_box() {
             "800",
             "800",
             "1",
+            "0",
         ])
         .output()
         .unwrap();
@@ -57,6 +58,7 @@ fn renders_two_pages() {
             "400",
             "400",
             "5",
+            "0",
         ])
         .output()
         .unwrap();
@@ -80,6 +82,7 @@ fn garbage_pdf_exits_nonzero() {
             "800",
             "800",
             "1",
+            "0",
         ])
         .output()
         .unwrap();

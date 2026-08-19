@@ -100,9 +100,25 @@ impl Render {
             .await
             .map_err(|e| Refusal::RenderTimeout(format!("spool: {e}")))?;
         drop(bytes);
+        if kind.is_video() {
+            convert::video_frame(&input, work.path(), max_w, max_h, &self.cfg).await?;
+            let (width, height) = png_size(&work.path().join("out").join("page-01.png")).await?;
+            let meta = WorkerMeta {
+                page_count: 1,
+                pages: vec![WorkerPage { width, height }],
+            };
+            return self.package(work.path(), 1, meta).await;
+        }
         let pdf = convert::to_pdf(kind, &input, work.path(), &self.cfg).await?;
         let meta = self
-            .rasterize(&pdf, work.path(), max_w, max_h, pages)
+            .rasterize(
+                &pdf,
+                work.path(),
+                max_w,
+                max_h,
+                pages,
+                kind.is_spreadsheet(),
+            )
             .await?;
         self.package(work.path(), pages, meta).await
     }
@@ -156,6 +172,7 @@ impl Render {
         max_w: u32,
         max_h: u32,
         pages: u32,
+        crop: bool,
     ) -> Result<WorkerMeta, Refusal> {
         let out = workdir.join("out");
         tokio::fs::create_dir(&out)
@@ -169,6 +186,7 @@ impl Render {
             .arg(max_w.to_string())
             .arg(max_h.to_string())
             .arg(pages.to_string())
+            .arg(if crop { "1" } else { "0" })
             .current_dir(workdir);
         let limits = Limits {
             deadline: self.cfg.raster_timeout,
@@ -285,6 +303,23 @@ async fn is_file(path: &Path) -> bool {
         .await
         .map(|m| m.is_file())
         .unwrap_or(false)
+}
+
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const PNG_IHDR_END: usize = 24;
+
+/// Reads a PNG's pixel dimensions straight from its IHDR (width and height are the two big-endian
+/// u32s at bytes 16..24), without decoding the image.
+async fn png_size(path: &Path) -> Result<(u32, u32), Refusal> {
+    let head = tokio::fs::read(path)
+        .await
+        .map_err(|e| Refusal::RenderTimeout(format!("read frame: {e}")))?;
+    if head.len() < PNG_IHDR_END || !head.starts_with(PNG_SIGNATURE) {
+        return Err(Refusal::UnsupportedType("frame is not a png".into()));
+    }
+    let w = u32::from_be_bytes([head[16], head[17], head[18], head[19]]);
+    let h = u32::from_be_bytes([head[20], head[21], head[22], head[23]]);
+    Ok((w, h))
 }
 
 fn zip_pages(dir: &Path, count: u32) -> std::io::Result<Vec<u8>> {

@@ -11,6 +11,10 @@ pub enum Kind {
     Csv,
     Md,
     Svg,
+    Mp4,
+    Mov,
+    Webm,
+    Mkv,
 }
 
 impl Kind {
@@ -23,6 +27,10 @@ impl Kind {
             "csv" => Some(Kind::Csv),
             "md" => Some(Kind::Md),
             "svg" => Some(Kind::Svg),
+            "mp4" => Some(Kind::Mp4),
+            "mov" => Some(Kind::Mov),
+            "webm" => Some(Kind::Webm),
+            "mkv" => Some(Kind::Mkv),
             _ => None,
         }
     }
@@ -33,6 +41,10 @@ impl Kind {
             Kind::Pdf => head.starts_with(b"%PDF-"),
             Kind::Docx | Kind::Xlsx | Kind::Pptx => head.starts_with(b"PK\x03\x04"),
             Kind::Csv | Kind::Md | Kind::Svg => !head.contains(&0),
+            Kind::Mp4 | Kind::Mov => {
+                head.len() >= 12 && matches!(&head[4..8], b"ftyp" | b"moov" | b"mdat")
+            }
+            Kind::Webm | Kind::Mkv => head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]),
         }
     }
 
@@ -45,7 +57,19 @@ impl Kind {
             Kind::Csv => "csv",
             Kind::Md => "md",
             Kind::Svg => "svg",
+            Kind::Mp4 => "mp4",
+            Kind::Mov => "mov",
+            Kind::Webm => "webm",
+            Kind::Mkv => "mkv",
         }
+    }
+
+    pub fn is_video(&self) -> bool {
+        matches!(self, Kind::Mp4 | Kind::Mov | Kind::Webm | Kind::Mkv)
+    }
+
+    pub fn is_spreadsheet(&self) -> bool {
+        matches!(self, Kind::Csv | Kind::Xlsx)
     }
 }
 
@@ -82,5 +106,45 @@ mod tests {
         assert!(Kind::Md.check_magic("# heading\n".as_bytes()));
         assert!(Kind::Svg.check_magic(b"<svg xmlns='x'/>"));
         assert!(!Kind::Md.check_magic(b"text with \x00 nul"));
+    }
+
+    #[test]
+    fn video_kinds_parse() {
+        for k in ["mp4", "mov", "webm", "mkv"] {
+            assert!(Kind::parse(k).is_some(), "{k}");
+        }
+        assert!(Kind::parse("avi").is_none());
+    }
+
+    #[test]
+    fn mp4_and_mov_require_an_isobmff_box_type() {
+        let mut ftyp = vec![0u8, 0, 0, 0x18];
+        ftyp.extend_from_slice(b"ftypmp42");
+        for k in [Kind::Mp4, Kind::Mov] {
+            assert!(k.check_magic(&ftyp));
+            assert!(k.check_magic(b"\0\0\0\x10moov rest ok"));
+            assert!(k.check_magic(b"\0\0\0\x10mdat rest ok"));
+            assert!(!k.check_magic(b"PK\x03\x04 not video"));
+            assert!(!k.check_magic(b"short"));
+        }
+    }
+
+    #[test]
+    fn webm_and_mkv_require_the_ebml_magic() {
+        let ebml = [0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x02, 0x03];
+        for k in [Kind::Webm, Kind::Mkv] {
+            assert!(k.check_magic(&ebml));
+            assert!(!k.check_magic(b"\0\0\0\x18ftypmp42"));
+        }
+    }
+
+    #[test]
+    fn is_video_partitions_the_kind_set() {
+        for k in [Kind::Mp4, Kind::Mov, Kind::Webm, Kind::Mkv] {
+            assert!(k.is_video(), "{k:?}");
+        }
+        for k in [Kind::Pdf, Kind::Docx, Kind::Csv, Kind::Md, Kind::Svg] {
+            assert!(!k.is_video(), "{k:?}");
+        }
     }
 }

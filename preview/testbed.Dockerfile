@@ -2,7 +2,7 @@ FROM rust:1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-writer libreoffice-calc libreoffice-impress \
         fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
-        curl ca-certificates \
+        ffmpeg curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
 RUN sh /tmp/fetch-pdfium.sh /usr/local/lib/pdfium && rm /tmp/fetch-pdfium.sh
