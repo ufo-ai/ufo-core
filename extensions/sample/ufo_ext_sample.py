@@ -337,7 +337,7 @@ async def _tick(ctx: ExtensionContext) -> None:
 
 async def _hook(ctx: ExtensionContext, request: Request) -> Response:
     body = (await request.body()).decode()
-    await ctx.store.put(ROUTE_KEY, {"body": body})
+    await ctx.store.put(ROUTE_KEY, {"body": body, "home_url": ctx.home_url()})
     return PlainTextResponse(body)
 
 

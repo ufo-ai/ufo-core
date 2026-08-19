@@ -9,6 +9,7 @@ requests the handlers emitted."""
 import asyncio
 import hashlib
 import hmac
+import html
 import itertools
 import json
 import logging
@@ -109,6 +110,7 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
+from ufo.sdk.callback_page import CONNECT_LOGO_PATH
 from ufo.sdk.jobs import untitled_conversation_workspaces
 from ufo.seats import UNRESOLVED_SPEAKER_MESSAGE
 from ufo.serve import _mount_shared_surfaces
@@ -117,6 +119,7 @@ from ufo.workspace import init_workspace_credentials, ws
 
 TEAM_ID = "T0000001"
 BOT_USER_ID = "UBOT00000"
+APP_ID = "A0000001"
 SIGNING_SECRET = "signing-secret"
 CLIENT_ID = "112233.445566"
 CLIENT_SECRET = "client-secret"
@@ -354,6 +357,7 @@ def _mock_transport(
                     "access_token": BOT_TOKEN,
                     "team": {"id": TEAM_ID, "name": "acme"},
                     "bot_user_id": BOT_USER_ID,
+                    "app_id": APP_ID,
                 },
             )
         if url == slack.SLACK_AUTH_TEST_URL:
@@ -1299,6 +1303,10 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
         )
     assert response.status_code == 200
     assert "installed" in response.text
+    # Nothing is left for the member here, so the page draws the mark, offers the one way back into
+    # the conversation, and takes its own tab away where the browser allows it.
+    assert CONNECT_LOGO_PATH in response.text and "window.close()" in response.text
+    assert slack.slack_app_dm_url(APP_ID, TEAM_ID) in html.unescape(response.text)
     assert await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT) == BOT_TOKEN
     assert await _read_identity(blob, workspace_id) == slack.SlackIdentity(
         bot_token_fingerprint=slack.bot_token_fingerprint(BOT_TOKEN),
@@ -1472,6 +1480,60 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
         response = await client.get(
             f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
             params={"code": "stale", "state": sealed},
+        )
+    assert response.status_code == 502
+    # The retry is the whole point of the page, so this one stays open to be read.
+    assert "window.close()" not in response.text and slack.ASK_UFO_AGAIN in response.text
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT)
+
+
+async def test_oauth_callback_refuses_an_install_with_no_app_id(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The install page's only way back into the conversation is built from the app id Slack
+    returns with the token. A response without one is malformed, so the install is refused whole
+    rather than landing a workspace whose finished page leads nowhere."""
+    workspace_id, member_id = await _seed(member_email="owner@acme.com")
+
+    def anonymous(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] == slack.SLACK_OAUTH_ACCESS_URL:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "access_token": BOT_TOKEN,
+                    "team": {"id": TEAM_ID, "name": "acme"},
+                    "bot_user_id": BOT_USER_ID,
+                },
+            )
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    _patch_httpx(monkeypatch, httpx.MockTransport(anonymous))
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (slack_manifest(),),
+        store,
+        blob,
+        _sandboxes(tmp_path),
+        InProcessHub(),
+        StubDbos(),
+        ARTIFACT_SECRET,
+        PUBLIC_BASE_URL,
+        None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
+    )
+    sealed = _install_state(store, workspace_id, member_id)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
+        response = await client.get(
+            f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
+            params={"code": "the-code", "state": sealed},
         )
     assert response.status_code == 502
     with pytest.raises(CredentialSlotUnset):

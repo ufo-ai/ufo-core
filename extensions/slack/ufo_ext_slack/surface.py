@@ -98,7 +98,6 @@ pool — and one share step then posts every file a turn shared as a single mess
 import asyncio
 import hashlib
 import hmac
-import html
 import json
 import logging
 import os
@@ -122,6 +121,7 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
+from ufo.sdk.callback_page import PageLink, callback_page
 from ufo.sdk.context import ExtensionContext, JsonValue, ScopedStore
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import (
@@ -199,6 +199,7 @@ SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
 SLACK_OAUTH_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_OAUTH_ACCESS_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_GET_PERMALINK_URL = "https://slack.com/api/chat.getPermalink"
+SLACK_APP_REDIRECT_URL = "https://slack.com/app_redirect"
 SLACK_OAUTH_CALLBACK_PATH = "oauth"
 SLACK_INSTALL_PAYLOAD = "slack-oauth-install"
 SLACK_INSTALL_TIMEOUT_SECONDS = 20
@@ -221,6 +222,7 @@ SLACK_BOT_SCOPES = (
 )
 TEAM_ID_PATTERN = r"^T[A-Z0-9]+$"
 BOT_USER_ID_PATTERN = r"^[UW][A-Z0-9]+$"
+APP_ID_PATTERN = r"^A[A-Z0-9]+$"
 MALFORMED_IDENTITY_ERROR = "malformed identity"
 
 
@@ -453,13 +455,15 @@ def signing_secret_fingerprint(signing_secret: str) -> str:
 
 @dataclass(frozen=True)
 class SlackInstall:
-    """What one OAuth `oauth.v2.access` exchange yields: the workspace's own bot token and the team
-    and bot-user ids Slack minted it for. The token is the credential; the ids become the surface's
-    identity record, proven by the exchange itself — no `auth.test` round-trip."""
+    """What one OAuth `oauth.v2.access` exchange yields: the workspace's own bot token and the team,
+    bot-user, and app ids Slack minted it for. The token is the credential; the team and bot-user
+    ids become the surface's identity record, proven by the exchange itself — no `auth.test`
+    round-trip. The app id is what the finished install page links back through."""
 
     bot_token: str
     team_id: str
     bot_user_id: str
+    app_id: str
 
 
 async def slack_oauth_exchange(code: str, redirect_uri: str) -> SlackInstall:
@@ -483,13 +487,26 @@ async def slack_oauth_exchange(code: str, redirect_uri: str) -> SlackInstall:
     team = payload.get("team")
     team_id = team.get("id") if isinstance(team, dict) else None
     bot_user_id = payload.get("bot_user_id")
+    app_id = payload.get("app_id")
     if not isinstance(access_token, str) or not access_token:
         raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
     if not isinstance(team_id, str) or not re.match(TEAM_ID_PATTERN, team_id):
         raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
     if not isinstance(bot_user_id, str) or not re.match(BOT_USER_ID_PATTERN, bot_user_id):
         raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
-    return SlackInstall(bot_token=access_token, team_id=team_id, bot_user_id=bot_user_id)
+    if not isinstance(app_id, str) or not re.match(APP_ID_PATTERN, app_id):
+        raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
+    return SlackInstall(
+        bot_token=access_token, team_id=team_id, bot_user_id=bot_user_id, app_id=app_id
+    )
+
+
+def slack_app_dm_url(app_id: str, team_id: str) -> str:
+    """Where the finished install page sends the owner: the conversation with this app's bot user in
+    the workspace they just installed it in. Slack resolves the app to its bot DM itself, so this
+    names no channel, and the `https` form works from a browser whether or not the desktop app is
+    installed."""
+    return f"{SLACK_APP_REDIRECT_URL}?{urlencode({'app': app_id, 'team': team_id})}"
 
 
 SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
@@ -1410,6 +1427,10 @@ async def _declared_files(
     return ()
 
 
+ASK_UFO_AGAIN = "Ask ufo to connect Slack again."
+CONTINUE_IN_SLACK = "Continue in Slack"
+
+
 async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
     """Complete an "Add to Slack" install: verify the sealed install `state` the owner minted names
     this workspace, exchange the returned code for the workspace's bot token, and land the three
@@ -1422,29 +1443,53 @@ async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
     error = request.query_params.get("error")
     if error:
         _LOG.info("slack oauth authorization declined: %s", error)
-        return _install_page("Slack authorization was cancelled.", 400)
+        return callback_page(
+            headline="Slack authorization was cancelled.",
+            detail=ASK_UFO_AGAIN,
+            status=400,
+        )
     state = request.query_params.get("state", "")
     code = request.query_params.get("code", "")
     if not state or not code:
-        return _install_page("This install link is missing its authorization.", 400)
+        return callback_page(
+            headline="This install link is missing its authorization.",
+            detail=ASK_UFO_AGAIN,
+            status=400,
+        )
     try:
         claims = ctx.open_credential_authorization(state)
     except CredentialRequestInvalid:
-        return _install_page("This install link has expired — ask ufo to connect Slack again.", 400)
+        return callback_page(
+            headline="This install link has expired.", detail=ASK_UFO_AGAIN, status=400
+        )
     if not _is_install_state(claims) or claims.workspace_id != ctx.workspace_id:
-        return _install_page("This install link is not valid for this workspace.", 400)
+        return callback_page(
+            headline="This install link is not valid for this workspace.",
+            detail=ASK_UFO_AGAIN,
+            status=400,
+        )
     if ctx.public_base_url is None:
-        return _install_page("This deploy has no public URL configured.", 500)
+        return callback_page(
+            headline="This deploy has no public URL configured.",
+            detail="Ask your operator to set it, then ask ufo to connect Slack again.",
+            status=500,
+        )
     redirect_uri = slack_oauth_redirect_uri(ctx.public_base_url)
     try:
         install = await slack_oauth_exchange(code, redirect_uri)
     except (SlackApiError, SlackIdentityError, httpx.HTTPError) as exchange_error:
         _LOG.warning("slack oauth exchange failed: %s", exchange_error)
-        return _install_page("Slack rejected the authorization — ask ufo to connect again.", 502)
+        return callback_page(
+            headline="Slack rejected the authorization.", detail=ASK_UFO_AGAIN, status=502
+        )
     try:
         await ctx.bind_installation(slack_installation_id(install.team_id))
     except SurfaceInstallationConflict:
-        return _install_page("This Slack workspace is already connected to another ufo.", 409)
+        return callback_page(
+            headline="This Slack workspace is already connected to another ufo.",
+            detail="Ask your operator which one holds it.",
+            status=409,
+        )
     identity = SlackIdentity(
         bot_token_fingerprint=bot_token_fingerprint(install.bot_token),
         team_id=install.team_id,
@@ -1455,16 +1500,12 @@ async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
     )
     await ctx.blob.put(IDENTITY_BLOB_KEY, identity.model_dump_json().encode())
     await _mirror_self_user_id(ctx.workspace_id, identity.bot_user_id)
-    return _install_page("ufo is installed — return to chat and talk to it.", 200)
-
-
-def _install_page(message: str, status: int) -> Response:
-    return Response(
-        f"<!doctype html><meta charset=utf-8><title>Slack · ufo</title>"
-        f"<body style='font:16px system-ui;margin:4rem auto;max-width:32rem;text-align:center'>"
-        f"<p>{html.escape(message)}</p></body>",
-        status_code=status,
-        media_type="text/html",
+    return callback_page(
+        headline="ufo is installed.",
+        link=PageLink(
+            label=CONTINUE_IN_SLACK, url=slack_app_dm_url(install.app_id, install.team_id)
+        ),
+        close=True,
     )
 
 

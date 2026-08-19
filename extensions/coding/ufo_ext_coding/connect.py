@@ -11,7 +11,12 @@ only a selector into that answer — a workspace binds an installation its membe
 `connect_github` mints the install link carrying the sealed state; GitHub returns the member to
 `/ext/coding/installed`, which does the exchange and binds. What lands in the slot is a seal over
 `(workspace, installation)`, so an id typed into the slot through the ordinary credential prompt
-never opens when a token is minted against it."""
+never opens when a token is minted against it.
+
+The return leg has no conversation behind it — the member left one to install an App on an
+organization — so the finished page carries them to the deploy's browser home rather than naming a
+thread it cannot know. A deploy with no browser surface has nowhere to send them, and the page says
+to close the tab instead."""
 
 import os
 from dataclasses import dataclass
@@ -20,6 +25,7 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, Field
 
+from ufo.sdk.callback_page import CLOSE_THIS_PAGE, PageLink, callback_page
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.credentials import authorized_slot_workspace
 from ufo.sdk.http import Request, Response
@@ -32,6 +38,8 @@ ROUTE_PATH = "installed"
 ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 INSTALLATIONS_URL = "https://api.github.com/user/installations"
 INSTALL_URL = f"https://github.com/apps/{APP_SLUG}/installations/new"
+ASK_UFO_AGAIN = "Ask ufo to connect GitHub again."
+RETURN_LABEL = "Return to ufo"
 HTTP_TIMEOUT_SECONDS = 10
 JSON_HEADERS = {"Accept": "application/json"}
 
@@ -149,36 +157,30 @@ async def github_installed(ctx: ExtensionContext, request: Request) -> Response:
     code = request.query_params.get("code", "")
     installation_id = request.query_params.get("installation_id", "")
     if not code or not installation_id:
-        return _page(
-            "GitHub returned without an authorization. Ask ufo to connect GitHub again, and be "
-            "sure to authorize as well as install.",
-            400,
+        return callback_page(
+            headline="GitHub returned without an authorization.",
+            detail="Ask ufo to connect GitHub again, and authorize as well as install.",
+            status=400,
         )
     try:
         reaches = await install_exchange().reaches(code, installation_id)
     except GitHubAuthorizationError:
-        return _page("GitHub declined the authorization — ask ufo to connect again.", 502)
+        return callback_page(
+            headline="GitHub declined the authorization.",
+            detail=ASK_UFO_AGAIN,
+            status=502,
+        )
     if not reaches:
-        return _page(
-            "That installation does not belong to the account that just authorized, so it was not "
-            "connected.",
-            403,
+        return callback_page(
+            headline="That installation does not belong to the account that just authorized.",
+            detail="It was not connected. Ask ufo to connect GitHub again from that account.",
+            status=403,
         )
     await ctx.credentials.bind_installation(GIT_INSTALLATION_SLOT, installation_id)
-    return _page(
-        "GitHub App installation is connected. Git push is available for the repositories this "
-        "installation grants — you can close this tab and return to the conversation.",
-        200,
-    )
-
-
-def _page(message: str, status: int) -> Response:
-    return Response(
-        status_code=status,
-        media_type="text/html",
-        content=(
-            "<!doctype html><html><head><title>GitHub · ufo</title></head>"
-            "<body style='font-family:system-ui;padding:3rem;max-width:34rem'>"
-            f"<p>{message}</p></body></html>"
-        ),
+    home = ctx.home_url()
+    return callback_page(
+        headline="GitHub is connected.",
+        detail="" if home else CLOSE_THIS_PAGE,
+        link=None if home is None else PageLink(label=RETURN_LABEL, url=home),
+        close=True,
     )

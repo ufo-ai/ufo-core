@@ -338,7 +338,7 @@ def run() -> None:
     )
     page_feed = CorePageFeed(blob=blob)
     _launch_jobs(runtime, invoker_for, sync_driver, page_feed)
-    _mount_ext_routes(app, manifests, credentials, index, embed)
+    _mount_ext_routes(app, manifests, credentials, index, embed, config.connect.public_base_url)
     _mount_shared_surfaces(
         app,
         manifests,
@@ -841,11 +841,14 @@ def _mount_ext_routes(
     credentials: CredentialStore | None,
     index: IndexBackend,
     embed: EmbedClient,
+    public_base_url: str | None,
 ) -> None:
     """Mount every extension route under `/ext/<name>/<path>` with a verified workspace-scoped
     context. `RouteSpec.identify` resolves and returns the request's workspace, which core binds for
     the handler; an unresolved request is refused before the handler can touch the database or
-    credentials."""
+    credentials. These routes answer a member's own browser — a provider's return leg lands on one —
+    so the context carries the deploy's public base and browser home, which is how a route renders
+    the link back to a surface that can carry the conversation on."""
     for manifest in manifests:
         if not manifest.routes:
             continue
@@ -854,7 +857,14 @@ def _mount_ext_routes(
                 f"extension {manifest.name!r} serves routes but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = extension_context_for(manifest.name, declared, index, embed)
+        context = extension_context_for(
+            manifest.name,
+            declared,
+            index,
+            embed,
+            public_base_url=public_base_url,
+            home_surface=home_surface(manifests),
+        )
         for spec in manifest.routes:
 
             async def endpoint(

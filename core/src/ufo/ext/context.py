@@ -1041,6 +1041,7 @@ class ExtensionContext:
     model: ModelAccess | None = None
     key_slot_for: Callable[[str], str | None] | None = None
     public_base_url: str | None = None
+    home_surface: str | None = None
     tailer: TurnTailer | None = None
     member_context_read_allowed: bool = False
     scheduled_member_id: UUID | None = None
@@ -1049,6 +1050,19 @@ class ExtensionContext:
     @property
     def workspace_id(self) -> UUID:
         return self.store.workspace_id
+
+    def home_url(self, fragment: str = "") -> str | None:
+        """A link into the deploy's browser portal, or None when this deploy has no public base or
+        installs no browser surface. A route answering a member's browser with nothing left to do
+        renders one, so they land on a surface that can carry the conversation on.
+
+        Core owns both halves, so no extension has to know another's routes: the surface mount path
+        is core's own and `home_surface` is the manifest flag naming the one surface a browser
+        belongs on. `fragment` is the portal's own hash route, which core does not interpret."""
+        if not self.public_base_url or self.home_surface is None:
+            return None
+        base = self.public_base_url.rstrip("/")
+        return f"{base}/surface/{self.home_surface}{fragment}"
 
     async def seated_members(
         self, *, cursor: UUID | None = None, limit: int = 100
@@ -2620,6 +2634,7 @@ def context_for(
     *,
     audience: Audience = SHARED_AUDIENCE,
     public_base_url: str | None = None,
+    home_surface: str | None = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -2658,6 +2673,7 @@ def context_for(
         ),
         key_slot_for=None if model_resolver is None else model_resolver.key_slot_for,
         public_base_url=public_base_url,
+        home_surface=home_surface,
         tailer=tailer,
         member_context_read_allowed=member_context_read,
         scheduled_member_id=scheduled_member_id,

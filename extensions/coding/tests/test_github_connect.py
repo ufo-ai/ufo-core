@@ -28,6 +28,8 @@ from ufo.credentials import (
     open_installation,
     seal_credential_request,
 )
+from ufo.sdk.callback_page import CLOSE_THIS_PAGE, CONNECT_LOGO_PATH
+from ufo.sdk.http import Response
 
 APP_ID = "4396470"
 OURS = "149082716"
@@ -51,9 +53,16 @@ class _Credentials:
         self.bound.append((slot, installation_id))
 
 
+HOME_URL = "https://app.ufo.test/surface/web"
+
+
 class _Ctx:
-    def __init__(self) -> None:
+    def __init__(self, home: str | None = HOME_URL) -> None:
         self.credentials = _Credentials()
+        self.home = home
+
+    def home_url(self, fragment: str = "") -> str | None:
+        return None if self.home is None else f"{self.home}{fragment}"
 
 
 def _github(*, reachable: tuple[str, ...], token: str | None = "user-token") -> httpx.MockTransport:
@@ -224,6 +233,25 @@ async def test_an_installation_the_member_reaches_is_bound() -> None:
     response = await _route(ctx, exchange, code="code", installation_id=OURS)
     assert response.status_code == 200
     assert ctx.credentials.bound == [(connect.GIT_INSTALLATION_SLOT, OURS)]
+    # Nothing is left for the member here, so the page draws the mark, offers the one way back into
+    # the conversation, and takes its own tab away where the browser allows it.
+    page = response.body.decode()
+    assert CONNECT_LOGO_PATH in page and "window.close()" in page
+    assert f'<a href="{HOME_URL}">{connect.RETURN_LABEL}</a>' in page
+
+
+async def test_a_deploy_with_no_browser_home_says_to_close_the_tab() -> None:
+    """A link needs somewhere to go. On a deploy that installs no browser surface there is no such
+    place, so the finished page tells the member the one thing left instead of rendering a link
+    into nothing."""
+    ctx = _Ctx(home=None)
+    exchange = _exchange(transport=_github(reachable=(OURS,)))
+    response = await _route(ctx, exchange, code="code", installation_id=OURS)
+    page = response.body.decode()
+
+    assert response.status_code == 200
+    assert "<a " not in page
+    assert CLOSE_THIS_PAGE in page
 
 
 async def test_an_installation_the_member_does_not_reach_is_refused() -> None:
@@ -261,6 +289,9 @@ async def test_a_declined_code_binds_nothing() -> None:
     response = await _route(ctx, exchange, code="code", installation_id=OURS)
     assert response.status_code == 502
     assert ctx.credentials.bound == []
+    # The retry is the whole point of the page, so this one stays open to be read.
+    assert "window.close()" not in response.body.decode()
+    assert connect.ASK_UFO_AGAIN in response.body.decode()
 
 
 async def test_a_return_leg_without_an_authorization_binds_nothing() -> None:
@@ -275,9 +306,7 @@ async def test_a_return_leg_without_an_authorization_binds_nothing() -> None:
     assert ctx.credentials.bound == []
 
 
-async def _route(
-    ctx: _Ctx, exchange: connect.GitHubInstallExchange, **params: str
-) -> httpx.Response:
+async def _route(ctx: _Ctx, exchange: connect.GitHubInstallExchange, **params: str) -> Response:
     """Drive the real handler with the deploy's exchange stood in for."""
     original = connect.install_exchange
     connect.install_exchange = lambda: exchange  # type: ignore[assignment]

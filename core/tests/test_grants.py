@@ -3,6 +3,7 @@ import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from html import unescape
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
@@ -51,16 +52,15 @@ from ufo.grants import (
 from ufo.sandbox.session import RunToken
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
-from ufo.surfaces.admission import Admission, ConnectResume
-from ufo.surfaces.cli import (
+from ufo.sdk.callback_page import (
+    CALLBACK_PAGE_MAX_BYTES,
     CLOSE_THIS_PAGE,
-    CONNECT_LOGO_CACHE,
-    CONNECT_LOGO_FILE,
     CONNECT_LOGO_PATH,
-    CONNECT_PAGE,
-    CONNECT_PAGE_MAX_BYTES,
-    callback_router,
+    PageLink,
+    callback_page,
 )
+from ufo.surfaces.admission import Admission, ConnectResume
+from ufo.surfaces.cli import CONNECT_LOGO_CACHE, CONNECT_LOGO_FILE, callback_router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
@@ -938,24 +938,58 @@ async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(
     assert after == 1
 
 
-def test_the_connect_page_is_small_and_fetches_only_its_own_mark() -> None:
+def test_the_callback_page_is_small_and_fetches_only_its_own_mark() -> None:
     """A member waits on this page in a browser they opened for one moment, often on a phone off a
     Slack thread, and no session or cache stands behind it. So the document carries its own styling
     and asks for exactly one thing more: the mark, from this same origin on the connection already
-    open. A stylesheet, a font, or a script added later would each cost another round trip on that
-    connection, and the cap plus these two assertions are what keep them out.
+    open. A stylesheet or a font added later would each cost another round trip on that connection,
+    and the cap plus these assertions are what keep them out.
 
-    Inlining the mark instead would put 16 KB on a 600-byte page, and nothing in front of this
+    Inlining the mark instead would put 19 KB on a 700-byte page, and nothing in front of this
     deploy compresses a response — so it is served once and cached for good."""
-    page = CONNECT_PAGE.substitute(headline="GitHub connected.", detail=CLOSE_THIS_PAGE)
+    page = callback_page(headline="GitHub connected.", detail=CLOSE_THIS_PAGE).body.decode()
 
-    assert len(page.encode()) < CONNECT_PAGE_MAX_BYTES
-    assert "<script" not in page
+    assert len(page.encode()) < CALLBACK_PAGE_MAX_BYTES
     # Same origin, so no host to resolve and no second connection to open.
     assert "://" not in page
     assert page.count("src=") == 1 and CONNECT_LOGO_PATH in page
     # It answers in the reader's own theme without a media query, which is the cheapest way to.
     assert "color-scheme:light dark" in page
+    # This page's other variant sends the member back to ask the agent, so it must stay put.
+    assert "<script" not in page
+
+
+def test_a_return_leg_with_nothing_left_to_say_closes_its_own_tab() -> None:
+    """The member is finished here and the agent has the work, so the tab goes away on its own
+    rather than being left for them to deal with. The close runs from the document itself, and the
+    detail line stays the instruction for a browser that refuses to close a tab it did not open."""
+    finished = callback_page(
+        headline="GitHub is connected.", detail=CLOSE_THIS_PAGE, close=True
+    ).body.decode()
+
+    assert "window.close()" in finished and CLOSE_THIS_PAGE in finished
+    # Still one document, one fetch: the close costs no round trip.
+    assert "://" not in finished
+    assert finished.count("src=") == 1
+    assert len(finished.encode()) < CALLBACK_PAGE_MAX_BYTES
+
+
+def test_a_finished_return_leg_links_back_to_the_conversation() -> None:
+    """The close is refused for any tab a script did not open, which is most of them: the member
+    reached this page from a chat link through the provider. A link needs no permission, so it is
+    the half that always works — and it replaces the detail line, because it says the same thing
+    and acts on it. It is styled in `currentColor`, so it needs no colour of its own to hold in
+    either theme, and the rule ships only on a page that has a link."""
+    back = "https://slack.com/app_redirect?app=A1&team=T1"
+    linked = callback_page(
+        headline="ufo is installed.", link=PageLink(label="Continue in Slack", url=back), close=True
+    ).body.decode()
+    plain = callback_page(headline="GitHub connected.", detail=CLOSE_THIS_PAGE).body.decode()
+
+    assert f'<a href="{back}">Continue in Slack</a>' in unescape(linked)
+    assert "<p>" not in linked
+    assert "color:inherit" in linked and "a{" not in plain
+    assert len(linked.encode()) < CALLBACK_PAGE_MAX_BYTES
 
 
 def test_the_connect_mark_is_the_portals_own_file_byte_for_byte() -> None:

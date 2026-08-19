@@ -269,7 +269,7 @@ def _check_routes(manifest: Manifest, store: CredentialStore) -> None:
     if not manifest.routes:
         return
     app = FastAPI()
-    _mount_ext_routes(app, (manifest,), store, None, None)
+    _mount_ext_routes(app, (manifest,), store, None, None, None)
     mounted = {route.path for route in app.routes}
     for spec in manifest.routes:
         assert f"/ext/{manifest.name}/{spec.path.lstrip('/')}" in mounted

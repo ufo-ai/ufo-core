@@ -1091,7 +1091,7 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
 def test_a_route_without_a_credential_key_fails_loud() -> None:
     manifest = _sample_manifest()
     with pytest.raises(RuntimeError, match="serves routes but no credential key"):
-        _mount_ext_routes(FastAPI(), (manifest,), None, None, None)
+        _mount_ext_routes(FastAPI(), (manifest,), None, None, None, None)
 
 
 async def test_job_fires_through_its_scoped_context(db: None) -> None:
@@ -1120,7 +1120,7 @@ async def test_route_reaches_its_scoped_context(db: None, monkeypatch: pytest.Mo
     workspace_id = await _workspace()
     manifest = _sample_manifest()
     app = FastAPI()
-    _mount_ext_routes(app, (manifest,), _credential_store(), None, None)
+    _mount_ext_routes(app, (manifest,), _credential_store(), None, None, None)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://serve") as client:
         response = await client.post(
             f"/ext/{sample.NAME}/{sample.ROUTE_PATH}",
@@ -1139,7 +1139,39 @@ async def test_route_reaches_its_scoped_context(db: None, monkeypatch: pytest.Mo
     assert forged.status_code == 401
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample.NAME)
-        assert await scoped.get(sample.ROUTE_KEY) == {"body": "ping"}
+        assert await scoped.get(sample.ROUTE_KEY) == {"body": "ping", "home_url": None}
+
+
+async def test_a_route_is_handed_the_deploy_base_and_the_browser_home(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider's return leg lands on an extension route with no conversation behind it, so the
+    page it answers with has nowhere of its own to send the member. Only core knows the deploy's
+    public base and which surface a browser belongs on, and it hands the route's context both, as
+    one link the extension does not have to assemble from core's mount paths."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    homed = replace(
+        manifest,
+        surfaces=(replace(manifest.surfaces[0], home=True), *manifest.surfaces[1:]),
+    )
+    app = FastAPI()
+    _mount_ext_routes(app, (homed,), _credential_store(), None, None, "https://ufo.test/")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://serve") as client:
+        response = await client.post(
+            f"/ext/{sample.NAME}/{sample.ROUTE_PATH}",
+            content="ping",
+            headers=_bearer(workspace_id),
+        )
+
+    assert response.status_code == 200
+    with ws(workspace_id):
+        recorded = await ScopedStore(extension=sample.NAME).get(sample.ROUTE_KEY)
+    assert recorded == {
+        "body": "ping",
+        "home_url": f"https://ufo.test/surface/{manifest.surfaces[0].name}",
+    }
 
 
 async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> None:

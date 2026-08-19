@@ -1259,7 +1259,7 @@ async def test_shared_oauth_bridge_verifies_workspace_and_lands_the_grant(
     params = {key: values[0] for key, values in parse_qs(bridge.query).items()}
     app = FastAPI()
     app.include_router(callback_router)
-    _mount_ext_routes(app, (composio_manifest.manifest(),), credentials, None, None)
+    _mount_ext_routes(app, (composio_manifest.manifest(),), credentials, None, None, None)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL) as client:
         rejected = await client.get(
