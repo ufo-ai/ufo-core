@@ -103,6 +103,12 @@ root = "./blobs"
 [pack]
 name = "assistant"
 
+[research]
+search_provider = "perplexity"
+
+[connect]
+public_base_url = "http://127.0.0.1"
+
 [o11y]
 otlp_endpoint = "http://127.0.0.1:4318"
 EOF

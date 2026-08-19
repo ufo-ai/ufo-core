@@ -86,6 +86,29 @@ def test_two_stacks_serve_simultaneously_without_collisions(
     assert home_after == home_before
 
 
+def test_preflight_fails_a_config_serve_rejects_before_seeding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A template serve cannot boot fails in seconds — before any seed subprocess runs — so a stale
+    template can never cost a materialization. The workspace seed stamps 'workspace ready' into
+    seed.log; its absence is the proof the preflight came first."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-stack")
+    template = tmp_path / "broken.toml"
+    template.write_text(TEMPLATE.replace('search_provider = "perplexity"', ""))
+    stack = EvalStack.provision(
+        RunSpec(label="badconfig", config=template),
+        root=tmp_path / "stamp" / "badconfig",
+        out=tmp_path / "archive",
+        repo_root=Path.cwd(),
+    )
+
+    with pytest.raises(RuntimeError, match="serve exited"):
+        asyncio.run(stack.run(asyncio.Lock()))
+
+    assert "workspace ready" not in (stack.root / "seed.log").read_text()
+    assert "search_provider is unset" in (stack.root / "serve.log").read_text()
+
+
 def test_stack_run_propagates_the_child_exit_and_tears_down(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -449,3 +449,22 @@ def test_database_name_is_postgres_safe() -> None:
 
     assert name == "eval_20260717_141530_an_odd_label"
     assert len(_database_name(Path("x" * 80) / ("y" * 80))) == 63
+
+
+def test_run_names_the_missing_egress_binary_before_any_seed_subprocess(tmp_path: Path) -> None:
+    """The egress-binary stat is the cheapest gate the stack has and materialization its most
+    expensive step, so a run fails on the missing binary before a single seed subprocess starts —
+    not after minutes of corpus embedding, which is where the lookup used to sit."""
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="nobinary", config=template),
+        root=tmp_path / "stamp" / "nobinary",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="cargo build"):
+        asyncio.run(stack.run(asyncio.Lock()))
+
+    assert (stack.root / "seed.log").read_bytes() == b""

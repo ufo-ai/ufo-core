@@ -261,17 +261,23 @@ class EvalStack:
 
     async def run(self, creation: asyncio.Lock) -> StackResult:
         try:
+            egress_binary = _egress_binary(self.repo_root)
             async with creation:
                 await self._create_databases()
+            await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
+            await self._preflight()
             readiness = await self._seed()
-            serve = await self._start_serve()
-            egress = await self._start_egress()
+            serve: asyncio.subprocess.Process | None = None
+            egress: asyncio.subprocess.Process | None = None
             try:
+                serve = await self._start_serve()
+                egress = await self._start_egress(egress_binary)
                 await self._ready(serve)
                 await self._egress_ready(egress)
                 exit_code = await self._drive(serve, egress, readiness)
             finally:
-                await self._shutdown(serve, egress)
+                if serve is not None:
+                    await self._shutdown(serve, egress)
         finally:
             for handle in (
                 self.serve_probe,
@@ -311,7 +317,6 @@ class EvalStack:
 
     async def _seed(self) -> Path | None:
         if self.spec.memory_100 is not None:
-            await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
             return await self._materialize(
                 "evals.memory_100.materialize", "--snapshot", str(self.spec.memory_100.resolve())
             )
@@ -354,16 +359,29 @@ class EvalStack:
         if await process.wait() != 0:
             raise RuntimeError(f"{step} exited {process.returncode} — see {self._log_path(step)}")
 
+    async def _preflight(self) -> None:
+        """Boot the real serve once to ready, then terminate it, before the corpus is paid for.
+        Serve's boot is the config's whole validator — extension seam requirements, the connector
+        redirect, model, carrier, and index selection all fail there in seconds — so a template a
+        knob behind the pack fails the run immediately rather than after minutes of
+        materialization, and every validation serve grows later is preflighted for free. The
+        preflight process is gone before seeding, so nothing of serve's races the materializer's
+        drained consumers."""
+        serve = await self._start_serve()
+        try:
+            await self._ready(serve)
+        finally:
+            await self._shutdown(serve)
+
     async def _start_serve(self) -> asyncio.subprocess.Process:
         self.serve_probe.close()
         self.proxy_probe.close()
         return await self._ufoctl("serve", log=self.serve_log)
 
-    async def _start_egress(self) -> asyncio.subprocess.Process:
+    async def _start_egress(self, binary: Path) -> asyncio.subprocess.Process:
         """Run ufo-egress on the probed proxy port, sharing serve's env (the CA, control token, and
         run-token secret) and pointing back at serve's egress-control RPC. `_start_serve` freed the
         proxy-port probe, so the wire binds it and the local carrier's HTTP(S)_PROXY reaches it."""
-        binary = _egress_binary(self.repo_root)
         env = dict(self.env) | {
             "UFO_EGRESS_BIND": "127.0.0.1",
             "UFO_EGRESS_PORT": str(self.config.sandbox.proxy_port),
@@ -530,8 +548,9 @@ def _mint_egress_ca() -> tuple[str, str]:
 def _egress_binary(repo_root: Path) -> Path:
     """The `ufo-egress` data-plane binary the stack runs beside serve so an in-sandbox fetch has a
     proxy to reach. It is the deleted in-process proxy's replacement, built from `egress/`; a stack
-    with no egress wire refuses every sandbox CONNECT, so a missing binary fails loud here rather
-    than as an unexplained connection-refused inside a suite that fetches over the network."""
+    with no egress wire refuses every sandbox CONNECT, so `run` resolves the binary before touching
+    a database — a missing build fails in seconds, never after a materialization and never as an
+    unexplained connection-refused inside a suite that fetches over the network."""
     for profile in ("release", "debug"):
         candidate = repo_root / "egress" / "target" / profile / "ufo-egress"
         if candidate.exists():
