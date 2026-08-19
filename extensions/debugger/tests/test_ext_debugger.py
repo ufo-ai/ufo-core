@@ -63,8 +63,8 @@ class _StubDbos:
         raise AssertionError("the debug surface admits nothing")
 
 
-def _mint(secret: str, workspace_id: UUID, email: str) -> str:
-    exp = int(datetime.now(tz=UTC).timestamp()) + 3600
+def _mint(secret: str, workspace_id: UUID, email: str, ttl_seconds: int = 3600) -> str:
+    exp = int(datetime.now(tz=UTC).timestamp()) + ttl_seconds
     payload = (
         base64.urlsafe_b64encode(
             json.dumps({"ws": str(workspace_id), "email": email, "exp": exp}).encode()
@@ -261,6 +261,26 @@ async def test_posted_token_binds_the_cookie_and_redirects(debug) -> None:
     assert listed.status_code == 200
 
 
+async def test_a_posted_token_recovers_a_session_behind_a_stale_cookie(debug) -> None:
+    """A held `ufo_debug` cookie whose bearer no longer resolves — signed under a secret this
+    deploy does not hold, or expired — must not shadow the live bearer the sign-in card posts: the
+    cookie is httponly, so an operator can neither read nor delete it, and signing in again is the
+    only way back."""
+    client, _, _ = debug
+    workspace_id, _ = await _seed_workspace()
+    operator = f"alex@{OPERATOR_EMAIL_DOMAIN}"
+    fresh = _mint(SECRET, workspace_id, operator)
+    forged = _mint("a-secret-this-deploy-does-not-hold", workspace_id, operator)
+    expired = _mint(SECRET, workspace_id, operator, ttl_seconds=-1)
+
+    for stale in (forged, expired):
+        client.cookies.set("ufo_debug", stale)
+        opened = await client.post("/surface/debug", data={"token": fresh}, follow_redirects=False)
+        assert opened.status_code == 303
+        assert opened.headers["set-cookie"].startswith(f"ufo_debug={fresh}")
+        assert (await client.get("/surface/debug/api/workspace")).status_code == 200
+
+
 async def test_query_tokens_are_never_accepted(debug) -> None:
     """The bearer never rides a URL: a `?token=` query neither authenticates a read nor binds a
     session, so access logs and histories cannot capture a working credential."""
@@ -270,9 +290,36 @@ async def test_query_tokens_are_never_accepted(debug) -> None:
     read = await client.get("/surface/debug/api/workspace", params={"token": token})
     assert read.status_code == 401
     bind = await client.get("/surface/debug", params={"token": token}, follow_redirects=False)
-    assert bind.status_code == 401
+    assert bind.status_code == 303
+    assert bind.headers["location"] == "/login"
+    assert "set-cookie" not in bind.headers
     tokenless_post = await client.post("/surface/debug", follow_redirects=False)
     assert tokenless_post.status_code == 401
+
+
+async def test_an_unresolved_page_get_lands_on_the_sign_in_page(debug) -> None:
+    """The Slack turn's `debug` link is a plain GET carrying no bearer: an operator whose cookie
+    outlived its bearer reaches the card that mints a new one instead of a bare `unauthorized`,
+    which is the only recoverable answer for a cookie they cannot read or delete. The API routes
+    still reject, so the page's own fetches fail loudly."""
+    client, _, _ = debug
+    workspace_id, _ = await _seed_workspace()
+    conversation_id = await _seed_conversation(workspace_id)
+    operator = f"alex@{OPERATOR_EMAIL_DOMAIN}"
+
+    linked = await client.get(
+        "/surface/debug",
+        params={"ws": str(workspace_id), "c": str(conversation_id)},
+        follow_redirects=False,
+    )
+    assert linked.status_code == 303
+    assert linked.headers["location"] == "/login"
+
+    client.cookies.set("ufo_debug", _mint(SECRET, workspace_id, operator, ttl_seconds=-1))
+    expired = await client.get("/surface/debug", follow_redirects=False)
+    assert expired.status_code == 303
+    assert expired.headers["location"] == "/login"
+    assert (await client.get("/surface/debug/api/conversations")).status_code == 401
 
 
 async def test_app_page_serves_the_built_app_and_fails_loud_unbuilt(debug, monkeypatch) -> None:
