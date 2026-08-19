@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { IconCheck } from "@tabler/icons-react";
+import { IconArrowRight, IconCheck, IconPlug } from "@tabler/icons-react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { AgentPicker } from "@/kernel/agentpick";
@@ -53,6 +53,7 @@ import {
 } from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
+import { workspaceHash } from "@/lib/route";
 import {
   answerQuestions,
   refreshTranscript,
@@ -783,21 +784,25 @@ function Composer({
 
 /** What a member can ask for before they have asked for anything: three applications named for the
  *  job each does and the decision each leaves with them. Creating one is the same act whichever app
- *  is being asked, so every start screen carries them. */
-const STARTERS = [
+ *  is being asked, so every start screen carries them. The body states that decision in the measure
+ *  a row leaves beside the name, which is one line. */
+const STARTERS: { mark: string; title: string; body: string; ask: string }[] = [
   {
+    mark: "gnomon",
     title: "PR babysitter",
-    body: "Reports what each open pull request waits on: age, reviewer, checks, conflicts. You decide what moves.",
+    body: "Reports what each open pull request waits on: age, reviewer, checks.",
     ask: "I want an application that watches our open pull requests and reports what each one waits on — age, reviewer, checks, conflicts — ordered by what it blocks.",
   },
   {
+    mark: "wedjat",
     title: "Competitive intel",
-    body: "Tracks the competitors you name and writes up what changed, with a source for each claim.",
+    body: "Tracks the competitors you name, with a source for every claim.",
     ask: "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
   },
   {
+    mark: "ostrakon",
     title: "What we've learned",
-    body: "Reads the week's work and writes down what the team learned, and what it should not repeat.",
+    body: "Writes down what the team learned this week, and what not to repeat.",
     ask: "I want an application that reads our work each week and writes down what we learned: what worked, what did not, and what we should not repeat.",
   },
 ];
@@ -805,24 +810,67 @@ const STARTERS = [
 /** A press is the whole act: the starter's sentence is said and the conversation opens on it. The
  *  member chose these words by pressing them, the way they choose the palette's row, and the
  *  sentence commits nothing but itself — what it asks for is decided later, in the conversation it
- *  opens. */
+ *  opens.
+ *
+ *  They stack under the box, a row each. A rule leads every row and none closes the last, so the
+ *  three read as one list standing on the screen rather than three cards set into it, and the name
+ *  carries the scan while the sentence beside it stays out of the way. A row is one line: what the
+ *  measure cannot hold is cut, never wrapped, so three starters cost three lines whatever they
+ *  say.
+ *
+ *  Each starter wears the avatar an app wears everywhere else, because that is what a press
+ *  founds: the row states the shape of the thing, not a category glyph standing in for it.
+ *
+ *  The connectors row closes the stack, and is the one row that is not an ask: it leaves for the
+ *  screen where accounts are connected. It wears a glyph rather than an avatar — no app stands
+ *  behind it — held in the width an avatar takes, so every row's words start on one edge. It keeps
+ *  the same rule and the same arrow, because it is reached the same way.
+ *
+ *  The arrow is drawn under the pointer or the focus outline rather than at rest: arrows standing on
+ *  an idle screen say a row leads somewhere once per row. It holds its place while hidden, so the
+ *  sentence truncates at the same character whether the row is under the pointer or not. */
+const STARTER_ROW = cn(
+  "group flex w-full items-center gap-md border-0 border-b border-edge bg-transparent",
+  "px-md py-lg text-start text-ui text-inherit no-underline last:border-b-0 hover:bg-fill",
+);
+
+const STARTER_ARROW = cn(
+  "size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100",
+  "ease-control group-hover:opacity-100 group-focus-visible:opacity-100",
+  "motion-reduce:transition-none",
+);
+
 function Starters({ agentId }: { agentId: string }) {
   return (
-    <div className="mt-2xl grid grid-cols-3 gap-lg max-narrow:grid-cols-1">
-      {STARTERS.map((starter) => (
+    <div className="mt-2xl flex flex-col">
+      {STARTERS.map(({ mark, title, body, ask }) => (
         <button
-          key={starter.title}
+          key={title}
           type="button"
-          onClick={() => setPendingAsk(agentId, starter.ask, true)}
-          className={cn(
-            "flex flex-col gap-xs rounded-panel border border-edge bg-transparent px-lg py-md",
-            "text-start text-inherit hover:bg-fill",
-          )}
+          onClick={() => setPendingAsk(agentId, ask, true)}
+          className={STARTER_ROW}
         >
-          <span className="text-ui font-medium">{starter.title}</span>
-          <span className="text-small text-ink-soft">{starter.body}</span>
+          <Avatar>
+            <AvatarFallback>
+              <AgentIcon name={mark} />
+            </AvatarFallback>
+          </Avatar>
+          <span className="min-w-0 flex-1 truncate">
+            <span className="font-medium">{title}</span>
+            <span className="text-ink-soft"> {body}</span>
+          </span>
+          <IconArrowRight className={STARTER_ARROW} aria-hidden />
         </button>
       ))}
+      <a href={workspaceHash("connectors")} className={STARTER_ROW}>
+        <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
+          <IconPlug className="size-(--size-glyph) text-ink-soft" aria-hidden />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-ink-soft">
+          Connect more accounts for better suggestions.
+        </span>
+        <IconArrowRight className={STARTER_ARROW} aria-hidden />
+      </a>
     </div>
   );
 }

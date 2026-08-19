@@ -3085,6 +3085,25 @@ test("a starter says its sentence on the press, and leaves with the start screen
   expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
 });
 
+test("the starters close on a link to the connectors screen, which the press reaches", async () => {
+  wire({ ...transcript(), "/connections": () => json({ connections: [] }) });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Message the agent");
+  const cta = screen.getByRole("link", { name: /Connect more accounts/ });
+  expect(cta.getAttribute("href")).toBe("#/workspace/connectors");
+
+  // The start screen prevents the default of every mousedown outside the box, so that a press in
+  // its empty space lands the cursor in the words. A link is reached on the click that follows,
+  // and this holds that the one does not swallow the other.
+  await userEvent.click(cta);
+
+  expect(location.hash).toBe("#/workspace/connectors");
+  await screen.findByText("No connector is connected yet.");
+  expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
+});
+
 test("a conversation that has opened fixes its agent, and the picker goes with the start screen", async () => {
   wire({
     ...transcript(),
