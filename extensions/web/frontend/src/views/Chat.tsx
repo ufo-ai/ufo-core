@@ -43,7 +43,14 @@ import { COLUMN } from "@/kernel/pane";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
-import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
+import {
+  clearDraft,
+  flushDrafts,
+  installDraftFlush,
+  moveDraft,
+  readDraft,
+  writeDraft,
+} from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 import {
@@ -623,17 +630,37 @@ function Composer({
   // and these words stay in the box rather than opening a conversation of their own.
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
 
+  // A route that renames this composer's agent — the rail's "New conversation" names the main one
+  // from another agent's start screen — renames the draft too, and no mount comes to read the named
+  // agent's own words. The box reads them here: the words it was holding are already stored under
+  // the agent they were written for (the flush lands any write still pending), and a pick in the
+  // box's own toolbar carries its words to the new key first, so this read hands back the same text
+  // and the member's place in it stands. The mount's own read is the initializer's, where a pending
+  // ask outranks the stored draft.
+  const drafted = useRef(draftKey);
+  useEffect(() => {
+    if (drafted.current === draftKey) return;
+    drafted.current = draftKey;
+    flushDrafts();
+    setText(readDraft(draftKey));
+  }, [draftKey]);
+
   // An ask handed over while this composer is already mounted — a starter and the palette both hand
   // one from the chat screen itself — reaches the box here rather than waiting for a mount that
-  // never comes.
+  // never comes. The palette sets the ask on the agent it names and then routes to that agent's
+  // start screen, which renames the agent of this same composer, so the take runs again on the new
+  // name: the one start screen stands for whichever agent it names, and no mount comes to read the
+  // ask.
   useEffect(() => {
     if (!founding) return;
-    return watchPendingAsk(() => {
+    const take = () => {
       const handed = takePendingAsk(target.agentId);
       if (!handed) return;
       if (handed.send) committed.current = handed.text;
       setText(handed.text);
-    });
+    };
+    take();
+    return watchPendingAsk(take);
   }, [founding, target.agentId]);
 
   useEffect(() => {
@@ -674,52 +701,82 @@ function Composer({
     return true;
   }
 
+  const box = (
+    <PromptInput onSend={send}>
+      <PromptInputAttachments />
+      <PromptInputTextarea
+        ref={input}
+        value={text}
+        onChange={(event) => {
+          setText(event.target.value);
+          writeDraft(draftKey, event.target.value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          event.currentTarget.form?.requestSubmit();
+        }}
+        autoComplete="off"
+        placeholder="Message the agent…"
+        aria-label="Message the agent"
+      />
+      <PromptInputToolbar>
+        <PromptInputAttach />
+        <div className="flex items-center gap-sm">
+          {starting && agents && onPickAgent ? (
+            <AgentPicker
+              agentId={agent.id}
+              agents={agents}
+              onPick={onPickAgent}
+              onClosed={() => input.current?.focus()}
+            />
+          ) : null}
+          <PromptInputSubmit
+            stops={Boolean(running && state.busy && !text.trim())}
+            busy={stopping}
+            disabled={disabled}
+            onStop={() => {
+              if (stopping || !running) return;
+              void stop(running.id);
+            }}
+          />
+        </div>
+      </PromptInputToolbar>
+    </PromptInput>
+  );
+  // On the start screen the box stands alone: nothing else is on that screen, so a press in the
+  // empty space around the card is a press on the words the member came to write, and it lands the
+  // cursor in them rather than on nothing. A press on the card itself is the card's own — the box
+  // places its cursor where the member pressed, and the controls beside it take their own presses.
+  //
+  // Both screens are the same two elements around the box, holding the whole start screen off the
+  // card in the outer one. Two shapes would rebuild the box on the send that opens the
+  // conversation, dropping what the member attached to that message and their place in the words.
   return (
     <div
-      className={cn(
-        COLUMN,
+      data-testid={starting ? "start" : undefined}
+      className={starting ? "flex flex-1 flex-col justify-center overflow-y-auto p-2xl" : undefined}
+      onMouseDown={
         starting
-          ? "flex flex-1 flex-col justify-center overflow-y-auto p-2xl"
-          : "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]",
-      )}
+          ? (event) => {
+              if ((event.target as Element).closest("[data-field-card]")) return;
+              event.preventDefault();
+              input.current?.focus();
+            }
+          : undefined
+      }
     >
-      <PromptInput onSend={send}>
-        <PromptInputAttachments />
-        <PromptInputTextarea
-          ref={input}
-          value={text}
-          onChange={(event) => {
-            setText(event.target.value);
-            writeDraft(draftKey, event.target.value);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-            event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
-          }}
-          autoComplete="off"
-          placeholder="Message the agent…"
-          aria-label="Message the agent"
-        />
-        <PromptInputToolbar>
-          <PromptInputAttach />
-          <div className="flex items-center gap-sm">
-            {starting && agents && onPickAgent ? (
-              <AgentPicker agentId={agent.id} agents={agents} onPick={onPickAgent} />
-            ) : null}
-            <PromptInputSubmit
-              stops={Boolean(running && state.busy && !text.trim())}
-              busy={stopping}
-              disabled={disabled}
-              onStop={() => {
-                if (stopping || !running) return;
-                void stop(running.id);
-              }}
-            />
-          </div>
-        </PromptInputToolbar>
-      </PromptInput>
-      {starting ? <Starters agentId={target.agentId} /> : null}
+      <div
+        className={cn(
+          COLUMN,
+          starting
+            ? undefined
+            : "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]",
+        )}
+      >
+        {box}
+        {starting ? <Starters agentId={target.agentId} /> : null}
+      </div>
     </div>
   );
 }

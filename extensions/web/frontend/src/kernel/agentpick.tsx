@@ -28,10 +28,15 @@ export function AgentPicker({
   agentId,
   agents,
   onPick,
+  onClosed,
 }: {
   agentId: string;
   agents: Agent[];
   onPick: (agentId: string) => void;
+  /** Where focus belongs once the list closes. The primitive hands it back to the trigger, which is
+   *  where it belongs for a picker leading a bar; a picker standing inside a box the member is
+   *  writing in says the box instead, so a pick never takes their place in the words. */
+  onClosed?: () => void;
 }) {
   if (agents.length < 2) return null;
   return (
@@ -39,7 +44,16 @@ export function AgentPicker({
       <SelectTrigger aria-label="Agent" className={cn(BAR_CONTROL, "w-(--container-control-row)")}>
         <SelectValue />
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent
+        onCloseAutoFocus={
+          onClosed
+            ? (event) => {
+                event.preventDefault();
+                onClosed();
+              }
+            : undefined
+        }
+      >
         {agents.map((entry) => (
           <SelectItem key={entry.id} value={entry.id}>
             <span className="flex min-w-0 items-center gap-xs">

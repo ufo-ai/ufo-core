@@ -913,9 +913,15 @@ function RoutedPane({
       ? agents.find((entry) => entry.id === route.agentId)
       : (mainAgent ?? undefined);
   if (!agent) return <PaneNote>No such agent.</PaneNote>;
+  // One start screen, whichever agent it names. The picker in its own composer renames the agent the
+  // first message reaches, and a key carrying that agent would remount the box on every pick — a
+  // fresh box holds the draft again but not the member's place in it, and the cursor lands back at
+  // the first character. The chat state and the draft are keyed by the agent inside it instead, and
+  // its composer takes a pending ask on the agent it is renamed to, because no mount comes to read
+  // one handed to the agent the route has just named.
   return (
     <ChatPane
-      key={"new:" + agent.id}
+      key="new"
       agent={agent}
       member={member}
       conversationId={null}

@@ -9,6 +9,7 @@ import { ConversationTranscript } from "@/views/Conversations";
 
 import {
   AGENT,
+  AGENT_ID,
   ARRIVAL_ID,
   CHAT_ROW,
   CONVO_ID,
@@ -2993,6 +2994,71 @@ test("the composer's agent picker draws each app's mark, and keeps the chosen on
       screen.getByRole("combobox", { name: "Agent" }).querySelector(".element-icon-aten"),
     ).toBeTruthy(),
   );
+});
+
+test("picking another agent keeps the member's place in the words already typed", async () => {
+  wire({ ...transcript() });
+  location.hash = "#/";
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = (await screen.findByLabelText("Message the agent")) as HTMLTextAreaElement;
+  await userEvent.type(box, "draft this");
+  box.setSelectionRange(6, 6);
+
+  await pick("Agent", "Second");
+
+  await waitFor(() =>
+    expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("Second"),
+  );
+  const after = screen.getByLabelText("Message the agent") as HTMLTextAreaElement;
+  expect(after).toBe(box);
+  expect(after.value).toBe("draft this");
+  expect(document.activeElement).toBe(after);
+  expect(after.selectionStart).toBe(6);
+  expect(after.selectionEnd).toBe(6);
+});
+
+/** One pane stands for every start screen, so a route that names another agent — the rail's "New
+ *  conversation" names the main one — renames the composer already on the screen rather than
+ *  mounting one that would read the named agent's draft. The box must read that draft itself, and
+ *  the words it was holding stay stored under the agent they were written for. */
+test("a route that renames the start screen's agent reads that agent's own draft", async () => {
+  wire({ ...transcript() });
+  localStorage.setItem("ufo.chat-draft." + MEMBER.id + "/new:" + AGENT_ID, "words for the main agent");
+  location.hash = "#/new/" + SECOND_ID;
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = (await screen.findByLabelText("Message the agent")) as HTMLTextAreaElement;
+  await userEvent.type(box, "words for the second");
+
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+
+  await waitFor(() => expect(box.value).toBe("words for the main agent"));
+  expect(localStorage.getItem("ufo.chat-draft." + MEMBER.id + "/new:" + SECOND_ID)).toBe(
+    "words for the second",
+  );
+});
+
+test("the start screen's empty space is the box's: a press in it lands the cursor in the words", async () => {
+  wire({ ...transcript() });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = (await screen.findByLabelText("Message the agent")) as HTMLTextAreaElement;
+  await userEvent.type(box, "draft this");
+  box.setSelectionRange(4, 4);
+  box.blur();
+  expect(document.activeElement).not.toBe(box);
+
+  fireEvent.mouseDown(screen.getByTestId("start"));
+
+  expect(document.activeElement).toBe(box);
+  expect(box.selectionStart).toBe(4);
+
+  // A press on the card is the card's own: the box places its cursor where the member pressed, and
+  // the controls beside it keep their presses.
+  await userEvent.click(screen.getByRole("button", { name: "Attach files" }));
+  expect(document.activeElement).not.toBe(box);
 });
 
 test("a starter says its sentence on the press, and leaves with the start screen", async () => {

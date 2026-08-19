@@ -453,6 +453,41 @@ test("the term is said to the agent, by the composer on the screen it lands on",
   expect(composer.value).toBe("");
 });
 
+/** The row says the term to the agent the palette names, which is the main one, from any screen —
+ *  including the start screen of another agent. One pane stands for every start screen, so the route
+ *  renames the agent of the composer already on the screen rather than mounting a second one, and
+ *  the words must be read under that new name. Left unread they would be said into a later chat. */
+test("the term is said to the agent the row names, from another agent's start screen", async () => {
+  const { calls } = wire({
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
+    "/slots": () => json({ slots: [] }),
+    "/conversations": () => json({ conversations: [] }),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
+    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
+    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
+    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/new/" + SECOND_ID;
+  portal();
+  await screen.findByLabelText("Message the agent");
+  await userEvent.click(screen.getByRole("button", { name: "Search" }));
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  await userEvent.click(found.getByRole("option", { name: "assistant: deploy" }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  const said = calls.filter((url) => url.includes("/chat?conversation="));
+  expect(said).toHaveLength(1);
+  expect(said[0]).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
+  expect(said[0]).not.toContain(SECOND_ID);
+  expect(location.hash).toBe("#/c/" + FOUNDED_ID);
+  const composer = (await screen.findByLabelText("Message the agent")) as HTMLTextAreaElement;
+  expect(composer.value).toBe("");
+});
+
 /** The words go to the agent's new chat. A conversation the member is reading belongs to that same
  *  agent and its composer is the one mounted, so an ask taken by the agent alone would be said
  *  there — into the thread they were leaving, over the draft they left in it. */
