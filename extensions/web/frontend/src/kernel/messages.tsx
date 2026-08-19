@@ -476,7 +476,7 @@ function Apps({ apps }: { apps: ChatApp[] }) {
           {index ? <ItemSeparator /> : null}
           <Item className="p-0">
             <a
-              href={agentHash(app.id, "home")}
+              href={agentHash(app.id)}
               className={cn(
                 "flex min-w-0 flex-1 items-center gap-lg rounded-panel px-xl py-lg",
                 "text-inherit no-underline hover:bg-fill",

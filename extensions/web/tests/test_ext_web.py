@@ -8468,6 +8468,133 @@ async def test_homepage_read_carries_the_bound_site(
     assert set(payload) == {"state", "url"}
 
 
+async def test_homepage_read_answers_building_while_the_seed_run_works(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An agent with no homepage yet, whose seed run is still working, is building rather than
+    absent: the member is waiting for a page, not looking at the lack of one."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "home-building@example.com")
+    conversation_id, turn_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=EXTENSION_WEB,
+                queue_key=f"homepage/{agent_id}/{member_id}",
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound=web_surface.SEED_PROMPT,
+                on_behalf_of_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), member_context_read=True)
+        await ctx.store.put(f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}", str(member_id))
+    path = f"/surface/web/agents/{agent_id}/homepage"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    building = await client.get(path, headers=cookie)
+    assert building.status_code == 200
+    assert building.json() == {"state": "building"}
+
+    # The run settling is what ends the wait; nothing else writes the state.
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(status="done", terminal=TerminalFrame(status="done", text="built").model_dump())
+        )
+    settled = await client.get(path, headers=cookie)
+    assert settled.json() == {"state": "none"}
+
+
+async def test_homepage_read_hands_over_a_bound_page_whatever_the_agent_is_doing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A homepage that exists is served while its agent works. The read cannot see a rebuild — one
+    asked for in a chat runs in that chat and registers its own site row — so treating a running
+    turn as a rebuild would blank the page for every unrelated thing the member says to the app."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "home-bound@example.com")
+    conversation_id, turn_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=EXTENSION_WEB,
+                queue_key=conversation_id.hex,
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        await sites.register(
+            conversation_id, "home", 8000, member_id, "workspace", SHARED_AUDIENCE, True
+        )
+        assert await sites.set_homepage(agent_id, conversation_id, "home") is not None
+        ctx = context_for(EXTENSION_WEB, frozenset(), member_context_read=True)
+        await ctx.store.put(f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}", str(member_id))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="what is your name?",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert read.status_code == 200
+    assert read.json()["state"] == "set"
+
+
+async def test_homepage_read_answers_none_for_an_agent_the_seed_settled_without_building(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A marker holding the settled note rather than a member names no conversation, so the read
+    answers absent rather than a build that will never finish."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "home-withheld@example.com")
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), member_context_read=True)
+        await ctx.store.put(f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}", "withheld-tools")
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert read.status_code == 200
+    assert read.json() == {"state": "none"}
+
+
 async def test_homepage_read_follows_the_agents_visibility(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

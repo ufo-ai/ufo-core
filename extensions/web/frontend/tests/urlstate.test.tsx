@@ -156,20 +156,20 @@ test("conversation slots parse in chat and standalone URLs", () => {
   });
 });
 
-test("the agent hash defaults to Home, and every other tab takes its own segment", () => {
-  expect(agentHash(AGENT.id, "home")).toBe("#/agents/" + AGENT.id);
+test("an app is one address, and the conversation it has open is a place on it", () => {
+  expect(agentHash(AGENT.id)).toBe("#/agents/" + AGENT.id);
   expect(parseHash("#/agents/" + AGENT.id)).toEqual({
     kind: "agent",
     agentId: AGENT.id,
-    tab: "home",
     place: {},
   });
-  expect(agentHash(AGENT.id, "conversations")).toBe("#/agents/" + AGENT.id + "/conversations");
-  expect(parseHash("#/agents/" + AGENT.id + "/conversations")).toEqual({
+  expect(agentHash(AGENT.id, { open: CONVO_ID })).toBe(
+    "#/agents/" + AGENT.id + "?open=" + CONVO_ID,
+  );
+  expect(parseHash("#/agents/" + AGENT.id + "?open=" + CONVO_ID)).toEqual({
     kind: "agent",
     agentId: AGENT.id,
-    tab: "conversations",
-    place: {},
+    place: { open: CONVO_ID },
   });
 });
 

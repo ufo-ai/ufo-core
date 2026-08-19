@@ -93,7 +93,6 @@ import {
   parseHash,
   sectionHash,
   workspaceHash,
-  type AgentTab,
   type PlaceStep,
   type Route,
   type Section,
@@ -229,8 +228,15 @@ export function App({ agents, member, onAgents }: AppProps) {
 
 
   const openAgent = useCallback(
-    (agentId: string, tab: AgentTab = "home") =>
-      go(agentHash(agentId, tab), { kind: "agent", agentId, tab, place: {} }),
+    (agentId: string) => go(agentHash(agentId), { kind: "agent", agentId, place: {} }),
+    [go],
+  );
+
+  /** An agent opened at a place rather than at its head — what the bare apps hash, which shows the
+   *  main agent without having navigated to it, turns a place change into. */
+  const openAgentPlace = useCallback(
+    (agentId: string, place: WorkspacePlace) =>
+      go(agentHash(agentId, place), { kind: "agent", agentId, place }),
     [go],
   );
 
@@ -254,13 +260,13 @@ export function App({ agents, member, onAgents }: AppProps) {
   );
 
   const placeAgent = useCallback(
-    (tab: AgentTab, place: WorkspacePlace, step: PlaceStep) => {
+    (place: WorkspacePlace, step: PlaceStep) => {
       const seen = routeRef.current;
-      stepPlace(step, seen.kind === "agent" && seen.tab === tab, () =>
+      stepPlace(step, seen.kind === "agent", () =>
         seen.kind === "agent"
           ? {
-              route: { kind: "agent", agentId: seen.agentId, tab, place },
-              hash: agentHash(seen.agentId, tab, place),
+              route: { kind: "agent", agentId: seen.agentId, place },
+              hash: agentHash(seen.agentId, place),
             }
           : null,
       );
@@ -440,6 +446,7 @@ export function App({ agents, member, onAgents }: AppProps) {
                   onCreated={created}
                   onActivity={activity}
                   onOpenAgent={openAgent}
+                  onOpenAgentPlace={openAgentPlace}
                   onNewChat={openNewChat}
                   onOpenSlot={openSlot}
                   onPlaceWorkspace={placeWorkspace}
@@ -822,6 +829,7 @@ function RoutedPane({
   onCreated,
   onActivity,
   onOpenAgent,
+  onOpenAgentPlace,
   onNewChat,
   onOpenSlot,
   onPlaceWorkspace,
@@ -838,12 +846,13 @@ function RoutedPane({
   onAgents: () => void;
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
-  onOpenAgent: (agentId: string, tab?: AgentTab) => void;
+  onOpenAgent: (agentId: string) => void;
+  onOpenAgentPlace: (agentId: string, place: WorkspacePlace) => void;
   onNewChat: (agentId: string) => void;
   onOpenSlot: (conversationId: string, slot: string | null) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
-  onPlaceAgent: (tab: AgentTab, place: WorkspacePlace, step: PlaceStep) => void;
+  onPlaceAgent: (place: WorkspacePlace, step: PlaceStep) => void;
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, OwnedConversation>>;
 }) {
@@ -886,13 +895,20 @@ function RoutedPane({
           agents={agents}
           member={member}
           selected={selected}
-          tab={route.kind === "agent" ? route.tab : "home"}
+          chats={rail.phase === "ready" ? rail.rows : null}
+          onCreated={onCreated}
           place={route.kind === "agent" ? route.place : {}}
           onOpen={onOpenAgent}
-          onTab={(tab) => (shown ? onOpenAgent(shown.id, tab) : undefined)}
-          onNewChat={onNewChat}
+          /* The bare apps hash shows the main agent without having navigated to it, so a place set
+             from that screen has no agent in the address to hang on: it names the agent it is
+             about and lands on that agent's own address. Answering nothing would make every
+             control the pane draws dead on the one screen the top bar opens. */
           onPlace={(place, step) =>
-            route.kind === "agent" ? onPlaceAgent(route.tab, place, step) : undefined
+            route.kind === "agent"
+              ? onPlaceAgent(place, step)
+              : shown
+                ? onOpenAgentPlace(shown.id, place)
+                : undefined
           }
           onAgents={onAgents}
         />

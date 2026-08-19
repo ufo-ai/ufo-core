@@ -204,7 +204,7 @@ export async function searchEverywhere(
       icon: IconApps,
       hits: matched.map((agent) => ({
         key: agent.id,
-        hash: agentHash(agent.id, "home"),
+        hash: agentHash(agent.id),
         primary: agentName(agent.name),
         fact: agent.model,
       })),

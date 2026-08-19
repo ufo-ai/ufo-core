@@ -8,7 +8,9 @@ import { MainAgentProvider } from "@/lib/mainAgent";
 import {
   AGENT,
   AGENT_ID,
+  CHAT_ROW,
   CONVO_ID,
+  FRESH,
   MEMBER,
   PlacedWorkspace,
   SECOND,
@@ -41,6 +43,7 @@ beforeEach(() => {
 
 const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
 
+/** What the half is called before a conversation is picked, which is the switcher's own control. */
 function usageDetails(totalMicroUsd: number, tokens: number = 1_200) {
   return {
     selected: {
@@ -169,7 +172,7 @@ test("switching agents discards unsaved settings edits", async () => {
   await userEvent.clear(await screen.findByLabelText("Prompt"));
   await userEvent.type(screen.getByLabelText("Prompt"), "do not carry this");
 
-  location.hash = "#/agents/" + SECOND_ID + "/settings";
+  location.hash = "#/agents/" + SECOND_ID;
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 
   await waitFor(() =>
@@ -486,11 +489,11 @@ test("the agent's own section lists what is shared with it and not what is held 
   expect(screen.queryByText("notion")).toBeTruthy();
 });
 
-test("a workspace-shared conversation reads as shared, in its row and its detail heading", async () => {
+test("a workspace-shared conversation reads as shared, in the switcher and in its heading", async () => {
   const shared = "5c0be3aa-0000-4000-8000-000000000003";
   wire({
     ["/conversations/" + shared + "/transcript"]: () => json({ messages: [] }),
-    "/conversations": () =>
+    "/conversations$": () =>
       json({
         conversations: [
           {
@@ -511,25 +514,22 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + shared;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const row = await screen.findByRole("button", { name: /Slack · 3 turns/ });
-  expect(row.querySelector("[data-part='primary']")!.textContent).toBe("Workspace");
-  expect(row.querySelector("[data-part='meta']")!.textContent).toBe("Slack · 3 turns");
-  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Created Jul 30 2026");
-  expect(row.textContent).not.toContain("slack");
-  expect(row.textContent).not.toContain(shared.slice(0, 8));
-
-  await userEvent.click(row);
-  expect(await screen.findByText("Slack · Workspace")).toBeTruthy();
+  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
+  const held = await pane.findByRole("button", { name: "Workspace" });
+  expect(held.textContent).not.toContain("slack");
+  expect(held.textContent).not.toContain(shared.slice(0, 8));
+  expect(await screen.findByRole("heading", { name: "Slack · Workspace" })).toBeTruthy();
 });
 
-test("a conversation row names what it is about and whose it is, and the keyboard opens it", async () => {
+test("the switcher names a conversation by what it is about, and the keyboard opens it", async () => {
   const opened = "8f2c1d40-0000-4000-8000-000000000004";
+  const said = "can you take a look at the failing deploy";
   wire({
     ["/conversations/" + opened + "/transcript"]: () => json({ messages: [] }),
-    "/conversations": () =>
+    "/conversations$": () =>
       json({
         conversations: [
           {
@@ -538,7 +538,7 @@ test("a conversation row names what it is about and whose it is, and the keyboar
             surface_label: null,
             audience: "shared",
             member_email: "mel@example.com",
-            description: "can you take a look at the failing deploy",
+            description: said,
             speakers: ["Mel Okafor (mel@example.com)", "pat@example.com"],
             turn_count: 4,
             created_at: "2026-07-30T10:00:00",
@@ -550,40 +550,27 @@ test("a conversation row names what it is about and whose it is, and the keyboar
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const row = await screen.findByRole("button", {
-    name: /can you take a look at the failing deploy/,
-  });
-  expect(row.getAttribute("tabindex")).toBe("0");
-  expect(row.querySelector("[data-part='primary']")!.textContent).toBe(
-    "can you take a look at the failing deploy",
-  );
-  expect(row.querySelector("[data-part='meta']")!.textContent).toBe(
-    "mel@example.com · Slack · Mel Okafor, pat · 4 turns · Workspace",
-  );
-  const when = row.querySelector("[data-part='when']")!;
-  expect(when.textContent).toBe("Last turn Aug 7 2026");
-  expect(when.querySelector("time")!.getAttribute("title")).toBe("Aug 7 2026 at 11:00 UTC");
-
-  row.focus();
-  expect(document.activeElement).toBe(row);
+  const switcher = await screen.findByRole("button", { name: FRESH });
+  switcher.focus();
+  await userEvent.keyboard("{Enter}");
+  const item = await screen.findByRole("menuitemradio", { name: said });
+  expect(document.activeElement).toBe(item);
   await userEvent.keyboard("{Enter}");
 
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + opened);
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
-  expect(
-    screen.getByRole("heading", { name: "Slack · can you take a look at the failing deploy" }),
-  ).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Slack · " + said })).toBeTruthy();
 });
 
-test("a Slack row names its channel on its meta line, and those words are the way out", async () => {
+test("a Slack conversation names its channel in its heading, and those words are the way out", async () => {
   const thread = "6b3f2a11-0000-4000-8000-000000000007";
-  const portal = "2d9c4e88-0000-4000-8000-000000000008";
   const permalink = "https://acme.slack.com/archives/C1/p1700000000000100";
   wire({
     ["/conversations/" + thread + "/transcript"]: () => json({ messages: [] }),
-    "/conversations": () =>
+    "/conversations$": () =>
       json({
         conversations: [
           {
@@ -601,39 +588,20 @@ test("a Slack row names its channel on its meta line, and those words are the wa
             readable: true,
             disclosable: false,
           },
-          {
-            id: portal,
-            surface: "web",
-            surface_label: null,
-            audience: "member:m1",
-            member_email: "member@example.com",
-            description: "Rename the deploy job",
-            source: "ufo web (member@example.com)",
-            speakers: ["member@example.com"],
-            turn_count: 2,
-            created_at: "2026-07-30T10:00:00",
-            last_turn_at: "2026-07-30T10:00:01",
-            readable: true,
-            disclosable: false,
-          },
         ],
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + thread;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const said = await screen.findByText("take a look at the failing deploy", {
-    selector: "[data-part='primary']",
+  const heading = await screen.findByRole("heading", {
+    name: "#ops ↗ · take a look at the failing deploy",
   });
-  const row = said.closest("li") as HTMLElement;
-  const meta = row.querySelector("[data-part='meta']") as HTMLElement;
-  expect(meta.textContent).toBe("#ops ↗ · 4 turns · Workspace");
-  const out = within(row).getByRole("link", { name: "#ops ↗" });
+  const out = within(heading).getByRole("link", { name: "#ops ↗" });
   expect(out.getAttribute("href")).toBe(permalink);
   expect(out.getAttribute("target")).toBe("_blank");
-  expect(meta.contains(out)).toBe(true);
-  expect(within(row).getAllByRole("link")).toHaveLength(1);
+  expect(within(heading).getAllByRole("link")).toHaveLength(1);
   const drawn = out.className.split(" ");
   expect(drawn).toContain("text-inherit");
   expect(drawn).toContain("no-underline");
@@ -642,18 +610,9 @@ test("a Slack row names its channel on its meta line, and those words are the wa
   expect(drawn).not.toContain("underline");
   expect(drawn).not.toContain("text-link");
   expect(within(out).getByText("↗").className).toContain("text-ink-soft");
-  const own = screen.getByText("Rename the deploy job", { selector: "[data-part='primary']" });
-  const mine = own.closest("li") as HTMLElement;
-  expect(within(mine).queryByRole("link")).toBeNull();
-  expect(mine.querySelector("[data-part='meta']")!.textContent).toBe(
-    "You · Portal · member · 2 turns",
-  );
-
-  await userEvent.click(out);
-  expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
-
-  await userEvent.click(said);
-  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
+  expect(
+    screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
+  ).toBeTruthy();
 });
 
 test("a conversation opened here reads as chat, with the reply's whole activity behind it", async () => {
@@ -680,7 +639,7 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
           },
         ],
       }),
-    "/conversations": () =>
+    "/conversations$": () =>
       json({
         conversations: [
           {
@@ -700,9 +659,8 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + held;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(await screen.findByRole("button", { name: /Rename the deploy job/ }));
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
   expect(screen.getByText("parent answer").tagName).toBe("STRONG");
@@ -751,7 +709,7 @@ test("a Slack transcript heads itself with its channel, and those words are the 
       }),
     ["/conversations/" + portal + "/transcript"]: () =>
       json({ messages: [{ role: "user", text: "Rename the deploy job" }] }),
-    "/conversations": () =>
+    "/conversations$": () =>
       json({
         conversations: [
           rows(thread, "slack", "take a look at the failing deploy"),
@@ -760,13 +718,8 @@ test("a Slack transcript heads itself with its channel, and those words are the 
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + thread;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(
-    await screen.findByText("take a look at the failing deploy", {
-      selector: "[data-part='primary']",
-    }),
-  );
 
   const heading = await screen.findByRole("heading", {
     name: "Slack ↗ · take a look at the failing deploy",
@@ -787,7 +740,10 @@ test("a Slack transcript heads itself with its channel, and those words are the 
   }
 
   await userEvent.click(
-    await screen.findByText("Rename the deploy job", { selector: "[data-part='primary']" }),
+    await screen.findByRole("button", { name: "take a look at the failing deploy" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitemradio", { name: "Rename the deploy job" }),
   );
 
   const portalHeading = await screen.findByRole("heading", {
@@ -796,9 +752,9 @@ test("a Slack transcript heads itself with its channel, and those words are the 
   expect(within(portalHeading).queryByRole("link")).toBeNull();
 });
 
-test("a conversation nobody shared offers no opener", async () => {
+test("a conversation nobody shared offers no opener, and the half stands on the composer", async () => {
   wire({
-    "/conversations": () =>
+    "/conversations$": () =>
       json({
         conversations: [
           {
@@ -831,17 +787,15 @@ test("a conversation nobody shared offers no opener", async () => {
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  const named = await screen.findByText("#ops", { selector: "[data-part='primary']" });
-  const unnamed = screen.getByText("Private channel", { selector: "[data-part='primary']" });
-  expect(named.closest("li")!.querySelector("[data-part='meta']")!.textContent).toBe("4 turns");
-  expect(unnamed.closest("li")!.querySelector("[data-part='meta']")!.textContent).toBe(
-    "Slack · 2 turns",
-  );
-  expect(screen.queryAllByRole("button", { name: /channel/i })).toEqual([]);
-  expect(named.closest("li")!.getAttribute("role")).toBeNull();
-  expect(screen.queryByText(/Channel or room/)).toBeNull();
+
+  await userEvent.click(await screen.findByRole("button", { name: FRESH }));
+
+  expect(screen.queryAllByRole("menuitemradio")).toEqual([]);
+  expect(screen.queryByText("#ops")).toBeNull();
+  expect(screen.queryByText("Private channel")).toBeNull();
+  expect(screen.getByLabelText("Message the agent")).toBeTruthy();
 });
 
 test("the sources listing groups a binding's streams and acts on the main agent's lane", async () => {
@@ -1036,26 +990,111 @@ test("a member who is not an admin is offered no administration control", async 
   expect(screen.queryByRole("menuitem", { name: "Administration" })).toBeNull();
 });
 
-test("the agent tab strip opens the tab named in the hash, and Home takes the bare hash", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+test("an app opens on the conversation that moved last, and the switcher names the rest", async () => {
+  const older = "44444444-4444-4444-8444-444444444444";
+  const listed = (id: string, description: string) => ({
+    id,
+    surface: "web",
+    surface_label: null,
+    audience: "member:m1",
+    member_email: "member@example.com",
+    description,
+    speakers: ["member@example.com"],
+    turn_count: 1,
+    created_at: "2026-07-30T10:00:00",
+    last_turn_at: "2026-07-30T10:00:01",
+    readable: true,
+    disclosable: false,
+  });
+  location.hash = "#/agents/" + AGENT_ID;
   wire({
-    "/conversations": () => json({ conversations: [] }),
+    "/api/chats": () =>
+      json({
+        chats: [
+          { ...CHAT_ROW, title: "Newest thread" },
+          { ...CHAT_ROW, conversation_id: older, title: "Older thread" },
+        ],
+      }),
+    "/conversations$": () =>
+      json({
+        conversations: [listed(CONVO_ID, "Newest thread"), listed(older, "Older thread")],
+      }),
     "/homepage": () => json({ state: "none" }),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByText("No conversation with Assistant yet.")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Conversations" }).getAttribute("aria-selected")).toBe(
-    "true",
-  );
-  expect(screen.queryByRole("tab", { name: "Settings" })).toBeNull();
-
-  await userEvent.click(screen.getByRole("tab", { name: "Home" }));
-
+  // Landing writes nothing to the address: the app's own hash already means "the latest".
+  const switcher = await screen.findByRole("button", { name: /Newest thread/ });
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  expect(screen.getByRole("tab", { name: "Home" }).getAttribute("aria-selected")).toBe("true");
-  expect(await screen.findByText("Assistant has not built its homepage.")).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Home" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Conversations" })).toBeNull();
+
+  await userEvent.click(switcher);
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Older thread" }));
+
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + older);
+});
+
+test("the app pane starts a conversation where it stands, without leaving for the chat screen", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    "/homepage": () => json({ state: "none" }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const pane = await screen.findByRole("region", { name: "Assistant" });
+  const act = within(pane).getByRole("button", { name: "New" });
+  const settings = within(pane).getByRole("button", { name: "Settings for Assistant" });
+  // The act stands at the far end, immediately before settings.
+  expect(settings.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+
+  await userEvent.click(act);
+
+  expect(await within(pane).findByRole("button", { name: /New conversation/ })).toBeTruthy();
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+});
+
+test("New starts a fresh conversation while the address still names one", async () => {
+  const held = "44444444-4444-4444-8444-444444444444";
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + held;
+  wire({
+    "/api/chats": () => json({ chats: [{ ...CHAT_ROW, conversation_id: held }] }),
+    "/conversations$": () =>
+      json({
+        conversations: [
+          {
+            id: held,
+            agent: null,
+            surface: "web",
+            surface_label: null,
+            audience: "shared",
+            member_email: MEMBER.email,
+            description: "The one already open",
+            source: null,
+            speakers: [MEMBER.email],
+            turn_count: 2,
+            created_at: "2026-08-01T09:00:00",
+            last_turn_at: "2026-08-07T11:00:00",
+            readable: true,
+            disclosable: false,
+          },
+        ],
+      }),
+    "/homepage": () => json({ state: "none" }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const pane = await screen.findByRole("region", { name: "Assistant" });
+  expect(await within(pane).findByRole("button", { name: /The one already open/ })).toBeTruthy();
+
+  await userEvent.click(within(pane).getByRole("button", { name: "New" }));
+
+  expect(await within(pane).findByRole("button", { name: FRESH })).toBeTruthy();
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
 });
 
 test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
@@ -1076,7 +1115,7 @@ test("the model field offers the deploy's models, which its schema alone cannot 
 test("a conversation the member may not read says so instead of reporting a status code", async () => {
   wire({
     "/conversations/c1/transcript": () => new Response("no", { status: 404 }),
-    "/conversations": () =>
+    "/conversations$": () =>
       json({
         conversations: [
           {
@@ -1096,9 +1135,8 @@ test("a conversation the member may not read says so instead of reporting a stat
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  location.hash = "#/agents/" + AGENT_ID + "?open=c1";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(await screen.findByRole("button", { name: /a shared thread/ }));
   expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
   expect(screen.queryByText(/Error 404/)).toBeNull();
 });
@@ -1231,43 +1269,4 @@ test("every container that stacks bands states the one gap between them", async 
   expect(panel.className).toContain("gap-6xl");
   const page = panel.parentElement;
   expect(page?.className).toContain("gap-6xl");
-});
-
-test("an agent's conversation search asks the server rather than the rows on the page", async () => {
-  const kept = "5c0be3aa-0000-4000-8000-000000000009";
-  const row = (id: string, description: string) => ({
-    id,
-    surface: "web",
-    surface_label: null,
-    audience: "shared",
-    member_email: null,
-    description,
-    speakers: [],
-    turn_count: 1,
-    created_at: "2026-07-30T10:00:00",
-    last_turn_at: null,
-    readable: true,
-    disclosable: false,
-  });
-  const { calls } = wire({
-    "/conversations?q=deploy": () => json({ conversations: [row(kept, "Rename the deploy job")] }),
-    "/conversations": () =>
-      json({
-        conversations: [
-          row(kept, "Rename the deploy job"),
-          row("5c0be3aa-0000-4000-8000-000000000010", "Order more coffee"),
-        ],
-      }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  expect(await screen.findByText("Order more coffee")).toBeTruthy();
-  const column = within(await screen.findByRole("navigation", { name: "Conversations" }));
-  await userEvent.type(column.getByLabelText("Search"), "deploy{Enter}");
-
-  expect(await screen.findByText("Rename the deploy job")).toBeTruthy();
-  expect(screen.queryByText("Order more coffee")).toBeNull();
-  expect(calls.some((url) => url.includes("/conversations?q=deploy"))).toBe(true);
 });

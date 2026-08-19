@@ -96,7 +96,7 @@ function everything() {
   return wire({
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
     "/slots": () => json({ slots: [] }),
-    "/conversations": () => json({ conversations: [FOUND_CONVERSATION] }),
+    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/workspace/artifacts": () => json({ artifacts: [FOUND_FILE] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, [FOUND_TASK]),
@@ -109,7 +109,6 @@ function everything() {
 function nothing() {
   return wire({
     "/slots": () => json({ slots: [] }),
-    "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
@@ -178,7 +177,6 @@ test("every memory match stands, though they all open the one memory screen", as
   const second = { ...FOUND_MEMORY, text: "deploys are announced in #ops", ref: "memory/2" };
   wire({
     "/slots": () => json({ slots: [] }),
-    "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () =>
       json({ available: true, kinds: [], matches: [FOUND_MEMORY, second] }),
@@ -238,7 +236,6 @@ test("a hosted site stands once, under artifacts, and opens there", async () => 
   const { calls } = wire({
     ["/objects/" + SITE_KIND.kind + "/deploy-notes"]: () => json(record),
     "/slots": () => json({ slots: [] }),
-    "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
@@ -274,7 +271,6 @@ test("two agents' same-named records both stand, each opening its own", async ()
   wire({
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
     "/slots": () => json({ slots: [] }),
-    "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, [FOUND_TASK, second]),
@@ -313,7 +309,7 @@ test("a radar hit opens that record in the radar feed", async () => {
 test("a read that fails states so under its own heading, and the others still answer", async () => {
   wire({
     "/slots": () => json({ slots: [] }),
-    "/conversations": () => json({ conversations: [FOUND_CONVERSATION] }),
+    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/workspace/artifacts": () => new Response("nope", { status: 503 }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
@@ -433,7 +429,7 @@ test("the term is said to the agent, by the composer on the screen it lands on",
   wire({
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "deploy" }),
     "/slots": () => json({ slots: [] }),
-    "/conversations": () => json({ conversations: [FOUND_CONVERSATION] }),
+    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
@@ -461,7 +457,6 @@ test("the term is said to the agent the row names, from another agent's start sc
   const { calls } = wire({
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
     "/slots": () => json({ slots: [] }),
-    "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
@@ -496,7 +491,6 @@ test("the term founds a new conversation, though the member was reading another"
     "/api/chats": () => json({ chats: [CHAT_ROW] }),
     "/slots": () => json({ slots: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
-    "/conversations": () => json({ conversations: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),

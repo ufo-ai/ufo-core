@@ -135,12 +135,12 @@ Three columns: the existing nav, a thin agent index, a wide pane.
 |---|---|
 | Index column | new `--container-index` token (~272px) in `theme.css`; search, List \| Graph segmented, one row per **agent** (name, model), the New agent act |
 | Routes | `#/agents/<uuid>` renders the pane in place — the drawer-over-list dies (`views/AgentPane.tsx` stops being a `RecordPanel`); bare `#/agents` renders the main agent selected without navigating |
-| Tabs | `Home` prepended to `AGENT_TABS` (`lib/route.ts:19`) as the default tab: the homepage iframe, or the absent state; the six existing tab bodies are unchanged |
-| Overview → Settings | with Home as the landing tab, Overview is the config surface and its name says so: tab label, hash segment, `views/Overview.tsx`, and the `agents/{agent_id}/overview` read rename to `settings` — one name on every end, its own commit |
+| Halves | the pane is the conversation and the homepage side by side, equal, read at once — no tab strip and no `AGENT_TABS`: the homepage iframe stands in its own half, headed `Home` |
+| Overview → Settings | with the homepage in its own half, Overview is the config surface and its name says so: tab label, hash segment, `views/Overview.tsx`, and the `agents/{agent_id}/overview` read rename to `settings` — one name on every end, its own commit |
 | Tab headers | one header shape across every tab of the pane: the agent's name beside the pill tab strip (`kernel/tabs.tsx` Segmented), each body opening at the band pitch Settings' `Group` headings set (`components/ui/facts.tsx:15`) — no tab draws a header variant of its own |
 | Graph | draws in the wide pane; an agent node click routes to that agent's Home |
 | Narrow | the index is the page; a selected agent overlays it, the existing `max-narrow` record pattern |
-| Absent state | `<name> has not built its homepage.` — one line, nothing else |
+| Absent state | no half at all — the pane is one column, because a column whose only content is the sentence that it is empty says nothing the missing half does not |
 
 **Subagent profiles leave the agents page.** They are profiles, not agents — no identity, no
 sandbox, no homepage. The index lists agents only; `views/SubagentPane.tsx`, the `#/subagents`

@@ -1,5 +1,3 @@
-export const AGENT_TABS = ["home", "conversations"] as const;
-
 export const WORKSPACE_TABS = [
   "team",
   "memory",
@@ -11,7 +9,6 @@ export const WORKSPACE_TABS = [
 
 export const SECTIONS = ["artifacts", "radar"] as const;
 
-export type AgentTab = (typeof AGENT_TABS)[number];
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
 
@@ -39,7 +36,7 @@ export type Route =
     }
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents" }
-  | { kind: "agent"; agentId: string; tab: AgentTab; place: WorkspacePlace }
+  | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
   | { kind: "first-run" }
@@ -58,7 +55,7 @@ const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
 /** The first run's own address. It is a place, not a boot flag: a member can return to it, and
  *  send a teammate to it, exactly as they can to any other screen. */
 export const FIRST_RUN_HASH = "#/first-run";
-const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?(?:\?(.*))?$/;
+const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\?(.*))?$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
 
@@ -83,10 +80,6 @@ function serializePlace(place: WorkspacePlace): string {
   }
   const raw = params.toString();
   return raw ? "?" + raw : "";
-}
-
-function isAgentTab(name: string | undefined): name is AgentTab {
-  return AGENT_TABS.includes((name ?? "") as AgentTab);
 }
 
 function isWorkspaceTab(name: string): name is WorkspaceTab {
@@ -136,12 +129,7 @@ export function parseHash(hash: string): Route {
   }
   const agent = hash.match(AGENT_HASH);
   if (agent) {
-    return {
-      kind: "agent",
-      agentId: agent[1],
-      tab: isAgentTab(agent[2]) ? agent[2] : "home",
-      place: parsePlace(agent[3]),
-    };
+    return { kind: "agent", agentId: agent[1], place: parsePlace(agent[2]) };
   }
   return { kind: "home" };
 }
@@ -177,8 +165,8 @@ export function newChatHash(agentId: string): string {
   return "#/new/" + agentId;
 }
 
-export function agentHash(agentId: string, tab: AgentTab, place: WorkspacePlace = {}): string {
-  return "#/agents/" + agentId + (tab === "home" ? "" : "/" + tab) + serializePlace(place);
+export function agentHash(agentId: string, place: WorkspacePlace = {}): string {
+  return "#/agents/" + agentId + serializePlace(place);
 }
 
 export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {

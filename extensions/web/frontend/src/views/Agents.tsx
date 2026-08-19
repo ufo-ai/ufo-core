@@ -21,7 +21,8 @@ import { AgentSkills } from "@/views/AgentSkills";
 import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
-import { AGENT_TABS, type AgentTab, type PlaceStep, type WorkspacePlace } from "@/lib/route";
+import type { PlaceStep, WorkspacePlace } from "@/lib/route";
+import type { ChatRow } from "@/lib/rail";
 import type { Agent, Member } from "@/lib/types";
 
 export type AgentsProps = {
@@ -30,12 +31,11 @@ export type AgentsProps = {
   /** The agent the hash names, or null on the bare route — which shows the main agent without
    *  navigating. */
   selected: Agent | null;
-  tab: AgentTab;
+  chats: ChatRow[] | null;
   place: WorkspacePlace;
   onOpen: (agentId: string) => void;
-  onTab: (tab: AgentTab) => void;
-  onNewChat: (agentId: string) => void;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
+  onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onAgents: () => void;
 };
 
@@ -239,12 +239,11 @@ export function Agents({
   agents,
   member,
   selected,
-  tab,
+  chats,
   place,
   onOpen,
-  onTab,
-  onNewChat,
   onPlace,
+  onCreated,
   onAgents,
 }: AgentsProps) {
   const mainAgent = useMainAgent();
@@ -393,11 +392,11 @@ export function Agents({
         />
       ) : shown ? (
         <AgentPane
+          key={shown.id}
           agent={shown}
-          tab={tab}
-          tabs={AGENT_TABS}
-          onTab={onTab}
-          onNewChat={() => onNewChat(shown.id)}
+          member={member}
+          chats={chats}
+          onCreated={(conversationId, title) => onCreated(shown, conversationId, title)}
           onSettings={() => {
             setSettingsTab(SETTINGS_TABS[0]);
             setSettling(true);

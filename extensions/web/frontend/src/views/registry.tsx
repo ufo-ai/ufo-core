@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
-import type { AgentTab, Section, WorkspaceTab } from "@/lib/route";
+import type { Section, WorkspaceTab } from "@/lib/route";
 import { Artifacts } from "@/views/Artifacts";
 import { Radar } from "@/views/Radar";
 import { WorkspaceConnectors } from "@/views/Connectors";
@@ -36,11 +36,6 @@ function declared<Payload, Row>(label: string, spec: ListingSpec<Payload, Row>):
     ),
   };
 }
-
-export const AGENT_TAB_LABELS: Record<AgentTab, string> = {
-  home: "Home",
-  conversations: "Conversations",
-};
 
 export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   team: {

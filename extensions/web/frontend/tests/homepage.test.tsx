@@ -14,12 +14,10 @@ beforeEach(() => {
 
 function open(routes: Parameters<typeof wire>[0]) {
   wire({ "/transcript": () => json({ messages: [] }), ...routes });
-  render(
-    <App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />,
-  );
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
 
-test("a set homepage frames the bound site in the pane", async () => {
+test("a set homepage frames the bound site beside the conversation", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({
     "/homepage": () =>
@@ -35,20 +33,37 @@ test("a set homepage frames the bound site in the pane", async () => {
   expect(frame.tagName).toBe("IFRAME");
   expect(frame.getAttribute("src")).toBe(HOMEPAGE_URL);
   expect(frame.hasAttribute("sandbox")).toBe(false);
+  // The one act on the half, and the one that leaves the portal.
+  const out = screen.getByRole("link", { name: "Open Assistant homepage" });
+  expect(out.getAttribute("href")).toBe(HOMEPAGE_URL);
+  expect(out.getAttribute("target")).toBe("_blank");
 });
 
-test("an absent homepage states the one line and nothing else", async () => {
+test("a homepage being built draws the page's shape rather than the page", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  open({ "/homepage": () => json({ state: "building" }) });
+
+  const half = await screen.findByRole("region", { name: "Assistant homepage" });
+  expect(half.getAttribute("aria-busy")).toBe("true");
+  expect(half.querySelector("iframe")).toBeNull();
+  expect(half.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
+  // Nothing to open until the build settles.
+  expect(screen.queryByRole("link", { name: "Open Assistant homepage" })).toBeNull();
+});
+
+test("an app with no homepage draws one column and no second half", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({ "/homepage": () => json({ state: "none" }) });
 
-  expect(await screen.findByText("Assistant has not built its homepage.")).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
+  expect(screen.queryByRole("region", { name: "Assistant homepage" })).toBeNull();
   expect(document.querySelector("iframe")).toBeNull();
 });
 
-test("the bare agents hash shows the main agent's Home without navigating", async () => {
+test("the bare agents hash shows the main agent without navigating", async () => {
   location.hash = "#/agents";
   open({});
 
-  expect(await screen.findByText("Assistant has not built its homepage.")).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
   expect(location.hash).toBe("#/agents");
 });

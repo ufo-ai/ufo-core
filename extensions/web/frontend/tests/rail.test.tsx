@@ -992,14 +992,15 @@ test("the agents index opens the agent's page, and chat starts the conversation"
   wire({ "/settings": () => json(SETTINGS), "/connections": () => json({ connections: [] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("main");
-  expect(screen.queryByRole("button", { name: "New conversation" })).toBeNull();
+  expect(screen.queryByRole("navigation", { name: "Conversations" })).toBeNull();
 
   location.hash = "#/agents";
   await openAgentRow("Assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 
   await userEvent.click(screen.getByRole("button", { name: "Chat" }));
-  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  const rail = within(await screen.findByRole("navigation", { name: "Conversations" }));
+  await userEvent.click(rail.getByRole("button", { name: "New conversation" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Message the agent")).toBeTruthy();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
@@ -1094,12 +1095,12 @@ test("a linked conversation past the rail's bound resolves by id", async () => {
 });
 
 test("a hash naming an agent this member cannot reach reports it", async () => {
-  location.hash = "#/agents/99999999-9999-4999-8999-999999999999/settings";
+  location.hash = "#/agents/99999999-9999-4999-8999-999999999999";
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("No such agent.")).toBeTruthy();
-  expect(screen.queryByRole("tab", { name: "Settings" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Settings for/ })).toBeNull();
 });
 
 test("the top bar marks the category the member is in and leaves the others off", async () => {

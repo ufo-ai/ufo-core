@@ -925,8 +925,9 @@ test("the index row and the pane header draw the app's name in Title Case", asyn
   expect(index.getByRole("button", { name: /^Code Reviewer/ })).toBeTruthy();
   expect(index.queryByText("code reviewer")).toBeNull();
 
-  const pane = await screen.findByRole("region", { name: "Code Reviewer" });
-  expect(within(pane).getByRole("heading", { name: "Code Reviewer" })).toBeTruthy();
+  const pane = within(await screen.findByRole("region", { name: "Code Reviewer" }));
+  expect(pane.getByRole("button", { name: "Settings for Code Reviewer" })).toBeTruthy();
+  expect(pane.queryByText("code reviewer")).toBeNull();
 });
 
 /** The drawn name is text; the stored name is the app's identity, and it is what addresses the
@@ -956,28 +957,35 @@ test("the settings dialog reads the drawn name and the intent it posts carries t
 });
 
 /** Starting a conversation with the open app is an act of its own header, standing with the acts
- *  at the far end rather than among the tabs: it leaves the apps screen for the chat, so it cannot
- *  be a tab — a segment that never reads as the current one. */
-test("the app pane's header starts a chat with the app it shows, standing with the acts and not among the tabs", async () => {
+ *  at the far end rather than inside the switcher: it makes a conversation instead of choosing
+ *  among the ones there are. It founds it where the pane stands, with the app the pane shows, so
+ *  the screen is not left for the chat. */
+test("the app pane's header starts a chat with the app it shows, standing with the acts at the far end", async () => {
+  const sent: string[] = [];
   location.hash = "#/agents/" + SECOND_ID;
   wire({
     "/api/agents": () => boot([AGENT, RESEARCH], ADMIN),
-    "/settings": () => json(SETTINGS),
-    "/connections": () => json({ connections: [] }),
+    "/chat": (url) => {
+      sent.push(url);
+      return json(OPENED);
+    },
+    "/transcript": () => json({ messages: [] }),
   });
   render(<Portal />);
 
-  const pane = await screen.findByRole("region", { name: "Research" });
-  const act = within(pane).getByRole("button", { name: "New chat" });
-  expect(within(pane).queryByRole("tab", { name: "New chat" })).toBeNull();
-  const tabs = within(pane).getByRole("tab", { name: "Conversations" });
-  const settings = within(pane).getByRole("button", { name: "Settings for Research" });
-  expect(tabs.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const pane = within(await screen.findByRole("region", { name: "Research" }));
+  const act = pane.getByRole("button", { name: "New" });
+  const switcher = pane.getByRole("button", { name: /New conversation/ });
+  const settings = pane.getByRole("button", { name: "Settings for Research" });
+  expect(switcher.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(settings.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
 
   await userEvent.click(act);
 
-  expect(location.hash).toBe("#/new/" + SECOND_ID);
-  expect(await screen.findByLabelText("Message the agent")).toBeTruthy();
-  expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("Research");
+  expect(location.hash).toBe("#/agents/" + SECOND_ID);
+  await userEvent.type(await pane.findByLabelText("Message the agent"), "hello");
+  await userEvent.click(pane.getByRole("button", { name: "Send" }));
+
+  await waitFor(() => expect(sent.length).toBe(1));
+  expect(sent[0]).toBe("/surface/web/agents/" + SECOND_ID + "/chat?conversation=new");
 });

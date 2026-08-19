@@ -3672,8 +3672,11 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
     admins for a private one — the same rule the frame gates each visit on, so the read never
     hands out a link that renders a refusal. The binding is read past the row gate (the row's
     own column is dormant while bound) and this handler applies the agent rule itself; a binding
-    that no longer resolves and an agent that never bound one answer the same absent state the
-    Home tab renders."""
+    that no longer resolves and an agent that never bound one answer the same absent state.
+
+    Three states, because the page a member is waiting for is not the page that is not there:
+    `building` while the seed run that builds an agent's first homepage is still working, `set`
+    once a homepage is bound, and `none` where none exists and nothing is making one."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -3696,8 +3699,38 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
         return JSONResponse({"state": "none"})
     bound = next((row for row in page.rows if "site_url" in row.fields), None)
     if bound is None:
-        return JSONResponse({"state": "none"})
+        return JSONResponse(
+            {"state": "building"} if await _seeding_homepage(ctx, agent_id) else {"state": "none"}
+        )
     return JSONResponse({"state": "set", "url": bound.fields["site_url"]})
+
+
+async def _seeding_homepage(ctx: SurfaceContext, agent_id: UUID) -> bool:
+    """Whether the agent's first homepage is being built right now. The seed is the one build this
+    read can see: its marker holds the member the turn rode on behalf of, which with the agent is
+    the whole of the queue key it opened the conversation under, so the conversation's own latest
+    turn says whether the work is still running. A marker holding anything else — the settled note
+    for an agent whose allowlist withholds the site tools — names no conversation and is building
+    nothing.
+
+    A bound homepage answers `set` whatever its agent is doing, and deliberately. A rebuild asked
+    for in a portal chat runs in that chat's own sandbox and registers its own site row, so the
+    bound row's conversation is not where the work is happening; reading that conversation's turns
+    would answer `building` for every unrelated thing the member says to the app, and would still
+    miss the rebuild. Until a site carries a build state of its own, a page that exists is a page
+    this read hands over."""
+    acting = await web_extension().store.get(f"{HOMEPAGE_SEED_PREFIX}{agent_id}")
+    if not isinstance(acting, str):
+        return False
+    try:
+        member = UUID(acting)
+    except ValueError:
+        return False
+    conversation = await ctx.find_conversation(f"homepage/{agent_id}/{member}")
+    if conversation is None:
+        return False
+    turn = await ctx.latest_turn(conversation)
+    return turn is not None and not await ctx.turn_is_terminal(turn)
 
 
 PREVIEW_KINDS = {

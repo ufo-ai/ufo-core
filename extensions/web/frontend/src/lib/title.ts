@@ -3,7 +3,7 @@ import { isPortalChat } from "@/lib/audience";
 import type { ChatRow } from "@/lib/rail";
 import type { Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
-import { AGENT_TAB_LABELS, SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
 const PRODUCT = "ufo";
 const TRAIL = " · ";
@@ -63,7 +63,7 @@ function where(
     case "agents":
       return [APPS];
     case "agent":
-      return [AGENT_TAB_LABELS[route.tab], named(route.agentId)];
+      return [named(route.agentId)];
     case "workspace":
       return [WORKSPACE_VIEWS[route.view].label, WORKSPACE];
     case "section":

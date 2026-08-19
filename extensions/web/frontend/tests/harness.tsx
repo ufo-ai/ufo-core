@@ -137,18 +137,33 @@ export function atPhoneWidth() {
 
 export type Route = (url: string, init?: RequestInit) => Response | Promise<Response>;
 
+/** The wire every suite stubs its reads on. A pattern matches anywhere in the url, except that one
+ *  ending in `$` matches only a url whose path ends there.
+ *
+ *  Both halves of that are load-bearing, and each is a bug the other cannot prevent. Substring
+ *  matching is why the defaults are tried first: a suite stubbing `/chat` would otherwise answer
+ *  `/api/chats` with it and hand the rail a payload holding no chats. And it is why the
+ *  conversation index is anchored: unanchored, `/conversations` answers
+ *  `/conversations/<id>/slots` and `/conversations/<id>/transcript` too, handing a chat pane an
+ *  index where it expected its slots. The defaults are the reads a screen makes whatever the suite
+ *  is about, so a suite states only what it is testing. */
 export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
   const table: Record<string, Route> = {
     "/api/chats": () => json({ chats: [] }),
     "/api/agents/status": () => json({ statuses: [] }),
     "/homepage": () => json({ state: "none" }),
+    "/conversations$": () => json({ conversations: [] }),
     ...routes,
   };
+  const matches = (url: string, pattern: string) =>
+    pattern.endsWith("$")
+      ? url.split("?")[0].endsWith(pattern.slice(0, -1))
+      : url.includes(pattern);
   const handler = vi.fn(async (url: string, init?: RequestInit) => {
     calls.push(url);
     for (const [pattern, route] of Object.entries(table)) {
-      if (url.includes(pattern)) return route(url, init);
+      if (matches(url, pattern)) return route(url, init);
     }
     throw new Error("no route for " + url);
   });
@@ -326,6 +341,17 @@ export function agentIndex(): Promise<HTMLElement> {
 }
 
 /** Open one agent from the index: the row is the control, named by the text it carries. */
+/** What the app pane's conversation half is headed by before a conversation names it, which is
+ *  also the switcher's own control while nothing is open. */
+export const FRESH = "New conversation";
+
+/** Open one of an app's conversations: the title of the one the half holds is the control, and the
+ *  conversations it lists are what a press picks between. */
+export async function pickConversation(held: string, wanted: string): Promise<void> {
+  await userEvent.click(await screen.findByRole("button", { name: held }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: wanted }));
+}
+
 export async function openAgentRow(name: string): Promise<void> {
   const index = await agentIndex();
   await userEvent.click(within(index).getByRole("button", { name: new RegExp("^" + name) }));

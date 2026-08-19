@@ -240,7 +240,7 @@ function Story({
           by{" "}
           {agent ? (
             <>
-              <a href={agentHash(agent.id, "home")} className={out}>
+              <a href={agentHash(agent.id)} className={out}>
                 {agent.name}
               </a>{" "}
             </>
