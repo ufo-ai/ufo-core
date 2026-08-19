@@ -4,11 +4,17 @@ import json
 import sys
 import tomllib
 from pathlib import Path
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 import yaml
 
+from evals.memory_ingestion.assets import LOCOMO, LONGMEM_CLEANED
+from evals.memory_ingestion.materialize import (
+    DERIVATION_MODEL,
+    DerivedEvidence,
+    IngestionReadiness,
+)
 from evals.registry import TASKS
 from evals.stack import Matrix
 
@@ -31,6 +37,11 @@ def _script(name: str):
 @pytest.fixture(scope="module")
 def planner():
     return _script("nightly_eval_matrix")
+
+
+@pytest.fixture(scope="module")
+def memory_nightly():
+    return _script("nightly_memory_ingestion")
 
 
 @pytest.fixture(scope="module")
@@ -128,7 +139,7 @@ def test_every_shard_archives_its_own_records_and_the_archive_merges_them(workfl
         "eval-stack-logs-${{ matrix.label }}",
     ]
     assert uploads[0]["if"] == "always()" and uploads[1]["if"] == "failure()"
-    assert archive["if"] == "always()" and archive["needs"] == "sweep"
+    assert archive["if"] == "always()" and archive["needs"] == ["sweep", "memory-ingestion"]
     assert download["with"]["pattern"] == "eval-run-records-*"
     assert download["with"]["merge-multiple"] is True
 
@@ -144,6 +155,147 @@ def test_the_summary_names_a_planned_suite_that_produced_no_report(planner, tmp_
     assert "0 of 0 planned suites ran" not in rendered
     assert "planned suites produced no report" in rendered
     assert all(suite in rendered for suite in planner.SMOKE_SUITES)
+
+
+def test_the_summary_requires_every_memory_ingestion_report(memory_nightly, tmp_path: Path) -> None:
+    summary = _script("eval_sweep_summary")
+    (tmp_path / "runs").mkdir()
+
+    rendered = summary.render(tmp_path, smoke=True, memory_ingestion=True)
+
+    assert all(name in rendered for name in memory_nightly.SMOKE_REPORT_CASES)
+
+
+def test_memory_ingestion_inputs_pin_luna_and_the_corpus(memory_nightly, tmp_path: Path) -> None:
+    root = tmp_path / "input"
+    snapshot = tmp_path / "snapshot"
+
+    memory_nightly.write_inputs(root, snapshot)
+
+    config = tomllib.loads((root / "ufo.toml").read_text())
+    matrix = Matrix.model_validate(tomllib.loads((root / "matrix.toml").read_text()))
+    assert config["models"]["background_jobs_model"] == DERIVATION_MODEL
+    assert config["pack"]["name"] == "assistant"
+    assert matrix.run[0].label == "memory-ingestion"
+    assert matrix.run[0].memory_ingestion == snapshot.resolve()
+
+
+def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly) -> None:
+    job = workflow["jobs"]["memory-ingestion"]
+    fetch = next(step for step in job["steps"] if step.get("name") == "Fetch the pinned corpora")
+    prepare = next(
+        step for step in job["steps"] if step.get("name") == "Prepare the memory-ingestion stack"
+    )
+    run = next(step for step in job["steps"] if step.get("name") == "Run memory ingestion")
+    uploads = [
+        step["with"]["name"]
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact")
+    ]
+
+    assert run["timeout-minutes"] < job["timeout-minutes"] < RUNNER_CEILING_MINUTES
+    assert fetch["env"]["LONGMEM_URL"] == LONGMEM_CLEANED.url
+    assert fetch["env"]["LOCOMO_URL"] == LOCOMO.url
+    assert '"$SWEEP_SMOKE"' in prepare["run"] and '"$SWEEP_SMOKE"' in run["run"]
+    assert "nightly_memory_ingestion.py verify" in run["run"]
+    assert uploads == [
+        "eval-run-records-memory-ingestion",
+        "eval-memory-ingestion-state",
+        "eval-stack-logs-memory-ingestion",
+    ]
+
+
+def test_a_failing_memory_ingestion_case_ends_the_step_red(workflow) -> None:
+    """`set +e` is there so `verify` still writes the state and the record over a failed stack, and
+    `verify` compares the record's shape and never reads `case.passed`. The stack's own code is the
+    only thing left that can turn the night red, so the step ends on it."""
+    run = next(
+        step
+        for step in workflow["jobs"]["memory-ingestion"]["steps"]
+        if step.get("name") == "Run memory ingestion"
+    )
+
+    assert "stack_status=$?" in run["run"]
+    assert run["run"].rstrip().endswith('exit "$stack_status"')
+
+
+def test_memory_ingestion_verification_accepts_scores_and_rejects_missing_cases(
+    memory_nightly, tmp_path: Path
+) -> None:
+    reports = tmp_path / "reports"
+    runs_root = tmp_path / "runs"
+    report_rows = []
+    for name, count in memory_nightly.SMOKE_REPORT_CASES.items():
+        report_rows.append(
+            {
+                "name": name,
+                "suite": "capability",
+                "digest": f"sha256:{name}",
+                "cases": [
+                    {
+                        "name": f"{name}-{index}",
+                        "passed": index % 2 == 0,
+                        "reason": "score",
+                        "evidence": {"prompt": "p", "response": "r"},
+                    }
+                    for index in range(count)
+                ],
+            }
+        )
+    run = {
+        "id": str(uuid4()),
+        "created_at": "2026-08-19T05:00:00Z",
+        "label": "memory-ingestion",
+        "agent": "assistant",
+        "ufo_version": "0",
+        "revision": "0",
+        "reports": report_rows,
+    }
+    (reports / "runs").mkdir(parents=True)
+    (reports / "runs" / "run.json").write_text(json.dumps(run))
+    readiness = IngestionReadiness(
+        snapshot_digest="snapshot",
+        corpus_digest="corpus",
+        derivation_model=DERIVATION_MODEL,
+        workspace_id=uuid4(),
+        source_id=uuid4(),
+        pages_root=tmp_path / "pages",
+        page_count=9,
+        memory_count=41,
+        chunk_count=41,
+        asker_email="asker@example.com",
+        evidence=(),
+    )
+    state = runs_root / "stamp" / "memory-ingestion" / "state" / "digest" / "readiness.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(readiness.model_dump_json())
+    output = tmp_path / "state" / "readiness.json"
+
+    memory_nightly.verify(reports, runs_root, output, smoke=True)
+    assert output.read_text() == state.read_text()
+
+    report_rows[0]["cases"].pop()
+    (reports / "runs" / "run.json").write_text(json.dumps(run))
+    with pytest.raises(RuntimeError, match="report cases differ"):
+        memory_nightly.verify(reports, runs_root, output, smoke=True)
+
+
+def test_the_archive_survives_a_memory_ingestion_job_that_wrote_no_state(workflow) -> None:
+    """The archive job runs `if: always()` so a failed sibling still leaves the night readable. The
+    ingestion job publishes no state artifact when it ends before `verify`, and a download by name
+    would stop the job there — no summary, no archive, no S3 copy, no trend point."""
+    metrics = _script("eval_sweep_metrics")
+    downloads = [
+        step
+        for step in workflow["jobs"]["archive"]["steps"]
+        if step.get("uses", "").startswith("actions/download-artifact")
+    ]
+    state = next(step for step in downloads if "memory-ingestion" in step["with"]["pattern"])
+
+    assert all("name" not in step["with"] for step in downloads)
+    assert state["with"]["pattern"] == "eval-memory-ingestion-state"
+    assert state["with"]["merge-multiple"] is True
+    assert state["with"]["path"] == str(Path("eval-reports") / metrics.MEMORY_STATE.parent)
 
 
 def test_the_archive_carries_the_summary_the_viewer_and_the_records(workflow) -> None:
@@ -212,6 +364,45 @@ def test_no_digest_rides_the_metric_tags(tmp_path: Path) -> None:
         for point in payload["series"]
     )
     assert "sha256:deadbeef" in event["text"] and "basics" in event["text"]
+
+
+def test_memory_ingestion_state_reports_fact_and_empty_evidence_counts(tmp_path: Path) -> None:
+    metrics = _script("eval_sweep_metrics")
+    _archive(tmp_path, "memory-ingestion", "memory_ingestion.locomo.multi_hop", 1, 2, "digest")
+    readiness = IngestionReadiness(
+        snapshot_digest="snapshot",
+        corpus_digest="corpus",
+        derivation_model=DERIVATION_MODEL,
+        workspace_id=uuid4(),
+        source_id=uuid4(),
+        pages_root=tmp_path / "pages",
+        page_count=9,
+        memory_count=41,
+        chunk_count=41,
+        asker_email="asker@example.com",
+        evidence=(
+            DerivedEvidence(source_ref="one", memory_ids=(uuid4(),)),
+            DerivedEvidence(source_ref="two", memory_ids=()),
+        ),
+    )
+    state = tmp_path / metrics.MEMORY_STATE
+    state.parent.mkdir(parents=True)
+    state.write_text(readiness.model_dump_json())
+
+    payload = metrics.series(tmp_path, mode="sweep", timestamp=1)
+    values = {
+        point["metric"]: point["points"][0]["value"]
+        for point in payload["series"]
+        if point["metric"].startswith("ufo.evals.memory_ingestion.")
+    }
+
+    assert values == {
+        metrics.MEMORY_PAGE_METRIC: 9,
+        metrics.MEMORY_FACT_METRIC: 41,
+        metrics.MEMORY_CHUNK_METRIC: 41,
+        metrics.MEMORY_EVIDENCE_METRIC: 2,
+        metrics.MEMORY_EMPTY_EVIDENCE_METRIC: 1,
+    }
 
 
 def test_a_sweep_that_scored_nothing_submits_nothing(tmp_path: Path) -> None:

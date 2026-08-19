@@ -15,10 +15,10 @@ name: Nightly evals
 # It ends red when any case fails: a failing case is the finding, so read the job summary and the
 # archived records, not only the job status.
 #
-# Corpus suites (`--memory-100`, `--issue-recall`, `--dsqa-100`, `--gdpval-100`, `--jobbench`,
-# `--wandr`, `--hle-gold`, `--compaction`, `--handbook`, `--coding-repo`, `mcp_atlas_100`) are not
-# here: each needs a built snapshot, is one run of its own, and several need a second offline
-# grading pass.
+# Memory ingestion is its own job because it builds and materializes a fixed corpus before the
+# run. Other corpus suites (`--memory-100`, `--issue-recall`, `--dsqa-100`, `--gdpval-100`,
+# `--jobbench`, `--wandr`, `--hle-gold`, `--compaction`, `--handbook`, `--coding-repo`,
+# `mcp_atlas_100`) are not here.
 
 on:
   schedule:
@@ -33,7 +33,9 @@ on:
     paths:
       - .github/workflows/evals-nightly.yml
       - .github/scripts/nightly_eval_matrix.py
+      - .github/scripts/nightly_memory_ingestion.py
       - .github/scripts/eval_sweep_summary.py
+      - .github/scripts/eval_sweep_metrics.py
 
 concurrency:
   group: evals-nightly-${{ github.ref }}
@@ -172,9 +174,119 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  memory-ingestion:
+    name: memory ingestion
+    runs-on: linux-4-core
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ufo
+          POSTGRES_PASSWORD: ufo
+          POSTGRES_DB: ufo
+        ports:
+          - 5541:5432
+        options: >-
+          --health-cmd "pg_isready -U ufo"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: egress
+      - run: cargo build --manifest-path egress/Cargo.toml
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/memory-ingestion-assets
+          key: memory-ingestion-assets-${{ hashFiles('evals/memory_ingestion/assets.py') }}
+
+      - name: Fetch the pinned corpora
+        env:
+          ASSETS: ${{ runner.temp }}/memory-ingestion-assets
+          LONGMEM_URL: https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_s_cleaned.json
+          LOCOMO_URL: https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json
+        run: |
+          mkdir -p "$ASSETS"
+          test -f "$ASSETS/longmemeval_s_cleaned.json" || \
+            { curl --fail --location --output "$ASSETS/longmem.tmp" "$LONGMEM_URL" && \
+              mv "$ASSETS/longmem.tmp" "$ASSETS/longmemeval_s_cleaned.json"; }
+          test -f "$ASSETS/locomo10.json" || \
+            { curl --fail --location --output "$ASSETS/locomo.tmp" "$LOCOMO_URL" && \
+              mv "$ASSETS/locomo.tmp" "$ASSETS/locomo10.json"; }
+
+      - name: Prepare the memory-ingestion stack
+        env:
+          ASSETS: ${{ runner.temp }}/memory-ingestion-assets
+        run: |
+          uv run python .github/scripts/nightly_memory_ingestion.py prepare \
+            --longmem "$ASSETS/longmemeval_s_cleaned.json" \
+            --locomo "$ASSETS/locomo10.json" \
+            --dir "$RUNNER_TEMP/memory-ingestion" "$SWEEP_SMOKE"
+          cat "$RUNNER_TEMP/memory-ingestion/ufo.toml" \
+            "$RUNNER_TEMP/memory-ingestion/matrix.toml"
+
+      - name: Run memory ingestion
+        timeout-minutes: 60
+        run: |
+          set +e
+          uv run python -m evals.stack "$RUNNER_TEMP/memory-ingestion/matrix.toml"
+          stack_status=$?
+          set -e
+          echo "eval stack exit $stack_status; verifying the complete score record"
+          uv run python .github/scripts/nightly_memory_ingestion.py verify \
+            --reports eval-reports --runs-root .local/evals \
+            --state-output memory-ingestion-state/readiness.json "$SWEEP_SMOKE"
+          # `verify` reads the record's shape, never `case.passed`, so a failing case reaches the
+          # job status only through the stack's own code — carried here so `verify` still runs.
+          exit "$stack_status"
+
+      - name: Upload the run records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-run-records-memory-ingestion
+          path: eval-reports/runs/*.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload the ingestion state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-memory-ingestion-state
+          path: memory-ingestion-state/readiness.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload the stack logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-stack-logs-memory-ingestion
+          path: .local/evals/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
   archive:
     name: archive
-    needs: sweep
+    needs: [sweep, memory-ingestion]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -197,6 +309,15 @@ jobs:
           merge-multiple: true
           path: eval-reports/runs
 
+      # A memory-ingestion job that ends before `verify` copies the state publishes no artifact
+      # (`if-no-files-found: warn`), and this job runs `if: always()` so the night still reads. A
+      # pattern tolerates zero matches; a name would stop the archive here.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eval-memory-ingestion-state
+          merge-multiple: true
+          path: eval-reports/state
+
       # The sweep's reader-facing outputs: the summary GitHub shows on the run page, the same
       # summary in the archive, and one viewer over every shard's records — a record itself is
       # megabytes of case evidence, so nothing else in the archive is small enough to open first.
@@ -207,6 +328,7 @@ jobs:
             exit 1
           fi
           uv run python .github/scripts/eval_sweep_summary.py eval-reports "$SWEEP_SMOKE" \
+            --memory-ingestion \
             | tee eval-reports/summary.md >>"$GITHUB_STEP_SUMMARY"
 
       # The whole night as one artifact: `summary.md` to read, `index.html` to open, and every

@@ -19,10 +19,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from evals.harness.viewer import load_runs
+from evals.memory_ingestion.materialize import IngestionReadiness
 
 GAUGE = 3
 PASSED_METRIC = "ufo.evals.cases_passed"
 SCORED_METRIC = "ufo.evals.cases_scored"
+MEAN_EVIDENCE_METRIC = "ufo.evals.mapped_evidence_coverage_mean"
+MIN_EVIDENCE_METRIC = "ufo.evals.mapped_evidence_coverage_min"
+PAGE_EVIDENCE_METRIC = "ufo.evals.page_evidence_coverage"
+DEGRADED_RECALL_METRIC = "ufo.evals.degraded_recall"
+UNMAPPED_EVIDENCE_METRIC = "ufo.evals.unmapped_evidence"
+MEMORY_PAGE_METRIC = "ufo.evals.memory_ingestion.pages"
+MEMORY_FACT_METRIC = "ufo.evals.memory_ingestion.facts"
+MEMORY_CHUNK_METRIC = "ufo.evals.memory_ingestion.chunks"
+MEMORY_EVIDENCE_METRIC = "ufo.evals.memory_ingestion.evidence_refs"
+MEMORY_EMPTY_EVIDENCE_METRIC = "ufo.evals.memory_ingestion.empty_evidence_refs"
+MEMORY_STATE = Path("state/readiness.json")
 
 
 def series(root: Path, mode: str, timestamp: int) -> dict:
@@ -41,6 +53,44 @@ def series(root: Path, mode: str, timestamp: int) -> dict:
                         "points": [{"timestamp": timestamp, "value": value}],
                     }
                 )
+            for metric, value in (
+                (MEAN_EVIDENCE_METRIC, report.mean_mapped_evidence_coverage),
+                (MIN_EVIDENCE_METRIC, report.min_mapped_evidence_coverage),
+                (PAGE_EVIDENCE_METRIC, report.page_evidence_coverage),
+                (DEGRADED_RECALL_METRIC, report.degraded_recall_count),
+                (UNMAPPED_EVIDENCE_METRIC, report.unmapped_evidence_count),
+            ):
+                if value is not None:
+                    points.append(
+                        {
+                            "metric": metric,
+                            "type": GAUGE,
+                            "tags": tags,
+                            "points": [{"timestamp": timestamp, "value": value}],
+                        }
+                    )
+    state_path = root / MEMORY_STATE
+    if state_path.exists():
+        readiness = IngestionReadiness.model_validate_json(state_path.read_bytes())
+        tags = ["suite:memory_ingestion", "shard:memory-ingestion", f"mode:{mode}"]
+        for metric, value in (
+            (MEMORY_PAGE_METRIC, readiness.page_count),
+            (MEMORY_FACT_METRIC, readiness.memory_count),
+            (MEMORY_CHUNK_METRIC, readiness.chunk_count),
+            (MEMORY_EVIDENCE_METRIC, len(readiness.evidence)),
+            (
+                MEMORY_EMPTY_EVIDENCE_METRIC,
+                sum(not evidence.memory_ids for evidence in readiness.evidence),
+            ),
+        ):
+            points.append(
+                {
+                    "metric": metric,
+                    "type": GAUGE,
+                    "tags": tags,
+                    "points": [{"timestamp": timestamp, "value": value}],
+                }
+            )
     if not points:
         raise SystemExit(f"no run record under {root} — the sweep recorded no score to submit")
     return {"series": points}

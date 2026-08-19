@@ -16,14 +16,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nightly_eval_matrix import plan
+from nightly_memory_ingestion import FULL_REPORT_CASES, SMOKE_REPORT_CASES
 
 from evals.harness.viewer import load_runs, write_viewer
 
 REASON_LIMIT = 240
 
 
-def render(root: Path, smoke: bool) -> str:
+def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
     planned = tuple(suite for shard in plan(smoke) for suite in shard.suites)
+    if memory_ingestion:
+        planned += tuple(SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES)
     runs = load_runs(root)
     reports = tuple((run.label, report) for run in runs for report in run.reports)
     scored = sum(len(report.scored) for _, report in reports)
@@ -73,8 +76,9 @@ def main(argv: list[str] | None = None) -> None:
         default=False,
         help="the sweep ran the proving subset",
     )
+    parser.add_argument("--memory-ingestion", action="store_true")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    sys.stdout.write(render(args.root, args.smoke))
+    sys.stdout.write(render(args.root, args.smoke, args.memory_ingestion))
     write_viewer(args.root, load_runs(args.root))
 
 
