@@ -8,6 +8,7 @@ import { AGENT_TAB_LABELS, SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/regist
 const PRODUCT = "ufo";
 const TRAIL = " · ";
 const NEW_CONVERSATION = "New conversation";
+const FIRST_RUN = "Set up this workspace";
 const WORKSPACE = "Workspace";
 const APPS = "Apps";
 const ADMINISTRATION = "Administration";
@@ -45,6 +46,8 @@ function where(
   switch (route.kind) {
     case "home":
       return [NEW_CONVERSATION, main ? agentName(main.name) : undefined];
+    case "first-run":
+      return [FIRST_RUN];
     case "new-chat":
       return [NEW_CONVERSATION, named(route.agentId)];
     case "chat": {

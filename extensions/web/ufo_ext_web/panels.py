@@ -32,6 +32,10 @@ ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
 CONNECT_ONLY_KINDS = frozenset({"connection"})
 AGENT_SPEC_REQUIRED = frozenset({"model", "internet_access_allowed", "reasoning"})
+INSTALL_LINK = re.compile(r"https://\S+")
+SLACK_INSTALL_STATE = re.compile(r"\{.*\}", re.DOTALL)
+SLACK_INSTALL_LINK_KEY = "authorize_url"
+SLACK_INSTALL_HINT_KEY = "hint"
 
 
 class ApplyIntent(BaseModel):
@@ -167,6 +171,72 @@ class CorrectionIntent(BaseModel):
     body: str = Field(min_length=1)
 
 
+class ProviderTile(BaseModel):
+    """One tool the first run offers as a pick. `name` is the connector provider slug the portal
+    draws the brand glyph by; `label` is what the member reads and what the memory states."""
+
+    name: str
+    label: str
+
+
+FIRST_RUN_PROVIDERS = (
+    ProviderTile(name="slack", label="Slack"),
+    ProviderTile(name="github", label="GitHub"),
+    ProviderTile(name="gmail", label="Gmail"),
+    ProviderTile(name="googlecalendar", label="Google Calendar"),
+    ProviderTile(name="googledrive", label="Google Drive"),
+    ProviderTile(name="notion", label="Notion"),
+    ProviderTile(name="jira", label="Jira"),
+    ProviderTile(name="asana", label="Asana"),
+    ProviderTile(name="linear", label="Linear"),
+    ProviderTile(name="figma", label="Figma"),
+    ProviderTile(name="zoom", label="Zoom"),
+    ProviderTile(name="airtable", label="Airtable"),
+    ProviderTile(name="intercom", label="Intercom"),
+    ProviderTile(name="stripe", label="Stripe"),
+)
+
+FIRST_RUN_PROVIDER_NAMES = frozenset(tile.name for tile in FIRST_RUN_PROVIDERS)
+
+
+class ToolingIntent(BaseModel):
+    """What the team already uses, picked on the first run and recorded through `memory_update` —
+    exactly the write chat performs when a member says it, so the item lands under the picking
+    member's own audience and every later turn recalls it. The picks name the offered tiles: a name
+    outside the catalog is refused before a turn exists, because the body the memory carries is
+    written from the catalog's own labels."""
+
+    verb: Literal["record_tooling"]
+    kind: Literal["memory"]
+    providers: list[str] = Field(min_length=1, max_length=len(FIRST_RUN_PROVIDERS))
+
+    @model_validator(mode="after")
+    def _picks_are_offered(self) -> "ToolingIntent":
+        unoffered = sorted(set(self.providers) - FIRST_RUN_PROVIDER_NAMES)
+        if unoffered:
+            raise ValueError(f"no provider tile named {unoffered[0]!r}")
+        return self
+
+
+class ConnectSlackIntent(BaseModel):
+    """The first run's Slack step: the `slack_connect` chat verb, dispatched verbatim so the tool's
+    own admin gate answers and nothing about who may install a workspace-wide bot is decided
+    twice. The tool seals the install link inside the turn and states it in its answer, so the
+    outcome carries that link back to the member who asked — `connect_account`'s per-member consent
+    URL is the one minted at stream time instead, because it authorizes a member's own account
+    rather than the workspace's."""
+
+    verb: Literal["connect_slack"]
+
+
+class ConnectGitHubIntent(BaseModel):
+    """The first run's GitHub step: the `connect_github` chat verb on the same terms as the Slack
+    step — dispatched verbatim, admin-gated by the tool, answered with the install link it sealed
+    for this workspace."""
+
+    verb: Literal["connect_github"]
+
+
 class AddMemberIntent(BaseModel):
     """One member added from the team panel — the same admin-only `add_member` chat verb, which
     mints the member at whatever email domain their address carries and reports whether they took a
@@ -184,9 +254,12 @@ class PanelIntent(BaseModel):
         ApplyIntent
         | AddMemberIntent
         | AudienceIntent
+        | ConnectGitHubIntent
+        | ConnectSlackIntent
         | CorrectionIntent
         | CredentialIntent
         | RefillIntent
+        | ToolingIntent
         | TranscriptIntent
     ) = Field(discriminator="verb")
 
@@ -196,9 +269,12 @@ def _tool_intent(
         ApplyIntent
         | AddMemberIntent
         | AudienceIntent
+        | ConnectGitHubIntent
+        | ConnectSlackIntent
         | CorrectionIntent
         | CredentialIntent
         | RefillIntent
+        | ToolingIntent
         | TranscriptIntent
     ),
     slot: CredentialSlotView | None,
@@ -243,6 +319,27 @@ def _tool_intent(
                     "source_ref": f"corrects memory/{submitted.corrects}",
                     "user_description": "Correct a memory from the portal.",
                 },
+            )
+        case ToolingIntent():
+            picked = set(submitted.providers)
+            labels = [tile.label for tile in FIRST_RUN_PROVIDERS if tile.name in picked]
+            return ToolIntent(
+                tool="memory_update",
+                input={
+                    "body": f"My team uses {', '.join(labels)}.",
+                    "source_ref": "first run",
+                    "user_description": "Record what the team uses from the first run.",
+                },
+            )
+        case ConnectSlackIntent():
+            return ToolIntent(
+                tool="slack_connect",
+                input={"user_description": "Connect Slack from the first run."},
+            )
+        case ConnectGitHubIntent():
+            return ToolIntent(
+                tool="connect_github",
+                input={"user_description": "Connect GitHub from the first run."},
             )
         case AddMemberIntent():
             return ToolIntent(
@@ -318,6 +415,33 @@ def _outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
         ERROR_CLASS_PREFIX.sub("", reason, count=1) if reason else f"Not applied ({frame.status})."
     )
     return JSONResponse({"applied": False, "message": message, "turn_id": str(turn_id)})
+
+
+def _connect_outcome(
+    submitted: ConnectSlackIntent | ConnectGitHubIntent, frame: TerminalFrame, turn_id: UUID
+) -> Response:
+    """The install link the connect step asked for, taken off the turn's own answer and read the
+    way the answering tool writes it. Slack answers an install state: `authorize_url` is the link
+    and `hint` says why it minted none, and the object arrives inside the wall its tool's
+    `untrusted` declaration renders every result in — the deploy's own `events_url` sits in that
+    same object, so the key is read rather than the first address in the text. GitHub answers a
+    sentence carrying its link. Where no link was minted the tool's own words stand in its place:
+    the workspace already holds the connector, or only an admin may install it."""
+    if frame.status != "done":
+        return _outcome(frame, turn_id)
+    match submitted:
+        case ConnectSlackIntent():
+            stated_state = SLACK_INSTALL_STATE.search(frame.text)
+            if stated_state is None:
+                raise RuntimeError("slack_connect answered no install state")
+            state = json.loads(stated_state.group())
+            link = state.get(SLACK_INSTALL_LINK_KEY)
+            stated = "" if link else state[SLACK_INSTALL_HINT_KEY]
+        case ConnectGitHubIntent():
+            found = INSTALL_LINK.search(frame.text)
+            link = found.group() if found else None
+            stated = "" if link else frame.text
+    return JSONResponse({"applied": True, "message": stated, "url": link, "turn_id": str(turn_id)})
 
 
 async def submit_intent(
@@ -422,6 +546,8 @@ async def submit_intent(
             async for _cursor, frame in frames:
                 match frame:
                     case Terminal():
+                        if isinstance(submitted, ConnectSlackIntent | ConnectGitHubIntent):
+                            return _connect_outcome(submitted, frame.frame, admitted.turn_id)
                         return _outcome(frame.frame, admitted.turn_id)
                     case Parked():
                         return JSONResponse(

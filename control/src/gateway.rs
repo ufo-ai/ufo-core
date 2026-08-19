@@ -388,6 +388,11 @@ impl Onboarding {
                 Vec::new()
             },
             directive("say", &[&format!("Signed in: {}", claim.email)]),
+            if ensured.founding {
+                directive("first", &["1"])
+            } else {
+                Vec::new()
+            },
             if ensured.admin {
                 directive("slack", &[SLACK_CHOICE])
             } else {

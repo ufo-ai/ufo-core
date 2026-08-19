@@ -18,6 +18,7 @@ from evals import (
     dead_route_repeat,
     document_visual,
     fanout,
+    first_run,
     github_connections,
     handback,
     low_stakes_default,
@@ -130,6 +131,7 @@ TASKS: tuple[EvalTask, ...] = (
         serial=True,
     ),
     capability_task("app_builder", app_builder.CASES),
+    capability_task("first_run", first_run.CASES),
     capability_task("connector_refs", connector_refs.CASES),
     capability_task(
         "writing_subagent",

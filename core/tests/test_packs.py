@@ -90,6 +90,9 @@ def test_assistant_billing_pack_is_the_local_bundle_plus_metronome() -> None:
     assert set(assistant.EXTENSIONS) < set(assistant_billing.EXTENSIONS)
     assert set(assistant_billing.EXTENSIONS) - set(assistant.EXTENSIONS) == {"metronome"}
     assert "metronome" not in assistant.EXTENSIONS
+    assert {skill.path.name for skill in packs[assistant_billing.NAME].skills} == set(
+        assistant.SKILL_NAMES
+    )
 
 
 def test_activating_the_assistant_billing_pack_brings_up_the_billing_surface() -> None:
@@ -120,13 +123,36 @@ def test_activating_the_assistant_eval_pack_swaps_real_brokers_for_the_environme
     assert not assistant_eval.REAL_BROKERS & set(names)
 
 
+def test_the_assistant_skills_reach_every_pack_that_composes_it() -> None:
+    """A pack that says it is the assistant bundle plus something carries the assistant's skills as
+    well as its extensions. Composing only the extension tuple leaves a bundle that claims the
+    assistant's behavior and silently drops the workflows it ships."""
+    for name in (assistant.NAME, assistant_billing.NAME, assistant_hosted.NAME):
+        loadable = skill_registry(load_manifests(name)).by_name
+        assert set(assistant.SKILL_NAMES) <= set(loadable), name
+
+
+def test_the_first_run_skill_ships_the_agent_ideas_it_routes_to() -> None:
+    """The first run proposes agents out of one reference file and names no idea in `SKILL.md`, so a
+    bundle shipping only the hub would send every workspace the same handful of agents the model
+    invents. The hub cites the path and the bundle carries it."""
+    skill = next(
+        entry
+        for entry in discovered_packs()[assistant.NAME].skills
+        if entry.path.name == "first-run"
+    )
+    assert {path.name for path in (skill.path / "references").iterdir()} == {"agent-ideas.md"}
+    assert "references/agent-ideas.md" in (skill.path / "SKILL.md").read_text()
+
+
 def test_assistant_hosted_pack_is_discovered_with_its_bundle_and_skills() -> None:
     packs = discovered_packs()
     assert assistant_hosted.NAME in packs
     assert packs[assistant_hosted.NAME].extensions == assistant_hosted.EXTENSIONS
-    assert {skill.path.name for skill in packs[assistant_hosted.NAME].skills} == set(
-        assistant_hosted.SKILL_NAMES
-    )
+    assert {skill.path.name for skill in packs[assistant_hosted.NAME].skills} == {
+        *assistant_hosted.SKILL_NAMES,
+        *assistant.SKILL_NAMES,
+    }
 
 
 def test_assistant_hosted_pack_activates_the_imessage_surface() -> None:
@@ -148,7 +174,7 @@ def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() 
     ]
     own = manifests[-1]
     parsed = {parse_skill(spec.path).name for spec in own.skills}
-    assert parsed == set(assistant_hosted.SKILL_NAMES)
+    assert parsed == {*assistant_hosted.SKILL_NAMES, *assistant.SKILL_NAMES}
 
 
 def test_the_hosted_onboarding_corpus_ships_its_reference_files() -> None:

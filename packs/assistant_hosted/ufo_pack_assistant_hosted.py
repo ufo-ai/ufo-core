@@ -14,13 +14,17 @@ the Redis live-frame hub, the E2B sandbox carrier, and a Browserbase-hosted Chro
 (the browserbase cdp provider, in place of Chrome inside the conversation's own sandbox). Memory
 still retrieves through OpenAI embeddings
 (Turbopuffer is the index seam, embeddings are separate). A workspace admin connects Slack in chat
-— the slack extension's setup tools drive it. Beyond its extensions it carries one pack-level
-skill, `customer-onboarding-help`: a curated, read-only corpus of this deploy's own onboarding facts
-(signup and invitations, the Slack install, billing and seats, what is not available yet, and what
-must never be disclosed) so a hosted workspace can be answered from shipped content rather than from
-memory a customer's workspace does not have."""
+— the slack extension's setup tools drive it. Beyond its extensions it carries two pack-level
+skills. `customer-onboarding-help` is a curated, read-only corpus of this deploy's own onboarding
+facts (signup and invitations, the Slack install, billing and seats, what is not available yet, and
+what must never be disclosed) so a hosted workspace can be answered from shipped content rather than
+from memory a customer's workspace does not have. `first-run` drives the opening conversation of a
+new workspace — what the company uses, the Slack install, and one piece of real work — so the member
+watches the product work instead of reading about it."""
 
 from pathlib import Path
+
+import ufo_pack_assistant
 
 from ufo.sdk.manifest import Pack, SkillSpec
 
@@ -69,5 +73,11 @@ def pack() -> Pack:
         name=NAME,
         version=VERSION,
         extensions=EXTENSIONS,
-        skills=tuple(SkillSpec(path=SKILLS_DIR / name) for name in SKILL_NAMES),
+        skills=(
+            *(SkillSpec(path=SKILLS_DIR / name) for name in SKILL_NAMES),
+            *(
+                SkillSpec(path=ufo_pack_assistant.SKILLS_DIR / name)
+                for name in ufo_pack_assistant.SKILL_NAMES
+            ),
+        ),
     )

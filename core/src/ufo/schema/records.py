@@ -219,6 +219,8 @@ class ToolIntent(BaseModel):
         "request_credentials",
         "read_private_transcript",
         "manage_billing",
+        "slack_connect",
+        "connect_github",
     ]
     input: dict[str, JsonValue]
 

@@ -25,6 +25,7 @@ import { Agents } from "@/views/Agents";
 import { ChatPane } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
+import { FirstRun } from "@/views/FirstRun";
 import { SignIn } from "@/views/SignIn";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
@@ -85,6 +86,7 @@ import {
   agentHash,
   artifactTarget,
   bootRoute,
+  FIRST_RUN_HASH,
   chatHash,
   newChatHash,
   parseHash,
@@ -182,6 +184,20 @@ export function App({ agents, member, onAgents }: AppProps) {
     if (location.hash !== hash) location.hash = hash;
     setRoute(next);
   }, []);
+
+  // The card reaches the first run by query, since a fragment never reaches the server; the address
+  // replaces it in the bar so what the member sees is somewhere they can return to. A workspace
+  // with no agent to talk to has no first run and falls back to the home screen.
+  useEffect(() => {
+    if (route.kind !== "first-run") return;
+    if (!mainAgent) {
+      go(HOME_HASH, { kind: "home" });
+      return;
+    }
+    if (location.hash !== FIRST_RUN_HASH) {
+      history.replaceState(null, "", FIRST_RUN_HASH);
+    }
+  }, [go, mainAgent, route.kind]);
 
   const openHome = useCallback(() => go(HOME_HASH, { kind: "home" }), [go]);
 
@@ -287,6 +303,9 @@ export function App({ agents, member, onAgents }: AppProps) {
       };
       setRail((current) => ({ ...current, rows: mergeChats(current.rows, [row]) }));
       const seen = routeRef.current;
+      // Every screen that draws an unfounded chat hands the member to the conversation their
+      // message founded. A screen left standing on one would redraw an empty composer over what
+      // they just sent.
       const started =
         seen.kind === "home" || (seen.kind === "new-chat" && seen.agentId === agent.id);
       if (started) openChat(conversationId);
@@ -403,7 +422,12 @@ export function App({ agents, member, onAgents }: AppProps) {
 /** The conversation-slot route lives on an agent hash, but what it reads is a conversation, so the
  *  rail stands beside it and marks its row the way an open chat's is marked. */
 function inChat(kind: Route["kind"]): boolean {
-  return kind === "home" || kind === "chat" || kind === "new-chat" || kind === "conversation-slot";
+  return (
+    kind === "home" ||
+    kind === "chat" ||
+    kind === "new-chat" ||
+    kind === "conversation-slot"
+  );
 }
 
 /** A place the bar reaches, named once and read twice: the row at a desk width and the drawer at a
@@ -787,6 +811,16 @@ function RoutedPane({
   linked: Readonly<Record<string, OwnedConversation>>;
 }) {
   if (route.kind === "admin") return <Admin />;
+  if (route.kind === "first-run") {
+    if (!mainAgent) return <PaneNote>No such agent.</PaneNote>;
+    return (
+      <FirstRun
+        agent={mainAgent}
+        member={member}
+        onOpenChat={() => onNewChat(mainAgent.id)}
+      />
+    );
+  }
   if (route.kind === "bad-link") return <PaneNote>This conversation link is not valid.</PaneNote>;
   if (route.kind === "workspace") {
     return (

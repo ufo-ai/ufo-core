@@ -68,7 +68,11 @@ async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
             },
         )
     assert response.status_code == 200
-    assert response.json() == {"workspace_id": str(workspace_id), "admin": True}
+    assert response.json() == {
+        "workspace_id": str(workspace_id),
+        "admin": True,
+        "founding": True,
+    }
 
     with ws(workspace_id):
         async with workspace_tx() as connection:
@@ -123,6 +127,9 @@ async def test_seat_grants_the_signup_balance_once(onboard_client: AsyncClient) 
         )
         assert joined.status_code == 200
         assert joined.json()["admin"] is False
+        # The first run belongs to the sign-in that seated the first member, exactly as the signup
+        # balance does — a teammate joining a workspace that already stands earns neither.
+        assert joined.json()["founding"] is False
 
     with ws(workspace_id):
         async with workspace_tx() as connection:

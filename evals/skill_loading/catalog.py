@@ -991,7 +991,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "application-new-app",
         "Build me a new app.",
         expected="create-application",
-        forbidden=("website-building", "create-skill"),
+        forbidden=("website-building", "create-skill", "first-run"),
     ),
     SkillLoadCase(
         "application-finance-assistant",
@@ -1005,5 +1005,25 @@ CASES: tuple[SkillLoadCase, ...] = (
         "I want a support bot of our own that our team can message. Get it made.",
         expected="create-application",
         forbidden=("create-skill", "website-building"),
+    ),
+    SkillLoadCase(
+        "first-run-get-set-up",
+        "Let's get set up.",
+        expected="first-run",
+    ),
+    SkillLoadCase(
+        "first-run-what-first",
+        "I just signed in and nothing is connected. What should I do first?",
+        expected="first-run",
+    ),
+    SkillLoadCase(
+        "first-run-panel-handoff",
+        "We use Gmail, Linear. What could you set up for us?",
+        expected="first-run",
+    ),
+    SkillLoadCase(
+        "first-run-slack-and-team",
+        "Let's connect Slack and show the team what this can do for them.",
+        expected="first-run",
     ),
 )

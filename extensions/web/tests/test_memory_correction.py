@@ -1,12 +1,14 @@
-"""The workspace memory view's correction lane end to end: a row's correction posts a `record`
-intent on the main agent's lane, the turn dispatches `memory_update` verbatim — exactly the write
-chat performs — so a new item lands under the correcting member's own audience naming the
-corrected item in `source_ref`. The named item is never edited or removed; both statements stand
-until the dedup sweep retires the near-duplicate original toward the correction, the newest of the
-two, and a correction further away retires nothing even then. The refusal polarities: a malformed
-or cross-paired intent is 400 before any turn, a walled agent is not-found, and another member's
-private item is untouchable — a correction naming it still writes only the corrector's own subject,
-invisible to the named item's owner."""
+"""The portal's memory-writing intent lanes end to end: the memory view's correction and the first
+run's picks. A row's correction posts a `record` intent on the main agent's lane, the turn
+dispatches `memory_update` verbatim — exactly the write chat performs — so a new item lands under
+the correcting member's own audience naming the corrected item in `source_ref`. The named item is
+never edited or removed; both statements stand until the dedup sweep retires the near-duplicate
+original toward the correction, the newest of the two, and a correction further away retires
+nothing even then. The refusal polarities: a malformed or cross-paired intent is 400 before any
+turn, a walled agent is not-found, and another member's private item is untouchable — a correction
+naming it still writes only the corrector's own subject, invisible to the named item's owner. The
+first run's picks ride the same lane to the same tool, recording what the team uses under the
+picking member's own subject."""
 
 import json
 from collections.abc import AsyncIterator, Iterator
@@ -466,6 +468,66 @@ async def test_a_correction_never_touches_another_members_item(
         headers={"cookie": f"{SESSION_COOKIE}={owner_token}"},
     )
     assert {match["text"] for match in owner_view.json()["matches"]} == {"the launch is friday"}
+
+
+async def test_the_first_run_records_what_the_team_uses(
+    memory_web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The first run's pick lane: the tiles the member pressed dispatch `memory_update` verbatim, so
+    one item lands under their own subject naming the first run in `source_ref`, and its body states
+    the catalog's labels in the catalog's own order however the picks arrived. A name the catalog
+    does not offer, and a pick of nothing, are 400 before a turn exists — so the one item on the
+    workspace is the one the accepted intent wrote."""
+    client, workspace_id, agent_id = memory_web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    path = f"/surface/web/agents/{agent_id}/intents"
+    unoffered = await client.post(
+        path,
+        json={"verb": "record_tooling", "kind": "memory", "providers": ["notion", "myspace"]},
+        headers=cookie,
+    )
+    assert unoffered.status_code == 400
+    nothing = await client.post(
+        path, json={"verb": "record_tooling", "kind": "memory", "providers": []}, headers=cookie
+    )
+    assert nothing.status_code == 400
+    recorded = await client.post(
+        path,
+        json={"verb": "record_tooling", "kind": "memory", "providers": ["notion", "gmail"]},
+        headers=cookie,
+    )
+    assert recorded.status_code == 200
+    outcome = recorded.json()
+    assert outcome["applied"] is True, outcome
+    async with workspace_tx() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.body, memory_item.c.subject, memory_item.c.source_ref
+                    ).where(memory_item.c.workspace_id == workspace_id)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        turn = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.inbound).where(
+                        tables.turn.c.id == UUID(outcome["turn_id"])
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert len(rows) == 1
+    assert rows[0]["body"] == "My team uses Gmail, Notion."
+    assert rows[0]["subject"] == member_subject(member_id)
+    assert rows[0]["source_ref"] == "first run"
+    assert json.loads(turn["inbound"])["tool"] == "memory_update"
 
 
 async def test_a_malformed_or_walled_correction_writes_nothing(

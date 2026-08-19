@@ -37,7 +37,7 @@ WORKSPACE_WIRE = frozenset(
     }
 )
 ONBOARD_WIRE = frozenset(
-    {"say", "ask", "choose", "exit", "token", "workspace", "slack", "debugger", "install"}
+    {"say", "ask", "choose", "exit", "token", "workspace", "slack", "debugger", "install", "first"}
 )
 FIXTURE_PATH = Path(__file__).parents[2] / "client" / "tests" / "fixtures" / "directives.jsonl"
 CODEC_TORTURE = "tab\there \\ back\\slash and\nnewline — ufo"
@@ -69,6 +69,7 @@ ONBOARD_FIELDS: dict[str, tuple[str, ...]] = {
     "slack": ("Connect Slack",),
     "debugger": ("https://ws.example/surface/debug",),
     "install": (),
+    "first": ("1",),
 }
 
 

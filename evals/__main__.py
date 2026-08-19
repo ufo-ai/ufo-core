@@ -52,6 +52,7 @@ from evals.driver import (
     seed_candidate_agent,
 )
 from evals.dsqa_100.runner import DSQA100Run, load_dsqa_100
+from evals.first_run import FIRST_RUN_PACKS
 from evals.gdpval_100.runner import (
     TREATMENTS,
     GDPvalCalibration,
@@ -486,6 +487,12 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(
             f"onboarding_help requires [pack] name in {ONBOARDING_HELP_PACKS}, "
             f"found {config.pack.name!r}"
+        )
+    if any(task.name == "first_run" for task in tasks) and (
+        config.pack.name not in FIRST_RUN_PACKS
+    ):
+        parser.error(
+            f"first_run requires [pack] name in {FIRST_RUN_PACKS}, found {config.pack.name!r}"
         )
     workspace_id = args.workspace
     recall_workspace_id = (

@@ -92,7 +92,8 @@ async fn the_fleet_count_reads_back_as_a_number() {
 async fn create_sends_the_derived_workspace_and_the_intake_profile() {
     let (base, log) = spawn_http(vec![(
         200,
-        r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true}"#.to_string(),
+        r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
+            .to_string(),
     )])
     .await;
     let profile = SignupProfile {
@@ -122,7 +123,8 @@ async fn create_without_a_profile_sends_none_rather_than_an_empty_one() {
     // "the form never described this customer" and leaves the default prompt alone.
     let (base, log) = spawn_http(vec![(
         200,
-        r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true}"#.to_string(),
+        r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
+            .to_string(),
     )])
     .await;
     workspaces(&base)
@@ -163,7 +165,8 @@ async fn joining_an_existing_membership_reads_it_rather_than_seating_again() {
 async fn joining_a_domain_match_seats_the_member() {
     let (base, log) = spawn_http(vec![(
         200,
-        r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":false}"#.to_string(),
+        r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":false,"founding":false}"#
+            .to_string(),
     )])
     .await;
     let choice = WorkspaceChoice {

@@ -47,6 +47,8 @@ export type IntentOutcome = {
   message: string;
   turn_id?: string;
   credentials?: CredentialRequest | null;
+  /** The install link a connect intent's tool minted for the member who submitted it. */
+  url?: string | null;
 };
 
 export async function postIntent(agentId: string, envelope: unknown): Promise<IntentOutcome> {
@@ -67,5 +69,6 @@ export async function postIntent(agentId: string, envelope: unknown): Promise<In
     message: outcome.message ?? "Error " + res.status + " — try again.",
     turn_id: outcome.turn_id,
     credentials: outcome.credentials,
+    url: outcome.url,
   };
 }

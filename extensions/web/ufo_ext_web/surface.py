@@ -119,7 +119,12 @@ from ufo.sdk.surfaces import (
 from ufo.sdk.tools import REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
-from ufo_ext_web.panels import ApplyIntent, agent_settings, submit_intent
+from ufo_ext_web.panels import (
+    FIRST_RUN_PROVIDERS,
+    ApplyIntent,
+    agent_settings,
+    submit_intent,
+)
 
 SURFACE_WEB = "web"
 SOURCE = "ufo web"
@@ -2795,6 +2800,51 @@ async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"installations": [entry.model_dump(mode="json") for entry in visible]})
 
 
+SLACK_SURFACE = "slack"
+GITHUB_PROVIDER = "github"
+CONNECT_STEP_NAMES = (SLACK_SURFACE, GITHUB_PROVIDER)
+
+
+class ConnectStep(BaseModel):
+    """One connector the first run offers to install where the member picked it, and whether the
+    workspace already holds it."""
+
+    name: str
+    label: str
+    installed: bool
+
+
+async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response:
+    """The first run's projection: the tools a team can say it uses, and the two of them the page
+    installs itself beside whether the workspace holds them. Each step reads the leg its own Connect
+    act writes: Slack's is the surface installation `slack_connect` binds, GitHub's the `git_push`
+    credential leg `github/coverage` reports — what `connect_github` fills by installing the App,
+    and what a stored token fills where no organization installed it — never the `api` leg, a broker
+    connection row that act neither writes nor needs. Both rows are the whole workspace's rather
+    than the reader's audience: the row is stated as a bare boolean, and a step narrowed by audience
+    would tell a member to install what the workspace already has. Both steps carry the catalog's
+    own label, so a tile and the step it reveals never name one connector two ways."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    surfaces = {entry.surface for entry in await ctx.list_installations()}
+    coverage = await ctx.github_coverage(member_id, admin=audience.admin)
+    held = {SLACK_SURFACE: SLACK_SURFACE in surfaces, GITHUB_PROVIDER: coverage.git_push}
+    return JSONResponse(
+        {
+            "providers": [tile.model_dump(mode="json") for tile in FIRST_RUN_PROVIDERS],
+            "connectors": [
+                ConnectStep(name=tile.name, label=tile.label, installed=held[tile.name]).model_dump(
+                    mode="json"
+                )
+                for tile in FIRST_RUN_PROVIDERS
+                if tile.name in CONNECT_STEP_NAMES
+            ],
+        }
+    )
+
+
 async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response:
     """One searchable, filterable keyset page of the files turns have shared with this member."""
     resolved = await _audience_for(ctx, request)
@@ -3673,6 +3723,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
+    SurfaceRoute(method="GET", path="workspace/first-run", handler=workspace_first_run),
     SurfaceRoute(method="GET", path="workspace/radar", handler=workspace_radar),
     SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),

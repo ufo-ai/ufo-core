@@ -102,11 +102,14 @@ class SeatRequest(BaseModel):
 
 
 class EnsuredWorkspace(BaseModel):
-    """The binding hosted onboarding just made: the workspace this member belongs to, and whether
-    they administer it. The admin flag lets the concluding prompt offer billing management."""
+    """The binding hosted onboarding just made: the workspace this member belongs to, whether they
+    administer it, and whether this sign-in seated its first member. The admin flag lets the
+    concluding prompt offer billing management; `founding` is what points that member at the first
+    run, so a member returning to a workspace they already belong to lands where they left off."""
 
     workspace_id: str
     admin: bool
+    founding: bool
 
 
 class WorkspaceChoice(BaseModel):
@@ -301,7 +304,9 @@ class OnboardControl:
                         sa.select(tables.member.c.is_admin).where(tables.member.c.id == member_id)
                     )
                 ).scalar_one()
-        return EnsuredWorkspace(workspace_id=str(workspace_id), admin=admin)
+        return EnsuredWorkspace(
+            workspace_id=str(workspace_id), admin=admin, founding=first_email is None
+        )
 
     async def _membership(self, workspace_id: UUID, email: str) -> Membership:
         """Whether this address still administers one workspace it was already seated in. A member

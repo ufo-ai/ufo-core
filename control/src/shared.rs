@@ -54,6 +54,10 @@ struct WorkspaceChoices {
 pub struct EnsuredWorkspace {
     pub workspace_id: String,
     pub admin: bool,
+    /// Whether this sign-in seated the workspace's first member. It is what points that member at
+    /// the first run; a member returning to a workspace they already belong to lands where they
+    /// left off.
+    pub founding: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -162,6 +166,7 @@ impl SharedWorkspaces {
         Ok(EnsuredWorkspace {
             workspace_id: choice.workspace_id.clone(),
             admin: membership.admin,
+            founding: false,
         })
     }
 

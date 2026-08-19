@@ -1,19 +1,3 @@
-import {
-  IconBrandAirtable,
-  IconBrandAsana,
-  IconBrandGithub,
-  IconBrandGmail,
-  IconBrandGoogleDrive,
-  IconBrandInstagram,
-  IconBrandIntercom,
-  IconBrandJira,
-  IconBrandMonday,
-  IconBrandNotion,
-  IconBrandSentry,
-  IconBrandSlack,
-  IconBrandStripe,
-  IconPlug,
-} from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
@@ -46,6 +30,7 @@ import { Moment } from "@/lib/moments";
 import { agentName } from "@/lib/agentName";
 import { BASE, postIntent } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
+import { ProviderGlyph } from "@/lib/providerGlyph";
 import { useAgents } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 
@@ -70,30 +55,6 @@ const ACCESS = { label: "Access", fact: true };
 const POOL_COLUMNS = [PROVIDER, "Account", ACCESS, "Agents"];
 const AGENT_COLUMNS = [PROVIDER, "Account", ACCESS];
 const ATTACH_AGENT = "attach-agent";
-
-const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
-  airtable: IconBrandAirtable,
-  asana: IconBrandAsana,
-  github: IconBrandGithub,
-  gmail: IconBrandGmail,
-  googledrive: IconBrandGoogleDrive,
-  instagram: IconBrandInstagram,
-  intercom: IconBrandIntercom,
-  jira: IconBrandJira,
-  monday: IconBrandMonday,
-  notion: IconBrandNotion,
-  sentry: IconBrandSentry,
-  slack: IconBrandSlack,
-  stripe: IconBrandStripe,
-};
-
-/** The provider a connection is on, drawn before the words that name it. The brokers reach far
- *  more providers than the icon set draws, so one the set does not carry takes the plain connector
- *  glyph and every option in the list still starts on the same line. */
-function ProviderGlyph({ provider }: { provider: string }) {
-  const Glyph = PROVIDER_GLYPHS[provider] ?? IconPlug;
-  return <Glyph className="size-icon shrink-0 text-ink-soft" aria-hidden />;
-}
 
 /** What names the account to the member: the label the provider gave it, else the address it is
  *  held under. The broker's id names neither, so it stands only where the connection carries

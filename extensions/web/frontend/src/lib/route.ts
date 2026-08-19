@@ -42,17 +42,22 @@ export type Route =
   | { kind: "agent"; agentId: string; tab: AgentTab; place: WorkspacePlace }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
+  | { kind: "first-run" }
   | { kind: "admin" }
   | { kind: "bad-link" };
 
 const CHAT_PREFIX = "#/c/";
 const CHAT_HASH = /^#\/c\/([0-9a-f-]{36})(?:\?(.*))?$/;
 const CHAT_TARGET_PARAM = "c";
+const FIRST_RUN_PARAM = "first";
 const ARTIFACT_TARGET_PARAM = "a";
 const ARTIFACT_PATH_PREFIX = "/artifacts/";
 const CONVERSATION_SLOT_HASH =
   /^#\/agents\/([0-9a-f-]{36})\/conversations\/([0-9a-f-]{36})\/slots\/([a-z][a-z0-9_-]{0,63})(?:\?root=([0-9a-f-]{36}))?$/;
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
+/** The first run's own address. It is a place, not a boot flag: a member can return to it, and
+ *  send a teammate to it, exactly as they can to any other screen. */
+export const FIRST_RUN_HASH = "#/first-run";
 const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?(?:\?(.*))?$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
@@ -97,6 +102,7 @@ export const HOME_HASH = "#/";
 export const AGENTS_HASH = "#/agents";
 
 export function parseHash(hash: string): Route {
+  if (hash === FIRST_RUN_HASH) return { kind: "first-run" };
   if (hash === "#/admin") return { kind: "admin" };
   if (hash === AGENTS_HASH) return { kind: "agents" };
   const chat = hash.match(CHAT_HASH);
@@ -145,11 +151,22 @@ export function artifactTarget(search: string): string | null {
   return target && target.startsWith(ARTIFACT_PATH_PREFIX) ? target : null;
 }
 
+/** Where a fresh page load lands. A signed-in card carries the conversation or artifact it was
+ *  opened for, and the sign-in that founded the workspace carries `first`, which is the query form
+ *  of the first run's own address — a form the signed-in card can post to, since a fragment never
+ *  reaches the server. The shell puts the address itself in the bar on arrival. A member returning
+ *  later carries neither and lands where they always do.
+ *
+ *  `first-run` names no agent because this read has none: the shell resolves it against the roster
+ *  it already holds, which is the only place the main agent's id is known. */
 export function bootRoute(hash: string, search: string): Route {
   const route = parseHash(hash);
   if (route.kind !== "home") return route;
-  const target = new URLSearchParams(search).get(CHAT_TARGET_PARAM);
-  return target ? parseHash(chatHash(target)) : route;
+  const params = new URLSearchParams(search);
+  const target = params.get(CHAT_TARGET_PARAM);
+  if (target) return parseHash(chatHash(target));
+  if (params.get(FIRST_RUN_PARAM)) return { kind: "first-run" };
+  return route;
 }
 
 export function chatHash(conversationId: string, slot?: string): string {

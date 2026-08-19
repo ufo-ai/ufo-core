@@ -186,6 +186,18 @@ test("a conversation named as a query target boots on that conversation", () => 
   expect(bootRoute("", "")).toEqual({ kind: "home" });
 });
 
+test("the sign-in that founded the workspace boots on its opening chat", () => {
+  expect(bootRoute("", "?first=1")).toEqual({ kind: "first-run" });
+  expect(parseHash("#/first-run")).toEqual({ kind: "first-run" });
+  expect(bootRoute("#/first-run", "")).toEqual({ kind: "first-run" });
+  expect(bootRoute("", "?first=1&c=" + CONVO_ID)).toEqual({
+    kind: "chat",
+    conversationId: CONVO_ID,
+  });
+  expect(bootRoute("#/agents", "?first=1")).toEqual({ kind: "agents" });
+  expect(bootRoute("", "")).toEqual({ kind: "home" });
+});
+
 test("a conversation permalink that is not a lowercase uuid names no route", () => {
   expect(parseHash(chatHash(MIXED_CASE_CONVO_ID))).toEqual({ kind: "bad-link" });
   expect(parseHash("#/c/not-a-conversation")).toEqual({ kind: "bad-link" });

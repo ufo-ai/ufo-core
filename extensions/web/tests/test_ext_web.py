@@ -41,6 +41,12 @@ from ufo_ext_sites.objects import site_object_name
 from ufo_ext_sites.store import HostedSites, hosted_site
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
+from ufo_ext_slack.manifest import manifest as slack_manifest
+from ufo_ext_slack.surface import (
+    SLACK_CLIENT_ID_ENV,
+    SLACK_CLIENT_SECRET_ENV,
+    SLACK_OAUTH_AUTHORIZE_URL,
+)
 from ufo_ext_sources.manifest import manifest as sources_manifest
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT
 from ufo_ext_sweep.manifest import AGENT_NAME as SWEEP_AGENT_NAME
@@ -50,7 +56,15 @@ from ufo_ext_web import panels as web_panels
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
-from ufo_ext_web.panels import ApplyIntent, _outcome
+from ufo_ext_web.panels import (
+    ApplyIntent,
+    ConnectGitHubIntent,
+    ConnectSlackIntent,
+    PanelIntent,
+    _connect_outcome,
+    _outcome,
+    _tool_intent,
+)
 from ufo_ext_web.surface import (
     ASSET_MEDIA_TYPES,
     NO_MEMBER_FAULT,
@@ -168,6 +182,7 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.tools.context import ToolContext
 from ufo.transcript import CompactionSummary, CompactionWindow, Conversation, compaction_key
+from ufo.untrusted import wall
 from ufo.workspace import ws
 from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges
 
@@ -949,6 +964,7 @@ def dbos_runtime(
                 connectors_manifest(),
                 SCHEDULED_TASK_KIND_ONLY,
                 skill_create_manifest(),
+                slack_manifest(),
                 sources_manifest(),
                 todos.manifest(),
                 SLOTTED,
@@ -2625,6 +2641,75 @@ async def test_workspace_surfaces_names_each_installed_surface_inside_the_audien
     assert widened.json() == admin_view.json()
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
+
+
+async def test_first_run_states_the_tiles_and_the_connectors_real_state(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The first run's projection: the tiles a member picks what their team uses from — Slack and
+    GitHub among them, because a team that uses them says so like any other tool — and the two of
+    those tiles the page can install itself, beside whether the workspace holds them. Each state is
+    the leg that step's own Connect act writes: Slack's surface installation, and GitHub's App
+    installation credential. A broker `github` connection is not that leg, so it leaves the step
+    offering the install; the credential is the whole workspace's, so the step reads connected for a
+    member who owns no connection at all. Refused without a session."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
+    other_id, other_token = await _seed_member(workspace_id, "n@example.com")
+    path = "/surface/web/workspace/first-run"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    bare = await client.get(path, headers=cookie)
+    assert bare.status_code == 200
+    payload = bare.json()
+    assert {"gmail", "notion", "linear", "slack", "github"} <= {
+        tile["name"] for tile in payload["providers"]
+    }
+    assert payload["connectors"] == [
+        {"name": "slack", "label": "Slack", "installed": False},
+        {"name": "github", "label": "GitHub", "installed": False},
+    ]
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_installation).values(
+                workspace_id=workspace_id,
+                surface="slack",
+                installation_id="team:T42",
+                agent_id=agent_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _seed_connection(workspace_id, agent_id, other_id, "github", shared=False)
+    held = await client.get(path, headers=cookie)
+    assert held.json()["connectors"] == [
+        {"name": "slack", "label": "Slack", "installed": True},
+        {"name": "github", "label": "GitHub", "installed": False},
+    ]
+    owner = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={other_token}"})
+    assert owner.json()["connectors"][1] == {
+        "name": "github",
+        "label": "GitHub",
+        "installed": False,
+    }
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="github_app_installation",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    connected = await client.get(path, headers=cookie)
+    assert connected.json()["connectors"][1] == {
+        "name": "github",
+        "label": "GitHub",
+        "installed": True,
+    }
+    anonymous = await client.get(path)
+    assert anonymous.status_code == 401
+    assert set(payload) == {"providers", "connectors"}
 
 
 async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
@@ -8473,6 +8558,145 @@ async def test_a_connect_intent_leaves_the_private_handoff_on_the_turn(
         assert unknown.json()["applied"] is False
     finally:
         install_connect_flow(None)
+
+
+def test_the_first_run_connect_steps_prepare_the_install_tools_verbatim() -> None:
+    """Each connect step names the chat verb that installs its connector and nothing else: the
+    panel carries no install rule of its own, so the tool's own admin gate decides who may, and
+    `ToolIntent`'s whitelist is what admits the verb at all — a tool it does not name cannot be
+    prepared here."""
+    for verb, tool in (("connect_slack", "slack_connect"), ("connect_github", "connect_github")):
+        submitted = PanelIntent.model_validate({"submitted": {"verb": verb}}).submitted
+        prepared = _tool_intent(submitted, None)
+        assert prepared.tool == tool
+        assert set(prepared.input) == {"user_description"}
+
+
+def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
+    """The install link reaches the member who pressed the step, read off the turn's answer the way
+    the answering tool writes it. Slack declares its result untrusted, so the state object arrives
+    walled: `authorize_url` in it is the link, `events_url` is this deploy's own address and never
+    the link, and `hint` says why it minted none. GitHub answers a sentence carrying its link, and
+    refuses a non-admin as the turn's own refusal."""
+    turn_id = uuid4()
+    slack = PanelIntent.model_validate({"submitted": {"verb": "connect_slack"}}).submitted
+    github = PanelIntent.model_validate({"submitted": {"verb": "connect_github"}}).submitted
+    assert isinstance(slack, ConnectSlackIntent)
+    assert isinstance(github, ConnectGitHubIntent)
+    minted = json.loads(
+        _connect_outcome(
+            slack,
+            TerminalFrame(
+                status="done",
+                text=wall(
+                    "slack_connect",
+                    json.dumps(
+                        {
+                            "state": "not_installed",
+                            "hint": "Open this Add to Slack link to install ufo.",
+                            "events_url": "https://web/surface/slack",
+                            "authorize_url": "https://slack.com/oauth/v2/authorize?state=sealed",
+                        }
+                    ),
+                ),
+            ),
+            turn_id,
+        ).body
+    )
+    assert minted == {
+        "applied": True,
+        "message": "",
+        "url": "https://slack.com/oauth/v2/authorize?state=sealed",
+        "turn_id": str(turn_id),
+    }
+    stated = json.loads(
+        _connect_outcome(
+            slack,
+            TerminalFrame(
+                status="done",
+                text=wall(
+                    "slack_connect",
+                    json.dumps(
+                        {
+                            "state": "not_installed",
+                            "hint": "Ask a workspace admin to connect Slack.",
+                            "events_url": "https://web/surface/slack",
+                        }
+                    ),
+                ),
+            ),
+            turn_id,
+        ).body
+    )
+    assert stated["url"] is None
+    assert stated["message"] == "Ask a workspace admin to connect Slack."
+    installed = json.loads(
+        _connect_outcome(
+            github,
+            TerminalFrame(
+                status="done",
+                text=(
+                    "Install the ufo GitHub App to connect this workspace: "
+                    "https://github.com/apps/ufo-ai/installations/new?state=sealed\n\nChoose the "
+                    "organization and which repositories it may reach."
+                ),
+            ),
+            turn_id,
+        ).body
+    )
+    assert installed["url"] == "https://github.com/apps/ufo-ai/installations/new?state=sealed"
+    assert installed["message"] == ""
+    refused = json.loads(
+        _connect_outcome(
+            github,
+            TerminalFrame(
+                status="failed",
+                error_class="IntentRefused",
+                error_message="ValueError: only a workspace admin can connect GitHub",
+            ),
+            turn_id,
+        ).body
+    )
+    assert refused == {
+        "applied": False,
+        "message": "only a workspace admin can connect GitHub",
+        "turn_id": str(turn_id),
+    }
+
+
+async def test_the_slack_step_mints_an_install_link_for_an_admin_and_no_one_else(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first run's Slack step end to end: the intent dispatches `slack_connect` on the member's
+    own lane, and that tool's own admin gate is the whole gate — a member is told who installs it
+    and gets no link, the admin gets the deploy's Add to Slack URL sealed to this workspace. No
+    message is spoken and no chat conversation exists to speak it in: the link comes back on the
+    submit."""
+    client, workspace_id, agent_id = web
+    config, _hub, _blob, _sandboxes = dbos_runtime
+    monkeypatch.setenv(SLACK_CLIENT_ID_ENV, "slack-client")
+    monkeypatch.setenv(SLACK_CLIENT_SECRET_ENV, "slack-secret")
+    monkeypatch.setattr(config.connect, "public_base_url", "https://web")
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    path = f"/surface/web/agents/{agent_id}/intents"
+    refused = await client.post(
+        path, json={"verb": "connect_slack"}, headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert refused.status_code == 200
+    assert refused.json()["url"] is None
+    assert "admin" in refused.json()["message"]
+    minted = await client.post(
+        path, json={"verb": "connect_slack"}, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
+    )
+    assert minted.status_code == 200
+    outcome = minted.json()
+    assert outcome["applied"] is True
+    assert outcome["message"] == ""
+    assert outcome["url"].startswith(SLACK_OAUTH_AUTHORIZE_URL)
+    assert "client_id=slack-client" in outcome["url"]
 
 
 async def test_connect_pairs_with_the_connection_kind_exactly(

@@ -332,7 +332,7 @@ async fn a_granted_domain_founds_its_workspace_and_signs_the_founder_in() {
             (200, r#"{"choices":[]}"#.to_string()),
             (
                 200,
-                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true}"#
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
                     .to_string(),
             ),
         ],
@@ -365,8 +365,41 @@ async fn a_granted_domain_founds_its_workspace_and_signs_the_founder_in() {
         screen.contains(&format!("slack\t{SLACK_CHOICE}")),
         "{screen}"
     );
+    // The sign-in that seated the first member carries the first run; the card reads it and opens
+    // the workspace there.
+    assert!(screen.contains("first\t1"), "{screen}");
     // A non-operator domain gets no debugger line.
     assert!(!screen.contains("debugger\t"), "{screen}");
+}
+
+#[tokio::test]
+async fn a_teammate_joining_an_existing_workspace_carries_no_first_run() {
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"second@acme.com"}}"#.to_string()),
+        ],
+        vec![
+            (
+                200,
+                r#"{"choices":[{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","label":"acme.com","member":true}]}"#
+                    .to_string(),
+            ),
+            (200, r#"{"admin":false}"#.to_string()),
+        ],
+        true,
+    )
+    .await;
+
+    turn(&rig, "session-2", "second@acme.com").await;
+    let screen = turn(&rig, "session-2", "123456").await;
+    assert!(
+        screen.contains("say\tSigned in: second@acme.com"),
+        "{screen}"
+    );
+    // The first run belongs to the sign-in that founded the workspace. A teammate joining one that
+    // already stands lands where every later sign-in does.
+    assert!(!screen.contains("first\t"), "{screen}");
 }
 
 #[tokio::test]
@@ -380,7 +413,7 @@ async fn the_minted_bearer_verifies_as_the_signed_in_member() {
             (200, r#"{"choices":[]}"#.to_string()),
             (
                 200,
-                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true}"#
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
                     .to_string(),
             ),
         ],
@@ -434,7 +467,7 @@ async fn an_operator_address_earns_the_debugger_line() {
             (200, r#"{"choices":[]}"#.to_string()),
             (
                 200,
-                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true}"#
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
                     .to_string(),
             ),
         ],

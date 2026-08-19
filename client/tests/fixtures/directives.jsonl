@@ -17,6 +17,7 @@
 {"wire": "onboard", "verb": "choose", "fields": ["Which workspace?", "acme", "beta LLC"], "line": "choose\tWhich workspace?\tacme\tbeta LLC"}
 {"wire": "onboard", "verb": "debugger", "fields": ["https://ws.example/surface/debug"], "line": "debugger\thttps://ws.example/surface/debug"}
 {"wire": "onboard", "verb": "exit", "fields": ["0"], "line": "exit\t0"}
+{"wire": "onboard", "verb": "first", "fields": ["1"], "line": "first\t1"}
 {"wire": "onboard", "verb": "install", "fields": [], "line": "install"}
 {"wire": "onboard", "verb": "say", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "say\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}
 {"wire": "onboard", "verb": "slack", "fields": ["Connect Slack"], "line": "slack\tConnect Slack"}

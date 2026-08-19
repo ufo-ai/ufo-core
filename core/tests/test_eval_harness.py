@@ -50,6 +50,7 @@ from evals.driver import (
     resolve_workspace_and_agent,
     seed_candidate_agent,
 )
+from evals.first_run import FIRST_RUN_PACKS, FIRST_RUN_SKILL
 from evals.harness.capability import (
     MAX_LINKED_ARTIFACT_BYTES,
     MAX_LINKED_TOTAL_BYTES,
@@ -166,6 +167,7 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_for
+from ufo.ext.loader import load_manifests, skill_registry
 from ufo.governance import Governance, prompt_digest
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
@@ -251,6 +253,29 @@ def test_onboarding_help_refuses_to_run_outside_the_hosted_pack(
         eval_main(["--only", "onboarding_help", "--out", str(tmp_path)])
     assert (
         "onboarding_help requires [pack] name in ('assistant_hosted',)" in capsys.readouterr().err
+    )
+
+
+def test_first_run_refuses_to_run_outside_a_pack_that_carries_the_skill(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`first-run` is a pack-level skill of the assistant bundle and every pack that composes it,
+    so an eval deploy's own `assistant_eval` loads none of it — every case would grade the harness
+    rather than the model. The gate names the packs that carry it, checked against what each
+    one loads."""
+    assert FIRST_RUN_PACKS == ("assistant", "assistant_billing", "assistant_hosted")
+    for pack in FIRST_RUN_PACKS:
+        assert FIRST_RUN_SKILL in skill_registry(load_manifests(pack)).by_name, pack
+    assert FIRST_RUN_SKILL not in skill_registry(load_manifests("assistant_eval")).by_name
+    monkeypatch.setattr(
+        "evals.__main__.load_config",
+        lambda: SimpleNamespace(pack=SimpleNamespace(name="assistant_eval")),
+    )
+    with pytest.raises(SystemExit):
+        eval_main(["--only", "first_run", "--out", str(tmp_path)])
+    assert (
+        "first_run requires [pack] name in ('assistant', 'assistant_billing', 'assistant_hosted')"
+        in capsys.readouterr().err
     )
 
 

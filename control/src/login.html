@@ -166,6 +166,7 @@ let token = null;
 let workspace = null;
 let debuggerUrl = null;
 let slackAsk = null;
+let founding = false;
 let email = null;
 let member = null;
 let choosing = false;
@@ -303,7 +304,8 @@ function complete() {
   document.getElementById('workspace-url').textContent = workspace;
   const portal = document.getElementById('portal-row');
   portal.action = workspace + '/surface/web' +
-    (target ? '?c=' + target[0] : artifact ? '?a=' + encodeURIComponent(artifact) : '');
+    (target ? '?c=' + target[0] : artifact ? '?a=' + encodeURIComponent(artifact)
+      : founding ? '?first=1' : '');
   document.getElementById('portal-token').value = token;
   document.getElementById('curl-line').textContent =
     'curl -fsSL ' + location.origin + '/ufo | sh';
@@ -333,6 +335,7 @@ function handle(directive) {
   else if (directive.verb === 'token') token = arg;
   else if (directive.verb === 'workspace') workspace = arg;
   else if (directive.verb === 'slack') slackAsk = arg;
+  else if (directive.verb === 'first') founding = true;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
   else if (directive.verb === 'exit') {
     if (arg !== '0') line('Failed — reload to retry.', 'error');

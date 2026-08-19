@@ -15,7 +15,9 @@ with no managed infrastructure
 pack-level skills or onboarding of its own: each capability's tools, skills, and onboarding ride
 that extension's own manifest, so the pack is nothing but the set that comes up together."""
 
-from ufo.sdk.manifest import Pack
+from pathlib import Path
+
+from ufo.sdk.manifest import Pack, SkillSpec
 
 NAME = "assistant"
 VERSION = "0.1.0"
@@ -50,5 +52,14 @@ EXTENSIONS = (
 )
 
 
+SKILLS_DIR = Path(__file__).parent / "skills"
+SKILL_NAMES = ("first-run",)
+
+
 def pack() -> Pack:
-    return Pack(name=NAME, version=VERSION, extensions=EXTENSIONS)
+    return Pack(
+        name=NAME,
+        version=VERSION,
+        extensions=EXTENSIONS,
+        skills=tuple(SkillSpec(path=SKILLS_DIR / name) for name in SKILL_NAMES),
+    )
