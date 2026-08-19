@@ -1209,7 +1209,7 @@ function RailRow({
       aria-current={current}
       onClick={onClick}
       className={cn(
-        "flex h-(--size-row) w-full items-center gap-xs rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
+        "flex h-(--size-row) w-full items-center gap-xs rounded-row border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
         "max-narrow:w-auto max-narrow:max-w-sidebar max-narrow:whitespace-nowrap",
         current && "bg-fill",
       )}

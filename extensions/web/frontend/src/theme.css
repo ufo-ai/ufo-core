@@ -191,6 +191,10 @@
 
   --radius-sm: var(--radius);
   --radius-control: var(--radius);
+  /* A sidebar row's own rounding, a pill rather than the page's radius. The rail's conversations
+     and the apps index are read down one column, so both name the radius here instead of each
+     carrying its own literal and drifting apart. */
+  --radius-row: calc(infinity * 1px);
   --radius-panel: var(--radius);
   --radius-bubble: var(--radius);
   --radius-menu: var(--radius);

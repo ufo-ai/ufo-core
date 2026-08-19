@@ -118,7 +118,7 @@ export function Agents({
                 an app: nothing here opens one, and the app's real row arrives from the apps read
                 when it lands. */}
             {building || running ? (
-              <li className={cn("flex items-center gap-xs rounded-control", building && "bg-fill")}>
+              <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
                 {building ? (
                   <div
                     aria-current
@@ -137,7 +137,7 @@ export function Agents({
                     onClick={() => setWanting(true)}
                     className={cn(
                       "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
-                      "rounded-control text-left text-inherit hover:bg-fill",
+                      "rounded-row text-left text-inherit hover:bg-fill",
                     )}
                   >
                     <span className="min-w-0 max-w-full truncate text-label">
@@ -158,7 +158,7 @@ export function Agents({
                 <li
                   key={agent.id}
                   className={cn(
-                    "flex items-center rounded-control hover:bg-fill",
+                    "flex items-center rounded-row hover:bg-fill",
                     open && "bg-fill",
                   )}
                 >
