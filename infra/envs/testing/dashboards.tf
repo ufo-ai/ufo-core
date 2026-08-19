@@ -1153,7 +1153,7 @@ resource "datadog_dashboard" "evals" {
     toplist_definition {
       title = "cases failing last night, by suite"
       request {
-        q = "top(sum:ufo.evals.cases_scored{$mode} by {suite}.last('1d') - sum:ufo.evals.cases_passed{$mode} by {suite}.last('1d'), 25, 'max', 'desc')"
+        q = "top(sum:ufo.evals.cases_scored{$mode} by {suite} - sum:ufo.evals.cases_passed{$mode} by {suite}, 25, 'last', 'desc')"
       }
     }
   }
