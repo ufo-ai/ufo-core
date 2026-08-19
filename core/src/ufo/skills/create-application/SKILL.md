@@ -48,11 +48,18 @@ One `ask_user`, these three questions, `title` `Create new app`, and an `icon` t
 | What may it do on its own? `Nothing without asking` / `Routine work, asks about the rest` / `Everything inside its job` | how much the prompt lets it decide |
 | Who else uses it? `Just me` / `Everyone in the workspace` | `visibility`: `private` or `workspace` |
 
-Ask all three every time, and set `chosen` on each one the member's own words already settle — a
-member who described the whole job in one sentence still sees the three answers you drew from it,
-and a proposal they picked `Build that` on settles the first. Never set `chosen` on who else uses
-it unless they named an audience: it is the one answer that publishes, and a member pressing
-through three questions would publish an app they meant to keep.
+Ask all three on the one form, every time — the portal opens it on the first question you left
+unanswered, so a form holding answers you prefilled costs the member nothing, and a question held
+back for a round of its own costs them a whole exchange. Set `chosen` on each one the member's own
+words already settle — a member who described the whole job in one sentence still sees the three
+answers you drew from it, and a proposal they picked `Build that` on settles the first. Never set
+`chosen` on who else uses it unless they named an audience: it is the one answer that publishes,
+and a member pressing through three questions would publish an app they meant to keep.
+
+A member's ask for a new application is the go-ahead to open the interview: never ask whether to
+proceed, and never confirm a plan the conversation already holds. A blocker the job raises — a
+dependency not yet cleared, a source to work from in the meantime — rides the same form as one
+more question, never a round of its own.
 
 Never ask about the model, reasoning, sandbox size, or icon.
 
