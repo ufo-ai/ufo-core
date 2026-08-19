@@ -1,8 +1,9 @@
-import { useState, type FormEvent } from "react";
+import { IconArrowRight, IconCheck, IconPlus } from "@tabler/icons-react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
-import { Page, PageHeader, Pane } from "@/kernel/pane";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Notice,
   type NoticeState,
@@ -11,13 +12,14 @@ import {
   PanelEmpty,
   PanelSkeleton,
   QUIET,
-  Section,
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
+import logo from "@/assets/ufo-logo.svg";
 import { postIntent } from "@/lib/api";
+import { BrandMark } from "@/lib/brandMark";
+import { cn } from "@/lib/cn";
 import { setPendingAsk } from "@/lib/pendingAsk";
-import { ProviderGlyph } from "@/lib/providerGlyph";
 import type { Agent, Member } from "@/lib/types";
 
 type ProviderTile = { name: string; label: string };
@@ -29,12 +31,17 @@ type FirstRunPayload = {
   connectors: Connector[];
 };
 
-/** What stands in the composer once the first run hands the member over: the tools the member just
+/** What the member says to open the conversation the first run hands them to: the tools they just
  *  picked, and the question the page stops at. The picks are written into the message in catalog
  *  order rather than left to a memory read, so the agent proposes against them on its first turn
  *  without asking again for what the member already answered. Which agents to set up is that
  *  conversation's work: creating one takes a speaking member, so it happens on the turns the member
- *  answers on, never on a page that never speaks. */
+ *  answers on, never on a page that never speaks.
+ *
+ *  It is said as the chat opens rather than left standing in the composer. The line commits
+ *  nothing — it asks what the agent could do, and every act that follows is decided on a later
+ *  turn the member answers — so a member who has just pressed through the whole setup arrives at a
+ *  reply rather than at a box holding words they have to press again. */
 function opening(labels: string[]): string {
   const ask = "What could you set up for us?";
   return labels.length ? "We use " + labels.join(", ") + ". " + ask : ask;
@@ -47,22 +54,108 @@ const CONNECT_VERB: Record<string, string> = {
   github: "connect_github",
 };
 
-/** What the workspace gains by installing each one, stated where the act is. */
-const CONNECT_NOTE: Record<string, string> = {
-  slack: "The agent answers mentions and direct messages in your Slack workspace.",
-  github: "The agent reads and pushes to the repositories the installation grants.",
+/** Each connector gets the whole step, and the step states what the workspace gains rather than
+ *  naming the act twice: the button under it already says Connect, so a heading that said it too
+ *  would ask the member to press a word they have just read. What they are deciding is whether they
+ *  want the agent in that product at all, so that is what the step says. */
+const CONNECT_COPY: Record<string, { title: string; note: string }> = {
+  slack: {
+    title: "The agent answers in Slack",
+    note: "Mention it in a channel or send it a direct message, and it replies where your team already works.",
+  },
+  github: {
+    title: "The agent works in your repositories",
+    note: "It reads the code and pushes to the repositories the installation grants. You pick which ones.",
+  },
 };
 
 const TOOLS_STEP = "tools";
 const TEAM_STEP = "team";
+
+/** The invite step's form, named so the act that submits it can stand in the page's head with the
+ *  other acts rather than inside the fields it commits. */
+const INVITE_FORM = "first-run-invite";
+
+/** Blank addresses the invite step opens with. A team is more than one person, so the step asks as
+ *  though several are coming: one box states that a teammate is an afterthought, and a member with
+ *  more to add says so with `Add another`. */
+const INVITE_ROWS = 3;
+
+/** What each step asks, keyed by the step's own name — which for a connector is the connector's
+ *  slug, so a step and the copy over it cannot drift apart. */
+const STEP_COPY: Record<string, { title: string; note: string }> = {
+  [TOOLS_STEP]: {
+    title: "What your team uses",
+    note: "Picks are recorded in memory, and the agent reads them on every later turn.",
+  },
+  [TEAM_STEP]: {
+    title: "Invite your team",
+    note: "Each address becomes a member of this workspace. They sign in with their work email.",
+  },
+  ...CONNECT_COPY,
+};
+
+/** The page the first run is read on, and the only screen in the portal that draws no navigation:
+ *  a member who has not set the workspace up has nowhere to navigate to yet, and a bar offering
+ *  four destinations invites them to leave the one thing they are here to finish. The mark and the
+ *  step's acts share that line instead, at the two edges of the page — so the acts stand where the
+ *  bar's own do, and the step below is only its question and the answer being given to it.
+ *
+ *  The question is centred over that answer, which is what makes it a question rather than the
+ *  heading of a screen: nothing is aligned to it, because there is nothing else on the line. */
+function Frame({
+  title,
+  note,
+  actions,
+  children,
+}: {
+  title?: string;
+  note?: string;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <main
+      className={cn(
+        "grid h-dvh grid-rows-[auto_1fr] gap-6xl overflow-y-auto",
+        "px-(--size-page-gutter) py-(--size-page-top) max-narrow:px-2xl",
+      )}
+    >
+      <div className="flex items-center gap-sm">
+        <span
+          role="img"
+          aria-label="ufo"
+          className="block h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current"
+          style={{ mask: `url(${logo}) center / contain no-repeat` }}
+        />
+        <div className="ml-auto flex items-center gap-sm">{actions}</div>
+      </div>
+      <div className="mx-auto flex w-full max-w-section flex-col justify-center gap-6xl">
+        {title ? (
+          <div className="flex flex-col gap-2xs text-center">
+            <h1 className="m-0 text-title font-medium">{title}</h1>
+            {note ? <p className="m-0 mx-auto max-w-form text-body text-ink-soft">{note}</p> : null}
+          </div>
+        ) : null}
+        {children}
+      </div>
+    </main>
+  );
+}
 
 /** The first run, one step at a time: the member states what their team uses, and that pick decides
  *  what the page asks next. Picking a connector reveals its install step, so the two connectors
  *  that put the agent where the team already works are asked for in place, by the member who just
  *  named them; picking neither leaves the page asking only who else belongs in the workspace.
  *  One step stands at a time: an answered step leaves the page, so what is on screen is always the
- *  one decision being asked for. The last act hands the opening message to the main agent's new
- *  chat unsent, and the member sends it. */
+ *  one decision being asked for. The last act opens the main agent's new chat on the opening
+ *  message, said.
+ *
+ *  The head states the acts the step actually has. Back is absent on the first step, because there
+ *  is nothing behind it. Continue commits the step and is held closed until the step's act is
+ *  done — so a step that asks for an install says plainly that it is still waiting — and every
+ *  step that can be left undone carries Skip beside it, because a closed Continue with no way past
+ *  it is a dead end rather than a question. */
 export function FirstRun({
   agent,
   member,
@@ -75,19 +168,23 @@ export function FirstRun({
   const state = usePanelRead<FirstRunPayload>("/workspace/first-run");
   const [picked, setPicked] = useState<string[]>([]);
   const [recorded, setRecorded] = useState<string[] | null>(null);
+  const [reached, setReached] = useState<string[]>([]);
+  const [rows, setRows] = useState<string[]>(() => Array<string>(INVITE_ROWS).fill(""));
+  const [added, setAdded] = useState<string[]>([]);
   const [at, setAt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
 
-  function toggle(name: string) {
-    setPicked((held) =>
-      held.includes(name) ? held.filter((entry) => entry !== name) : [...held, name],
-    );
-  }
-
+  /** The picks reach memory once per answer rather than once per visit: a member who steps back to
+   *  change them writes again, and one who steps back and changes nothing does not. The write takes
+   *  at least one pick, so clearing every pick after recording leaves the earlier answer standing —
+   *  correcting that is a sentence to the agent, which is where memory is corrected everywhere
+   *  else. */
   async function record() {
     if (busy) return;
-    if (picked.length) {
+    const stated = [...picked].sort().join(" ");
+    const written = recorded === null ? null : [...recorded].sort().join(" ");
+    if (picked.length && stated !== written) {
       setBusy(true);
       const outcome = await postIntent(agent.id, {
         verb: "record_tooling",
@@ -109,36 +206,26 @@ export function FirstRun({
     <Panel
       state={state}
       loading={() => (
-        <Pane>
-          <Page>
-            <PanelSkeleton shape="form" />
-          </Page>
-        </Pane>
+        <Frame>
+          <PanelSkeleton shape="form" />
+        </Frame>
       )}
       failed={(message) => (
-        <Pane>
-          <Page>
-            <PanelEmpty>{message}</PanelEmpty>
-          </Page>
-        </Pane>
+        <Frame>
+          <PanelEmpty>{message}</PanelEmpty>
+        </Frame>
       )}
     >
       {(payload) => {
+        const chosen = payload.connectors.filter((row) => (recorded ?? []).includes(row.name));
         const revealed =
           recorded === null
             ? [TOOLS_STEP]
-            : [
-                TOOLS_STEP,
-                ...payload.connectors
-                  .filter((row) => recorded.includes(row.name))
-                  .map((row) => row.name),
-                TEAM_STEP,
-              ];
-        const advance = () => {
-          if (at + 1 < revealed.length) {
-            setAt(at + 1);
-            return;
-          }
+            : [TOOLS_STEP, ...chosen.map((row) => row.name), TEAM_STEP];
+        const step = revealed[at];
+        const connector = chosen.filter((row) => row.name === step)[0];
+        const held = connector ? connector.installed || reached.includes(step) : false;
+        const finish = () => {
           setPendingAsk(
             agent.id,
             opening(
@@ -146,68 +233,176 @@ export function FirstRun({
                 .filter((tile) => (recorded ?? []).includes(tile.name))
                 .map((tile) => tile.label),
             ),
-            false,
+            true,
           );
           onOpenChat();
         };
+        const advance = () => (at + 1 < revealed.length ? setAt(at + 1) : finish());
+        const wanted = rows
+          .map((row) => row.trim())
+          .filter(Boolean)
+          .filter((email) => !added.includes(email));
+        /** Every address the member wrote, one intent each, and then the chat. A refusal stops the
+         *  run where it happened and states itself: the addresses already taken are held, so
+         *  pressing again asks only for the ones that never landed. */
+        const invite = async (event: FormEvent) => {
+          event.preventDefault();
+          if (busy) return;
+          setBusy(true);
+          for (const email of wanted) {
+            const outcome = await postIntent(agent.id, { verb: "add_member", email, admin: false });
+            if (!outcome.applied) {
+              setBusy(false);
+              setNotice(outcomeNotice(outcome));
+              return;
+            }
+            setAdded((held) => [...held, email]);
+          }
+          setBusy(false);
+          finish();
+        };
         return (
-          <Pane>
-            <Page>
-              <PageHeader title="Set up this workspace" />
-              <OutcomeNotice state={notice} />
-
-              {[revealed[at]].map((step) => {
-                const connector = payload.connectors.filter((row) => row.name === step)[0];
-                return (
-                  <div key={step} className="flex flex-col gap-md">
-                    {step === TOOLS_STEP ? (
-                      <Section
-                        title="What your team uses"
-                        note="Picks are recorded in memory, and the agent reads them on every later turn."
-                      >
-                        <ul className="m-0 grid list-none grid-cols-4 gap-2xs p-0 max-narrow:grid-cols-2">
-                          {payload.providers.map((tile) => (
-                            <li key={tile.name}>
-                              <Button
-                                variant="option"
-                                className="size-full flex-col gap-2xs px-sm py-md"
-                                aria-pressed={picked.includes(tile.name)}
-                                disabled={recorded !== null}
-                                onClick={() => toggle(tile.name)}
-                              >
-                                <ProviderGlyph provider={tile.name} className="text-inherit" />
-                                {tile.label}
-                              </Button>
-                            </li>
-                          ))}
-                        </ul>
-                      </Section>
-                    ) : null}
-                    {connector ? (
-                      <Connect agent={agent} admin={member.admin} row={connector} />
-                    ) : null}
-                    {step === TEAM_STEP ? <Invite agent={agent} admin={member.admin} /> : null}
-                    <div>
-                      <Button busy={busy} onClick={step === TOOLS_STEP ? record : advance}>
-                        Continue
-                      </Button>
-                    </div>
-                  </div>
-                );
-              })}
-            </Page>
-          </Pane>
+          <Frame
+            title={STEP_COPY[step].title}
+            note={STEP_COPY[step].note}
+            actions={
+              <>
+                {at > 0 ? (
+                  <Button size="bar" onClick={() => setAt(at - 1)}>
+                    Back
+                  </Button>
+                ) : null}
+                {step === TOOLS_STEP ? null : (
+                  <Button size="bar" onClick={advance}>
+                    Skip
+                  </Button>
+                )}
+                {step === TEAM_STEP ? (
+                  <Button
+                    type="submit"
+                    form={INVITE_FORM}
+                    variant="send"
+                    size="bar"
+                    busy={busy}
+                    disabled={!wanted.length}
+                  >
+                    Invite
+                  </Button>
+                ) : (
+                  <Button
+                    variant="send"
+                    size="bar"
+                    busy={busy}
+                    disabled={connector !== undefined && !held}
+                    onClick={step === TOOLS_STEP ? record : advance}
+                  >
+                    Continue
+                  </Button>
+                )}
+              </>
+            }
+          >
+            <OutcomeNotice state={notice} />
+            {step === TOOLS_STEP ? (
+              <ToggleGroup
+                className="flex flex-wrap justify-center gap-lg"
+                value={picked}
+                onValueChange={setPicked}
+              >
+                {payload.providers.map((tile) => (
+                  <Tile key={tile.name} name={tile.name} label={tile.label} />
+                ))}
+              </ToggleGroup>
+            ) : null}
+            {connector ? (
+              <Connect
+                key={connector.name}
+                agent={agent}
+                admin={member.admin}
+                row={connector}
+                held={held}
+                onReached={() => setReached((names) => [...names, connector.name])}
+              />
+            ) : null}
+            {step === TEAM_STEP ? (
+              <Invite
+                admin={member.admin}
+                rows={rows}
+                added={added}
+                onRows={setRows}
+                onSubmit={invite}
+              />
+            ) : null}
+          </Frame>
         );
       }}
     </Panel>
   );
 }
 
-/** One connector's install step. The intent dispatches that connector's own admin-gated tool, which
- *  seals the install link for this workspace and answers with it — a non-admin is told who installs
- *  it rather than pressing an act the workspace refuses. The link expires, so the act stays on the
- *  page and mints another. */
-function Connect({ agent, admin, row }: { agent: Agent; admin: boolean; row: Connector }) {
+/** One provider the team can say it uses: its own mark on a card, and the name under the card. The
+ *  mark is what the member scans for, so it is drawn at the size of a thing being looked for and in
+ *  the product's own colours, and the label only confirms what the mark already said.
+ *
+ *  Every card carries the slot its pick lands in, empty until it is picked. Marks this saturated
+ *  leave a tinted border with nothing to say — a colour among fourteen colours — so what separates
+ *  a picked tile from an unpicked one is a shape that was already on screen, filling. */
+function Tile({ name, label }: { name: string; label: string }) {
+  return (
+    <ToggleGroupItem
+      value={name}
+      className="group flex w-(--size-app-tile) flex-col items-center gap-sm"
+    >
+      <span
+        className={cn(
+          "relative flex aspect-square w-full items-center justify-center",
+          "rounded-panel border border-edge bg-surface",
+          "group-hover:border-edge-strong group-aria-pressed:border-ink",
+        )}
+      >
+        <BrandMark provider={name} />
+        <span
+          className={cn(
+            "absolute top-xs right-xs flex size-(--size-glyph) items-center justify-center",
+            "rounded-full border border-edge transition-colors duration-100 ease-control",
+            "group-aria-pressed:border-ink group-aria-pressed:bg-ink",
+          )}
+        >
+          <IconCheck
+            className="size-icon text-surface opacity-0 group-aria-pressed:opacity-100"
+            aria-hidden
+          />
+        </span>
+      </span>
+      <span className="text-label text-ink-soft group-aria-pressed:text-ink">{label}</span>
+    </ToggleGroupItem>
+  );
+}
+
+/** One connector's own step. The intent dispatches that connector's admin-gated tool, which seals
+ *  the install link for this workspace and answers with it — a non-admin is told who installs it
+ *  rather than pressing an act the workspace refuses. The link expires, so the act stays on the
+ *  step and mints another.
+ *
+ *  Each connector gets a step to itself because they are two different decisions, not two rows of
+ *  one: putting the agent in the team's chat and giving it the team's code are worth different
+ *  amounts to different teams, and a member reading a list weighs them against each other instead
+ *  of against their own work. The step's heading carries what the connector is worth, and the act
+ *  under it is the only thing on the screen — it carries the mark itself, so the product is named
+ *  once rather than drawn twice on one page. */
+function Connect({
+  agent,
+  admin,
+  row,
+  held,
+  onReached,
+}: {
+  agent: Agent;
+  admin: boolean;
+  row: Connector;
+  held: boolean;
+  onReached: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
@@ -219,27 +414,28 @@ function Connect({ agent, admin, row }: { agent: Agent; admin: boolean; row: Con
     setBusy(false);
     setLink(outcome.url ?? null);
     setNotice(outcome.url ? QUIET : outcomeNotice(outcome));
+    if (outcome.url) onReached();
   }
 
   return (
-    <Section title={"Connect " + row.label} note={CONNECT_NOTE[row.name]}>
-      <div className="flex items-center gap-md">
-        {row.installed ? (
-          <span className="flex items-center gap-sm text-label text-ink-soft">
-            <ProviderGlyph provider={row.name} />
-            Connected
-          </span>
-        ) : admin ? (
-          <Button variant="send" busy={busy} onClick={connect}>
-            <ProviderGlyph provider={row.name} className="text-inherit" />
-            {"Connect " + row.label}
-          </Button>
-        ) : (
-          <span className="text-label text-ink-soft">
-            {"A workspace admin connects " + row.label + "."}
-          </span>
-        )}
-      </div>
+    <div className="flex flex-col items-center gap-2xl">
+      {held ? (
+        <span className={cn(buttonVariants({ variant: "outline" }), "text-ink-soft")}>
+          <BrandMark provider={row.name} className="size-(--size-glyph)" />
+          {row.label + " connected"}
+          <IconCheck className="size-icon text-ink" aria-hidden />
+        </span>
+      ) : admin ? (
+        <Button variant="send" busy={busy} onClick={connect}>
+          <BrandMark provider={row.name} onInk className="size-(--size-glyph)" />
+          {"Connect " + row.label}
+          <IconArrowRight className="size-icon" aria-hidden />
+        </Button>
+      ) : (
+        <span className="text-label text-ink-soft">
+          {"A workspace admin connects " + row.label + "."}
+        </span>
+      )}
       {link ? (
         <Notice>
           <a href={link} target="_blank" rel="noopener">
@@ -248,58 +444,64 @@ function Connect({ agent, admin, row }: { agent: Agent; admin: boolean; row: Con
         </Notice>
       ) : null}
       <OutcomeNotice state={notice} />
-    </Section>
+    </div>
   );
 }
 
-/** The last step: teammates added by address, one intent each, through the same admin-only verb
+/** The last step: teammates named by address, one intent each, through the same admin-only verb
  *  chat adds a member with. Nothing reaches the address — the member exists once the verb applies,
  *  and they reach the workspace by signing in. Each one is stated as it lands, so the member reads
- *  what they added before the page hands them on. */
-function Invite({ agent, admin }: { agent: Agent; admin: boolean }) {
-  const [email, setEmail] = useState("");
-  const [added, setAdded] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
+ *  what they added before the page hands them on.
+ *
+ *  The addresses are written together and committed once, rather than one at a time against an act
+ *  beside the box: a member filling in their team types three names and presses once. The act that
+ *  commits them stands in the page's head with the step's other acts and reaches the form by name,
+ *  so the fields carry nothing but fields and the Enter key still submits. */
+function Invite({
+  admin,
+  rows,
+  added,
+  onRows,
+  onSubmit,
+}: {
+  admin: boolean;
+  rows: string[];
+  added: string[];
+  onRows: (rows: string[]) => void;
+  onSubmit: (event: FormEvent) => void;
+}) {
+  const first = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    first.current?.focus();
+  }, []);
 
-  async function add(event: FormEvent) {
-    event.preventDefault();
-    const wanted = email.trim();
-    if (busy || !wanted) return;
-    setBusy(true);
-    const outcome = await postIntent(agent.id, { verb: "add_member", email: wanted, admin: false });
-    setBusy(false);
-    if (!outcome.applied) {
-      setNotice(outcomeNotice(outcome));
-      return;
-    }
-    setNotice(QUIET);
-    setAdded((held) => [...held, wanted]);
-    setEmail("");
+  if (!admin) {
+    return <p className="m-0 text-center text-label text-ink-soft">A workspace admin adds members.</p>;
   }
-
   return (
-    <Section
-      title="Invite your team"
-      note="Each address becomes a member of this workspace. They sign in with their work email."
-    >
-      {admin ? (
-        <form onSubmit={add} className="flex items-stretch gap-sm">
+    <div className="mx-auto flex w-full max-w-form flex-col gap-2xl">
+      <form id={INVITE_FORM} onSubmit={onSubmit} className="flex flex-col gap-sm">
+        {rows.map((value, index) => (
           <Input
+            key={index}
+            ref={index === 0 ? first : undefined}
             type="email"
-            required
-            aria-label="Email"
+            className="max-w-none"
+            aria-label={"Email " + (index + 1)}
             placeholder="email@work.com"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
+            value={value}
+            onChange={(event) =>
+              onRows(rows.map((held, at) => (at === index ? event.target.value : held)))
+            }
           />
-          <Button type="submit" variant="send" busy={busy}>
-            Add
-          </Button>
-        </form>
-      ) : (
-        <p className="m-0 text-label text-ink-soft">A workspace admin adds members.</p>
-      )}
+        ))}
+      </form>
+      <div>
+        <Button variant="row" onClick={() => onRows([...rows, ""])}>
+          <IconPlus className="size-icon" aria-hidden />
+          Add another
+        </Button>
+      </div>
       {added.length ? (
         <Notice>
           {(added.length === 1 ? "Added " : "Added " + added.length + " members: ") +
@@ -307,7 +509,6 @@ function Invite({ agent, admin }: { agent: Agent; admin: boolean }) {
             "."}
         </Notice>
       ) : null}
-      <OutcomeNotice state={notice} />
-    </Section>
+    </div>
   );
 }

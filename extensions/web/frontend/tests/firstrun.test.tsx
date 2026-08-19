@@ -4,11 +4,23 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, AGENT_ID, MEMBER, json, useStreamFake, wire, type Route } from "./harness";
+import {
+  AGENT,
+  AGENT_ID,
+  CONVO_ID,
+  MEMBER,
+  TURN_ID,
+  json,
+  useStreamFake,
+  wire,
+  type Route,
+} from "./harness";
 
 const ADMIN = { ...MEMBER, admin: true };
 
 const SLACK_LINK = "https://slack.com/oauth/v2/authorize?state=sealed";
+
+const OPENED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Setting up" };
 
 const FIRST_RUN = {
   providers: [
@@ -79,6 +91,15 @@ async function record(...picks: string[]) {
   await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 }
 
+/** The act that commits the step being asked for. */
+function commit(): HTMLButtonElement {
+  return screen.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
+}
+
+function toolingIntent(...providers: string[]) {
+  return { verb: "record_tooling", kind: "memory", providers };
+}
+
 test("the card's query lands on the first run's own address", async () => {
   open();
 
@@ -96,12 +117,19 @@ test("the address opens the first run on its own, with no query at all", async (
   expect(location.hash).toBe("#/first-run");
 });
 
+test("the page draws no shell around the step", async () => {
+  open();
+
+  await screen.findByRole("heading", { name: "What your team uses" });
+  expect(screen.queryByRole("banner")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
+});
+
 test("the tiles are the whole first step: no later step stands until the picks are recorded", async () => {
   open();
 
   await screen.findByRole("button", { name: "Slack" });
-  expect(screen.queryByRole("heading", { name: "Connect Slack" })).toBeNull();
-  expect(screen.queryByRole("heading", { name: "Connect GitHub" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "The agent answers in Slack" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "Invite your team" })).toBeNull();
 });
 
@@ -111,11 +139,10 @@ test("the picks are recorded through the intent lane, and only what was picked i
 
   await record("Notion", "Slack");
 
-  expect(intents(posted.calls)).toEqual([
-    { verb: "record_tooling", kind: "memory", providers: ["notion", "slack"] },
-  ]);
-  await screen.findByRole("heading", { name: "Connect Slack" });
-  expect(screen.queryByRole("heading", { name: "Connect GitHub" })).toBeNull();
+  expect(intents(posted.calls)).toEqual([toolingIntent("notion", "slack")]);
+  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   // One step stands at a time: the answered step leaves the page rather than sitting above the
   // one being asked for.
   expect(screen.queryByRole("button", { name: "Notion" })).toBeNull();
@@ -129,23 +156,119 @@ test("picking neither connector skips to the invite step", async () => {
   await record("Notion");
 
   await screen.findByRole("heading", { name: "Invite your team" });
-  expect(screen.queryByRole("heading", { name: "Connect Slack" })).toBeNull();
-  expect(screen.queryByRole("heading", { name: "Connect GitHub" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "The agent answers in Slack" })).toBeNull();
 });
 
-test("both connectors picked are asked for one after the other, then the invite", async () => {
+test("each connector picked is its own step, in the order the tiles offer them", async () => {
   const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("GitHub", "Slack");
+
+  // Slack leads because the catalog does, not because it was picked second.
+  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await screen.findByRole("heading", { name: "The agent works in your repositories" });
+  expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await screen.findByRole("heading", { name: "Invite your team" });
+  expect(screen.getByRole("button", { name: "Invite" })).toBeTruthy();
+});
+
+test("the foot carries only the acts the step has", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await screen.findByRole("button", { name: "Notion" });
+  expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
+  expect(commit().disabled).toBe(false);
+
+  await record("Slack");
+
+  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+
+  await screen.findByRole("heading", { name: "Invite your team" });
+  expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Skip" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  // Nothing is written yet, so there is nobody to invite — Skip is the way past.
+  expect((screen.getByRole("button", { name: "Invite" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("continue is held closed until a listed connector is connected", async () => {
+  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
   open({ "/intents": posted.route });
 
   await record("Slack", "GitHub");
 
-  await screen.findByRole("heading", { name: "Connect Slack" });
-  expect(screen.queryByRole("heading", { name: "Connect GitHub" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-  await screen.findByRole("heading", { name: "Connect GitHub" });
-  expect(screen.queryByRole("heading", { name: "Invite your team" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  expect(commit().disabled).toBe(true);
+  await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
+
+  await waitFor(() => expect(commit().disabled).toBe(false));
+  await userEvent.click(commit());
+  // The next connector is a step of its own, and closed on its own terms.
+  await screen.findByRole("heading", { name: "The agent works in your repositories" });
+  expect(commit().disabled).toBe(true);
+});
+
+test("skip leaves the connect step behind with nothing connected", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Slack");
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+
   await screen.findByRole("heading", { name: "Invite your team" });
+  expect(intents(posted.calls)).toEqual([toolingIntent("slack")]);
+});
+
+test("back re-opens the tiles with the picks still on them and still editable", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Slack", "GitHub");
+  await userEvent.click(await screen.findByRole("button", { name: "Back" }));
+
+  const slack = await screen.findByRole("button", { name: "Slack" });
+  expect(slack.getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "GitHub" }).getAttribute("aria-pressed")).toBe("true");
+  expect((slack as HTMLButtonElement).disabled).toBe(false);
+  await userEvent.click(slack);
+  expect(slack.getAttribute("aria-pressed")).toBe("false");
+});
+
+test("a changed pick on the way back is recorded again", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Slack");
+  await userEvent.click(await screen.findByRole("button", { name: "Back" }));
+  await userEvent.click(await screen.findByRole("button", { name: "GitHub" }));
+  await userEvent.click(commit());
+
+  await screen.findByRole("button", { name: "Connect Slack" });
+  expect(intents(posted.calls)).toEqual([toolingIntent("slack"), toolingIntent("slack", "github")]);
+});
+
+test("picks left as they were on the way back are not recorded twice", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Slack");
+  await userEvent.click(await screen.findByRole("button", { name: "Back" }));
+  await userEvent.click(commit());
+
+  await screen.findByRole("button", { name: "Connect Slack" });
+  expect(intents(posted.calls)).toEqual([toolingIntent("slack")]);
 });
 
 test("a connector the workspace already holds states so and carries no act", async () => {
@@ -154,9 +277,9 @@ test("a connector the workspace already holds states so and carries no act", asy
 
   await record("Slack");
 
-  const step = (await screen.findByRole("heading", { name: "Connect Slack" })).closest("section");
-  expect(step?.textContent).toContain("Connected");
+  await screen.findByText("Slack connected");
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
+  expect(commit().disabled).toBe(false);
 });
 
 test("connecting mints the link on the intent lane, never through the chat", async () => {
@@ -173,7 +296,20 @@ test("connecting mints the link on the intent lane, never through the chat", asy
   expect(screen.queryByPlaceholderText("Message the agent…")).toBeNull();
 });
 
-test("the GitHub step submits its own connect verb", async () => {
+test("a link minted on one connector's step is not shown on the next one's", async () => {
+  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  open({ "/intents": posted.route });
+
+  await record("Slack", "GitHub");
+  await userEvent.click(await screen.findByRole("button", { name: "Connect Slack" }));
+  await screen.findByRole("link", { name: "Open the Slack install page" });
+  await userEvent.click(commit());
+
+  await screen.findByRole("button", { name: "Connect GitHub" });
+  expect(screen.queryByRole("link")).toBeNull();
+});
+
+test("the GitHub row submits its own connect verb", async () => {
   const posted = recorder({
     connect_github: { applied: true, message: "", url: "https://github.com/apps/ufo-ai" },
   });
@@ -201,6 +337,7 @@ test("a connect the tool minted no link for states what it answered instead", as
 
   await screen.findByText("Ask a workspace admin to connect Slack — only they can install it.");
   expect(screen.queryByRole("link")).toBeNull();
+  expect(commit().disabled).toBe(true);
 });
 
 test("a member who is not an admin is told who installs, and presses nothing", async () => {
@@ -211,32 +348,61 @@ test("a member who is not an admin is told who installs, and presses nothing", a
 
   await screen.findByText("A workspace admin connects Slack.");
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
   await screen.findByText("A workspace admin adds members.");
-  expect(screen.queryByLabelText("Email")).toBeNull();
-  expect(intents(posted.calls)).toEqual([
-    { verb: "record_tooling", kind: "memory", providers: ["slack"] },
-  ]);
+  expect(screen.queryByLabelText("Email 1")).toBeNull();
+  expect(intents(posted.calls)).toEqual([toolingIntent("slack")]);
 });
 
-test("the invite step adds a teammate through the member verb", async () => {
-  const posted = recorder({ add_member: { applied: true, message: "teammate@work.com added." } });
+test("the invite step opens on three boxes and grows one at a time", async () => {
+  const posted = recorder();
   open({ "/intents": posted.route });
 
   await record("Notion");
-  await userEvent.type(await screen.findByLabelText("Email"), "teammate@work.com");
-  await userEvent.click(screen.getByRole("button", { name: "Add" }));
 
+  await screen.findByLabelText("Email 1");
+  expect(screen.getByLabelText("Email 2")).toBeTruthy();
+  expect(screen.getByLabelText("Email 3")).toBeTruthy();
+  expect(screen.queryByLabelText("Email 4")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Add another" }));
+  expect(screen.getByLabelText("Email 4")).toBeTruthy();
+});
+
+test("the first box takes the cursor as the step arrives", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Notion");
+
+  const first = await screen.findByLabelText("Email 1");
+  await waitFor(() => expect(document.activeElement).toBe(first));
+});
+
+test("every address written is added on one press, and then the chat opens", async () => {
+  const sent: string[] = [];
+  const posted = recorder();
+  open({
+    "/intents": posted.route,
+    "/chat": (_url, init) => {
+      sent.push(String(init?.body));
+      return json(OPENED);
+    },
+  });
+
+  await record("Notion");
+  await userEvent.type(await screen.findByLabelText("Email 1"), "sam@work.com");
+  await userEvent.type(screen.getByLabelText("Email 3"), "alex@work.com");
+  await userEvent.click(screen.getByRole("button", { name: "Invite" }));
+
+  // A blank box is not an address: only what was written is asked for, in the order it stands in.
   await waitFor(() =>
-    expect(intents(posted.calls).at(-1)).toEqual({
-      verb: "add_member",
-      email: "teammate@work.com",
-      admin: false,
-    }),
+    expect(intents(posted.calls).slice(1)).toEqual([
+      { verb: "add_member", email: "sam@work.com", admin: false },
+      { verb: "add_member", email: "alex@work.com", admin: false },
+    ]),
   );
-  expect((screen.getByLabelText("Email") as HTMLInputElement).value).toBe("");
-  // The member reads what landed before the page hands them on.
-  await screen.findByText("Added teammate@work.com.");
+  await waitFor(() => expect(sent).toEqual(["We use Notion. What could you set up for us?"]));
 });
 
 test("a refused invite states the refusal and adds nobody", async () => {
@@ -246,52 +412,56 @@ test("a refused invite states the refusal and adds nobody", async () => {
   open({ "/intents": posted.route });
 
   await record("Notion");
-  await userEvent.type(await screen.findByLabelText("Email"), "teammate@work.com");
-  await userEvent.click(screen.getByRole("button", { name: "Add" }));
+  await userEvent.type(await screen.findByLabelText("Email 1"), "teammate@work.com");
+  await userEvent.click(screen.getByRole("button", { name: "Invite" }));
 
   await screen.findByText("only a workspace admin can add members");
-  expect((screen.getByLabelText("Email") as HTMLInputElement).value).toBe("teammate@work.com");
+  expect((screen.getByLabelText("Email 1") as HTMLInputElement).value).toBe("teammate@work.com");
+  // The refusal stops the run where it happened rather than handing the member on.
+  expect(screen.queryByPlaceholderText("Message the agent…")).toBeNull();
 });
 
-test("the last continue opens the chat carrying the picks and the question, unsent", async () => {
-  const chats: string[] = [];
+test("the last act says the picks and the question into the agent's new chat", async () => {
+  const sent: { url: string; body: string }[] = [];
   const posted = recorder();
   open({
     "/intents": posted.route,
-    [`/agents/${AGENT_ID}/chat`]: (url) => {
-      chats.push(url);
-      return json({});
+    "/chat": (url, init) => {
+      sent.push({ url, body: String(init?.body) });
+      return json(OPENED);
     },
   });
 
   // Picked out of catalog order: the message states them in the order the tiles are offered, so
   // one pick set produces one message however the member clicked it.
   await record("Notion", "Gmail");
-  await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
 
-  await waitFor(() => expect(location.hash).toBe("#/new/" + AGENT_ID));
+  await waitFor(() => expect(sent.length).toBe(1));
+  expect(sent[0].url).toBe("/surface/web/agents/" + AGENT_ID + "/chat?conversation=new");
+  expect(sent[0].body).toBe("We use Gmail, Notion. What could you set up for us?");
   const box = await screen.findByPlaceholderText("Message the agent…");
-  expect((box as HTMLTextAreaElement).value).toBe(
-    "We use Gmail, Notion. What could you set up for us?",
-  );
-  expect(chats).toEqual([]);
+  expect((box as HTMLTextAreaElement).value).toBe("");
   // The page creates no agent: creating one takes a speaking member, and the page never speaks.
-  expect(intents(posted.calls)).toEqual([
-    { verb: "record_tooling", kind: "memory", providers: ["notion", "gmail"] },
-  ]);
+  expect(intents(posted.calls)).toEqual([toolingIntent("notion", "gmail")]);
 });
 
-test("picking nothing records nothing and still opens the same question", async () => {
+test("picking nothing records nothing and still says the same question", async () => {
+  const sent: string[] = [];
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({
+    "/intents": posted.route,
+    "/chat": (_url, init) => {
+      sent.push(String(init?.body));
+      return json(OPENED);
+    },
+  });
 
   await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Invite your team" });
-  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
-  await waitFor(() => expect(location.hash).toBe("#/new/" + AGENT_ID));
-  const box = await screen.findByPlaceholderText("Message the agent…");
-  expect((box as HTMLTextAreaElement).value).toBe("What could you set up for us?");
+  await waitFor(() => expect(sent).toEqual(["What could you set up for us?"]));
   expect(intents(posted.calls)).toEqual([]);
 });
 
@@ -303,7 +473,5 @@ test("a refused record keeps the member on the first step and states the refusal
   await screen.findByText("No memory extension.");
   expect(location.hash).toBe("#/first-run");
   expect(screen.queryByRole("heading", { name: "Invite your team" })).toBeNull();
-  expect((screen.getByRole("button", { name: "Gmail" }) as HTMLButtonElement).disabled).toBe(
-    false,
-  );
+  expect((screen.getByRole("button", { name: "Gmail" }) as HTMLButtonElement).disabled).toBe(false);
 });

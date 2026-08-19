@@ -287,6 +287,13 @@
      Larger than the glyph a rail row carries: a row states the surface beside a title the member is
      scanning past, a header states it about the one conversation on the screen. */
   --size-surface-mark: 24px;
+  /* A provider's own mark, and the tile it is picked on. Larger again than the surface mark: the
+     tile is found by its mark and only confirmed by the label under it, so the mark is what the
+     pointer travels to rather than an annotation beside a name. The tile is stated as a floor
+     rather than a width — the grid fills the measure with whole columns of at least this, so the
+     same set reads as five columns on a page and two on a phone without either being written. */
+  --size-brand-mark: 32px;
+  --size-app-tile: 104px;
   /* The command palette's list. Fixed rather than capped: the panel is centred, and a list that
      grew as reads landed would walk the rows out from under the member's cursor. */
   --size-palette: 360px;
@@ -298,6 +305,57 @@
   --size-logo: 72px;
   --size-notice: 1em;
   --marker-width: 2px;
+}
+
+/* The vendored provider marks a first-run tile is picked by, each drawn in its own product's
+   colours so a member finds the one they use by its shape rather than by reading every label. A
+   `url()` is not a colour, so `light-dark()` cannot carry a pair — the one mark that needs both
+   schemes restates the mechanism the palette uses instead: the pinning class first, the preference
+   only where nothing is pinned. A provider named here is one the portal draws in full colour, and
+   every other takes its glyph. */
+:root {
+  --brand-asana: url("./assets/brands/asana.svg");
+  --brand-figma: url("./assets/brands/figma.svg");
+  --brand-github: url("./assets/brands/github.svg");
+  --brand-gmail: url("./assets/brands/gmail.svg");
+  --brand-googlecalendar: url("./assets/brands/googlecalendar.svg");
+  --brand-googledrive: url("./assets/brands/googledrive.svg");
+  --brand-linear: url("./assets/brands/linear.svg");
+  --brand-notion: url("./assets/brands/notion.svg");
+  --brand-slack: url("./assets/brands/slack.svg");
+  --brand-stripe: url("./assets/brands/stripe.svg");
+  --brand-zoom: url("./assets/brands/zoom.svg");
+}
+
+/* GitHub draws its mark in one ink and leaves the page to supply the contrast, which the dark pane
+   does not. Every other mark carries its own colours and reads on both panes unchanged. */
+@media (prefers-color-scheme: dark) {
+  :root:where(:not(.light)) {
+    --brand-github: url("./assets/brands/github-dark.svg");
+  }
+}
+
+:root:where(.dark) {
+  --brand-github: url("./assets/brands/github-dark.svg");
+}
+
+/* The same marks drawn inside a filled act. That act is ink on the pane, so its ground is the
+   scheme's other end and a one-ink mark that reads on the page disappears on the button — these
+   are the pane's pair, swapped. A mark carrying its own colours reads on either ground and names
+   the same file twice rather than leaving the button's token undeclared. */
+:root {
+  --brand-slack-on-ink: url("./assets/brands/slack.svg");
+  --brand-github-on-ink: url("./assets/brands/github-dark.svg");
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not(.light)) {
+    --brand-github-on-ink: url("./assets/brands/github.svg");
+  }
+}
+
+:root:where(.dark) {
+  --brand-github-on-ink: url("./assets/brands/github.svg");
 }
 
 

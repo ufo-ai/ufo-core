@@ -5360,6 +5360,10 @@ def test_only_declared_asset_suffixes_are_served(tmp_path: Path) -> None:
     assert served["assets/index-abc.js"] == (b"boot()", "text/javascript; charset=utf-8")
 
 
+INLINE_ASSET = "data:"
+URL_REFERENCE = re.compile(r"""url\((?:"([^"]*)"|'([^']*)'|([^)]*))\)""")
+
+
 async def test_every_asset_the_portal_references_is_served_from_the_surface_itself(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -5369,7 +5373,8 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
     under the surface's own static path and answer with the media type its element expects. The
     stylesheet's own `url()` references are the same claim one level down: the brand faces are
     named there rather than in the page, and a font nobody serves degrades to a fallback family
-    silently instead of failing a load.
+    silently instead of failing a load. A reference the build inlined carries its own bytes and
+    reaches no origin at all, so it is the sheet rather than something the surface serves.
     Only the shell names these and the shell serves to a session, so an asset read carrying none is
     401; each revalidates by etag rather than transferring on every load."""
     client, workspace_id, _agent_id = web
@@ -5389,9 +5394,10 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
 
     sheet = next(ref for ref in assets if ref.endswith(".css"))
     styles = (await client.get(sheet, headers=cookie)).text
-    faces = set(re.findall(r"url\(([^)]+)\)", styles))
-    assert faces, "the stylesheet names no font file"
-    assets |= faces
+    faces = {quoted or single or bare for quoted, single, bare in URL_REFERENCE.findall(styles)}
+    served = {ref for ref in faces if not ref.startswith(INLINE_ASSET)}
+    assert served, "the stylesheet names no font file"
+    assets |= served
 
     for ref in sorted(assets):
         assert ref.startswith("/surface/web/static/"), ref

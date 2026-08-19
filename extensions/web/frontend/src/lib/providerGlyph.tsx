@@ -45,5 +45,7 @@ export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
  *  glyph and every option in the list still starts on the same line. */
 export function ProviderGlyph({ provider, className }: { provider: string; className?: string }) {
   const Glyph = PROVIDER_GLYPHS[provider] ?? IconPlug;
-  return <Glyph className={cn("size-icon shrink-0 text-ink-soft", className)} aria-hidden />;
+  return (
+    <Glyph className={cn("size-(--size-icon) shrink-0 text-ink-soft", className)} aria-hidden />
+  );
 }

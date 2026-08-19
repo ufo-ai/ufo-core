@@ -366,6 +366,27 @@ export function App({ agents, member, onAgents }: AppProps) {
     };
   }, [route, rail, sought]);
 
+  /** The first run draws no shell. It is the one destination a member reaches before the workspace
+   *  is theirs to move around in, so the bar's four places are all somewhere they cannot use yet —
+   *  and the page carries its own mark and its own foot instead. */
+  if (route.kind === "first-run") {
+    return (
+      <Viewer.Provider value={member.email}>
+        <MainAgentProvider agents={agents}>
+          {mainAgent ? (
+            <FirstRun
+              agent={mainAgent}
+              member={member}
+              onOpenChat={() => openNewChat(mainAgent.id)}
+            />
+          ) : (
+            <PaneNote>No such agent.</PaneNote>
+          )}
+        </MainAgentProvider>
+      </Viewer.Provider>
+    );
+  }
+
   return (
     <Viewer.Provider value={member.email}>
       <MainAgentProvider agents={agents}>
@@ -827,16 +848,6 @@ function RoutedPane({
   linked: Readonly<Record<string, OwnedConversation>>;
 }) {
   if (route.kind === "admin") return <Admin />;
-  if (route.kind === "first-run") {
-    if (!mainAgent) return <PaneNote>No such agent.</PaneNote>;
-    return (
-      <FirstRun
-        agent={mainAgent}
-        member={member}
-        onOpenChat={() => onNewChat(mainAgent.id)}
-      />
-    );
-  }
   if (route.kind === "bad-link") return <PaneNote>This conversation link is not valid.</PaneNote>;
   if (route.kind === "workspace") {
     return (
