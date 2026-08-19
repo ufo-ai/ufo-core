@@ -890,6 +890,7 @@ function RoutedPane({
           place={route.kind === "agent" ? route.place : {}}
           onOpen={onOpenAgent}
           onTab={(tab) => (shown ? onOpenAgent(shown.id, tab) : undefined)}
+          onNewChat={onNewChat}
           onPlace={(place, step) =>
             route.kind === "agent" ? onPlaceAgent(route.tab, place, step) : undefined
           }

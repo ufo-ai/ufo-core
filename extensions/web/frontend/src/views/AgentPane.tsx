@@ -16,6 +16,7 @@ export type AgentPaneProps = {
   tab: AgentTab;
   tabs: readonly AgentTab[];
   onTab: (tab: AgentTab) => void;
+  onNewChat: () => void;
   onSettings: () => void;
   place: WorkspacePlace;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
@@ -24,12 +25,18 @@ export type AgentPaneProps = {
 /** The wide pane of the agents screen: one header — the agent's name beside the tab strip — worn
  *  the way the chat pane wears its own, a full-width band whose rule separates it from the body,
  *  the body starting at the band pitch a record's groups are read at. No tab draws a header of its
- *  own. */
+ *  own.
+ *
+ *  Starting a conversation is not a tab — it leaves the page for the chat instead of swapping the
+ *  panel under them, and a segment that can never read as the current one is not a segment. So it
+ *  stands with the acts at the far end, in the filled ink the New application act is drawn in,
+ *  which is what tells an act apart from the pills it would otherwise sit among. */
 export function AgentPane({
   agent,
   tab,
   tabs,
   onTab,
+  onNewChat,
   onSettings,
   place,
   onPlace,
@@ -51,10 +58,13 @@ export function AgentPane({
           label={(name) => AGENT_TAB_LABELS[name]}
           onPick={onTab}
         />
+        <Button variant="send" size="bar" className="ml-auto shrink-0" onClick={onNewChat}>
+          New chat
+        </Button>
         <Button
           size="icon"
           aria-label={"Settings for " + agentName(agent.name)}
-          className="ml-auto shrink-0 rounded-full"
+          className="shrink-0 rounded-full"
           onClick={onSettings}
         >
           <IconSettings className="size-icon" aria-hidden />

@@ -31,6 +31,7 @@ export type AgentsProps = {
   place: WorkspacePlace;
   onOpen: (agentId: string) => void;
   onTab: (tab: AgentTab) => void;
+  onNewChat: (agentId: string) => void;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
   onAgents: () => void;
 };
@@ -66,6 +67,7 @@ export function Agents({
   place,
   onOpen,
   onTab,
+  onNewChat,
   onPlace,
   onAgents,
 }: AgentsProps) {
@@ -223,6 +225,7 @@ export function Agents({
           tab={tab}
           tabs={AGENT_TABS}
           onTab={onTab}
+          onNewChat={() => onNewChat(shown.id)}
           onSettings={() => {
             setSettingsTab(SETTINGS_TABS[0]);
             setSettling(true);
