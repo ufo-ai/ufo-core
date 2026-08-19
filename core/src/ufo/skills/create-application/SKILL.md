@@ -36,27 +36,26 @@ exist with `object_list(kind="agent")` so you never propose one twice. Then stat
 proposal: what the app does, who runs it, what it answers with.
 
 End with `ask_user`: one question, options `Build that`, `Something else`. A member who reads a
-proposal and picks one is three questions ahead of a member asked "what would you like to build?".
+proposal and picks one is a round ahead of a member asked "what would you like to build?".
 
 ## Interview
 
-One `ask_user`, these three questions, `title` `Create new app`, and an `icon` that draws the job.
+One `ask_user`, these two questions, `title` `Create new app`, and an `icon` that draws the job.
 That is the ask's own mark, any tabler outline name — not the app's icon, which comes from the
 portal's own pack.
 
 | Question | What it settles |
 |---|---|
 | What job is it for? | the prompt |
-| What may it do on its own? `Nothing without asking` / `Routine work, asks about the rest` / `Everything inside its job` | how much the prompt lets it decide |
 | Who else uses it? `Just me` / `Everyone in the workspace` | `visibility`: `private` or `workspace` |
 
-Ask all three on the one form, every time — the portal opens it on the first question you left
-unanswered, so a form holding answers you prefilled costs the member nothing, and a question held
-back for a round of its own costs them a whole exchange. Set `chosen` on each one the member's own
-words already settle — a member who described the whole job in one sentence still sees the three
-answers you drew from it, and a proposal they picked `Build that` on settles the first. Never set
-`chosen` on who else uses it unless they named an audience: it is the one answer that publishes,
-and a member pressing through three questions would publish an app they meant to keep.
+Ask both on the one form, every time — the portal opens it on the first question you left
+unanswered, so a form holding an answer you prefilled costs the member nothing, and a question held
+back for a round of its own costs them a whole exchange. Set `chosen` on the job when the member's
+own words already settle it — a member who described the whole job in one sentence still sees the
+answer you drew from it, and a proposal they picked `Build that` on settles it. Never set `chosen`
+on who else uses it unless they named an audience: it is the answer that publishes, and a member
+pressing through the form would publish an app they meant to keep.
 
 A member's ask for a new application is the go-ahead to open the interview: never ask whether to
 proceed, and never confirm a plan the conversation already holds. For a member who named the job,
@@ -66,7 +65,7 @@ need — where the work lives, which account it reads — and a blocker the job 
 not yet cleared, a source to work from in the meantime — each ride the form as one more question,
 never a round of their own.
 
-Never ask about the model, reasoning, sandbox size, or icon.
+Never ask about the model, reasoning, sandbox size, icon, when it runs, or how far it acts alone.
 
 ## Draft it yourself
 
@@ -81,6 +80,13 @@ the job, how it decides, where it stops and asks — and what its homepage repor
 build designed one, so the page the application builds and keeps fresh is the page the member
 confirmed. Do not hand the member a blank prompt to fill in, and do not paste their own sentence
 back as the prompt.
+
+How it decides is settled for you: it works when the job needs it, takes the routine work of that
+job on its own, and asks before anything unusual. Write that boundary into the prompt in the
+application's own terms — what counts as routine here, what counts as unusual. A narrower one
+(nothing without asking) or a wider one (everything inside the job) lands only when the member's
+own words asked for it. Nobody picked that boundary, so the reply carrying the form states it in a
+line: what the application settles itself, what it brings to a person.
 
 ## Design the homepage (guided build)
 

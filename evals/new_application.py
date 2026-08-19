@@ -269,8 +269,7 @@ SCENARIOS = (
         ScenarioUser(
             reason_for_call="You want the support team to have an application of its own that "
             "answers the common product questions and passes anything else to a person.",
-            known_info="The whole support team uses it, not just you. It should handle the "
-            "routine answers on its own and check with a person before anything unusual.",
+            known_info="The whole support team uses it, not just you.",
             task_instructions=SATISFIED_INSTRUCTION,
         ),
         DescribedGrader(
@@ -282,6 +281,11 @@ SCENARIOS = (
         rubric=(
             "The assistant proposed the name and the instructions itself rather than asking the "
             "member to supply them.",
+            "The assistant never asks the member how much the application may do on its own, or "
+            "when it should run.",
+            "Before the application is created, the assistant states the boundary it wrote: the "
+            "application handles the routine work of its job itself and brings anything unusual to "
+            "a person.",
             "After creating it, the assistant says the new application holds no connected "
             "accounts, credentials, sources, skills, or memory yet, and offers to attach an "
             "account the workspace already has.",
@@ -305,6 +309,10 @@ SCENARIOS = (
             _graded_stated_up_front,
         ),
         seed=_seeded(),
+        rubric=(
+            "The assistant never asks the member how much the application may do on its own, or "
+            "when it should run.",
+        ),
         digest_tag="new-application:stated-up-front",
     ),
     ScenarioCase(

@@ -355,12 +355,15 @@ test("the run opens on the first question the turn does not already have the ans
         chosen: "Watch x.com for AI keywords",
         options: [{ label: "Watch x.com for AI keywords" }],
       },
-      { question: "How much on its own?", options: [{ label: "ask me" }, { label: "go ahead" }] },
+      {
+        question: "Where does the work live?",
+        options: [{ label: "the shared inbox" }, { label: "the tracker" }],
+      },
       { question: "Who sees it?", options: [{ label: "just me" }, { label: "the workspace" }] },
     ],
   });
 
-  await screen.findByRole("radio", { name: "ask me" });
+  await screen.findByRole("radio", { name: "the shared inbox" });
   const stepper = document.querySelector("[data-slot=questionnaire-stepper]")!;
   expect(stepper.textContent).toBe("2/3");
   expect(screen.queryByRole("textbox", { name: "What job is it for?" })).toBeNull();
