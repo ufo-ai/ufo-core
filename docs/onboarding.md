@@ -46,16 +46,17 @@ browser ------>| web (ufo_session) · debug (ufo_debug)      |
 
 ## The apex edge
 
-One worker per apex fronts `flyingobject.ai` and `testing.flyingobject.ai`. Each uses its own
-`origin_base` for gateway-backed responses — the client script, the fleet count, and the
-onboarding wire — its own D1 waitlist database, and its own confirmation queue. Unmatched requests
-pass through to what that host serves. Sign-in lives on the app host, so the apex carries no
-signed-in state and the session cookie stays same-origin.
+One worker per apex fronts `ufo.ai` and `testing.ufo.ai`. Each uses its own `origin_base` for
+gateway-backed responses — the client script, the fleet count, and the onboarding wire — its own
+D1 waitlist database, and its own confirmation queue. Unmatched requests pass through to what that
+host serves. Sign-in lives on the app host, so the apex carries no signed-in state and the session
+cookie stays same-origin. The retired `flyingobject.ai` zone answers every request with a 301 to
+the same subdomain and path under ufo.ai.
 
 ## Terminal onboarding flow
 
 ```text
-curl -fsSL https://flyingobject.ai/ufo | sh
+curl -fsSL https://ufo.ai/ufo | sh
   |
   | POST /v1/onboard/{channel}
   | header: x-ufo-session=<host.pid.epoch>
@@ -238,10 +239,8 @@ and sends values to AWS Secrets Manager through stdin.
 
 ## Web login
 
-The whole browser sign-in flow is same-origin on the **app host** — `app.ufo.ai` in production,
-`app.testing.ufo.ai` on testing, with the same fleet also answering as `app.<env apex>` — and the
-primary is the sole host a fresh sign-in completes on (`WORKOS_REDIRECT_URI` names it). The apex
-`GET /login` 302s to the primary (edge worker); on the app host the ingress
+The whole browser sign-in flow is same-origin on the **app host** (`app.<apex>`), the sole
+authenticated host. The apex `GET /login` 302s there (edge worker); on the app host the ingress
 routes the front-door prefixes (`ufo.serve.RESERVED_HOST_PREFIXES`: `/login`, `/v1/onboard`,
 `/ufo`) to `ufo-gateway`, while `/` and `/surface/*` stay on `ufo-serve` (nginx longest-prefix).
 Two invariants hold this up by construction rather than by convention: the serve fleet **fails its

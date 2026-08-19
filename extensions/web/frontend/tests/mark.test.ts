@@ -19,11 +19,9 @@ function served(answer: Response | string) {
 }
 
 test("the host the page came from names the deploy", () => {
-  expect(deployment("flyingobject.ai")).toBe("production");
-  expect(deployment("app.flyingobject.ai")).toBe("production");
+  expect(deployment("ufo.ai")).toBe("production");
   expect(deployment("app.ufo.ai")).toBe("production");
-  expect(deployment("testing.flyingobject.ai")).toBe("testing");
-  expect(deployment("app.testing.flyingobject.ai")).toBe("testing");
+  expect(deployment("testing.ufo.ai")).toBe("testing");
   expect(deployment("app.testing.ufo.ai")).toBe("testing");
   expect(deployment("localhost")).toBe("local");
   expect(deployment("ufo-4.localhost")).toBe("local");
@@ -53,11 +51,11 @@ test("a local page wears the mark in the local colour and production wears it as
   expect(decodeURIComponent(local())).toContain("fill: #0095FF");
 
   const staging = served(mark);
-  await markDeployment("app.testing.flyingobject.ai");
+  await markDeployment("app.testing.ufo.ai");
   expect(decodeURIComponent(staging())).toContain("fill: #FF6700");
 
   const production = served(mark);
-  await markDeployment("app.flyingobject.ai");
+  await markDeployment("app.ufo.ai");
   expect(production()).toContain("/surface/web/static/assets/ufo-mark-a1.svg");
 });
 

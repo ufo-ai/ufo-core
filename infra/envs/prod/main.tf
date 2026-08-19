@@ -14,7 +14,7 @@ module "platform" {
 
   name                 = "prod"
   region               = var.region
-  hostname             = "flyingobject.ai"
+  hostname             = "ufo.ai"
   dns_zone_names       = local.dns_zone_names
   cloudflare_api_token = var.cloudflare_api_token
 

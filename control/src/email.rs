@@ -74,7 +74,7 @@ pub const DISPOSABLE_EMAIL_DOMAINS: &[&str] = &[
 ];
 
 pub const PUBLIC_BASE_URL_ENV: &str = "UFO_PUBLIC_BASE_URL";
-pub const DEFAULT_PUBLIC_BASE_URL: &str = "https://flyingobject.ai";
+pub const DEFAULT_PUBLIC_BASE_URL: &str = "https://ufo.ai";
 
 pub const INVITE_SUBJECT: &str = "Your invitation";
 

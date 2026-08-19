@@ -14,13 +14,13 @@
 //! grant out of the way.
 //!
 //! The customer's channel is the idempotency boundary, and `CHANNEL_NAME_SQL` is what makes it one.
-//! The name it derives is `ext-<domain-label>-flyingobject` — the domain's first label only, never
+//! The name it derives is `ext-<domain-label>-ufo` — the domain's first label only, never
 //! an email address, since the local part and the TLD both stay out of it — and it derives it where
 //! the grant lives, so materializing stays one statement and every replica reaches the same name.
 //! It is bounded to 77 characters, inside Slack's 80-character limit.
 //!
 //! Dropping the TLD means the name is *not* unique across customers: `acme.com` and `acme.io` both
-//! derive `ext-acme-flyingobject`. That is a deliberate readability trade. The `channel_name` unique
+//! derive `ext-acme-ufo`. That is a deliberate readability trade. The `channel_name` unique
 //! constraint is what keeps it safe — the second customer's row is skipped rather than created, so
 //! two customers can never be pointed at one channel. A skipped customer needs a channel by hand.
 
@@ -38,7 +38,7 @@ pub const BOT_TOKEN_ENV: &str = "UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN";
 pub const TEAM_ID_ENV: &str = "UFO_CONTROL_SLACK_CONNECT_TEAM_ID";
 
 pub const CHANNEL_PREFIX: &str = "ext";
-pub const CHANNEL_SUFFIX: &str = "flyingobject";
+pub const CHANNEL_SUFFIX: &str = "ufo";
 pub const MAX_DOMAIN_LABEL_CHARS: usize = 60;
 
 pub const STATE_PENDING: &str = "pending";

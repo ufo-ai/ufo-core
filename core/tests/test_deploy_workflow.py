@@ -20,7 +20,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # Terraform template `if`/`endif` directive lines, stripped before a template parses as YAML.
 TEMPLATE_DIRECTIVE = (
     r'(?m)^%\{ (?:if workload_ha|if cache_enabled|if cache_s3_bucket != ""'
-    r"|if preview_enabled|for shared_host in shared_hosts|endif|endfor) ~?\}\n?"
+    r"|if preview_enabled|endif) \}\n?"
 )
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
@@ -1144,7 +1144,7 @@ def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> N
             "Reject destructive changes",
             "Terraform apply",
             "Gate testing door",
-            "testing.flyingobject.ai",
+            "testing.ufo.ai",
             "Terraform init",
             "Terraform plan",
             "github.event_name != 'pull_request'",
@@ -1157,7 +1157,7 @@ def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> N
             "Reject destructive production edge changes",
             "Terraform production edge apply",
             "Gate production door",
-            "flyingobject.ai",
+            "ufo.ai",
             "Terraform production edge init",
             "Terraform production edge plan",
             None,
@@ -1349,7 +1349,7 @@ def test_production_shared_edge_uses_current_main() -> None:
     )
     assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
     assert tuple(re.findall(r"-target=(\S+)", plan["run"])) == (
-        "cloudflare_ruleset.https_redirect",
+        "cloudflare_ruleset.flyingobject_redirect",
         "cloudflare_zone_setting.always_use_https",
     )
     assert '-out="$RUNNER_TEMP/shared-edge.tfplan"' in plan["run"]
@@ -1398,7 +1398,7 @@ def test_pull_requests_guard_the_production_edge_plan() -> None:
         "env": {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
         "run": (
             "terraform plan -input=false -no-color -lock=false \\\n"
-            "  -target=cloudflare_ruleset.https_redirect \\\n"
+            "  -target=cloudflare_ruleset.flyingobject_redirect \\\n"
             "  -target=cloudflare_zone_setting.always_use_https \\\n"
             "  -target=module.prod \\\n"
             '  -out="$RUNNER_TEMP/production-edge-review.tfplan"\n'
@@ -2764,7 +2764,7 @@ def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
     environment = {
         "BAD_RESPONSE": "",
         "CURL_CALLS": str(calls),
-        "ORIGIN_HOST": "flyingobject.ai",
+        "ORIGIN_HOST": "ufo.ai",
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "TERRAFORM_CALL": str(tmp_path / "terraform-call"),
         "TF_DIR": "infra/envs/prod",
@@ -2774,11 +2774,10 @@ def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
         "-chdir=infra/envs/prod output -raw hostname"
     )
     assert calls.read_text().splitlines() == [
-        "-fsS -X POST https://origin.flyingobject.ai/v1/onboard/ufo",
-        "-fsS https://origin.flyingobject.ai/ufo",
-        "-fsS -o /dev/null -w %{http_code} "
-        "https://origin.flyingobject.ai/ufo/bin/x86_64-unknown-linux-musl",
-        "-fsS https://origin.flyingobject.ai/fleet",
+        "-fsS -X POST https://origin.ufo.ai/v1/onboard/ufo",
+        "-fsS https://origin.ufo.ai/ufo",
+        "-fsS -o /dev/null -w %{http_code} https://origin.ufo.ai/ufo/bin/x86_64-unknown-linux-musl",
+        "-fsS https://origin.ufo.ai/fleet",
     ]
     for bad_response in ("onboard", "ufo", "binary", "fleet"):
         failed = subprocess.run(
@@ -3130,8 +3129,8 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
 @pytest.mark.parametrize(
     ("workflow", "job_name", "hostname", "tf_dir"),
     [
-        ("deploy.yml", "rollout", "testing.flyingobject.ai", "infra/envs/testing"),
-        ("deploy-production.yml", "deploy", "flyingobject.ai", "infra/envs/prod"),
+        ("deploy.yml", "rollout", "testing.ufo.ai", "infra/envs/testing"),
+        ("deploy-production.yml", "deploy", "ufo.ai", "infra/envs/prod"),
     ],
 )
 def test_runtime_rollout_gates_the_direct_gateway_origin(
@@ -3250,12 +3249,12 @@ def test_runtime_certificates_match_ingress_tls() -> None:
     }
     assert certificates == {
         "ufo-gateway-tls": ("apex_host",),
-        "ufo-ingress-tls": ("*.sites_host", "gateway_origin_host"),
+        "ufo-ingress-tls": ("*.apex_host",),
         "ufo-serve-tls": ("shared_host",),
     }
     assert ingresses == [
         ("ufo-gateway-tls", ("apex_host",)),
-        ("ufo-ingress-tls", ("*.sites_host",)),
+        ("ufo-ingress-tls", ("*.apex_host",)),
         ("ufo-ingress-tls", ("gateway_origin_host",)),
         ("ufo-serve-tls", ("shared_host",)),
     ]
@@ -3900,8 +3899,8 @@ def test_edge_doors_use_separate_environment_origins() -> None:
         )
     )
     assert doors == {
-        "flyingobject.ai": "https://origin.flyingobject.ai",
-        "testing.flyingobject.ai": "https://origin.testing.flyingobject.ai",
+        "ufo.ai": "https://origin.ufo.ai",
+        "testing.ufo.ai": "https://origin.testing.ufo.ai",
     }
     hosted = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     assert "${apex_host},${gateway_origin_host}" in hosted

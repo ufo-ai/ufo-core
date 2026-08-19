@@ -373,8 +373,8 @@ async fn a_failed_slack_delivery_rearms_and_a_delivered_one_does_not() {
         .batch_execute(&format!(
             "insert into ufo_control.slack_connect_delivery \
              (email_domain, email, state, channel_name, attempts, last_error) values \
-             ('acme.com', 'founder@acme.com', '{STATE_FAILED}', 'ext-acme-flyingobject', 8, 'nope'), \
-             ('other.com', 'founder@other.com', 'delivered', 'ext-other-flyingobject', 1, null)"
+             ('acme.com', 'founder@acme.com', '{STATE_FAILED}', 'ext-acme-ufo', 8, 'nope'), \
+             ('other.com', 'founder@other.com', 'delivered', 'ext-other-ufo', 1, null)"
         ))
         .await
         .unwrap();

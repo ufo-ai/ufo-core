@@ -18,7 +18,6 @@ before(async () => {
   const env = {
     DB: d1(),
     ORIGIN_BASE: APEX,
-    APP_HOST: "app.ufo.ai",
     WAITLIST_EMAILS: {
       async send(message) {
         queued.push(message);

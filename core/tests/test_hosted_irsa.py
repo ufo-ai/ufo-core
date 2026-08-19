@@ -36,7 +36,7 @@ def _documents(workload_ha: bool) -> list[dict[str, object]]:
     )
     rendered = re.sub(
         r'(?m)^%\{ (?:if cache_enabled|if cache_s3_bucket != ""|if preview_enabled'
-        r"|for shared_host in shared_hosts|endif|endfor) ~?\}\n?",
+        r"|endif) \}\n?",
         "",
         rendered,
     )
@@ -377,36 +377,32 @@ def test_hosted_proxy_carries_only_the_cache_scoped_identity() -> None:
     assert "eks.amazonaws.com/role-arn: ${cache_s3_role_arn}" in proxy_account
 
 
-def test_sites_answer_one_label_under_the_sites_host_behind_the_proxy() -> None:
+def test_sites_answer_one_label_under_the_apex_behind_the_proxy() -> None:
     """Three deploy facts decide a site's address, and all are unforgiving.
 
     The NLB admits only `cloudflare_ipv4_ranges`, so a site address that resolves straight to it is
     dropped on every port — proxying is the only way a site is reachable at all. A wildcard TLS SAN
-    matches exactly one label, so the zone's edge certificate (`*.<sites_host>`) covers a site one
-    label under the sites host and covers nothing beneath a `sites.` prefix. And the portal frames
-    each site, whose view cookie is `SameSite=Lax` — so the sites host and the primary portal host
-    must share a registrable domain, or every framed site request answers 403. Pinning the depth,
-    the proxy annotation, the source-range restriction, and the portal adjacency together keeps
-    the four from drifting into a combination that publishes site addresses no browser can open."""
+    matches exactly one label, so the zone's edge certificate (`*.<apex>`) covers a site one label
+    under the apex and covers nothing beneath a `sites.` prefix. And the portal frames each site,
+    whose view cookie is `SameSite=Lax` — so the site and the portal host must share a registrable
+    domain, which deriving both from the apex guarantees. Pinning the depth, the proxy annotation,
+    and the source-range restriction together keeps the three from drifting into a combination
+    that publishes site addresses no browser can open."""
     sites_ingress = next(
         block
         for block in HOSTED_TEMPLATE.read_text().split("kind: Ingress")
         if "name: ufo-ingress" in block.split("---", maxsplit=1)[0]
     ).split("---", maxsplit=1)[0]
-    assert 'external-dns.alpha.kubernetes.io/hostname: "*.${sites_host}"' in sites_ingress
+    assert 'external-dns.alpha.kubernetes.io/hostname: "*.${apex_host}"' in sites_ingress
     assert 'external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"' in sites_ingress
-    assert '- hosts: ["*.${sites_host}"]' in sites_ingress
-    assert '- host: "*.${sites_host}"' in sites_ingress
+    assert '- hosts: ["*.${apex_host}"]' in sites_ingress
+    assert '- host: "*.${apex_host}"' in sites_ingress
     assert "sites." not in sites_ingress.replace("`sites.` prefix", "")
     for env in (TESTING_CONFIG, PROD_CONFIG):
         config = env.read_text()
-        assert '    ingress_public_url = "https://${local.sites_host}"' in config
+        assert '    ingress_public_url = "https://${module.platform.hostname}"' in config
         assert "loadBalancerSourceRanges = local.cloudflare_ipv4_ranges" in config
-        sites_host = re.search(r'(?m)^  sites_host\s+= "([^"]+)"$', config)
-        assert sites_host is not None
-        assert re.search(
-            r'(?m)^  shared_hosts\s+= \["app\.' + re.escape(sites_host.group(1)) + '"', config
-        )
+        assert '  shared_host         = "app.${module.platform.hostname}"' in config
 
 
 def test_serve_mounts_the_rendered_config_and_the_proxy_reads_env() -> None:

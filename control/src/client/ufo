@@ -1,9 +1,9 @@
 #!/bin/sh
-# usage: curl -fsSL https://flyingobject.ai/ufo | sh
+# usage: curl -fsSL https://ufo.ai/ufo | sh
 # installs the native ufo client for this platform into $UFO_HOME/bin and runs it.
 set -eu
 
-UFO_URL="${UFO_URL:-https://flyingobject.ai}"
+UFO_URL="${UFO_URL:-https://ufo.ai}"
 export UFO_URL
 UFO_HOME="${UFO_HOME:-$HOME/.ufo}"
 BIN="$UFO_HOME/bin/ufo"

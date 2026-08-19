@@ -40,7 +40,7 @@ Options:
   -h, --help     Show this help.
 ";
 
-const GATEWAY_URL_DEFAULT: &str = "https://flyingobject.ai";
+const GATEWAY_URL_DEFAULT: &str = "https://ufo.ai";
 const ONBOARDING_CHANNEL: &str = "onboard";
 const RECONNECT_ATTEMPTS: u32 = 3;
 const RECONNECT_PAUSE: Duration = Duration::from_secs(1);

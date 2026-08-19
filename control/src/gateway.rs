@@ -44,7 +44,7 @@ pub const SLACK_CHOICE: &str = "Connect Slack";
 pub const BILLING_CHOICE: &str = "Set up billing";
 pub const TOUR_CHOICE: &str = "Show me what you can do";
 pub const WORKSPACE_PROMPT: &str = "Choose a workspace:";
-pub const SCRIPT_URL_DEFAULT: &str = r#"UFO_URL="${UFO_URL:-https://flyingobject.ai}""#;
+pub const SCRIPT_URL_DEFAULT: &str = r#"UFO_URL="${UFO_URL:-https://ufo.ai}""#;
 pub const SHELLSCRIPT_MEDIA_TYPE: &str = "text/x-shellscript";
 pub const ONBOARDING_FAILED: &str = "Onboarding failed.";
 
@@ -129,7 +129,7 @@ impl Onboarding {
         if body.is_empty() {
             return render(&[
                 install.to_vec(),
-                directive("say", &["ufo · flyingobject.ai"]),
+                directive("say", &[&self.apex_host]),
                 directive("ask", &["Enter your work email:"]),
             ]);
         }

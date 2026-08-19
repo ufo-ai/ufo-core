@@ -6,7 +6,7 @@ export type Deployment = "production" | "testing" | "local";
 
 const LOCAL_HOST = "localhost";
 const LOOPBACK_HOST = "127.0.0.1";
-const TESTING_HOSTS = ["testing.ufo.ai", "testing.flyingobject.ai"];
+const TESTING_HOST = "testing.ufo.ai";
 
 const DEPLOYMENT_MARKS: Record<Deployment, string | null> = {
   production: null,
@@ -20,9 +20,7 @@ export function deployment(host: string): Deployment {
   if (host === LOCAL_HOST || host === LOOPBACK_HOST || host.endsWith("." + LOCAL_HOST)) {
     return "local";
   }
-  if (TESTING_HOSTS.some((testing) => host === testing || host.endsWith("." + testing))) {
-    return "testing";
-  }
+  if (host === TESTING_HOST || host.endsWith("." + TESTING_HOST)) return "testing";
   return "production";
 }
 

@@ -62,7 +62,7 @@ async fn a_granted_domain_materializes_one_row_with_a_derived_channel_name() {
     let row = row(&pool, "acme.com").await;
     assert_eq!(
         row.get::<_, String>("channel_name"),
-        "ext-acme-flyingobject",
+        "ext-acme-ufo",
         "the name drops the local part and the TLD"
     );
     assert_eq!(row.get::<_, String>("email"), "founder@acme.com");
@@ -70,7 +70,7 @@ async fn a_granted_domain_materializes_one_row_with_a_derived_channel_name() {
 
 #[tokio::test]
 async fn two_domains_sharing_a_label_yield_one_channel_and_the_second_is_skipped() {
-    // `acme.com` and `acme.io` both derive `ext-acme-flyingobject`. The unique constraint is what
+    // `acme.com` and `acme.io` both derive `ext-acme-ufo`. The unique constraint is what
     // keeps that safe: the second customer is skipped rather than pointed at the first's channel.
     let pool = ledger_pool().await;
     let invites = InviteCodes::new(pool.clone());
@@ -86,7 +86,7 @@ async fn two_domains_sharing_a_label_yield_one_channel_and_the_second_is_skipped
         .unwrap()
         .query_one(
             "select count(*) from ufo_control.slack_connect_delivery \
-             where channel_name = 'ext-acme-flyingobject'",
+             where channel_name = 'ext-acme-ufo'",
             &[],
         )
         .await
@@ -256,7 +256,7 @@ async fn a_name_taken_channel_is_resolved_by_its_exact_name() {
         vec![
             auth_ok(),
             ok(r#"{"ok":false,"error":"name_taken"}"#),
-            ok(r#"{"ok":true,"channels":[{"name":"ext-acme-flyingobject","id":"CEXIST"}]}"#),
+            ok(r#"{"ok":true,"channels":[{"name":"ext-acme-ufo","id":"CEXIST"}]}"#),
             ok(r#"{"ok":true,"invite_id":"I456"}"#),
             ok(r#"{"ok":true}"#),
         ],
@@ -281,7 +281,7 @@ async fn a_retried_row_reconciles_a_live_invite_rather_than_sending_a_second() {
         .execute(
             "insert into ufo_control.slack_connect_delivery \
              (email_domain, email, state, channel_name, channel_id, invite_attempted_at) \
-             values ('acme.com','founder@acme.com','pending','ext-acme-flyingobject','C123', now())",
+             values ('acme.com','founder@acme.com','pending','ext-acme-ufo','C123', now())",
             &[],
         )
         .await
@@ -319,7 +319,7 @@ async fn a_dead_invite_is_not_read_as_proof_one_landed() {
         .execute(
             "insert into ufo_control.slack_connect_delivery \
              (email_domain, email, state, channel_name, channel_id, invite_attempted_at) \
-             values ('acme.com','founder@acme.com','pending','ext-acme-flyingobject','C123', now())",
+             values ('acme.com','founder@acme.com','pending','ext-acme-ufo','C123', now())",
             &[],
         )
         .await
@@ -355,7 +355,7 @@ async fn an_unrecognized_invite_status_is_ambiguous_and_fails_for_review() {
         .execute(
             "insert into ufo_control.slack_connect_delivery \
              (email_domain, email, state, channel_name, channel_id, invite_attempted_at) \
-             values ('acme.com','founder@acme.com','pending','ext-acme-flyingobject','C123', now())",
+             values ('acme.com','founder@acme.com','pending','ext-acme-ufo','C123', now())",
             &[],
         )
         .await
@@ -387,7 +387,7 @@ async fn an_externally_shared_channel_proves_an_invitation_landed() {
         .execute(
             "insert into ufo_control.slack_connect_delivery \
              (email_domain, email, state, channel_name, channel_id, invite_attempted_at) \
-             values ('acme.com','founder@acme.com','pending','ext-acme-flyingobject','C123', now())",
+             values ('acme.com','founder@acme.com','pending','ext-acme-ufo','C123', now())",
             &[],
         )
         .await
@@ -419,7 +419,7 @@ async fn a_row_at_its_attempt_ceiling_fails_instead_of_rescheduling_forever() {
         .execute(
             "insert into ufo_control.slack_connect_delivery \
              (email_domain, email, state, channel_name, attempts) \
-             values ('acme.com','founder@acme.com','pending','ext-acme-flyingobject', 8)",
+             values ('acme.com','founder@acme.com','pending','ext-acme-ufo', 8)",
             &[],
         )
         .await
@@ -464,7 +464,7 @@ async fn a_lease_another_worker_holds_is_left_untouched() {
         .execute(
             "insert into ufo_control.slack_connect_delivery \
              (email_domain, email, state, channel_name, worker_id, claim_expires_at) \
-             values ('acme.com','founder@acme.com','claimed','ext-acme-flyingobject', \
+             values ('acme.com','founder@acme.com','claimed','ext-acme-ufo', \
                      'other-worker', now() + interval '2 minutes')",
             &[],
         )
@@ -493,7 +493,7 @@ async fn a_lapsed_lease_is_taken_again() {
         .execute(
             "insert into ufo_control.slack_connect_delivery \
              (email_domain, email, state, channel_name, worker_id, claim_expires_at) \
-             values ('acme.com','founder@acme.com','claimed','ext-acme-flyingobject', \
+             values ('acme.com','founder@acme.com','claimed','ext-acme-ufo', \
                      'dead-worker', now() - interval '1 minute')",
             &[],
         )

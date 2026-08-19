@@ -19,7 +19,7 @@ output "hostname" {
 }
 
 output "shared_host" {
-  value = local.shared_hosts[0]
+  value = local.shared_host
 }
 
 output "system_namespace" {

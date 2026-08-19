@@ -23,11 +23,6 @@ variable "origin_base" {
   description = "This door's gateway base URL."
 }
 
-variable "app_host" {
-  type        = string
-  description = "Member portal host /login redirects to."
-}
-
 variable "favicon_svg" {
   type        = string
   description = "Product mark served as the apex favicon."

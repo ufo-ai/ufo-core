@@ -128,7 +128,7 @@ async fn the_installer_is_served_stamped_with_this_deploys_base_url() {
         "the deploy's own base URL is written in"
     );
     assert!(
-        !script.contains(r#"UFO_URL="${UFO_URL:-https://flyingobject.ai}""#),
+        !script.contains(r#"UFO_URL="${UFO_URL:-https://ufo.ai}""#),
         "the default was replaced, not appended"
     );
 }
@@ -269,7 +269,7 @@ async fn an_oversized_body_is_refused_rather_than_graded() {
 async fn an_empty_first_turn_asks_for_the_work_email() {
     let rig = rig(vec![], vec![], true).await;
     let screen = turn(&rig, "session-1", "").await;
-    assert!(screen.contains("say\tufo · flyingobject.ai"), "{screen}");
+    assert!(screen.contains("say\tflyingobject.ai"), "{screen}");
     assert!(screen.contains("ask\tEnter your work email:"), "{screen}");
 }
 

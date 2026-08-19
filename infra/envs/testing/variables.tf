@@ -5,7 +5,7 @@ variable "region" {
 
 variable "apex_host" {
   type        = string
-  default     = "testing.flyingobject.ai"
+  default     = "testing.ufo.ai"
   description = "Apex FQDN the platform (onboarding gateway) workspace serves."
 }
 
