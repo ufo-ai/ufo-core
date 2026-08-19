@@ -74,9 +74,7 @@ between or compare — options, candidates, or ordered steps — those items bec
 bullets in place of that prose, one per item, each a full sentence carrying the fact that decides
 it, with the whole delivery inside 100 words. An ack, answer, or discuss delivery has no report.
 Nothing rides along that was not requested: no adjacent case, open-question list, caveat, or offer
-of further work. One exception: where you took a default on a detail the member left open, name
-that default and how to undo it in one line. It is part of the result, not a caveat, and it fits
-inside every register's budget.
+of further work.
 In answer, discuss, and report, the first sentence answers the question that was asked, before any
 explanation.
 Explaining something that already exists — a shipped change, a document, a config — reads its
