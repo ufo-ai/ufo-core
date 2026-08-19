@@ -43,6 +43,7 @@ EXTENSIONS = (
     "skill_create",
     "index_default",
     "embed_openai",
+    "openrouter",
     "ufo",
     "web",
     "debugger",

@@ -4,14 +4,13 @@ import pytest
 import ufo_ext_coding.connect as connect
 import ufo_ext_coding.manifest as coding
 
-from ufo.ext.loader import skill_registry
+from ufo.ext.loader import load_manifests, skill_registry
 from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.models.catalog import CORE_MODEL_SPECS
 from ufo.sandbox.exec_env import CONVERSATION_ID_ENV
 from ufo.tools.builtins import BUILTIN_TOOLS
 
 TOOL_NARRATION = "connecting their GitHub"
-PARENT_MODEL = "claude-opus-5"
 # The escalation prompt is hard-wrapped, so a whole sentence spans a line break.
 ESCALATION_PROMPT = " ".join(coding.FABLE_ESCALATION_PROMPT.split())
 
@@ -218,26 +217,25 @@ def test_the_escalation_profile_reuses_the_coding_contract_and_raises_only_the_m
     assert escalation.output_model is coding_profile.output_model
     assert escalation.max_rounds == coding_profile.max_rounds
     assert coding_profile.model is None
-    assert escalation.model == coding.FABLE_ESCALATION_MODEL == "claude-5-fable-20260609"
+    assert escalation.model == coding.FABLE_ESCALATION_MODEL == "anthropic/claude-fable-5"
     assert escalation.prompt == coding.FABLE_ESCALATION_PROMPT != coding_profile.prompt
 
 
-def test_the_escalation_model_is_one_the_deploy_serves() -> None:
+def test_the_escalation_model_is_registered_by_an_installed_manifest() -> None:
     """Nothing checks a pinned id at boot, so an id no `ModelSpec` describes first fails inside the
-    child's own dispatch. The catalog is the check this profile gets."""
-    assert coding.FABLE_ESCALATION_MODEL in {spec.id for spec in CORE_MODEL_SPECS}
+    child's own dispatch. Core's catalog alone is not that check: this rung runs on a provider an
+    extension registers, and asserting against the core table would pass only by adding the id to a
+    table core does not serve it from. The union every turn resolves through is the check."""
+    served = {spec.id for spec in CORE_MODEL_SPECS}
+    served |= {spec.id for manifest in load_manifests() for spec in manifest.models}
+    assert coding.FABLE_ESCALATION_MODEL in served
 
 
-def test_the_escalation_prompt_states_the_window_it_runs_under() -> None:
-    """The window is why the child reads what is already on disk instead of re-deriving the whole
-    repository. Both numbers come from the catalog: a re-specced model fails here rather than
-    teaching the child a budget it does not have."""
-    windows = {spec.id: spec.context_window for spec in CORE_MODEL_SPECS}
-    assert (
-        f"Your context window is {windows[coding.FABLE_ESCALATION_MODEL]:,} tokens against your "
-        f"parent's {windows[PARENT_MODEL]:,}."
-    ) in ESCALATION_PROMPT
+def test_the_escalation_prompt_bounds_the_reading_without_naming_a_window() -> None:
+    """The rung runs on the same 1M window its parent does, so a window comparison states nothing
+    the child can act on. What survives is the instruction the comparison used to carry."""
     assert "Read the files that decide the failure, not the repository." in ESCALATION_PROMPT
+    assert "context window" not in ESCALATION_PROMPT
 
 
 def test_the_escalation_prompt_reads_the_workspace_before_github() -> None:

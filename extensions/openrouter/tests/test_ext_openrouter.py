@@ -288,10 +288,11 @@ def test_kimi_k3_spec_carries_its_price_cache_rate_and_million_token_window() ->
 
 
 def test_fable_5_route_carries_its_slug_price_window_and_required_reasoning() -> None:
-    """The id is the slug OpenRouter serves, which its own catalog spells `anthropic/claude-fable-5`
-    over canonical slug `anthropic/claude-5-fable-20260609`. Cache writes carry no rate, so this
-    router's one write channel leaves them priced as input, like every other row here. The model
-    reasons on every call, so a row that let an agent write `off` would send a budget it refuses."""
+    """The id is the slug OpenRouter's catalog publishes, `anthropic/claude-fable-5`; the router
+    also resolves dated spellings onto it, so a wrong id here would pass a live call and hide the
+    mistake. Cache writes carry no rate, so this router's one write channel leaves them priced as
+    input, like every other row here. The model reasons on every call, so a row that let an agent
+    write `off` would send a budget it refuses."""
     spec = {s.id: s for s in openrouter.manifest().models}["anthropic/claude-fable-5"]
     assert openrouter.openrouter_slug(spec.id) == "anthropic/claude-fable-5"
     assert spec.price.input == 10_000_000

@@ -123,6 +123,7 @@ BEDROCK_MODEL_SPECS = (
         "anthropic.claude-fable-5",
         ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000, 20_000_000),
         "2026-01",
+        context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
         reasoning=REQUIRED_REASONS,
     ),
     _anthropic(

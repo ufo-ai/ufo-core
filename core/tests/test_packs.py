@@ -9,6 +9,7 @@ extension, and a pack whose name collides with a bundled extension each raise (t
 collision cases stub discovery — the real dependency — to drive the real narrowing)."""
 
 import pytest
+import ufo_ext_coding.manifest as coding
 import ufo_pack_assistant as assistant
 import ufo_pack_assistant_billing as assistant_billing
 import ufo_pack_assistant_eval as assistant_eval
@@ -36,6 +37,23 @@ def test_activating_the_assistant_pack_makes_exactly_its_bundle_active() -> None
     followed by the pack's own (here empty) manifest — the coherent config a serve brings up."""
     names = [manifest.name for manifest in load_manifests(assistant.NAME)]
     assert names == [*assistant.EXTENSIONS, assistant.NAME]
+
+
+def test_a_pack_that_ships_coding_registers_the_escalation_model() -> None:
+    """`coding` pins its escalation rung to a model id another extension registers, so a pack that
+    brings up `coding` without that registrar has a rung whose child cannot resolve a model and
+    never runs. The pin is only as good as the set it comes up in, which is why this is asserted
+    per activated pack rather than against every installed extension."""
+    for pack in (assistant, assistant_billing, assistant_eval, assistant_hosted):
+        manifests = load_manifests(pack.NAME)
+        if not any(manifest.name == "coding" for manifest in manifests):
+            continue
+        profiles = {
+            profile.name: profile for manifest in manifests for profile in manifest.subagents
+        }
+        pinned = profiles[coding.FABLE_ESCALATION_PROFILE_NAME].model
+        served = {spec.id for manifest in manifests for spec in manifest.models}
+        assert pinned in served, f"{pack.NAME} activates coding but registers no {pinned}"
 
 
 def test_assistant_packs_mount_the_member_portal() -> None:

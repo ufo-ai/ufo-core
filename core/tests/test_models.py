@@ -1334,10 +1334,15 @@ async def test_anthropic_required_reasoning_clamps_off_to_minimum() -> None:
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
-    spec = next(
-        spec
-        for spec in core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-        if spec.id == "claude-5-fable-20260609"
+    spec = replace(
+        next(
+            spec
+            for spec in core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+            if spec.id == "claude-opus-5"
+        ),
+        reasoning=ReasoningSupport(
+            supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
+        ),
     )
     async for _ in AnthropicClient(client=anthropic_sdk(create), spec=spec).complete(
         REQUEST.model_copy(update={"model": spec.id, "reasoning": "off"})
@@ -1486,19 +1491,15 @@ def test_catalog_registers_opus_5_with_its_long_context_window(tmp_path: Path) -
     assert spec.price.output == 25_000_000
 
 
-def test_catalog_registers_fable_5_under_the_id_anthropic_serves(tmp_path: Path) -> None:
-    """The registry key is the id sent on the wire, so a row keyed by anything the provider does not
-    serve is a 404 on every turn that reaches it, and no local check sees it first."""
+def test_core_registers_no_fable_row(tmp_path: Path) -> None:
+    """Fable 5 requires 30-day retention and this org holds zero data retention, so the direct
+    Anthropic wire answers 404 for it on every key. Core therefore ships no row: the model reaches a
+    turn through the router extension that does serve it, and a row keyed here would be a 404 no
+    local check sees first."""
     registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec("claude-5-fable-20260609")
-    assert spec.provider == "anthropic"
-    assert spec.context_window == 1_000_000
-    assert spec.price.input == 10_000_000
-    assert spec.price.output == 50_000_000
-    assert spec.reasoning.default_on
-    assert not spec.reasoning.can_disable
-    with pytest.raises(ValueError, match="no model registered for id 'claude-fable-5'"):
-        registry.spec("claude-fable-5")
+    for stranded in ("claude-fable-5", "claude-5-fable-20260609"):
+        with pytest.raises(ValueError, match=f"no model registered for id '{stranded}'"):
+            registry.spec(stranded)
 
 
 def test_registry_resolves_auto_to_an_overridden_default(tmp_path: Path) -> None:

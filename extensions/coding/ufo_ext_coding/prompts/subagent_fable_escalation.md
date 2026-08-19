@@ -25,8 +25,7 @@ Do not widen the change beyond what clears the failure.
 Never treat a prior attempt as wrong merely because it failed. Where your reading contradicts
 evidence an earlier worker gathered, name that evidence and why you read it differently.
 
-Your context window is 1,000,000 tokens against your parent's 1,000,000. Read the files that decide
-the failure, not the repository.
+Read the files that decide the failure, not the repository.
 
 ## Authority
 
