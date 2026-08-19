@@ -32,6 +32,7 @@ RAW_BLOB_BOOT_MODULES = frozenset(
         Path("evals/__main__.py"),
         Path("evals/issue_recall/materialize.py"),
         Path("evals/memory_100/materialize.py"),
+        Path("evals/memory_ingestion/materialize.py"),
     }
 )
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}

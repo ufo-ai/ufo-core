@@ -82,6 +82,7 @@ def test_derived_config_isolates_a_sqlite_template(tmp_path: Path) -> None:
     assert config.blob.root == root / "blobs"
     assert config.serve.host == "127.0.0.1"
     assert config.serve.port == 18710
+    assert config.connect.public_base_url == "http://127.0.0.1:18710"
     assert config.sandbox.proxy_port == 18888
     assert config.o11y.otlp_endpoint is None
     assert config.pack.name == "assistant"
@@ -158,6 +159,8 @@ def test_run_spec_rejects_orchestrator_owned_surface() -> None:
         RunSpec(label="smoke", config=Path("ufo.toml"), args=("--out=elsewhere",))
     with pytest.raises(ValidationError, match="--memory-100"):
         RunSpec(label="smoke", config=Path("ufo.toml"), args=("--memory-100", "snap"))
+    with pytest.raises(ValidationError, match="--memory-ingestion"):
+        RunSpec(label="smoke", config=Path("ufo.toml"), args=("--memory-ingestion", "snap"))
     with pytest.raises(ValidationError, match="UFO_CONFIG"):
         RunSpec(label="smoke", config=Path("ufo.toml"), env={"UFO_CONFIG": "x"})
     with pytest.raises(ValidationError, match="label"):
@@ -354,7 +357,7 @@ def test_issue_recall_spec_needs_a_collector_endpoint_but_no_postgres(
         out=tmp_path / "archive",
         repo_root=tmp_path,
     )
-    for log in (stack.seed_log, stack.serve_log, stack.eval_log):
+    for log in (stack.seed_log, stack.serve_log, stack.egress_log, stack.eval_log):
         log.close()
 
     assert not (tmp_path / "a").exists()
@@ -428,6 +431,53 @@ def test_memory_100_child_args_carry_the_snapshot_and_readiness(
     assert "--memory-100" not in stack._child_args(None)
     assert stack.config.o11y.otlp_endpoint != "http://127.0.0.1:4318"
     assert stack.admin_database_url == "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
+
+
+def test_memory_ingestion_seeds_and_passes_snapshot_and_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(POSTGRES_TEMPLATE + '\n[o11y]\notlp_endpoint = "http://127.0.0.1:4318"\n')
+    snapshot = tmp_path / "snapshot"
+    stack = EvalStack.provision(
+        RunSpec(label="ingestion", config=template, memory_ingestion=snapshot),
+        root=tmp_path / "run",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    for log in (stack.seed_log, stack.serve_log, stack.egress_log, stack.eval_log):
+        log.close()
+    ufoctl: list[tuple[str, ...]] = []
+    materialized: list[tuple[str, ...]] = []
+    readiness = tmp_path / "run" / "state" / "abc" / "readiness.json"
+
+    async def fake_ufoctl(self: EvalStack, *argv: str, log: object) -> object:
+        ufoctl.append(argv)
+        return _DoneProcess()
+
+    async def fake_materialize(self: EvalStack, module: str, *corpus_args: str) -> Path:
+        materialized.append((module, *corpus_args))
+        return readiness
+
+    monkeypatch.setattr(EvalStack, "_ufoctl", fake_ufoctl)
+    monkeypatch.setattr(EvalStack, "_materialize", fake_materialize)
+
+    assert asyncio.run(stack._seed()) == readiness
+    assert ufoctl == [("migrate",)]
+    assert materialized == [
+        (
+            "evals.memory_ingestion.materialize",
+            "--snapshot",
+            str(snapshot.resolve()),
+        )
+    ]
+    assert stack._child_args(readiness)[-4:] == (
+        "--memory-ingestion",
+        str(snapshot.resolve()),
+        "--memory-ingestion-state",
+        str(readiness),
+    )
 
 
 def test_materialize_readiness_parses_the_last_line_and_fails_loud(tmp_path: Path) -> None:

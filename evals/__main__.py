@@ -100,6 +100,10 @@ from evals.memory_100.runner import (
     WORKFLOW_WAIT_SECONDS as MEMORY_100_WORKFLOW_WAIT_SECONDS,
 )
 from evals.memory_100.runner import Memory100Run, load_memory_100
+from evals.memory_ingestion.runner import (
+    WORKFLOW_WAIT_SECONDS as MEMORY_INGESTION_WORKFLOW_WAIT_SECONDS,
+)
+from evals.memory_ingestion.runner import MemoryIngestionRun, load_memory_ingestion
 from evals.onboarding_help import ONBOARDING_HELP_PACKS
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
@@ -197,6 +201,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--memory-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--memory-100-state", type=Path, metavar="READINESS")
+    parser.add_argument("--memory-ingestion", type=Path, metavar="SNAPSHOT")
+    parser.add_argument("--memory-ingestion-state", type=Path, metavar="READINESS")
     parser.add_argument("--issue-recall", type=Path, metavar="READINESS")
     parser.add_argument("--hle-gold", type=Path, metavar="GOLD_JSONL")
     parser.add_argument("--hle-gold-smoke", action="store_true")
@@ -275,6 +281,8 @@ def main(argv: list[str] | None = None) -> None:
     names = tuple(args.only)
     if (args.memory_100 is None) != (args.memory_100_state is None):
         parser.error("--memory-100 and --memory-100-state must be provided together")
+    if (args.memory_ingestion is None) != (args.memory_ingestion_state is None):
+        parser.error("--memory-ingestion and --memory-ingestion-state must be provided together")
     if args.hle_gold_smoke and args.hle_gold is None:
         parser.error("--hle-gold-smoke requires --hle-gold")
     if args.hle_gold is not None and not args.list and args.workspace is None:
@@ -301,6 +309,7 @@ def main(argv: list[str] | None = None) -> None:
         source is not None
         for source in (
             args.memory_100,
+            args.memory_ingestion,
             args.dsqa_100,
             args.gdpval_100,
             args.jobbench,
@@ -321,6 +330,11 @@ def main(argv: list[str] | None = None) -> None:
     memory_run: Memory100Run | None = None
     if args.memory_100 is not None and args.memory_100_state is not None:
         memory_run = load_memory_100(args.memory_100, args.memory_100_state)
+    memory_ingestion_run: MemoryIngestionRun | None = None
+    if args.memory_ingestion is not None and args.memory_ingestion_state is not None:
+        memory_ingestion_run = load_memory_ingestion(
+            args.memory_ingestion, args.memory_ingestion_state
+        )
     dsqa_run = load_dsqa_100(args.dsqa_100) if args.dsqa_100 is not None else None
     compaction_run = load_compaction(args.compaction) if args.compaction is not None else None
     if (args.mcp_atlas_data is not None or args.mcp_atlas_samples is not None) and (
@@ -371,6 +385,7 @@ def main(argv: list[str] | None = None) -> None:
         tasks = _tasks(
             names,
             memory_run,
+            memory_ingestion_run,
             issue_run,
             dsqa_run,
             compaction_run,
@@ -507,7 +522,11 @@ def main(argv: list[str] | None = None) -> None:
     recall_workspace_id = (
         memory_run.readiness.workspace_id
         if memory_run is not None
-        else (issue_run.readiness.workspace_id if issue_run is not None else None)
+        else (
+            memory_ingestion_run.readiness.workspace_id
+            if memory_ingestion_run is not None
+            else (issue_run.readiness.workspace_id if issue_run is not None else None)
+        )
     )
     if recall_workspace_id is not None:
         if workspace_id is not None and workspace_id != recall_workspace_id:
@@ -541,6 +560,8 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = CODING_REPO_WORKFLOW_WAIT_SECONDS
     if memory_run is not None:
         workflow_wait_seconds = MEMORY_100_WORKFLOW_WAIT_SECONDS
+    if memory_ingestion_run is not None:
+        workflow_wait_seconds = MEMORY_INGESTION_WORKFLOW_WAIT_SECONDS
     if tasks and all(task.name == "document_visual" for task in tasks):
         workflow_wait_seconds = DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(
@@ -951,6 +972,7 @@ def _skill_loading_subset(names: tuple[str, ...]) -> EvalTask:
 def _tasks(
     names: tuple[str, ...],
     memory_run: Memory100Run | None,
+    memory_ingestion_run: MemoryIngestionRun | None = None,
     issue_run: IssueRecallRun | None = None,
     dsqa_run: DSQA100Run | None = None,
     compaction_run: CompactionRun | None = None,
@@ -989,6 +1011,11 @@ def _tasks(
         return selected_tasks(
             (*TASKS, *issue_run.tasks, *mcp_atlas),
             names or tuple(task.name for task in issue_run.tasks),
+        )
+    if memory_ingestion_run is not None:
+        return selected_tasks(
+            (*TASKS, *memory_ingestion_run.tasks, *mcp_atlas),
+            names or tuple(task.name for task in memory_ingestion_run.tasks),
         )
     if memory_run is None and dsqa_run is None:
         return selected_tasks((*TASKS, *mcp_atlas), names) if names else selected_run_tasks()

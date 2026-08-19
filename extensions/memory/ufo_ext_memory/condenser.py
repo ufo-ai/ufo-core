@@ -52,20 +52,20 @@ MAX_PAGE_BODY_CHARS = 8_000
 MIN_PAGE_BODY_CHARS = 40
 EXTRACT_PAGE_BATCH = 10
 FACT_EXTRACT_MAX_TOKENS = 16_384
-EXTRACT_KEEP_NOTABILITY = frozenset({"high", "medium"})
 FACT_EXTRACT_TOOL = "record_facts"
 FACT_EXTRACT_TOOL_DESCRIPTION = (
-    "Record every fact worth keeping from the source pages, one entry per fact."
+    "Record every concrete, source-supported fact from the source pages, one entry per fact."
 )
 FACT_EXTRACT_SYSTEM = (
-    "Distill durable, standalone facts from the source pages the user sends as JSON "
-    '({"pages":[{"page_id":"...","body":"..."}]}). For each candidate fact judge its notability '
-    "high, medium, or low and emit only high and medium ones. Write each fact as a concise "
-    "third-person claim that stands alone without the page, carrying its source page_id, a "
-    "memory_kind (one of fact, preference, decision, event, task), and a confidence 1-10. Record "
-    f"them with the {FACT_EXTRACT_TOOL} tool."
+    "Extract every concrete claim from the source pages the user sends as JSON "
+    '({"pages":[{"page_id":"...","body":"..."}]}). Preserve exact names, quantities, dates, '
+    "places, lists, negation, conditions, qualifiers, and causal or temporal relations. Do not "
+    "drop a claim because it is narrow or appears once. Do not infer claims the source does not "
+    "state. Exclude greetings, generic advice, pure questions, and text with no concrete claim. "
+    "Write each fact as a concise third-person claim that stands alone without the page, carrying "
+    "its source page_id, a memory_kind (one of fact, preference, decision, event, task), and a "
+    f"confidence 1-10. Record them with the {FACT_EXTRACT_TOOL} tool."
 )
-
 DEDUP_GROUP_MAX = 2_000
 DEDUP_EMBED_BATCH = 100
 SUPERSEDE_COSINE = 0.90
@@ -97,10 +97,9 @@ CONSOLIDATE_SYSTEM = (
 class ExtractedFact(BaseModel):
     """One fact the extraction model read out of a source page — untrusted model output validated
     at this boundary before it reaches `memory_item`. `page_id` maps the fact back to the page that
-    scopes its subject; a fact whose notability is below the keep set is dropped by the caller."""
+    scopes its subject."""
 
     page_id: str
-    notability: str
     body: str
     memory_kind: MemoryKind = KIND_FACT
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
@@ -170,7 +169,7 @@ class FactDeriver:
         settled: dict[UUID, PageChange] = {}
         for fact in extracted:
             page = by_id.get(fact.page_id)
-            if page is None or fact.notability.lower() not in EXTRACT_KEEP_NOTABILITY:
+            if page is None:
                 continue
             latest = (await self.store.page_states((page.page_id,))).get(page.page_id)
             if latest is None or latest.subject != page.subject or latest.revision != page.revision:

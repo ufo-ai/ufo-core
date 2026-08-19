@@ -325,7 +325,6 @@ def _extraction(page_id: UUID, body: str) -> str:
             "facts": [
                 {
                     "page_id": str(page_id),
-                    "notability": "high",
                     "memory_kind": "fact",
                     "confidence": 7,
                     "body": body,
@@ -640,30 +639,28 @@ async def _index_pages(
 # --- fact derivation ---------------------------------------------------------
 
 
-async def test_derive_facts_writes_subject_scoped_facts_through_page_change(
+async def test_derive_facts_writes_each_source_supported_fact_through_page_change(
     db: None, tmp_path: object
 ) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     page_id, _source_id = await _seed_page(
-        blob, workspace_id, "Acme ships the widget to the whole team on friday."
+        blob, workspace_id, "Acme ships the widget to the whole team on friday in blue packaging."
     )
     payload = json.dumps(
         {
             "facts": [
                 {
                     "page_id": str(page_id),
-                    "notability": "high",
                     "memory_kind": "event",
                     "confidence": 8,
                     "body": "Acme ships the widget on friday",
                 },
                 {
                     "page_id": str(page_id),
-                    "notability": "low",
                     "memory_kind": "fact",
                     "confidence": 3,
-                    "body": "a low-notability aside",
+                    "body": "Acme uses blue packaging",
                 },
             ]
         }
@@ -674,8 +671,11 @@ async def test_derive_facts_writes_subject_scoped_facts_through_page_change(
         await runner.drive(_derive_consumer(runner))
 
     rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
-    assert len(rows) == 1
-    fact = rows[0]
+    assert {row.body for row in rows} == {
+        "Acme ships the widget on friday",
+        "Acme uses blue packaging",
+    }
+    fact = next(row for row in rows if row.body == "Acme ships the widget on friday")
     assert fact.body == "Acme ships the widget on friday"
     assert fact.subject == SHARED_SUBJECT
     assert fact.memory_kind == "event"
@@ -698,7 +698,6 @@ async def test_derive_facts_truncates_an_oversized_model_body(db: None, tmp_path
             "facts": [
                 {
                     "page_id": str(page_id),
-                    "notability": "high",
                     "memory_kind": "event",
                     "confidence": 8,
                     "body": oversized,
@@ -729,7 +728,6 @@ async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
             "facts": [
                 {
                     "page_id": str(page_id),
-                    "notability": "high",
                     "memory_kind": "fact",
                     "confidence": 7,
                     "body": "Beatrix leads the platform team",
@@ -770,7 +768,6 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
             "facts": [
                 {
                     "page_id": str(page_id),
-                    "notability": "high",
                     "memory_kind": "fact",
                     "confidence": 6,
                     "body": "the office is in the old cannery building",
@@ -817,7 +814,6 @@ async def test_derive_facts_binds_each_fact_to_its_pages_source(db: None) -> Non
             "facts": [
                 {
                     "page_id": str(page_id),
-                    "notability": "high",
                     "memory_kind": "fact",
                     "confidence": 6,
                     "body": "the acquisition codename is polaris",
@@ -860,7 +856,6 @@ async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
             "facts": [
                 {
                     "page_id": str(page_id),
-                    "notability": "high",
                     "body": "the acquisition plan has been redacted",
                 }
             ]
@@ -946,6 +941,8 @@ async def test_the_extraction_compels_the_recording_tool_instead_of_asking_for_j
     assert request.tool_choice == FACT_EXTRACT_TOOL
     assert request.reasoning == "off"
     assert request.tools[0].input_schema["properties"]["facts"]["type"] == "array"
+    assert "notability" not in json.dumps(request.tools[0].input_schema)
+    assert "Preserve exact names, quantities, dates" in request.system
     assert await _page_facts(page_id) == {body: 1}
 
 

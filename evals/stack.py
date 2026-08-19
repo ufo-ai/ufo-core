@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from evals.harness.viewer import load_runs, write_viewer
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.config import Config, DatabaseConfig, O11yConfig
+from ufo.config import Config, ConnectConfig, DatabaseConfig, O11yConfig
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.sandbox.session import (
     EGRESS_CA_CERT_ENV,
@@ -57,6 +57,8 @@ ORCHESTRATOR_ARGS = (
     "--list",
     "--memory-100",
     "--memory-100-state",
+    "--memory-ingestion",
+    "--memory-ingestion-state",
     "--issue-recall",
 )
 ORCHESTRATOR_ENV = ("UFO_CONFIG", "UFOCTL_DIR")
@@ -118,6 +120,7 @@ class RunSpec(BaseModel):
     env: dict[str, str] = {}
     model: str | None = None
     memory_100: Path | None = None
+    memory_ingestion: Path | None = None
     issue_recall: bool = False
 
     @field_validator("label")
@@ -136,11 +139,21 @@ class RunSpec(BaseModel):
         for name in ORCHESTRATOR_ENV:
             if name in self.env:
                 raise ValueError(f"run {self.label!r} sets {name} — the stack owns it")
-        if self.memory_100 is not None and self.model is not None:
+        if (
+            self.memory_100 is not None or self.memory_ingestion is not None
+        ) and self.model is not None:
             raise ValueError(
-                f"run {self.label!r} sets model with memory_100 — materialization owns the agent"
+                f"run {self.label!r} sets model with a memory corpus — materialization owns the "
+                "agent"
             )
-        if self.memory_100 is not None and self.issue_recall:
+        corpora = sum(
+            (
+                self.memory_100 is not None,
+                self.memory_ingestion is not None,
+                self.issue_recall,
+            )
+        )
+        if corpora > 1:
             raise ValueError(f"run {self.label!r} materializes two corpora — run them separately")
         return self
 
@@ -197,10 +210,12 @@ class EvalStack:
     @classmethod
     def provision(cls, spec: RunSpec, root: Path, out: Path, repo_root: Path) -> Self:
         template = template_config(spec.config.read_text())
-        if spec.memory_100 is not None and not template.database.url.startswith("postgresql"):
-            raise ValueError(f"run {spec.label!r}: memory_100 requires a Postgres template")
         if (
-            spec.memory_100 is not None or spec.issue_recall
+            spec.memory_100 is not None or spec.memory_ingestion is not None
+        ) and not template.database.url.startswith("postgresql"):
+            raise ValueError(f"run {spec.label!r}: memory evaluation requires a Postgres template")
+        if (
+            spec.memory_100 is not None or spec.memory_ingestion is not None or spec.issue_recall
         ) and template.o11y.otlp_endpoint is None:
             raise ValueError(
                 f"run {spec.label!r}: a recall-graded corpus requires a template [o11y] "
@@ -319,6 +334,13 @@ class EvalStack:
         if self.spec.memory_100 is not None:
             return await self._materialize(
                 "evals.memory_100.materialize", "--snapshot", str(self.spec.memory_100.resolve())
+            )
+        if self.spec.memory_ingestion is not None:
+            await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
+            return await self._materialize(
+                "evals.memory_ingestion.materialize",
+                "--snapshot",
+                str(self.spec.memory_ingestion.resolve()),
             )
         await self._checked(await self._ufoctl(*self._seed_args(), log=self.seed_log), "seed")
         if not self.spec.issue_recall:
@@ -495,6 +517,13 @@ class EvalStack:
                 "--memory-100-state",
                 str(readiness),
             ]
+        if readiness is not None and self.spec.memory_ingestion is not None:
+            argv += [
+                "--memory-ingestion",
+                str(self.spec.memory_ingestion.resolve()),
+                "--memory-ingestion-state",
+                str(readiness),
+            ]
         if readiness is not None and self.spec.issue_recall:
             argv += ["--issue-recall", str(readiness)]
         return tuple(argv)
@@ -593,8 +622,9 @@ def derived_config(
 ) -> Config:
     """Rewrite only the collision knobs of a validated template: database (a per-run SQLite file
     or a per-run database on the template's Postgres server, DBOS sibling re-derived), blob root,
-    loopback serve host with probed serve/proxy ports, and — when the template sets one — a
-    private loopback OTLP endpoint. Every suite knob passes through untouched.
+    loopback serve host with probed serve/proxy ports, the matching OAuth callback base, and — when
+    the template sets one — a private loopback OTLP endpoint. Every suite knob passes through
+    untouched.
 
     The stack always serves shared: the shared fleet is the only runtime, so a stack seeds one
     workspace and serves it through the fleet path (per-request/per-turn workspace resolution, the
@@ -610,6 +640,7 @@ def derived_config(
             "database": DatabaseConfig(url=url, owner_url=template.database.owner_url or url),
             "blob": template.blob.model_copy(update={"root": root / "blobs"}),
             "serve": template.serve.model_copy(update={"host": "127.0.0.1", "port": serve_port}),
+            "connect": ConnectConfig(public_base_url=f"http://127.0.0.1:{serve_port}"),
             "sandbox": template.sandbox.model_copy(
                 update={"proxy_port": proxy_port, "workspace_root": root / "workspaces"}
             ),
