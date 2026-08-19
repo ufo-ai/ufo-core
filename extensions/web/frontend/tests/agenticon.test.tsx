@@ -11,6 +11,10 @@ import { ELEMENT_ICONS } from "@/lib/elementIcons";
 declare const __MARK_SPRITES__: Record<string, string>;
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
+/** The brand's own artwork, where the brand keeps it: the portal wears these files rather than a
+ *  copy of what they draw. */
+const BRAND = join(import.meta.dirname, "..", "..", "..", "..", "assets", "brand");
+const BRAND_MARK = "ufo-mark.svg";
 const OUTLINE: Record<string, [string, Record<string, string>][]> = JSON.parse(
   readFileSync(
     join(import.meta.dirname, "..", "node_modules", "@tabler", "icons", "tabler-nodes-outline.json"),
@@ -120,12 +124,11 @@ test("a name that could name no mark at all is answered without a fetch", () => 
 test("the picker's marks are the bundle's own, in the order it draws them", () => {
   const asked = servesSprites();
   const slugs = Object.keys(AGENT_ICONS);
-  expect(slugs).toHaveLength(41);
-  expect(slugs[0]).toBe("ufo");
-  expect(slugs.slice(0, 4)).toEqual(["ufo", "propylon", "nabatu", "gibil"]);
-  // The product's own mark is tabler's; the rest of the set is the element pack, whole and in the
-  // pack module's own order, so the picker offers no mark the pack does not draw.
-  expect(slugs.slice(1)).toEqual(Object.keys(ELEMENT_ICONS));
+  expect(slugs).toHaveLength(40);
+  expect(slugs.slice(0, 4)).toEqual(["propylon", "nabatu", "gibil", "adyton"]);
+  // The set is the element pack, whole and in the pack module's own order, so the picker offers no
+  // mark the pack does not draw and holds no mark of tabler's own.
+  expect(slugs).toEqual(Object.keys(ELEMENT_ICONS));
 
   const { container } = render(
     <>
@@ -135,10 +138,61 @@ test("the picker's marks are the bundle's own, in the order it draws them", () =
     </>,
   );
 
-  expect(container.querySelector(".tabler-icon-ufo")).not.toBeNull();
-  for (const slug of slugs.slice(1))
+  for (const slug of slugs)
     expect(container.querySelector(`.element-icon-${slug}`)).not.toBeNull();
   expect(asked).toEqual([]);
+});
+
+/** The product's own mark is reserved: the picker offers it to nobody, while the main agent's row
+ *  goes on holding it. That row draws the brand's own three-dot mark — the glyph the wordmark opens
+ *  with, worn as a mask so it takes the ink around it — and asks for no sprite. */
+test("the reserved product mark is offered nowhere and draws the brand's own mark", () => {
+  const asked = servesSprites();
+  const faults = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  expect(Object.keys(AGENT_ICONS)).not.toContain("ufo");
+
+  const { container } = render(<AgentIcon name="ufo" />);
+
+  const mark = container.querySelector<HTMLElement>(".brand-mark")!;
+  expect(mark).not.toBeNull();
+  expect(mark.style.mask).toContain("ufo-mark.svg");
+  expect(mark.className.split(" ")).toContain("bg-current");
+  expect(mark.getAttribute("aria-hidden")).toBe("true");
+  expect(container.querySelector(".tabler-icon-question-mark")).toBeNull();
+  expect(asked).toEqual([]);
+  expect(faults.mock.calls).toHaveLength(0);
+});
+
+/** The artwork is the brand's own file, read from where the brand keeps it: the favicon links are
+ *  cut from the same file, so the mark a row draws cannot drift from the mark on the tab. The saucer
+ *  the portal drew for the main agent before is gone from the bundle with it. */
+test("the reserved mark wears the brand file the tab icons are cut from, and no saucer", () => {
+  const { container } = render(<AgentIcon name="ufo" />);
+  const mask = container.querySelector<HTMLElement>(".brand-mark")!.style.mask;
+
+  expect(mask).toContain("assets/brand/" + BRAND_MARK);
+  expect(existsSync(join(BRAND, BRAND_MARK))).toBe(true);
+  // The build emits one file for both readers: the favicon link and the drawn mark name it.
+  const favicon = /assets\/ufo-mark-[A-Za-z0-9_-]+\.svg/.exec(
+    readFileSync(join(STATIC, "index.html"), "utf8"),
+  )![0];
+  expect(entry().includes(favicon)).toBe(true);
+  // `includes` rather than a matcher on the whole bundle: a failure should name the mark, not print
+  // a megabyte of minified module.
+  expect(entry().includes(OUTLINE.ufo[0][1].d)).toBe(false);
+});
+
+/** The mark sizes like every other: the glyph size unless its caller sets another. */
+test("the reserved mark draws at the glyph size unless its caller sets another", () => {
+  const bundled = render(<AgentIcon name="ufo" />);
+  const sized = render(<AgentIcon name="ufo" className="size-8" />);
+
+  const classes = (from: HTMLElement) =>
+    from.querySelector<HTMLElement>(".brand-mark")!.className.split(" ");
+  expect(classes(bundled.container)).toContain("size-(--size-glyph)");
+  expect(classes(sized.container)).toContain("size-8");
+  expect(classes(sized.container)).not.toContain("size-(--size-glyph)");
 });
 
 /** A mark whose paths were copied short or dropped still draws, so nothing but reading the paths

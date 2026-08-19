@@ -61,7 +61,6 @@ tabler outline mark answers still draws, so a name written before the portal's o
 keeps its mark."""
 
 AGENT_ICONS: tuple[TablerIcon, ...] = (
-    "ufo",
     "propylon",
     "nabatu",
     "gibil",
@@ -103,22 +102,17 @@ AGENT_ICONS: tuple[TablerIcon, ...] = (
     "shushan",
     "atef",
 )
-"""The icons the portal's picker offers, in the order it shows them: the product's own mark and
-the element pack the portal draws, the set a member chooses from by eye and the set an unnamed
-icon is dealt from."""
+"""The icons the portal's picker offers, in the order it shows them: the element pack the portal
+draws, the set a member chooses from by eye and the set an unnamed icon is dealt from. The
+product's own mark is not one of them, so it is neither offered nor dealt."""
 
 MAIN_AGENT_ICON: TablerIcon = "ufo"
-"""The icon the workspace's main agent is created with, and the one a member reaches for to say
-an agent is the workspace itself."""
+"""The product's own mark, the icon the workspace's main agent is created with. It is reserved: the
+picker never offers it and no agent is ever dealt it, while a row already holding it keeps drawing
+it."""
 
 DEFAULT_AGENT_ICON: TablerIcon = "propylon"
 """The icon a row inserted without one carries."""
-
-AUTO_AGENT_ICONS: tuple[TablerIcon, ...] = tuple(
-    icon for icon in AGENT_ICONS if icon != MAIN_AGENT_ICON
-)
-"""The icons an agent may be dealt automatically: every icon but the product's own mark, which a
-member applies deliberately or not at all."""
 
 AGENT_ICON_KEYWORDS: dict[str, TablerIcon] = {
     "support": "kardia",
@@ -178,7 +172,7 @@ NAME_TOKENS = re.compile(r"[^a-z0-9]+")
 
 
 def auto_agent_icon(name: str, taken: Collection[str]) -> TablerIcon:
-    """The icon a new agent starts with, drawn from `AUTO_AGENT_ICONS`: the first name token a
+    """The icon a new agent starts with, drawn from `AGENT_ICONS`: the first name token a
     keyword names, else the name's hash over the icons the workspace has not used yet, so agents of
     one workspace read apart at a glance and a given name always lands on the same icon. Once every
     icon is taken the workspace repeats one."""
@@ -193,9 +187,9 @@ def auto_agent_icon(name: str, taken: Collection[str]) -> TablerIcon:
     )
     if keyword is not None and keyword not in taken:
         return keyword
-    free = tuple(icon for icon in AUTO_AGENT_ICONS if icon not in taken)
+    free = tuple(icon for icon in AGENT_ICONS if icon not in taken)
     if not free:
-        return keyword if keyword is not None else AUTO_AGENT_ICONS[seed % len(AUTO_AGENT_ICONS)]
+        return keyword if keyword is not None else AGENT_ICONS[seed % len(AGENT_ICONS)]
     return free[seed % len(free)]
 
 

@@ -102,16 +102,22 @@ export default defineConfig({
   base: BASE,
   plugins: [react(), tailwindcss(), tablerMarks()],
   resolve: {
-    alias: { "@": new URL("./src", import.meta.url).pathname },
+    alias: {
+      "@": new URL("./src", import.meta.url).pathname,
+      // The brand's own artwork, drawn once and worn by every surface. The portal reads it where
+      // the brand keeps it, so no copy of a mark can drift from the one the favicons are cut from.
+      "@brand": new URL("../../../assets/brand", import.meta.url).pathname,
+    },
   },
   build: {
     outDir: "../ufo_ext_web/static",
     emptyOutDir: true,
   },
   server: {
-    // The boot suite imports the built entry from `../ufo_ext_web/static`, one directory above
-    // this root, which the default allow-list refuses.
-    fs: { allow: [".."] },
+    // The boot suite imports the built entry from `../ufo_ext_web/static`, and a mark is read from
+    // `assets/brand` at the tree's root; both sit above this root, which the default allow-list
+    // refuses.
+    fs: { allow: ["../../.."] },
     proxy: {
       // `changeOrigin` stays off because `open_session` answers a 303 rebuilt from the forwarded
       // Host: rewritten, the sign-in lands on the backend, which serves the gitignored built tree

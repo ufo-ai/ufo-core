@@ -14,7 +14,7 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "baseUrl": ".",
-    "paths": { "@/*": ["./src/*"] },
+    "paths": { "@/*": ["./src/*"], "@brand/*": ["../../../assets/brand/*"] },
     "types": ["node", "vite/client"]
   },
   "include": ["src", "tests", "dev-routing.ts", "vite.config.ts"]

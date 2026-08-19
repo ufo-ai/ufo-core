@@ -588,6 +588,28 @@ test("a mark named for what every object answers still leads the picker as the a
   expect((marks[0] as HTMLInputElement).checked).toBe(true);
 });
 
+/** The workspace's own mark is reserved: the picker offers it to no app, and the main agent is the
+ *  row that holds it. It appears there once and only as that row's own mark — led, checked and drawn
+ *  as the brand's own mark — the way any mark from outside the offered set appears. */
+test("the main agent keeps the reserved mark, and no offered cell repeats it", async () => {
+  wire({
+    "/settings": () => json({ ...SETTINGS, spec: { ...SETTINGS.spec, icon: "ufo" } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[{ ...AGENT, icon: "ufo" }]} member={MEMBER} onAgents={() => {}} />);
+  await openAgentSettings();
+
+  const marks = await screen.findAllByRole("radio");
+  expect(marks.length).toBe(Object.keys(AGENT_ICONS).length + 1);
+  expect(marks[0].getAttribute("value")).toBe("ufo");
+  expect(marks[0].getAttribute("aria-label")).toBe("ufo");
+  expect((marks[0] as HTMLInputElement).checked).toBe(true);
+  expect(marks[0].closest("label")!.querySelector(".brand-mark")).toBeTruthy();
+  expect(marks.slice(1).map((mark) => mark.getAttribute("value"))).not.toContain("ufo");
+});
+
 test("a member picks another mark, and the pick rides one intent and comes back", async () => {
   const posted: unknown[] = [];
   let icon = "propylon";
@@ -608,12 +630,14 @@ test("a member picks another mark, and the pick rides one intent and comes back"
 
   const marks = await screen.findAllByRole("radio");
   expect(marks.length).toBe(Object.keys(AGENT_ICONS).length);
-  // The set leads with the workspace's own mark, and the picker draws the set in its own order.
-  expect(Object.keys(AGENT_ICONS)[0]).toBe("ufo");
-  expect(marks[0].getAttribute("value")).toBe("ufo");
-  // Every label is the slug's words capitalized, except the product's own name, which is read as
-  // it is written.
-  expect(marks[0].getAttribute("aria-label")).toBe("ufo");
+  // The picker draws the offered set in its own order, and the product's own mark is not in it:
+  // the workspace's mark is reserved, so no picker offers it to an app.
+  expect(Object.keys(AGENT_ICONS)[0]).toBe("propylon");
+  expect(marks[0].getAttribute("value")).toBe("propylon");
+  expect(marks.map((mark) => mark.getAttribute("value"))).not.toContain("ufo");
+  expect(screen.queryByRole("radio", { name: "ufo" })).toBeNull();
+  // Every label is the slug's words capitalized.
+  expect(marks[0].getAttribute("aria-label")).toBe("Propylon");
   expect(screen.getByRole("radio", { name: "Kylix" })).toBeTruthy();
   expect((screen.getByRole("radio", { name: "Propylon" }) as HTMLInputElement).checked).toBe(
     true,

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { IconQuestionMark, IconUfo } from "@tabler/icons-react";
+import { IconQuestionMark } from "@tabler/icons-react";
+
+import brandMark from "@brand/ufo-mark.svg";
 
 import { cn } from "@/lib/cn";
 import {
@@ -49,13 +51,15 @@ import {
  *  `vite.config.ts` cut and emitted it as. */
 declare const __MARK_SPRITES__: Record<string, string>;
 
-/** The marks the picker offers, in the order it draws them: the workspace's own mark first, then
- *  the element pack with kindred marks adjacent, so the member scans groups instead of a wall of
- *  unrelated shapes. This is the whole of what an app is offered, and the whole of what the bundle
- *  carries. A row holding any other slug tabler draws still draws it, read from that letter's
- *  sprite, so an icon written before this pack arrived keeps its mark. */
+/** The product's own mark: reserved, so the picker offers it to no app, while the row that holds
+ *  it — the workspace's main agent — draws the brand's own mark, `BrandMark` below. */
+const RESERVED_MARK = "ufo";
+
+/** The marks the picker offers, in the order it draws them: the element pack with kindred marks
+ *  adjacent, so the member scans groups instead of a wall of unrelated shapes. This is the whole of
+ *  what an app is offered. A row holding any other slug tabler draws still draws it, read from that
+ *  letter's sprite, so an icon written before this pack arrived keeps its mark. */
 export const AGENT_ICONS = {
-  ufo: IconUfo,
   propylon: Propylon,
   nabatu: Nabatu,
   gibil: Gibil,
@@ -111,17 +115,33 @@ const MARK_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
  *  whatever it sits in. It is always hidden from assistive technology: the mark restates what the
  *  row's own text and the picker's own label already say.
  *
- *  The picker's marks are the element pack's own paths, bundled and drawn at once; any other slug
- *  tabler draws is read from its letter's sprite, one fetch per letter for the page's life. A slug
- *  no sprite answers is reported to the console and drawn as the unknown mark, so the hole is
- *  visible and named while the row it sits in still lists its app. */
+ *  The picker's marks are the element pack's own paths, bundled and drawn at once, and the reserved
+ *  mark is the brand's own file; any other slug tabler draws is read from its letter's sprite, one
+ *  fetch per letter for the page's life. A slug no sprite answers is reported to the console and
+ *  drawn as the unknown mark, so the hole is visible and named while the row it sits in still lists
+ *  its app. */
 export function AgentIcon({ name, className }: { name: string; className?: string }) {
   if (!MARK_NAME.test(name)) return <UnknownMark name={name} className={className} />;
+  if (name === RESERVED_MARK) return <BrandMark className={className} />;
   if (Object.hasOwn(AGENT_ICONS, name)) {
     const Drawn = AGENT_ICONS[name as AgentIconName];
     return <Drawn className={cn(GLYPH, className)} aria-hidden />;
   }
   return <FetchedMark name={name} className={className} />;
+}
+
+/** The brand's three-dot mark, the glyph the top nav's wordmark opens with, worn as a mask over the
+ *  ink around it: the artwork is the brand file itself, so the mark the main agent's row draws is
+ *  the mark the tab icon and the wordmark are cut from, and nothing here holds a second copy of the
+ *  geometry to drift. */
+function BrandMark({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn("brand-mark block shrink-0 bg-current", GLYPH, className)}
+      style={{ mask: `url(${brandMark}) center / contain no-repeat` }}
+      aria-hidden
+    />
+  );
 }
 
 const marks = new Map<string, Map<string, MarkPath[]>>();

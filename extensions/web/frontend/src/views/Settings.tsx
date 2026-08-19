@@ -26,7 +26,8 @@ const SETUP_ASK = "Load the agent-setup skill and follow its instructions.";
 
 /** The one mark whose label is not derived from its slug. Every other label is the slug's words
  *  with a capital on the first; the product is named ufo, and its name is written as it is
- *  written wherever it is read. */
+ *  written wherever it is read. The picker offers this mark to no app — it reaches the grid only as
+ *  the main agent's own mark, led and checked like any mark from outside the offered set. */
 const UFO_ICON = "ufo";
 
 type SettingsPayload = {
