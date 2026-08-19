@@ -986,7 +986,7 @@ async def _cancel_turn(config: Config, turn_id: UUID) -> bool:
             raise click.ClickException(f"no turn {turn_id}")
         client = replay_safe_client(config.database.system_url)
         with ws(workspace_id):
-            return await cancel_one_turn(client, turn_id)
+            return await cancel_one_turn(client, turn_id) is not None
     finally:
         await dispose_db()
 

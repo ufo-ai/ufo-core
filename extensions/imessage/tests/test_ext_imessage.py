@@ -74,7 +74,15 @@ from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
-from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
+from ufo.schema.records import (
+    Agent,
+    AskQuestion,
+    AskUserInput,
+    ConnectRequest,
+    QuestionOption,
+    TerminalFrame,
+    Turn,
+)
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.tools.context import ToolContext
@@ -380,6 +388,53 @@ async def test_group_writeback_does_not_mint_a_connect_url() -> None:
 
     assert await surface.post(Context(), writeback) == "message"
     assert sent == ["Continue in a direct message to connect the account."]
+
+
+async def test_a_question_writeback_states_the_answer_already_settled() -> None:
+    """iMessage renders an ask as lines the member answers in words, so an answer the agent read
+    off their own words is stated with them — the read-back they correct by replying."""
+    sent: list[str] = []
+
+    class Provider:
+        async def send_text(self, _conversation_id: str, text: str, _idempotency_key: str) -> str:
+            sent.append(text)
+            return "message"
+
+    class Context:
+        def home_url(self) -> str:
+            return "https://ufo.example.test"
+
+    surface = ImessageSurface(provider=lambda: Provider())
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        queue_key=queue_key("direct-chat", direct=True),
+        terminal=TerminalFrame(
+            status="done",
+            text="One thing to settle.",
+            question=AskUserInput(
+                title="Create new app",
+                questions=(
+                    AskQuestion(
+                        question="Who else uses it?",
+                        options=(QuestionOption(label="Just me"), QuestionOption(label="Everyone")),
+                        chosen="Just me",
+                    ),
+                ),
+            ),
+        ),
+        artifacts=(),
+    )
+
+    assert await surface.post(Context(), writeback) == "message"
+    assert sent == [
+        "One thing to settle.\n\n"
+        "Create new app\n"
+        "Who else uses it?\n"
+        "Options: Just me, Everyone\n"
+        "Current answer: Just me"
+    ]
 
 
 async def test_direct_writeback_mints_the_requesting_members_connect_url() -> None:

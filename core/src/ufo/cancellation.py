@@ -15,15 +15,16 @@ from dbos import DBOSClient
 
 from ufo.db import workspace_tx
 from ufo.o11y import emit_metric, turn_profile
+from ufo.object_name import ObjectRef
 from ufo.schema import tables
 from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TerminalFrame
 
-CANCELLED_FRAME = TerminalFrame(status=CANCELLED)
 
-
-async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
+async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | None:
     """Cancel a single turn: cancel its durable workflow, then commit its cancelled terminal.
-    Returns True iff this call transitioned the turn to cancelled.
+    Returns the committed frame iff this call transitioned the turn to cancelled — carrying
+    the objects the row already says the turn created, so a member who stopped a turn is
+    still told what it made.
 
     Cancel-before-commit is the invariant every cancel path upholds through this one function: the
     row is written terminal only after the workflow cancel is durable, so a `cancelled` row always
@@ -47,14 +48,23 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
             )
         ).one_or_none()
     if row is None or row.status not in NON_TERMINAL_STATUSES:
-        return False
+        return None
     await client.cancel_workflow_async(str(turn_id))
     async with workspace_tx() as connection:
+        made = (
+            await connection.execute(
+                sa.select(tables.turn.c.created_refs).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+        frame = TerminalFrame(
+            status=CANCELLED,
+            created=tuple(ObjectRef.model_validate(ref) for ref in made or ()),
+        )
         result = await connection.execute(
             sa.update(tables.turn)
             .values(
                 status=CANCELLED,
-                terminal=CANCELLED_FRAME.model_dump(mode="json"),
+                terminal=frame.model_dump(mode="json"),
                 updated_at=sa.func.now(),
             )
             .where(
@@ -63,11 +73,11 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
             )
         )
     if result.rowcount == 0:
-        return False
+        return None
     emit_metric(
         "turn_terminal_total",
         status=CANCELLED,
         error_class="",
         profile=turn_profile(row.subagent_profile, spawned=row.parent_turn_id is not None),
     )
-    return True
+    return frame

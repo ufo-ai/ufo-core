@@ -9,6 +9,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from ufo import o11y
 from ufo.cancellation import cancel_one_turn
 from ufo.db import owner_tx, workspace_tx
+from ufo.object_name import ObjectRef
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.workspace import ws
@@ -99,7 +100,7 @@ async def test_cancel_one_turn_cancels_the_workflow_then_commits_the_terminal(db
     workspace_id, agent_id = await _workspace_agent()
     turn_id = await _turn(workspace_id, agent_id, "running")
     client = _RecordingClient()
-    assert await cancel_one_turn(client, turn_id) is True
+    assert await cancel_one_turn(client, turn_id) is not None
     assert client.cancelled == [str(turn_id)]
     assert await _status(turn_id) == "cancelled"
     async with workspace_tx() as connection:
@@ -111,12 +112,38 @@ async def test_cancel_one_turn_cancels_the_workflow_then_commits_the_terminal(db
     assert TerminalFrame.model_validate(terminal).status == "cancelled"
 
 
+async def test_cancel_one_turn_names_what_the_turn_already_created(db: None) -> None:
+    """The turn row records its creations the round they happen, so the cancelled terminal — the
+    one frame the turn's own execution never writes — still names them, on the committed row and
+    on the frame the stopper publishes."""
+    workspace_id, agent_id = await _workspace_agent()
+    turn_id = await _turn(workspace_id, agent_id, "running")
+    made = ObjectRef(kind="widget", name="anvil")
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(created_refs=[made.model_dump(mode="json")])
+                .where(tables.turn.c.id == turn_id)
+            )
+        frame = await cancel_one_turn(_RecordingClient(), turn_id)
+        assert frame is not None
+        assert frame.created == (made,)
+        async with workspace_tx() as connection:
+            terminal = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one()
+    assert TerminalFrame.model_validate(terminal).created == (made,)
+
+
 async def test_cancel_one_turn_cancels_a_queued_turn_with_no_live_workflow(db: None) -> None:
     """A queued turn never enqueued has no live workflow — the cancel is a no-op UPDATE, yet the row
     is still committed cancelled, so nothing downstream re-dispatches it."""
     workspace_id, agent_id = await _workspace_agent()
     turn_id = await _turn(workspace_id, agent_id, "queued")
-    assert await cancel_one_turn(_RecordingClient(), turn_id) is True
+    assert await cancel_one_turn(_RecordingClient(), turn_id) is not None
     assert await _status(turn_id) == "cancelled"
 
 
@@ -126,7 +153,7 @@ async def test_cancel_one_turn_leaves_a_terminal_turn_untouched(db: None) -> Non
     workspace_id, agent_id = await _workspace_agent()
     done = await _turn(workspace_id, agent_id, "done")
     client = _RecordingClient()
-    assert await cancel_one_turn(client, done) is False
+    assert await cancel_one_turn(client, done) is None
     assert client.cancelled == []
     assert await _status(done) == "done"
 
@@ -139,7 +166,7 @@ async def test_cancel_one_turn_reports_nothing_cancelled_for_a_turn_that_does_no
     profile now rides along on."""
     await _workspace_agent()
     client = _RecordingClient()
-    assert await cancel_one_turn(client, uuid4()) is False
+    assert await cancel_one_turn(client, uuid4()) is None
     assert client.cancelled == []
 
 
@@ -205,8 +232,8 @@ async def test_the_cancelled_terminal_is_counted_once_by_the_call_that_wrote_it(
     reader = _metric_reader(monkeypatch)
     workspace_id, agent_id = await _workspace_agent()
     turn_id = await _turn(workspace_id, agent_id, "queued", "coding")
-    assert await cancel_one_turn(_RecordingClient(), turn_id) is True
-    assert await cancel_one_turn(_RecordingClient(), turn_id) is False
+    assert await cancel_one_turn(_RecordingClient(), turn_id) is not None
+    assert await cancel_one_turn(_RecordingClient(), turn_id) is None
     assert _terminal_counts(reader) == [(1, "cancelled", "", "coding")]
 
 
@@ -234,7 +261,7 @@ async def test_a_cancel_that_transitioned_nothing_counts_no_terminal(
                     .where(tables.turn.c.id == turn_id)
                 )
 
-    assert await cancel_one_turn(_RacingClient(), turn_id) is False
+    assert await cancel_one_turn(_RacingClient(), turn_id) is None
     assert await _status(turn_id) == "done"
     assert _terminal_counts(reader) == []
 
@@ -260,7 +287,7 @@ async def test_the_operator_verb_cancels_a_wedged_turn_in_its_own_workspace(db: 
     assert found == workspace_id
 
     with ws(found):
-        assert await cancel_one_turn(client, wedged) is True
+        assert await cancel_one_turn(client, wedged) is not None
     assert client.cancelled == [str(wedged)]
 
     async with workspace_tx() as connection:

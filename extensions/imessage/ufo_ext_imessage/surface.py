@@ -497,6 +497,8 @@ class ImessageSurface:
             lines.append(item.question)
             if item.options:
                 lines.append("Options: " + ", ".join(option.label for option in item.options))
+            if item.chosen:
+                lines.append("Current answer: " + item.chosen)
         return "\n".join(lines)
 
     async def _artifact_bytes(self, ctx: SurfaceContext, blob_key: str, size_bytes: int) -> bytes:

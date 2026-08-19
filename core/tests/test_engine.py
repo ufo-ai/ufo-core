@@ -3943,6 +3943,86 @@ async def test_terminal_frame_names_the_objects_the_turn_created(db: None, tmp_p
     assert TerminalFrame.model_validate(stored).created == frame.created
 
 
+@dataclass
+class AppliesAndShootsModel:
+    """One round carrying a create beside a call whose dispatch dies past its handler."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        call = _widget_call("a1", "teal")[0]
+        yield ToolCallStart(id=call.id, name=call.name)
+        yield ToolCallDelta(id=call.id, partial_json=json.dumps(call.input))
+        yield ToolCallStart(id="c2", name="shot")
+        yield ToolCallDelta(id="c2", partial_json="{}")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_round_that_created_and_then_faulted_still_names_the_creation(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fault and the creation share one round: the widget row committed before the sibling
+    call's step died, so the failed terminal and the turn row both name it — the fold runs on the
+    dispatch unwind, not only after a round that ends well."""
+
+    async def unwritable(self: FilesystemBlobStore, key: str, data: bytes) -> None:
+        raise RuntimeError("blob store down")
+
+    monkeypatch.setattr(FilesystemBlobStore, "put", unwritable)
+    turn = await _seed_turn("queued", None)
+    registry = object_registry(
+        (
+            BoundKind(
+                kind=ObjectKind(
+                    name=sample.WIDGET_KIND,
+                    description="d",
+                    guidance="g",
+                    spec_model=sample.WidgetSpec,
+                    store=sample.WidgetStore(),
+                ),
+                extension=sample.NAME,
+                context=context_for(sample.NAME, frozenset()),
+            ),
+        )
+    )
+    engine = replace(
+        _engine(turn, AppliesAndShootsModel(), tmp_path),
+        tools=ToolRegistry((*ObjectVerbs(registry).tools(), _image_result_tool("shot"))),
+    )
+    with ws(turn.workspace_id), pytest.raises(RuntimeError, match="blob store down"):
+        await engine.run()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status, tables.turn.c.terminal, tables.turn.c.created_refs
+                ).where(tables.turn.c.id == turn.id)
+            )
+        ).one()
+    assert row.status == "failed"
+    assert TerminalFrame.model_validate(row.terminal).created == (
+        ObjectRef(kind=sample.WIDGET_KIND, name="anvil"),
+    )
+    assert [ObjectRef.model_validate(ref) for ref in row.created_refs] == [
+        ObjectRef(kind=sample.WIDGET_KIND, name="anvil")
+    ]
+
+
+async def test_a_resumed_turn_still_names_what_the_parked_attempt_created(
+    db: None, tmp_path: Path
+) -> None:
+    """A resume is a fresh workflow whose re-run rounds find the names already taken, so the
+    terminal seeds from the turn row's own record of what the parked attempt made."""
+    seeded = await _seed_turn("queued", None)
+    turn = seeded.model_copy(
+        update={"created_refs": (ObjectRef(kind=sample.WIDGET_KIND, name="anvil"),)}
+    )
+    engine = _engine(turn, EchoModel(), tmp_path)
+    with ws(turn.workspace_id):
+        frame = await engine.run()
+    assert frame is not None
+    assert frame.status == "done"
+    assert frame.created == (ObjectRef(kind=sample.WIDGET_KIND, name="anvil"),)
+
+
 def test_created_objects_read_the_apply_results_never_the_calls() -> None:
     calls = _widget_call("a1", "teal")
     created = (

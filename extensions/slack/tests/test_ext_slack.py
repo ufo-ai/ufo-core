@@ -9178,8 +9178,50 @@ def test_a_question_offering_one_option_renders_as_a_box_it_guides() -> None:
         "type": "plain_text_input",
         "action_id": "ask:0",
         "multiline": True,
+        "initial_value": "Watch x.com for AI keywords",
     }
     assert rendered[1]["hint"] == {"type": "plain_text", "text": "Watch x.com for AI keywords"}
+
+
+def test_a_chosen_answer_opens_the_control_on_it() -> None:
+    """The member's own words already settled these, so each control opens on the inferred answer —
+    the read-back-and-correct flow the ask's `chosen` exists for — and a chosen no option holds
+    selects nothing rather than inventing an option."""
+    rendered = slack.slack_ask_blocks(
+        AskUserInput(
+            title="Create new app",
+            questions=(
+                AskQuestion(
+                    question="Ship it?",
+                    options=(QuestionOption(label="Ship"), QuestionOption(label="Hold")),
+                    chosen="Hold",
+                ),
+                AskQuestion(
+                    question="Who should review it?",
+                    options=(QuestionOption(label="Priya"), QuestionOption(label="Marco")),
+                    multi_select=True,
+                    chosen="Marco",
+                ),
+                AskQuestion(question="Name the tag?", free_text_only=True, chosen="v2"),
+                AskQuestion(
+                    question="Which lane?",
+                    options=(QuestionOption(label="fast"), QuestionOption(label="slow")),
+                    chosen="neither of these",
+                ),
+            ),
+        )
+    )
+
+    assert rendered is not None
+    assert rendered[1]["element"]["initial_option"] == {
+        "text": {"type": "plain_text", "text": "Hold"},
+        "value": "Hold",
+    }
+    assert rendered[2]["element"]["initial_options"] == [
+        {"text": {"type": "plain_text", "text": "Marco"}, "value": "Marco"}
+    ]
+    assert rendered[3]["element"]["initial_value"] == "v2"
+    assert "initial_option" not in rendered[4]["element"]
 
 
 def test_an_ask_the_form_cannot_express_renders_whole_as_prose() -> None:

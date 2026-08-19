@@ -1052,7 +1052,7 @@ class TurnEngine:
             model_specs=self.model_specs,
             auto_model=self.auto_model,
         )
-        created: dict[ObjectRef, None] = {}
+        created: dict[ObjectRef, None] = dict.fromkeys(self.turn.created_refs)
         try:
             if not await self._mark_running():
                 return await self._resolve_unclaimed()
@@ -1497,40 +1497,44 @@ class TurnEngine:
                 *tool_calls,
             )
             results: tuple[ToolResultBlock, ...] = ()
-            for segment in _dispatch_segments(self.tools, tool_calls):
-                if finish_error is not None and segment[0].name == FINISH_TOOL:
+            try:
+                for segment in _dispatch_segments(self.tools, tool_calls):
+                    if finish_error is not None and segment[0].name == FINISH_TOOL:
+                        results = (
+                            *results,
+                            ToolResultBlock(
+                                tool_use_id=segment[0].id,
+                                content=_bounded(finish_error),
+                                is_error=True,
+                            ),
+                        )
+                        continue
+                    bound = await asyncio.gather(
+                        *(self._bind_or_error(context, call, requesters) for call in segment),
+                        return_exceptions=True,
+                    )
+                    failures = [outcome for outcome in bound if isinstance(outcome, BaseException)]
+                    if failures:
+                        raise failures[0]
+                    dispatched = await asyncio.gather(
+                        *(
+                            self._dispatch(item)
+                            for item in bound
+                            if not isinstance(item, BaseException)
+                        ),
+                        return_exceptions=True,
+                    )
                     results = (
                         *results,
-                        ToolResultBlock(
-                            tool_use_id=segment[0].id,
-                            content=_bounded(finish_error),
-                            is_error=True,
-                        ),
+                        *(o for o in dispatched if not isinstance(o, BaseException)),
                     )
-                    continue
-                bound = await asyncio.gather(
-                    *(self._bind_or_error(context, call, requesters) for call in segment),
-                    return_exceptions=True,
-                )
-                failures = [outcome for outcome in bound if isinstance(outcome, BaseException)]
-                if failures:
-                    raise failures[0]
-                dispatched = await asyncio.gather(
-                    *(
-                        self._dispatch(item)
-                        for item in bound
-                        if not isinstance(item, BaseException)
-                    ),
-                    return_exceptions=True,
-                )
-                failures = [outcome for outcome in dispatched if isinstance(outcome, BaseException)]
-                if failures:
-                    raise failures[0]
-                results = (
-                    *results,
-                    *(o for o in dispatched if not isinstance(o, BaseException)),
-                )
-            created.update(dict.fromkeys(_created_refs(tool_calls, results)))
+                    failures = [
+                        outcome for outcome in dispatched if isinstance(outcome, BaseException)
+                    ]
+                    if failures:
+                        raise failures[0]
+            finally:
+                await self._fold_created(created, tool_calls, results)
             question = _final_act(tool_calls, results, ASK_USER_TOOL, AskUserInput)
             credential_request = _final_act(
                 tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest
@@ -1544,6 +1548,36 @@ class TurnEngine:
         meter.incomplete_reason = ROUND_BUDGET_INCOMPLETE
         messages, text = await self._force_final(messages, usage_events, system, requesters)
         return messages, text, None, None, None
+
+    async def _fold_created(
+        self,
+        created: dict[ObjectRef, None],
+        tool_calls: tuple[ToolUseBlock, ...],
+        results: tuple[ToolResultBlock, ...],
+    ) -> None:
+        """Fold a round's creations into the accumulator and write the whole set on the turn row,
+        the round they happen — durable ahead of any terminal. Every terminal then names what is
+        already true: this execution's own commit reads the accumulator, a canceller reads the row,
+        and a resume — a fresh workflow whose re-run rounds find the names already taken — seeds
+        from it instead of losing what the parked attempt made. Runs on the dispatch unwind too, so
+        a round that created and then faulted still records the creation before the fault routes
+        the turn."""
+        fresh = [ref for ref in _created_refs(tool_calls, results) if ref not in created]
+        if not fresh:
+            return
+        created.update(dict.fromkeys(fresh))
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    created_refs=[ref.model_dump(mode="json") for ref in created],
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.turn.c.id == self.turn.id,
+                    tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                )
+            )
 
     async def _absorb_arrivals(
         self,

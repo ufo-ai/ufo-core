@@ -197,7 +197,7 @@ class CancelReconciler:
         for orphan in orphans:
             with ws(orphan.workspace_id):
                 cancelled = await cancel_one_turn(self.client, orphan.id)
-            if cancelled:
+            if cancelled is not None:
                 log("instance.cancel_reconciled", turn_id=str(orphan.id))
 
     def _orphans_query(self) -> sa.Select:
@@ -296,7 +296,7 @@ class StrandedTurnReconciler:
                 continue
             with ws(row.workspace_id):
                 cancelled = await cancel_one_turn(self.client, row.id)
-            if cancelled:
+            if cancelled is not None:
                 log(
                     "instance.stranded_turn_reconciled",
                     turn_id=str(row.id),

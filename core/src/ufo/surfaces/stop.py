@@ -9,7 +9,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from dbos import DBOSClient
 
-from ufo.cancellation import CANCELLED_FRAME, cancel_one_turn
+from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.surface import Stopped
 from ufo.hub import Absorbed, Hub, Terminal
@@ -47,13 +47,14 @@ class MemberStop:
             ).scalar_one_or_none()
         if owner != conversation_id:
             raise ValueError(f"turn {turn_id} is not a turn of conversation {conversation_id}")
-        if not await cancel_one_turn(self.client, turn_id):
+        frame = await cancel_one_turn(self.client, turn_id)
+        if frame is None:
             return Stopped(ended=False, founded_turn_id=None)
         founded = await self.admission.redispatch(workspace_id, conversation_id)
         if founded is not None:
             new_turn_id, arrival_id = founded
             await self.hub.publish(new_turn_id, Absorbed(arrivals=(arrival_id,)))
-        await self.hub.publish(turn_id, Terminal(frame=CANCELLED_FRAME))
+        await self.hub.publish(turn_id, Terminal(frame=frame))
         return Stopped(
             ended=True,
             founded_turn_id=None if founded is None else founded[0],

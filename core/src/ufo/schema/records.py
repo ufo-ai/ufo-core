@@ -458,6 +458,10 @@ class Turn(BaseModel):
     on_behalf_of_member_id: UUID | None = None
     context: TurnContext | None = None
     terminal: TerminalFrame | None = None
+    created_refs: tuple[ObjectRef, ...] = ()
+    """The objects this turn has created so far, written the round that created each — durable
+    ahead of any terminal, so a resume seeds from it and a canceller names it. The terminal's
+    `created` is this record's final copy."""
     parent_turn_id: UUID | None = None
     subagent_profile: str | None = None
     subagent_name: str | None = None
@@ -470,6 +474,13 @@ class Turn(BaseModel):
         """True for a turn a spawn admitted — a profile child (`subagent_profile` set) or an agent
         child (parent linkage alone). Only the spawn path writes `parent_turn_id`."""
         return self.parent_turn_id is not None
+
+    @field_validator("created_refs", mode="before")
+    @classmethod
+    def _nothing_created(cls, value: object) -> object:
+        """The column is nullable and only a round that created something writes it, so a turn
+        that created nothing carries SQL NULL — which reads as the empty set."""
+        return () if value is None else value
 
     @field_validator("created_at", "updated_at")
     @classmethod

@@ -1220,7 +1220,11 @@ def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] |
     An ask holding one question the form cannot express — an attachment, an option group wider than
     Slack takes, an option label past the option ceiling — renders whole as prose that lists every
     question with its options, and the member answers by replying in the thread, the flow every
-    question supports regardless."""
+    question supports regardless.
+
+    An answer the member's own words already settled arrives as `chosen` and opens the control on
+    it — the option pre-selected, the box pre-filled — so they read back what was inferred and
+    correct it in place rather than answering twice."""
     if question is None:
         return None
     controls = [_ask_control(index, ask) for index, ask in enumerate(question.questions)]
@@ -1270,11 +1274,16 @@ def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
     ):
         return None
     if len(choices) < MIN_ANSWER_OPTIONS:
-        control["element"] = {
+        element: dict[str, object] = {
             "type": "plain_text_input",
             "action_id": block_id,
             "multiline": True,
         }
+        lone = ask.options or ()
+        written = ask.chosen or (lone[0].label if len(lone) == 1 else None)
+        if written:
+            element["initial_value"] = written
+        control["element"] = element
         if ask.options:
             suggested = "\n".join(
                 f"{option.label} — {option.description}" if option.description else option.label
@@ -1282,11 +1291,18 @@ def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
             )
             control["hint"] = {"type": "plain_text", "text": suggested[:SLACK_INPUT_LABEL_LIMIT]}
         return control
-    control["element"] = {
+    picker: dict[str, object] = {
         "type": "checkboxes" if ask.multi_select else "radio_buttons",
         "action_id": block_id,
         "options": [_ask_option(option) for option in choices],
     }
+    settled = next((option for option in choices if option.label == ask.chosen), None)
+    if settled is not None:
+        if ask.multi_select:
+            picker["initial_options"] = [_ask_option(settled)]
+        else:
+            picker["initial_option"] = _ask_option(settled)
+    control["element"] = picker
     return control
 
 

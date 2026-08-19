@@ -416,7 +416,7 @@ class WorkspaceDriver:
         which sweeps any turn left live under a cancelled ancestor; the primitive's
         cancel-before-commit ordering keeps a crash mid-cancel from orphaning this root, which the
         reconciler never re-examines."""
-        return await cancel_one_turn(self.dbos, turn_id)
+        return await cancel_one_turn(self.dbos, turn_id) is not None
 
     async def _cancel_overdue(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
         """The wait's deadline fired: terminalize the turn before the runner advances. A turn that

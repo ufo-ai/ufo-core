@@ -70,6 +70,7 @@ from ufo.o11y import (
     turn_profile,
     turn_span,
 )
+from ufo.object_name import ObjectRef
 from ufo.provisioning import AgentProvisioning
 from ufo.sandbox.cache import cache_git_config
 from ufo.sandbox.conversation import ConversationSandbox
@@ -694,6 +695,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.updated_at,
                     tables.turn.c.context,
                     tables.turn.c.terminal,
+                    tables.turn.c.created_refs,
                     tables.turn.c.parent_turn_id,
                     tables.turn.c.subagent_profile,
                     tables.turn.c.subagent_name,
@@ -735,6 +737,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         updated_at=row.updated_at,
         context=None if row.context is None else TurnContext.model_validate(row.context),
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
+        created_refs=tuple(ObjectRef.model_validate(ref) for ref in row.created_refs or ()),
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,
         subagent_name=row.subagent_name,

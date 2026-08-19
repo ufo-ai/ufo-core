@@ -194,6 +194,7 @@ turn = sa.Table(
     sa.Column("connect_authorized_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("context", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
+    sa.Column("created_refs", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("parent_turn_id", sa.Uuid, nullable=True),
     sa.Column("subagent_profile", sa.Text, nullable=True),
     sa.Column("subagent_name", sa.Text, nullable=True),

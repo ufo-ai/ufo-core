@@ -147,7 +147,19 @@ def _agent_applies(output: CapabilityOutput) -> tuple[int, ...]:
 
 
 def _asks(output: CapabilityOutput) -> tuple[int, ...]:
-    return tuple(index for index, call in enumerate(output.calls) if call.name == "ask_user")
+    return tuple(
+        index
+        for index, call in enumerate(output.calls)
+        if call.name == "ask_user" and call.succeeded
+    )
+
+
+def _interviews(output: CapabilityOutput) -> tuple[int, ...]:
+    """The asks that stood before the create — the form the member's submission agreed to. An ask
+    after the create is the closing move the skill itself teaches (offer to attach an account) and
+    counts toward nothing here."""
+    applies = _agent_applies(output)
+    return tuple(index for index in _asks(output) if index < applies[0]) if applies else ()
 
 
 async def _creation_failure(outcome: ScenarioOutcome, visibility: str) -> CapabilityVerdict | None:
@@ -164,10 +176,9 @@ async def _creation_failure(outcome: ScenarioOutcome, visibility: str) -> Capabi
         )
     row = rows[0]
     applies = _agent_applies(outcome.output)
-    asks = _asks(outcome.output)
     if not applies:
         return CapabilityVerdict(False, "no successful object_apply carried an agent manifest")
-    if not asks or asks[-1] > applies[0]:
+    if not _interviews(outcome.output):
         return CapabilityVerdict(False, "created the application before confirming it")
     if (row.model, row.reasoning) != (AUTO_MODEL, "auto"):
         return CapabilityVerdict(
@@ -186,9 +197,11 @@ async def _graded_support_desk(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "workspace")
     if failure is not None:
         return failure
-    asks = _asks(outcome.output)
-    if len(asks) != 1:
-        return CapabilityVerdict(False, f"{len(asks)} ask_user rounds, exactly one")
+    interviews = _interviews(outcome.output)
+    if len(interviews) != 1:
+        return CapabilityVerdict(
+            False, f"{len(interviews)} ask_user rounds before the create, exactly one"
+        )
     return CapabilityVerdict(True, "one workspace application created from one answered form")
 
 
@@ -196,10 +209,12 @@ async def _graded_stated_up_front(outcome: ScenarioOutcome) -> CapabilityVerdict
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
-    asks = _asks(outcome.output)
-    if len(asks) != 1:
+    interviews = _interviews(outcome.output)
+    if len(interviews) != 1:
         return CapabilityVerdict(
-            False, f"{len(asks)} ask_user rounds; the form is asked once, prefilled"
+            False,
+            f"{len(interviews)} ask_user rounds before the create; the form is asked "
+            "once, prefilled",
         )
     return CapabilityVerdict(True, "one private application created from one answered form")
 

@@ -118,6 +118,7 @@ from evals.harness.viewer import (
     record_run,
     render_viewer,
 )
+from evals.new_application import _interviews
 from evals.registry import (
     SCENARIO_SIMULATOR_MODEL,
     SEMANTIC_JUDGE_MODEL,
@@ -310,6 +311,20 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "credential_handoff",
         }
     )
+
+
+def test_the_interview_is_the_succeeded_ask_before_the_create() -> None:
+    """A post-create ask is the closing move the skill teaches — offering to attach an account —
+    and a refused ask agreed to nothing: neither is the form the member said go on."""
+    manifest = "kind: agent\nname: helper\nspec:\n  prompt: p\n"
+    apply = ToolInvocation(name="object_apply", input={"manifest": manifest}, has_result=True)
+    asked = ToolInvocation(name="ask_user", input={}, has_result=True)
+    refused = ToolInvocation(name="ask_user", input={}, has_result=True, is_error=True)
+
+    assert _interviews(CapabilityOutput("", (refused, asked, apply, asked))) == (1,)
+    assert _interviews(CapabilityOutput("", (apply, asked))) == ()
+    assert _interviews(CapabilityOutput("", (refused, apply))) == ()
+    assert _interviews(CapabilityOutput("", (asked,))) == ()
 
 
 def test_stateful_and_scenario_tasks_are_exclusive() -> None:
