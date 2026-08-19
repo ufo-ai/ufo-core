@@ -1013,6 +1013,12 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("create-skill", "website-building"),
     ),
     SkillLoadCase(
+        "application-another-pr-babysitter",
+        "We already have several apps. Add a pull request babysitter for our other repository.",
+        expected="create-application",
+        forbidden=("first-run",),
+    ),
+    SkillLoadCase(
         "first-run-get-set-up",
         "Let's get set up.",
         expected="first-run",
@@ -1031,5 +1037,11 @@ CASES: tuple[SkillLoadCase, ...] = (
         "first-run-slack-and-team",
         "Let's connect Slack and show the team what this can do for them.",
         expected="first-run",
+    ),
+    SkillLoadCase(
+        "first-run-first-app",
+        "This is our first app. We use Slack and GitHub. Set up the pull request babysitter.",
+        expected="first-run",
+        forbidden=("create-application",),
     ),
 )

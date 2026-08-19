@@ -131,17 +131,19 @@ def test_the_assistant_skills_reach_every_pack_that_composes_it() -> None:
         assert set(assistant.SKILL_NAMES) <= set(loadable), name
 
 
-def test_the_first_run_skill_ships_the_agent_ideas_it_routes_to() -> None:
-    """The first run proposes agents out of one reference file and names no idea in `SKILL.md`, so a
-    bundle shipping only the hub would send every workspace the same handful of agents the model
-    invents. The hub cites the path and the bundle carries it."""
+def test_the_first_run_skill_ships_only_the_four_app_recipes() -> None:
     skill = next(
         entry
         for entry in discovered_packs()[assistant.NAME].skills
         if entry.path.name == "first-run"
     )
-    assert {path.name for path in (skill.path / "references").iterdir()} == {"agent-ideas.md"}
-    assert "references/agent-ideas.md" in (skill.path / "SKILL.md").read_text()
+    assert not (skill.path / "references" / "agent-ideas.md").exists()
+    assert {path.name for path in (skill.path / "references" / "recipes").iterdir()} == {
+        "ai-news-review.md",
+        "competitive-intel.md",
+        "pull-request-babysitter.md",
+        "what-we-learned.md",
+    }
 
 
 def test_assistant_hosted_pack_is_discovered_with_its_bundle_and_skills() -> None:
