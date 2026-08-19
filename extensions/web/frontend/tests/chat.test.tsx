@@ -49,7 +49,7 @@ const transcript = (payload: unknown = { messages: [] }) => ({
 });
 
 function open() {
-  return render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  return render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
 
 function waiting(text: string): boolean {
@@ -1999,7 +1999,7 @@ test("an application the turn created stands on the reply that made it, and open
     ...transcript(),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "build me a digest");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -2037,7 +2037,7 @@ test("a reloaded conversation draws the app card on the reply that created it", 
       ],
     }),
   );
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   const reply = (await screen.findByText(saying("Second is set up."))).closest(
     "[data-slot=message]",
@@ -2753,7 +2753,7 @@ test("switching conversations remounts the log so scroll state never leaks acros
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
 
   const first = screen.getByTestId("log");
@@ -2949,7 +2949,7 @@ test("a turn the fleet picked back up says so among its steps", async () => {
 test("the start screen picks the agent in its own composer, and carries what was typed to it", async () => {
   wire({ ...transcript() });
   location.hash = "#/";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Message the agent");
   expect(screen.queryByTestId("log")).toBeNull();
@@ -2972,7 +2972,7 @@ test("the start screen picks the agent in its own composer, and carries what was
 test("the composer's agent picker draws each app's mark, and keeps the chosen one", async () => {
   wire({ ...transcript() });
   location.hash = "#/";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Message the agent");
   const control = screen.getByRole("combobox", { name: "Agent" });
@@ -3003,7 +3003,7 @@ test("a starter says its sentence on the press, and leaves with the start screen
     },
   });
   location.hash = "#/";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Message the agent");
   await userEvent.click(screen.getByRole("button", { name: /Inbox triage/ }));
@@ -3023,7 +3023,7 @@ test("a conversation that has opened fixes its agent, and the picker goes with t
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
   location.hash = "#/";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("combobox", { name: "Agent" })).toBeTruthy();
   await userEvent.type(screen.getByLabelText("Message the agent"), "hello");

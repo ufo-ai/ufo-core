@@ -25,7 +25,7 @@ async function streaming() {
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -334,7 +334,7 @@ test("a reloaded turn draws the thought it settled into as a step", async () => 
       }),
     "/slots": () => json({ slots: [] }),
   });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const summary = await screen.findByText("Completed 1 step");
   expect(screen.queryByText("Reading the changelog first.")).toBeNull();
@@ -451,7 +451,7 @@ test("an arrival the reload found undrained waits until an absorbed frame names 
       }),
     "/slots": () => json({ slots: [] }),
   });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await waitFor(() =>
     expect(screen.getByText("and the tests").classList.contains("italic")).toBe(true),
@@ -584,7 +584,7 @@ test("the slot strip draws the option every pressed control in the portal is dra
         ],
       }),
   });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const changes = await screen.findByRole("button", { name: "Changes 2" });
   // The rule is that a pressed control is drawn as pressed, which these four classes are. The
@@ -609,7 +609,7 @@ test("a send whose answer is not json ends the wait instead of disabling the com
     "/transcript": () => json({ messages: [] }),
     "/chat": () => new Response("<html>", { status: 200 }),
   });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 

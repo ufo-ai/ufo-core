@@ -4,6 +4,10 @@ import { afterEach, beforeEach, vi } from "vitest";
 import { resetChatStore } from "@/lib/chatStore";
 import { resetStreams } from "@/lib/turnStream";
 
+// A CI failure's DOM dump is the one record of what actually rendered there; the default limit
+// cuts it off inside the page's own top bar.
+process.env.DEBUG_PRINT_LIMIT ??= "30000";
+
 const KEY_FAULT = /unique "key" prop|two children with the same key/;
 let keyFaults: string[] = [];
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from evals import (
     ab_reversal,
+    app_builder,
     authority_handoff,
     basics,
     browser_nav,
@@ -128,6 +129,7 @@ TASKS: tuple[EvalTask, ...] = (
         judge_model=SEMANTIC_JUDGE_MODEL,
         serial=True,
     ),
+    capability_task("app_builder", app_builder.CASES),
     capability_task("connector_refs", connector_refs.CASES),
     capability_task(
         "writing_subagent",

@@ -29,7 +29,7 @@ function asking(question: Record<string, unknown>, posts: RequestInit[] = []) {
       return json({ turn_id: TURN_ID, body: String(init?.body ?? "") });
     },
   });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   return posts;
 }
 

@@ -44,7 +44,7 @@ async function streaming(routes: Record<string, () => Response> = {}) {
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
     ...routes,
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -210,7 +210,7 @@ test("returning to an idle tab refetches the transcript", async () => {
       });
     },
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
 
   window.dispatchEvent(new Event("focus"));
@@ -223,7 +223,7 @@ test("a transcript that never loads says so in the pane, not as an empty convers
     "/api/chats": () => json(RAIL),
     "/transcript": () => new Response("nope", { status: 503 }),
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("The conversation did not load.")).toBeTruthy();
   expect(screen.getByText("Error 503 — reload to retry.")).toBeTruthy();
@@ -241,7 +241,7 @@ test("a re-read that fails states so over the conversation it already holds", as
       return new Response("nope", { status: 503 });
     },
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("still here");
 
   window.dispatchEvent(new Event("focus"));
@@ -256,7 +256,7 @@ test("a draft survives leaving the chat and is cleared by sending", async () => 
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "half a thought");
@@ -334,7 +334,7 @@ test("a transcript fetched before a send never erases the exchange", async () =>
     },
     "/chat": () => json({ turn_id: TURN_ID }),
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
 
   window.dispatchEvent(new Event("focus"));
@@ -388,7 +388,7 @@ test("a failed idle refetch keeps what the member already sees", async () => {
       return new Response("down", { status: 500 });
     },
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("kept history");
 
   window.dispatchEvent(new Event("focus"));
@@ -407,7 +407,7 @@ test("returning visibility alone refetches an idle transcript", async () => {
       });
     },
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
 
   document.dispatchEvent(new Event("visibilitychange"));
@@ -416,20 +416,20 @@ test("returning visibility alone refetches an idle transcript", async () => {
 
 test("a draft never crosses members on a shared browser", async () => {
   wire({ "/api/chats": () => json(RAIL), "/transcript": () => json({ messages: [] }) });
-  const first = render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  const first = render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "private thought");
   window.dispatchEvent(new Event("pagehide"));
   first.unmount();
 
   const other = render(
-    <App agents={[AGENT, SECOND]} member={{ ...MEMBER, id: "m2", email: "other@example.com" }} newAgent={null} onAgents={() => {}} />,
+    <App agents={[AGENT, SECOND]} member={{ ...MEMBER, id: "m2", email: "other@example.com" }} onAgents={() => {}} />,
   );
   await screen.findByText("No messages in this conversation yet.");
   expect((screen.getByLabelText("Message the agent") as HTMLInputElement).value).toBe("");
   other.unmount();
 
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
   expect((screen.getByLabelText("Message the agent") as HTMLInputElement).value).toBe(
     "private thought",

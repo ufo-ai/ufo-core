@@ -3,27 +3,25 @@ import { useState } from "react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
-import { ObjectPane, SpecPanel, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
-import { BesideHost, useBeside } from "@/kernel/beside";
+import { ObjectPane } from "@/kernel/objects";
+import { BesideHost } from "@/kernel/beside";
 import { BANDS } from "@/kernel/pane";
-import { outcomeNotice, type NoticeState } from "@/kernel/panel";
 import { TabPanel, TabRow } from "@/kernel/tabs";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
-import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { AgentPane } from "@/views/AgentPane";
 import { AgentSkills } from "@/views/AgentSkills";
+import { APP_BUILDER_TITLE, AppBuilder } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import { AGENT_TABS, type AgentTab, type PlaceStep, type WorkspacePlace } from "@/lib/route";
-import type { Agent, NewAgentForm } from "@/lib/types";
+import type { Agent, Member } from "@/lib/types";
 
 export type AgentsProps = {
   agents: Agent[];
-  newAgent: NewAgentForm | null;
+  member: Member;
   /** The agent the hash names, or null on the bare route — which shows the main agent without
    *  navigating. */
   selected: Agent | null;
@@ -35,9 +33,12 @@ export type AgentsProps = {
   onAgents: () => void;
 };
 
-const AGENT_KIND = "agent";
-const MODEL_FIELD = "model";
 const MAIN = "Main";
+
+/** One app-building run, while its wizard holds the pane: what the chat route called the
+ *  conversation the opening message founded, absent until that message lands. The run is nothing but
+ *  this — client-side state a reload clears, so no phantom row survives one. */
+type Run = { title: string | null };
 
 /** The clock-fired tasks the app holds. Radar reads them across the workspace, beside what they
  *  did; here they are read and written for the one app they run on, which is where a member sets
@@ -56,25 +57,13 @@ const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
   skills: "Skills",
 };
 
-/** The values a create form opens on: one for every field whose choices are closed — the deploy's
- *  model ids, and the enums the spec declares. A picker the member never opened would otherwise
- *  submit nothing and earn a refusal for a value the form was already showing. */
-function initialSpec(form: NewAgentForm): Record<string, ObjectValue> {
-  const properties = form.spec_schema.properties ?? {};
-  return Object.fromEntries(
-    Object.entries(properties).flatMap(([field, property]) => {
-      const choices = field === MODEL_FIELD ? form.models : property.enum;
-      return choices?.length ? [[field, choices[0]]] : [];
-    }),
-  );
-}
-
 /** The apps screen: a thin index — the New application act over one row per app, the open app's
- *  settings behind the gear beside it — next to a wide pane holding the selected app. On a narrow
- *  screen the index is the page and a hash-named app overlays it. */
+ *  settings behind the gear beside it — next to a wide pane holding the selected app, or the
+ *  app-building wizard while a run is open. On a narrow screen the index is the page and a
+ *  hash-named app overlays it. */
 export function Agents({
   agents,
-  newAgent,
+  member,
   selected,
   tab,
   place,
@@ -85,45 +74,15 @@ export function Agents({
 }: AgentsProps) {
   const mainAgent = useMainAgent();
   const shown = selected ?? mainAgent;
-  const [creating, setCreating] = useState(false);
+  const [run, setRun] = useState<Run | null>(null);
   const [settling, setSettling] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(SETTINGS_TABS[0]);
-  const [toast, setToast] = useState<ToastState>(SILENT);
-
-  /** The `agent` kind takes a create only from a workspace admin speaking on the main agent's
-   *  lane, so that is the lane the intent rides. A create that landed is read back through the one
-   *  answer to what agents exist, which the index, the sidebar, and the router all draw from. */
-  async function create(lane: string, envelope: SpecEnvelope): Promise<NoticeState> {
-    const outcome = await postIntent(lane, { ...envelope, create_only: true });
-    if (outcome.applied) {
-      onAgents();
-      setToast({ title: "Created " + agentName(envelope.name) + "." });
-    }
-    return outcomeNotice(outcome);
-  }
-
-  const beside = useBeside(
-    creating && newAgent && mainAgent ? (
-      <SpecPanel
-        schema={newAgent.spec_schema}
-        kind={AGENT_KIND}
-        name={null}
-        spec={initialSpec(newAgent)}
-        title="New application"
-        options={{ [MODEL_FIELD]: newAgent.models }}
-        onDone={(envelope) => create(mainAgent.id, envelope)}
-        onClose={() => setCreating(false)}
-      />
-    ) : null,
-    () => setCreating(false),
-  );
 
   return (
     <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1">
-      <nav
-        aria-label="Agents"
+      <div
         className={cn(
-          "flex min-h-0 flex-col gap-sm overflow-y-auto",
+          "flex min-h-0 flex-col gap-2xl overflow-y-auto",
           "border-r border-edge bg-sidebar px-sm py-2xl max-narrow:border-r-0",
           /* The pane covers this index on a narrow screen, so the index stops answering while
              it is covered: a row behind the cover is still a tab stop and still a row a reader
@@ -131,56 +90,90 @@ export function Agents({
           selected && "max-narrow:invisible",
         )}
       >
-        {newAgent && mainAgent ? (
-          <Button variant="send" size="bar" className="shrink-0" onClick={() => setCreating(true)}>
-            New application
-          </Button>
-        ) : null}
-        <ul className="m-0 flex list-none flex-col gap-px p-0">
-          {agents.map((agent) => {
-            const open = agent.id === shown?.id;
-            return (
-              /** The whole row is the one control: it opens the app, and nothing else stands on
-               *  it. What acts on the open app is worn by that app's own pane, beside its name. */
-              <li
-                key={agent.id}
-                className={cn(
-                  "flex items-center rounded-control hover:bg-fill",
-                  open && "bg-fill",
-                )}
-              >
-                <button
-                  type="button"
-                  aria-current={open}
-                  onClick={() => onOpen(agent.id)}
+        <nav aria-label="Agents" className="flex shrink-0 flex-col gap-sm">
+          {/* Every member is offered the act: the `agent` kind admits a create from any speaking
+              member and stamps them the owner, and the wizard rides the main agent's own chat. */}
+          {mainAgent ? (
+            <Button
+              variant="send"
+              size="bar"
+              className="shrink-0"
+              onClick={() => setRun({ title: null })}
+            >
+              New application
+            </Button>
+          ) : null}
+          <ul className="m-0 flex list-none flex-col gap-px p-0">
+            {/* The run in flight, named the way the wizard's own pane is until the conversation has a
+                title of its own. It is the pane the screen is showing, so the row states where the
+                member already is rather than offering a place to go — and it is not an app: nothing
+                here opens one, and the app's real row arrives from the apps read when it lands. */}
+            {run ? (
+              <li className="flex items-center gap-xs rounded-control bg-fill pr-xs">
+                <div className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs">
+                  <span className="min-w-0 truncate text-label">
+                    {run.title ? APP_BUILDER_TITLE + ": " + run.title : APP_BUILDER_TITLE}
+                  </span>
+                  <span className="w-full truncate font-mono text-small text-ink-soft">Building</span>
+                </div>
+              </li>
+            ) : null}
+            {agents.map((agent) => {
+              const open = !run && agent.id === shown?.id;
+              return (
+                /** The whole row is the one control: it opens the app, and nothing else stands on
+                 *  it. What acts on the open app is worn by that app's own pane, beside its name. */
+                <li
+                  key={agent.id}
                   className={cn(
-                    "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent",
-                    "px-sm py-xs text-left text-inherit",
+                    "flex items-center rounded-control hover:bg-fill",
+                    open && "bg-fill",
                   )}
                 >
-                  {/* Both facts are read in the row's own ink rather than the soft tone: soft ink
-                      clears the contrast floor over the pane's surface and not over the fill an
-                      open or hovered row draws, and these two words are the smallest text in the
-                      rail. Size and the mono face carry the hierarchy instead. */}
-                  <Avatar>
-                    <AvatarFallback>
-                      <AgentIcon name={agent.icon} />
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="flex min-w-0 flex-1 flex-col gap-2xs">
-                    <span className="flex w-full items-baseline gap-sm">
-                      <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
-                      {agent.main ? <span className="text-small">{MAIN}</span> : null}
+                  <button
+                    type="button"
+                    aria-current={open}
+                    onClick={() => {
+                      setRun(null);
+                      onOpen(agent.id);
+                    }}
+                    className={cn(
+                      "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent",
+                      "px-sm py-xs text-left text-inherit",
+                    )}
+                  >
+                    {/* Both facts are read in the row's own ink rather than the soft tone: soft ink
+                        clears the contrast floor over the pane's surface and not over the fill an
+                        open or hovered row draws, and these two words are the smallest text in the
+                        rail. Size and the mono face carry the hierarchy instead. */}
+                    <Avatar>
+                      <AvatarFallback>
+                        <AgentIcon name={agent.icon} />
+                      </AvatarFallback>
+                    </Avatar>
+                    <span className="flex min-w-0 flex-1 flex-col gap-2xs">
+                      <span className="flex w-full items-baseline gap-sm">
+                        <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
+                        {agent.main ? <span className="text-small">{MAIN}</span> : null}
+                      </span>
+                      <span className="w-full truncate font-mono text-small">{agent.model}</span>
                     </span>
-                    <span className="w-full truncate font-mono text-small">{agent.model}</span>
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </nav>
-      {shown ? (
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
+      </div>
+      {run && mainAgent ? (
+        <AppBuilder
+          agent={mainAgent}
+          member={member}
+          onOpened={(title) => setRun({ title })}
+          onSettled={onAgents}
+          onClose={() => setRun(null)}
+        />
+      ) : shown ? (
         <AgentPane
           agent={shown}
           tab={tab}
@@ -199,7 +192,7 @@ export function Agents({
           No agent is visible to you.
         </div>
       )}
-      {shown ? (
+      {shown && !run ? (
         <Dialog open={settling} onOpenChange={setSettling}>
           <DialogContent className="w-settings" aria-describedby={undefined}>
             {/* A record the dialog raises — a connector's own row — has to stand inside it: the
@@ -227,8 +220,6 @@ export function Agents({
           </DialogContent>
         </Dialog>
       ) : null}
-      {beside}
-      <Toast state={toast} onDone={() => setToast(SILENT)} />
     </div>
   );
 }

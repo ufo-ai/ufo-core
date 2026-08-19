@@ -31,7 +31,7 @@ async function streaming() {
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
   render(
-    <App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+    <App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />,
   );
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));

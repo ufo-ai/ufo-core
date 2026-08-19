@@ -119,7 +119,7 @@ from ufo.sdk.surfaces import (
 from ufo.sdk.tools import REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
-from ufo_ext_web.panels import ApplyIntent, agent_create_schema, agent_settings, submit_intent
+from ufo_ext_web.panels import ApplyIntent, agent_settings, submit_intent
 
 SURFACE_WEB = "web"
 SOURCE = "ufo web"
@@ -734,9 +734,10 @@ async def _audience_for(
 async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     """The portal's first read: the signed-in member and the agents their web audience holds — every
     agent for a workspace admin, the main agent plus the granted non-main agents for everyone else.
-    `agents` is the set a member may open and message. `new_agent` is the create form's source — the
-    kind's spec schema and the deploy's model ids — for every signed-in member, because the `agent`
-    kind admits a create from any speaking member and stamps them the owner."""
+    `agents` is the set a member may open and message. The create act draws nothing from this read:
+    it is a conversation the `create-application` skill runs, and the screen offers it to every
+    signed-in member, because the `agent` kind admits a create from any speaking member and stamps
+    them the owner."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -762,10 +763,6 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 }
                 for agent in audience.agents
             ],
-            "new_agent": {
-                "spec_schema": agent_create_schema(ctx.sandbox_sizes),
-                "models": list(ctx.models),
-            },
         }
     )
 

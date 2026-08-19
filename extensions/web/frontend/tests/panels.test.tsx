@@ -80,7 +80,7 @@ test("the settings page states the agent's facts, renders its schema, and submit
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
   expect(await screen.findByText("Main agent")).toBeTruthy();
   expect(fact("Installations")).toBe("Portal, Terminal");
@@ -137,7 +137,7 @@ test("the settings usage fact opens the workspace usage tab", async () => {
       }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
 
   await userEvent.click(await screen.findByRole("link", { name: "Workspace usage" }));
@@ -163,7 +163,7 @@ test("switching agents discards unsaved settings edits", async () => {
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(
-    <App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+    <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
   await openAgentSettings();
   await userEvent.clear(await screen.findByLabelText("Prompt"));
@@ -206,7 +206,7 @@ test("settings polling preserves dirty edits", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   vi.useFakeTimers();
   try {
-    render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
     // The gear, not `openAgentSettings`: this test drives fake timers, which userEvent waits on.
     fireEvent.click(screen.getByRole("button", { name: "Settings for Assistant" }));
     await act(async () => {
@@ -257,7 +257,7 @@ test("a non-admin reads an agent prompt but cannot edit it", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
   expect(await screen.findByText("be useful")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save prompt" })).toBeNull();
@@ -273,7 +273,6 @@ test("the agents index states a row's name and model, and leaves the address lis
         { ...SECOND, id: "33333333-3333-4333-8333-333333333333", name: "private", web_audience: [] },
       ]}
       member={{ ...MEMBER, admin: true }}
-      newAgent={null}
       onAgents={() => {}}
     />,
   );
@@ -288,7 +287,7 @@ test("the agents index states a row's name and model, and leaves the address lis
 test("a non-admin reads the same index rows", async () => {
   location.hash = "#/agents";
   render(
-    <App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+    <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
 
   const index = within(await screen.findByRole("navigation", { name: "Agents" }));
@@ -304,7 +303,7 @@ test("a settings read that fails states the error and offers no form", async () 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
@@ -347,7 +346,7 @@ test("the scheduled index leads with both runs, and its detail pauses through th
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/radar?chip=scheduled_task";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const listed = (await screen.findByText("digest")).closest("tr");
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
@@ -401,7 +400,7 @@ test("a detail whose kind the lane refuses offers no control and no prose about 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/artifacts";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await viewCard("docs-abc"));
 
@@ -437,7 +436,7 @@ test("a private grant is shared with the agent from the settings connectors sect
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings("Assistant", "Connectors");
   expect(await screen.findByText("Only you")).toBeTruthy();
   await pressRow("github");
@@ -477,7 +476,7 @@ test("the agent's own section lists what is shared with it and not what is held 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings("Assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
@@ -510,7 +509,7 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const row = await screen.findByRole("button", { name: /Slack · 3 turns/ });
   expect(row.querySelector("[data-part='primary']")!.textContent).toBe("Workspace");
@@ -549,7 +548,7 @@ test("a conversation row names what it is about and whose it is, and the keyboar
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const row = await screen.findByRole("button", {
     name: /can you take a look at the failing deploy/,
@@ -619,7 +618,7 @@ test("a Slack row names its channel on its meta line, and those words are the wa
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const said = await screen.findByText("take a look at the failing deploy", {
     selector: "[data-part='primary']",
@@ -699,7 +698,7 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: /Rename the deploy job/ }));
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
@@ -759,7 +758,7 @@ test("a Slack transcript heads itself with its channel, and those words are the 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await userEvent.click(
     await screen.findByText("take a look at the failing deploy", {
       selector: "[data-part='primary']",
@@ -830,7 +829,7 @@ test("a conversation nobody shared offers no opener", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   const named = await screen.findByText("#ops", { selector: "[data-part='primary']" });
   const unnamed = screen.getByText("Private channel", { selector: "[data-part='primary']" });
   expect(named.closest("li")!.querySelector("[data-part='meta']")!.textContent).toBe("4 turns");
@@ -992,7 +991,7 @@ test("the top bar routes agents, sections, and the workspace by hash and marks t
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/workspace/artifacts": () => json({ artifacts: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   expect(location.hash).toBe("#/agents");
@@ -1028,7 +1027,7 @@ test("the top bar routes agents, sections, and the workspace by hash and marks t
 
 test("a member who is not an admin is offered no administration control", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
   expect(await screen.findByRole("menuitem", { name: /Theme/ })).toBeTruthy();
   expect(screen.queryByRole("menuitem", { name: "Administration" })).toBeNull();
@@ -1041,7 +1040,7 @@ test("the agent tab strip opens the tab named in the hash, and Home takes the ba
     "/homepage": () => json({ state: "none" }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("No conversation with Assistant yet.")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Conversations" }).getAttribute("aria-selected")).toBe(
@@ -1063,7 +1062,7 @@ test("the model field offers the deploy's models, which its schema alone cannot 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
   expect((await opened("model")).map((option) => option.textContent)).toEqual([
     "opus",
@@ -1095,7 +1094,7 @@ test("a conversation the member may not read says so instead of reporting a stat
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: /a shared thread/ }));
   expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
   expect(screen.queryByText(/Error 404/)).toBeNull();
@@ -1129,7 +1128,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings("Assistant", "Connectors");
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
@@ -1197,7 +1196,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings("Assistant", "Connectors");
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
@@ -1222,7 +1221,7 @@ test("every container that stacks bands states the one gap between them", async 
   wire({ "/workspace/team": () => json({ members: [], can_add: false }) });
   location.hash = "#/workspace/team";
   render(
-    <App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+    <App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />,
   );
 
   const panel = await screen.findByRole("tabpanel");
@@ -1259,7 +1258,7 @@ test("an agent's conversation search asks the server rather than the rows on the
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("Order more coffee")).toBeTruthy();
   const column = within(await screen.findByRole("navigation", { name: "Conversations" }));

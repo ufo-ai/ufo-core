@@ -379,7 +379,7 @@ test("a value the kind's spec declares as an enum reads as its own chip", async 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/artifacts";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await viewCard("docs-abc"));
 
@@ -407,7 +407,7 @@ test("a deploy without the sites extension leaves the shelf to its files alone",
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/artifacts";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
   expect(screen.queryByText(/^Error /)).toBeNull();
@@ -794,7 +794,7 @@ test("the radar section is reached by its own hash and leads with the feed", asy
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/radar";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
   expect(await screen.findByText("roll-up.pdf")).toBeTruthy();
@@ -818,7 +818,7 @@ test("an app's Scheduled tab lists that app's tasks, and a row opens inside the 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   const dialog = await openAgentSettings("Assistant", "Scheduled");
 
@@ -844,7 +844,7 @@ test("a row opens under the agent that owns it, and closing returns to the whole
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/radar?chip=scheduled_task";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await openRow("weekly-roll");
 
@@ -873,7 +873,7 @@ test("a panel taking the column clears the displaced record without leaving the 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/radar";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
   expect(await screen.findByRole("heading", { level: 2, name: "daily-brief" })).toBeTruthy();
@@ -904,7 +904,7 @@ test("the artifacts section reads the site index on the main agent", async () =>
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/artifacts";
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);

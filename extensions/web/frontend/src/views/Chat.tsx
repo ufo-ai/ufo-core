@@ -65,6 +65,10 @@ export type ChatProps = {
   agent: ChatAgent;
   member: Member;
   conversationId: string | null;
+  /** The store key a founding send runs under, when the pane is not the chat screen: the wizard
+   *  founds on a key of its own, so its opening send and the chat screen's new-conversation buffer
+   *  can never hold each other busy. */
+  foundingKey?: string;
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
   onSettled?: () => void;
@@ -81,6 +85,7 @@ export function Chat({
   agent,
   member,
   conversationId,
+  foundingKey,
   onCreated,
   onActivity,
   onSettled,
@@ -88,7 +93,7 @@ export function Chat({
   agents,
   onPickAgent,
 }: ChatProps) {
-  const chatKey = conversationId ?? "new:" + agent.id;
+  const chatKey = conversationId ?? foundingKey ?? "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
   const state = useChat(chatKey);
   const composer = useRef<HTMLTextAreaElement>(null);

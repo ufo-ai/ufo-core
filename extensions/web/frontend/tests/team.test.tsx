@@ -28,7 +28,7 @@ beforeEach(() => {
 
 test("the roster names each member, who administers, and who holds a seat", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const lead = await screen.findByText("lead@example.com");
   expect(lead.closest("tr")?.textContent).toContain("Admin");
@@ -47,7 +47,7 @@ test("an admin adds a member by email, optionally as an admin, through the inten
       return json({ applied: true, message: "Added new@example.com." });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const submit = await openAdd();
   await userEvent.type(screen.getByPlaceholderText("email@work.com"), "new@example.com");
@@ -65,7 +65,7 @@ test("an admin adds a member by email, optionally as an admin, through the inten
 
 test("the address and its role stretch to one height, so the chevron sits on the row's line", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await openAdd();
   const row = screen.getByLabelText("Email").parentElement;
@@ -75,7 +75,7 @@ test("the address and its role stretch to one height, so the chevron sits on the
 
 test("the act stays shut until every row carries an address", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const submit = await openAdd();
   expect(submit.hasAttribute("disabled")).toBe(true);
@@ -89,7 +89,7 @@ test("the act stays shut until every row carries an address", async () => {
 
 test("a search narrows the roster to the members whose address matches", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.type(await screen.findByLabelText("Search members"), "LEAD{enter}");
 
@@ -99,7 +99,7 @@ test("a search narrows the roster to the members whose address matches", async (
 
 test("a search that matches nobody says so in a row, and the table holds", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.type(await screen.findByLabelText("Search members"), "nobody{enter}");
 
@@ -121,7 +121,7 @@ test("added rows each send their own intent, and the roster reports the count", 
       return json({ applied: true, message: "Added someone." });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const submit = await openAdd();
   await userEvent.click(screen.getByRole("button", { name: "Add more" }));
@@ -156,7 +156,7 @@ test("only the refused rows stay behind, so a second press cannot re-add what la
         : json({ applied: true, message: "Added good@example.com." });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const submit = await openAdd();
   await userEvent.click(screen.getByRole("button", { name: "Add more" }));
@@ -177,7 +177,7 @@ test("a refused add states the refusal and leaves the form to correct", async ()
     "/workspace/team": () => json(ROSTER),
     "/intents": () => json({ applied: false, message: "Only an admin adds a member." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const submit = await openAdd();
   await userEvent.type(screen.getByPlaceholderText("email@work.com"), "x@example.com");
@@ -192,7 +192,7 @@ test("a refused add states the refusal and leaves the form to correct", async ()
 
 test("the tab names the roster, so the section under it repeats no heading", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByRole("tab", { name: "Team", selected: true })).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Members" })).toBeNull();
@@ -202,7 +202,7 @@ test("the tab names the roster, so the section under it repeats no heading", asy
 
 test("the address and role are named for a member who cannot see the placeholder", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await openAdd();
   expect(screen.getByLabelText("Email").getAttribute("type")).toBe("email");
@@ -218,7 +218,7 @@ test("an add already in flight is not sent twice", async () => {
       return new Promise(() => undefined) as unknown as Response;
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const submit = await openAdd();
   await userEvent.type(screen.getByPlaceholderText("email@work.com"), "new@example.com");
@@ -232,7 +232,7 @@ test("an add already in flight is not sent twice", async () => {
 
 test("a member who may not add reads the roster with no form", async () => {
   wire({ "/workspace/team": () => json({ ...ROSTER, can_add: false }) });
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
@@ -240,7 +240,7 @@ test("a member who may not add reads the roster with no form", async () => {
 
 test("the form admits an address at any domain and hints a neutral one", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await openAdd();
   expect(
@@ -251,7 +251,7 @@ test("the form admits an address at any domain and hints a neutral one", async (
 
 test("a roster that fails to read states the error and offers no form", async () => {
   wire({ "/workspace/team": () => new Response("no", { status: 500 }) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
@@ -259,7 +259,7 @@ test("a roster that fails to read states the error and offers no form", async ()
 
 test("a read whose body is not json states the failure rather than hanging", async () => {
   wire({ "/workspace/team": () => new Response("<html>", { status: 200 }) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
@@ -270,7 +270,7 @@ test("the sidebar offers the workspace, which opens on the roster", async () => 
     "/workspace/team": () => json(ROSTER),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
   await waitFor(() => expect(calls.some((url) => url.includes("/workspace/team"))).toBe(true));
@@ -295,7 +295,7 @@ test("an outcome notice does not follow the member to another view", async () =>
     "/transcript": () => json({ messages: [] }),
     "/intents": () => json({ applied: true, message: "Added member@example.com." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
   const submit = await openAdd();
@@ -316,7 +316,7 @@ test("an outcome notice does not follow the member to another view", async () =>
 
 test("a failed roster read states the fault through the shared fence", async () => {
   wire({ "/workspace/team": () => new Response("nope", { status: 500 }) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();

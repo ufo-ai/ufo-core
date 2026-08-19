@@ -170,7 +170,7 @@ test("an admin is offered administration, which reads the admin projection", asy
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
 
   await openAdministration();
   expect(await screen.findByText("Seated")).toBeTruthy();
@@ -182,7 +182,7 @@ test("an admin is offered administration, which reads the admin projection", asy
 
 test("the top bar names the categories on the left and workspace and the member on the right", () => {
   wire({});
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const bar = screen.getByRole("navigation", { name: "Primary" });
   const names = within(bar)
@@ -196,7 +196,7 @@ test("the top bar names the categories on the left and workspace and the member 
 
 test("the menu drawer carries the bar's destinations and the act that starts a conversation", async () => {
   wire({});
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
 
@@ -217,7 +217,7 @@ test("the menu drawer carries the bar's destinations and the act that starts a c
 
 test("picking a destination in the drawer moves the page and shuts the drawer", async () => {
   wire({});
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
@@ -229,7 +229,7 @@ test("picking a destination in the drawer moves the page and shuts the drawer", 
 
 test("the member's menu states who is signed in and offers the theme choice", async () => {
   wire({});
-  render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const trigger = screen.getByRole("button", { name: MEMBER.email });
   expect(trigger.querySelector("[data-slot=avatar-fallback]")!.textContent).toBe("M");
@@ -273,7 +273,6 @@ async function administration(routes: Record<string, Route>) {
     <App
       agents={[SECOND_AGENT]}
       member={{ ...MEMBER, admin: true }}
-      newAgent={null}
       onAgents={() => {}}
     />,
   );
@@ -321,7 +320,6 @@ test("an agent's record carries its surfaces and the web access grant, and the r
     <App
       agents={[SECOND_AGENT]}
       member={{ ...MEMBER, admin: true }}
-      newAgent={null}
       onAgents={() => {}}
     />,
   );
@@ -461,7 +459,7 @@ test("a failed administration read stays inside the scrolling frame the view own
     "/api/admin": () => new Response("no", { status: 500 }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
 
   await openAdministration();
   const message = await screen.findByText("Error 500 — reload to retry.");
@@ -480,7 +478,7 @@ test("the admin loading arm keeps the padded frame its other arms own", async ()
     "/api/admin": () => new Promise<Response>(() => {}),
   });
   location.hash = "#/admin";
-  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
 
   const loading = await screen.findByTestId("admin-loading");
   expect(loading.closest("main")).not.toBeNull();

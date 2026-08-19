@@ -37,7 +37,7 @@ type RadarArtifact = {
   preview_url: string | null;
 };
 
-type RadarRun = {
+export type RadarRun = {
   turn_id: string;
   conversation_id: string;
   agent_id: string;
@@ -50,7 +50,7 @@ type RadarRun = {
   artifacts: RadarArtifact[];
 };
 
-type RadarPayload = { runs: RadarRun[]; older?: string | null; newer?: string | null };
+export type RadarPayload = { runs: RadarRun[]; older?: string | null; newer?: string | null };
 
 /** A run that ended well needs no mark beside its own reply; the other endings are stated. */
 const STATUS_NOTES: Record<string, string> = {

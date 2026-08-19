@@ -45,18 +45,9 @@ export type Conversation = {
  *  since the pane it lands in names none. */
 export type OwnedConversation = Conversation & { agent: ConversationAgent };
 
-/** What the create act draws its form from: the `agent` kind's own spec schema and the model ids
- *  this deploy serves. The boot read carries it for every signed-in member — any speaking member
- *  may create an agent and owns what they created. */
-export type NewAgentForm = {
-  spec_schema: { properties?: Record<string, SchemaProperty>; required?: string[] };
-  models: string[];
-};
-
 export type AgentsPayload = {
   agents: Agent[];
   member: Member;
-  new_agent: NewAgentForm | null;
 };
 
 export type SpendCap = {

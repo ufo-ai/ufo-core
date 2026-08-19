@@ -120,7 +120,7 @@ function nothing() {
 }
 
 function portal() {
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 }
 
 function open() {

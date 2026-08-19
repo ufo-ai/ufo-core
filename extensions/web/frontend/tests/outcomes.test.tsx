@@ -49,7 +49,7 @@ test("a connect intent opens the stream for the turn it reports and shows the co
     "/settings": () => json(SETTINGS),
     "/intents": () => json({ applied: true, message: "Requested.", turn_id: TURN_ID }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
   await openAgentSettings("Assistant", "Connectors");
 
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
@@ -91,7 +91,7 @@ test("a credential intent that answers with a request renders the prompt carryin
       return json({ stored: true });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
   expect(await screen.findByText("models authenticates with this value.")).toBeTruthy();
@@ -116,7 +116,7 @@ test("credentials group, sort, and render slot state and literals", async () => 
   wire({
     "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByText("Credential values are shared across the workspace.")).toBeTruthy();
   expect(await screen.findByText("Filled", { selector: '[data-part="status"]' })).toBeTruthy();
@@ -143,7 +143,7 @@ test("credentials group, sort, and render slot state and literals", async () => 
 test("a credential family stands further from the family above it than from its own cards", async () => {
   location.hash = "#/workspace/credentials";
   wire({ "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await screen.findByText("Credential values are shared across the workspace.");
   const families = [...document.querySelectorAll("main h2")].map(
@@ -161,7 +161,7 @@ test("a credential family stands further from the family above it than from its 
 test("a row's acts stand on one line, so the row keeps its pitch", async () => {
   location.hash = "#/workspace/credentials";
   wire({ "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const replace = await screen.findByRole("button", { name: "Replace" });
   const cluster = replace.parentElement!;
@@ -190,7 +190,7 @@ test("a stored credential states the slot it stored and re-reads the listing", a
       }),
     "/credentials": () => json({ stored: true }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
   await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
@@ -228,7 +228,7 @@ test("a request whose second slot is refused keeps the first stored and asks onl
         : json({ stored: true });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
   await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
@@ -257,7 +257,7 @@ test("a cleared credential states the outcome and re-reads the listing", async (
     },
     "/intents": () => json({ applied: true, message: "Cleared OPENAI_API_KEY." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Clear" }));
   await userEvent.click(await screen.findByRole("button", { name: "Confirm clear" }));
@@ -276,7 +276,7 @@ test("a destructive act posts nothing until a second click confirms it, and leav
       return json({ applied: false, message: "Only an admin may clear it." });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Clear" }));
   expect(intents.length).toBe(0);
@@ -301,7 +301,7 @@ test("two acts in a row each re-read, even though the server answers one constan
     },
     "/intents": () => json({ applied: true, message: "Saved.", turn_id: TURN_ID }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const clears = await screen.findAllByRole("button", { name: "Clear" });
   await userEvent.click(clears[0]);
@@ -332,7 +332,7 @@ test("an empty slot offers Set, and a refused act states the refusal in place", 
     "/workspace/credentials": () => json({ slots: [{ ...SLOT, filled: false }] }),
     "/intents": () => json({ applied: false, message: "Only an admin may set it." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Set" }));
 
@@ -343,7 +343,7 @@ test("an empty slot offers Set, and a refused act states the refusal in place", 
 test("a workspace with no declared slots says so", async () => {
   location.hash = "#/workspace/credentials";
   wire({ "/workspace/credentials": () => json({ slots: [] }) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByText("No credential slots are declared.")).toBeTruthy();
 });
@@ -359,7 +359,7 @@ test("the secret field hides what a member types and refuses whitespace", async 
       return json({ stored: true });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
   const field = await screen.findByLabelText("the key");
@@ -377,7 +377,7 @@ test("a refused store states the reason the server gave and keeps the field", as
     "/intents": () => json(REQUESTED),
     "/credentials": () => new Response("that seal has expired", { status: 400 }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
   await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
@@ -397,7 +397,7 @@ test("the scheduled and settings refusals tone their notices", async () => {
     "/transcript": () => json({ messages: [] }),
     "/intents": refuse,
   });
-  const first = render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
   await userEvent.type(await screen.findByLabelText("Name"), "digest");
   await userEvent.click(screen.getByRole("button", { name: "Create" }));
@@ -411,7 +411,7 @@ test("the scheduled and settings refusals tone their notices", async () => {
     "/transcript": () => json({ messages: [] }),
     "/intents": refuse,
   });
-  const second = render(<App agents={[AGENT]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  const second = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
   await userEvent.click(await screen.findByRole("button", { name: "Save" }));
   await refusedNotice("The workspace refuses it.");

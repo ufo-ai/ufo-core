@@ -954,6 +954,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Build a full-stack inventory app with authentication, a persistent database, searchable "
         "products, and an interactive admin dashboard.",
         expected="website-building/webapp",
+        forbidden=("create-application",),
     ),
     SkillLoadCase(
         "webapp-customer-portal",
@@ -981,5 +982,28 @@ CASES: tuple[SkillLoadCase, ...] = (
         "testimonials, and mobile QA.",
         expected="website-building",
         forbidden=("website-building/webapp",),
+    ),
+    # "App" is the word two skills answer to. Here it is a workspace agent — something that holds a
+    # prompt and answers members — and the pair below is the confusion that decides it: an app the
+    # member will talk to routes to `create-application`, an app the member will open in a browser
+    # routes to `website-building`, and each names the other as the wrong pick.
+    SkillLoadCase(
+        "application-new-app",
+        "Build me a new app.",
+        expected="create-application",
+        forbidden=("website-building", "create-skill"),
+    ),
+    SkillLoadCase(
+        "application-finance-assistant",
+        "Set up an assistant for the finance team that reads our weekly revenue export and "
+        "answers the questions people ask about it.",
+        expected="create-application",
+        forbidden=("website-building", "data-exploration"),
+    ),
+    SkillLoadCase(
+        "application-support-bot",
+        "I want a support bot of our own that our team can message. Get it made.",
+        expected="create-application",
+        forbidden=("create-skill", "website-building"),
     ),
 )

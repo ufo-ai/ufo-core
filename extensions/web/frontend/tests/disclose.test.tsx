@@ -46,7 +46,7 @@ beforeEach(() => {
 
 test("a disclosable row is the control, one shared with nobody is inert and says so", async () => {
   wire(conversations([PRIVATE, WALLED]));
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await disclosable()).toBeTruthy();
   expect(screen.getByText("Private channel", { selector: "[data-part='primary']" })).toBeTruthy();
@@ -55,7 +55,7 @@ test("a disclosable row is the control, one shared with nobody is inert and says
 
 test("the acknowledgement names the owner and what opening records, and does not read yet", async () => {
   const { calls } = wire(conversations([PRIVATE]));
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
 
@@ -76,7 +76,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
       return json({ applied: true, message: "Recorded." });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
@@ -102,7 +102,7 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
         release = resolve;
       }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const rows = await screen.findAllByRole("button", { name: /Private/ });
   await userEvent.click(rows[0]);
@@ -129,7 +129,7 @@ test("an acknowledgement in flight for one conversation never opens over another
       });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const openers = await screen.findAllByRole("button", { name: /Private/ });
   await userEvent.click(openers[0]);
@@ -150,7 +150,7 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
     ...conversations([PRIVATE]),
     "/intents": () => json({ applied: false, message: "Only an admin may read it." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
@@ -170,7 +170,7 @@ test("a permalink to another member's conversation offers the listing's acknowle
     "/transcript": () => json({ messages: [] }),
     "/intents": () => json({ applied: true, message: "Recorded." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByText(/private to owner@example.com/)).toBeTruthy();
   expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
@@ -191,7 +191,7 @@ test("a permalink to a conversation naming no member is unshared, not missing", 
         ? json({ chats: [], conversation: linked })
         : json({ chats: [] }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(
     await screen.findByText("This conversation is not shared with this account."),
@@ -203,7 +203,7 @@ test("a permalink to a conversation naming no member is unshared, not missing", 
  *  member takes an empty list for the answer and never learns the projection refused. */
 test("a failed conversations read states the error rather than an empty column", async () => {
   wire({ "/conversations": () => new Response("nope", { status: 503 }) });
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
   expect(screen.queryByText("No conversation with assistant yet.")).toBeNull();
@@ -213,7 +213,7 @@ test("a failed conversations read states the error rather than an empty column",
  *  still there to leave by — and nothing is read until the member takes it. */
 test("the listing stands beside the acknowledgement, which reads nothing until it is taken", async () => {
   const { calls } = wire(conversations([PRIVATE]));
-  render(<App agents={[AGENT]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
 

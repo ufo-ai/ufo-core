@@ -54,6 +54,12 @@ export type Handoffs = {
 
 export type StreamingTurn = { id: string; answering: boolean };
 
+/** The conversation a founding send on this key opened. `migrateChat` moves the state to the
+ *  conversation's own key and leaves this behind as a forwarding record, so a pane that lost the
+ *  founding callback — unmounted mid-flight, or never the sender at all — still learns where its
+ *  conversation went by reading the key it was watching. */
+export type Founding = { conversationId: string; title: string };
+
 export type ChatState = {
   messages: Bubble[] | null;
   /** How many compacted-away pages stand above `messages`, as the transcript read stated it. */
@@ -70,6 +76,7 @@ export type ChatState = {
   spoken: string[];
   handoffs: Handoffs;
   fault: ToastState | null;
+  founded: Founding | null;
 };
 
 const EMPTY: ChatState = {
@@ -82,6 +89,7 @@ const EMPTY: ChatState = {
   spoken: [],
   handoffs: {},
   fault: null,
+  founded: null,
 };
 
 const states = new Map<string, ChatState>();
@@ -111,12 +119,20 @@ export function liveTurn(): LiveTurn {
   };
 }
 
-export function migrateChat(fromKey: string, toKey: string): void {
+export function migrateChat(fromKey: string, toKey: string, title: string): void {
   const state = states.get(fromKey);
   if (!state) return;
-  states.delete(fromKey);
   states.set(toKey, state);
+  states.set(fromKey, { ...EMPTY, founded: { conversationId: toKey, title } });
   for (const listener of listeners) listener();
+}
+
+/** Read and clear the key's forwarding record: binding is a one-shot act, and a record left behind
+ *  would bind the next run of the same pane to a conversation it never opened. */
+export function consumeFounding(chatKey: string): Founding | null {
+  const record = chatState(chatKey).founded;
+  if (record) updateChat(chatKey, (state) => ({ ...state, founded: null }));
+  return record;
 }
 
 export function clearChat(chatKey: string): void {

@@ -240,7 +240,6 @@
   --container-attachment: 160px;
   --container-record: min(440px, 45%);
   --container-menu: 160px;
-
   --media-tall: 60vh;
   --media-card: 20rem;
   /* The square one attached file is drawn in, in the composer and on the message it was sent with.

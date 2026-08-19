@@ -2156,9 +2156,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert index.status_code == 200
-    body = index.json()
-    assert body["new_agent"]["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
-    assert {key: value for key, value in body.items() if key != "new_agent"} == {
+    assert index.json() == {
         "member": {"email": "outsider@example.com", "admin": False},
         "agents": [
             {
@@ -2275,59 +2273,13 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
     assert reachable.text == "conversation is required"
 
 
-async def test_boot_read_carries_the_create_form_for_every_member(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """The Agents screen draws its create act from the boot read: the `agent` kind's own spec
-    schema, `prompt` among the required fields because the kind refuses a create without one, and
-    the deploy's model ids for the one field the schema cannot enumerate. Every signed-in member
-    gets it, because any speaking member may create an agent and owns what they created."""
-    client, workspace_id, _agent_id = web
-    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
-    admin_view = await client.get(
-        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
-    )
-    form = admin_view.json()["new_agent"]
-    assert form["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
-    assert sorted(form["spec_schema"]["properties"]) == [
-        "internet_access_allowed",
-        "model",
-        "prompt",
-        "reasoning",
-        "visibility",
-    ]
-    assert sorted(form["spec_schema"]["required"]) == [
-        "internet_access_allowed",
-        "model",
-        "prompt",
-        "reasoning",
-    ]
-    assert form["spec_schema"]["properties"]["visibility"]["enum"] == ["private", "workspace"]
-    assert form["spec_schema"]["properties"]["reasoning"]["enum"] == [
-        "auto",
-        "off",
-        "low",
-        "medium",
-        "high",
-    ]
-    assert form["spec_schema"]["properties"]["internet_access_allowed"]["title"] == (
-        "Internet Access Allowed"
-    )
-    member_view = await client.get(
-        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
-    )
-    assert member_view.json()["new_agent"] == form
-
-
 async def test_every_agent_read_carries_its_icon_and_no_form_asks_for_one(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The portal draws an agent by its icon wherever it names one, so the icon rides all three
     reads a screen draws an agent from: the boot index, the administration table, and the settings
-    spec that states the current value the picker opens on. Neither form offers the field — the
-    kind assigns an icon at birth, so the create form has nothing to ask, and the settings page
-    picks from a grid of drawn marks that a schema enum cannot describe."""
+    spec that states the current value the picker opens on. The form offers no field for it — the
+    settings page picks from a grid of drawn marks that a schema enum cannot describe."""
     client, workspace_id, _agent_id = web
     second_agent = uuid4()
     async with workspace_tx() as connection:
@@ -2350,7 +2302,6 @@ async def test_every_agent_read_carries_its_icon_and_no_form_asks_for_one(
         "assistant": "compass",
         "ops": "telescope",
     }
-    assert "icon" not in boot["new_agent"]["spec_schema"]["properties"]
     administration = (await client.get("/surface/web/api/admin", headers=headers)).json()
     assert {agent["name"]: agent["icon"] for agent in administration["agents"]} == {
         "assistant": "compass",
@@ -9081,9 +9032,9 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deploy whose carrier declares sizes offers the setting on both agent forms: the update
-    schema and the create schema carry `sandbox_size` as its enum, the spec states the stored
-    value, and the field stays optional — a create that omits it births the default."""
+    """A deploy whose carrier declares sizes offers the setting on the agent's own form: the update
+    schema carries `sandbox_size` as its enum, the spec states the stored value, and the field stays
+    optional — an agent born without one takes the default."""
     config, hub, blob, sandboxes = dbos_runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     dbos_client = replay_safe_client(config.database.system_url)
@@ -9112,9 +9063,6 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
             f"/surface/web/agents/{agent_id}/settings",
             headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
-        boot = await client.get(
-            "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"}
-        )
     dbos_client.destroy()
     assert settings.status_code == 200
     data = settings.json()
@@ -9125,9 +9073,7 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
         "large",
     ]
     assert data["spec_schema"]["properties"]["sandbox_size"]["title"] == "Sandbox Size"
-    create = boot.json()["new_agent"]["spec_schema"]
-    assert create["properties"]["sandbox_size"]["enum"] == ["small", "medium", "large"]
-    assert "sandbox_size" not in create["required"]
+    assert "sandbox_size" not in data["spec_schema"]["required"]
 
 
 async def test_an_oversized_intent_answers_413(web: tuple[AsyncClient, UUID, UUID]) -> None:

@@ -19,6 +19,11 @@ const STOPPED = "Stopped.";
 
 export const NEW_CONVERSATION = "new";
 
+/** What a send did with the words: an accepted send carried them to the wire — a failure past that
+ *  point is worn by the transcript as its own error entry — while a refused founding send never
+ *  left, because the key's founding is still in flight and the caller keeps its words. */
+export type SendOutcome = "accepted" | "refused";
+
 /** One conversation as the client addresses it: the store key it holds, the agent and
  *  conversation the routes name, and what a create hands back to the shell. */
 export type ChatTarget = {
@@ -675,12 +680,23 @@ export async function sendMessage(
   body: string | FormData,
   shown: string,
   attached: File[] = [],
-): Promise<void> {
+): Promise<SendOutcome> {
   const chatKey = target.key;
   // The one send that cannot be repeated: the `new` sentinel opens a conversation per request, so a
   // second send before the first answers founds a second conversation instead of joining the first,
-  // and the two halves are answered apart. The founding send holds the chat busy until it lands.
-  if (target.conversationId === null && chatState(chatKey).busy) return;
+  // and the two halves are answered apart. The founding send holds the chat busy until it lands —
+  // and a send it turns away is refused loudly: the caller gets the refusal and the key wears a
+  // fault, never a silent drop the member reads as words that went somewhere.
+  if (target.conversationId === null && chatState(chatKey).busy) {
+    updateChat(chatKey, (state) => ({
+      ...state,
+      fault: {
+        title: "The conversation is still opening.",
+        description: "Send again once it has.",
+      },
+    }));
+    return "refused";
+  }
   bumpEpoch(chatKey);
   const token = String(++SENDS);
   updateChat(chatKey, (state) => ({
@@ -727,12 +743,12 @@ export async function sendMessage(
   } catch {
     settled(chatKey, null);
     failTurn(chatKey, "Network error — try again.");
-    return;
+    return "accepted";
   }
   if (!res.ok) {
     settled(chatKey, null);
     failTurn(chatKey, "Error " + res.status + " — try again.");
-    return;
+    return "accepted";
   }
   let accepted: {
     turn_id?: unknown;
@@ -746,12 +762,12 @@ export async function sendMessage(
   } catch {
     settled(chatKey, null);
     failTurn(chatKey, "Network error — try again.");
-    return;
+    return "accepted";
   }
   if (typeof accepted.turn_id !== "string") {
     settled(chatKey, null);
     failTurn(chatKey, MALFORMED_REPLY);
-    return;
+    return "accepted";
   }
   let streamKey = chatKey;
   if (target.conversationId) {
@@ -760,17 +776,18 @@ export async function sendMessage(
     if (typeof accepted.conversation_id !== "string" || typeof accepted.title !== "string") {
       settled(chatKey, null);
       failTurn(chatKey, MALFORMED_REPLY);
-      return;
+      return "accepted";
     }
     streamKey = accepted.conversation_id;
-    migrateChat(chatKey, streamKey);
+    migrateChat(chatKey, streamKey, accepted.title);
     target.onCreated?.(accepted.conversation_id, accepted.title);
   }
   const arrivalId = typeof accepted.arrival_id === "string" ? accepted.arrival_id : null;
   settled(streamKey, arrivalId);
   const joined = arrivalId !== null && accepted.opened_run === false;
-  if (joined && tailed(streamKey, accepted.turn_id)) return;
+  if (joined && tailed(streamKey, accepted.turn_id)) return "accepted";
   streamTurn(streamKey, accepted.turn_id, false);
+  return "accepted";
 }
 
 export async function answerQuestions(

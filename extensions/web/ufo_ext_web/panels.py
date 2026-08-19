@@ -443,25 +443,6 @@ async def submit_intent(
     raise RuntimeError("the turn's tail ended without a terminal frame")
 
 
-def agent_create_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
-    """The create form's field source: the writable spec, with `prompt` among the required
-    fields. The kind takes the initial prompt at birth and refuses a create without one, so the
-    form states the requirement exactly where the kind enforces it. The I/O contract fields stay
-    with `object_apply`, where a raw schema is typed, not formed. `icon` is absent because the
-    kind assigns one at birth, so the form never asks a member to pick before the agent exists.
-    `sandbox_size` renders only where the deploy's carrier offers sizes — on a single-shape
-    backend the field would change nothing a member can observe, so the form never states the
-    choice."""
-    schema = AgentSpec.model_json_schema()
-    hidden = {"input_schema", "output_schema", "icon"} | (
-        set() if sandbox_sizes else {"sandbox_size"}
-    )
-    schema["properties"] = {
-        key: value for key, value in schema["properties"].items() if key not in hidden
-    }
-    return {**schema, "required": [*schema["required"], "prompt"]}
-
-
 def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
     """The settings form's field source: the writable spec schema minus `prompt` and `icon`. The
     settings page renders each in a control the schema cannot describe — a multiline editor for

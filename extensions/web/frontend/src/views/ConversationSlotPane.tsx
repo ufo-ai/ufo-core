@@ -51,7 +51,9 @@ type Source = { url: string; title: string; snippet: string; published_date: str
 type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
 type TaskStatus = "pending" | "in_progress" | "completed";
 type ConversationTask = { description: string; status: TaskStatus };
-type TasksPayload = {
+/** The todo board one conversation holds, as its `tasks` slot answers it. Read here as the slot's
+ *  own list, and by the app-building wizard as the progress of its run. */
+export type TasksSlotPayload = {
   type: "tasks";
   title: string;
   tasks: ConversationTask[];
@@ -90,7 +92,7 @@ type SlotPayload =
   | ChangesPayload
   | SitesPayload
   | SourcesPayload
-  | TasksPayload;
+  | TasksSlotPayload;
 
 function slotPath(
   agentId: string,
@@ -277,7 +279,7 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
   );
 }
 
-function TasksContent({ payload }: { payload: TasksPayload }) {
+function TasksContent({ payload }: { payload: TasksSlotPayload }) {
   const labels: Record<TaskStatus, string> = {
     pending: "Pending",
     in_progress: "In progress",

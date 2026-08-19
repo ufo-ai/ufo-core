@@ -171,4 +171,3 @@ export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): s
 export function sectionHash(section: Section, place: WorkspacePlace = {}): string {
   return "#/" + section + serializePlace(place);
 }
-

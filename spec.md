@@ -668,9 +668,14 @@ the kind's refusal, the turn is the audit record, and the per-conversation parti
 member's intents one at a time in order. A connect intent leaves the same private OAuth handoff
 chat's connect_account does: the URL rides the turn's terminal and is minted per speaking member
 at stream time, never in a transcript or an intent response. The Agents screen creates an agent
-through the same lane — admin-only, on the main agent's lane, taking the initial prompt — and the
-boot read carries the kind's spec schema only to a member it admits a create from, so the act is
-drawn exactly where the lane honours it. An admin
+through no form and no lane of its own: the act opens a conversation with the main agent in the
+screen's own pane, the `create-application` skill interviews the member, and the agent lands the
+app with its own `object_apply` create — the same gate, which admits a create from any speaking
+member and stamps them the owner, so the screen offers the act to every member it draws for. The
+run's own todo board is the only progress signal the pane reads. A guided build's design phase settles the
+app's homepage — the page every agent builds and binds through its own homepage turn — and the
+drafted prompt carries that design, so the page the Apps screen frames is the one the member
+confirmed. An admin
 replaces any existing prompt or setting from the agent page's prepared intent. In chat, only the
 main agent may replace an agent prompt, including its own; a child agent may replace none. The
 agent kind writes the complete row directly, and the turn is the audit record. The

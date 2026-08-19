@@ -169,7 +169,7 @@ function originParts(conversation: Conversation): ReactNode[] {
  *  it. The viewer's own private row carries no audience label — the exception is labelled, never
  *  the default — and a label the origin or the subject already states does not repeat. Another
  *  member's private row states owner and audience as the one part `Private to <email>`. */
-function metaParts(entry: Conversation, viewer: string | null): ReactNode[] {
+export function metaParts(entry: Conversation, viewer: string | null): ReactNode[] {
   const mine = entry.member_email !== null && entry.member_email === viewer;
   const theirs = isMemberAudience(entry.audience) && !mine;
   const shown = subject(entry, viewer);
@@ -194,7 +194,7 @@ function turns(count: number): string {
  *  the member is scanning for what moved most recently has to say which of the two it shows — a
  *  conversation nobody has spoken in yet is the one row showing a creation date, and it reads as
  *  one rather than as activity that stopped there. */
-function moment(entry: Conversation) {
+export function moment(entry: Conversation) {
   return entry.last_turn_at ? (
     <>
       Last turn <Moment at={entry.last_turn_at} />
