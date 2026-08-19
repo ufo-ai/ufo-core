@@ -165,6 +165,7 @@ from ufo.sources.sync import (
     SourceBackend,
     SourceIdentityResolver,
     SyncDriver,
+    register_sources,
 )
 from ufo.surfaces.admission import (
     Admission,
@@ -336,6 +337,12 @@ def run() -> None:
         source_credentials=SourceCredentialResolver(connectors),
         identity_resolvers=_source_identity_resolvers(manifests, credentials, blob),
     )
+    unknown_backends = sorted(
+        {entry.backend for entry in config.sources} - sync_driver.backends.keys()
+    )
+    if unknown_backends:
+        raise RuntimeError(f"[[sources]] names unknown backends: {', '.join(unknown_backends)}")
+    app.state.configured_sources = config.sources
     page_feed = CorePageFeed(blob=blob)
     _launch_jobs(runtime, invoker_for, sync_driver, page_feed)
     _mount_ext_routes(app, manifests, credentials, index, embed, config.connect.public_base_url)
@@ -1130,7 +1137,9 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     span the whole boot (jobs enqueue under this executor id before uvicorn starts) and survive an
     app-loop stall, so `run` drives it on a dedicated thread from the moment the seat exists, and
     retires the seat only after `DBOS.destroy` has stopped all execution — a seat freed while
-    queued workflows still run would hand a peer a second live execution."""
+    queued workflows still run would hand a peer a second live execution. Configured `[[sources]]`
+    rows register first: once at boot, off the sync poll."""
+    await register_sources(app.state.configured_sources)
     async with asyncio.TaskGroup() as group:
         tasks = [
             group.create_task(ExecutorRecovery().run()),

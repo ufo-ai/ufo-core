@@ -243,10 +243,13 @@ class SourceConfig(BaseModel):
 
 class SourceEntry(BaseModel):
     """One content source: which backend, with its config. `register_sources` lands each as a
-    source row the sync driver polls."""
+    source row the sync driver polls. `backend` names core's `folder` or a backend an extension
+    registers through its Manifest `sources` point; serve refuses an unknown name at boot. A
+    configured source is operator authority: its pages sync workspace-shared, and a local
+    directory root enters only here, never from a chat act."""
 
     model_config = ConfigDict(extra="forbid")
-    backend: Literal["folder"]
+    backend: str = Field(min_length=1)
     config: SourceConfig
 
 
@@ -346,6 +349,7 @@ class Config(BaseModel):
     connectors: ConnectorsConfig = ConnectorsConfig()
     research: ResearchConfig = ResearchConfig()
     pack: PackConfig = PackConfig()
+    sources: tuple[SourceEntry, ...] = ()
 
 
 def config_path() -> Path:

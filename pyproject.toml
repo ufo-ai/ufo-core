@@ -56,6 +56,7 @@ documents = "ufo_ext_documents.manifest:manifest"
 e2b = "ufo_ext_e2b:manifest"
 embed_openai = "ufo_ext_embed_openai:manifest"
 eval_env = "ufo_ext_eval_env.manifest:manifest"
+gbrain = "ufo_ext_gbrain.manifest:manifest"
 index_default = "ufo_ext_index_default:manifest"
 imessage = "ufo_ext_imessage.manifest:manifest"
 keyed_connectors = "ufo_ext_keyed_connectors:manifest"
@@ -150,6 +151,7 @@ packages = [
     "extensions/connectors/ufo_ext_connectors",
     "extensions/debugger/ufo_ext_debugger",
     "extensions/documents/ufo_ext_documents",
+    "extensions/gbrain/ufo_ext_gbrain",
     "evals",
     "extensions/eval_env/ufo_ext_eval_env",
     "extensions/imessage/ufo_ext_imessage",

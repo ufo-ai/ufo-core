@@ -6,8 +6,10 @@ code in any `__init__.py`), so the public surface lives in named modules like th
 
 from ufo.ext.manifest import CarrierSpec as CarrierSpec
 from ufo.sandbox.containment import ContainmentError as ContainmentError
+from ufo.sandbox.containment import contained_file as contained_file
 from ufo.sandbox.containment import contained_leaf as contained_leaf
 from ufo.sandbox.containment import contained_relative as contained_relative
+from ufo.sandbox.containment import contained_root as contained_root
 from ufo.sandbox.session import COPY_IN_PROG as COPY_IN_PROG
 from ufo.sandbox.session import NO_PROXY_HOSTS as NO_PROXY_HOSTS
 from ufo.sandbox.session import SANDBOX_MODULE_BOOTSTRAP as SANDBOX_MODULE_BOOTSTRAP

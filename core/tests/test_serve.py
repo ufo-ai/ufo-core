@@ -271,6 +271,7 @@ async def test_serve_lifespan_waits_for_background_shutdown(
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
+            configured_sources=(),
         )
     )
     async with serve._serve_lifespan(app):
@@ -303,6 +304,7 @@ async def test_serve_lifespan_propagates_a_background_failure(
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
+            configured_sources=(),
         )
     )
     with pytest.raises(ExceptionGroup) as raised:
