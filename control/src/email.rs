@@ -2,8 +2,9 @@
 //!
 //! `WorkEmailPolicy` rejects free, personal, and disposable domains so a workspace maps to a real
 //! organization — the denylist fails CLOSED and a malformed address is rejected up front. The
-//! sender delivers a rendered subject and body through SESv2, carrying no message shape of its own:
-//! `invite_email` is the one message the service sends, since WorkOS delivers the sign-in code.
+//! sender delivers a rendered subject, text body, and HTML body through SESv2, carrying no message
+//! shape of its own: `invite_email` is the one message the service sends, since WorkOS delivers the
+//! sign-in code.
 //! Signing is pure CPU (hmac/sha256) so it runs inline, and every network call is async.
 //! Credentials are the pod's IRSA web identity (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`,
 //! injected by the EKS pod identity webhook from the gateway ServiceAccount's annotation),
@@ -75,7 +76,28 @@ pub const DISPOSABLE_EMAIL_DOMAINS: &[&str] = &[
 pub const PUBLIC_BASE_URL_ENV: &str = "UFO_PUBLIC_BASE_URL";
 pub const DEFAULT_PUBLIC_BASE_URL: &str = "https://flyingobject.ai";
 
-pub const INVITE_SUBJECT: &str = "Your ufo invite";
+pub const INVITE_SUBJECT: &str = "Your invitation";
+
+const INVITE_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<body style="margin:0;padding:0;background:#FAF9F7;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#FAF9F7;">
+<tr><td align="center" style="padding:24px 16px;">
+<table role="presentation" width="440" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:440px;">
+<tr><td align="center" style="padding-bottom:20px;">
+<img src="{workspace_url}/login/logo.png" alt="ufo" width="72" height="18" style="display:block;border:0;width:72px;height:18px;"></td></tr>
+<tr><td style="padding:20px;background:#FAF9F7;border:1px solid #EBEAE9;border-radius:4px;">
+<h1 style="margin:0 0 8px;font:600 16px/1.5 system-ui,sans-serif;color:#191A1A;">Your invitation</h1>
+<p style="margin:0 0 20px;font:14px/1.5 system-ui,sans-serif;color:#919090;">Sign in as {email}. This invitation expires {expires} UTC.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+<tr><td align="center" bgcolor="#191A1A" style="border-radius:4px;">
+<a href="{first_run_url}" style="display:block;padding:10px 18px;font:500 15px/1.5 system-ui,sans-serif;color:#FAF9F7;text-decoration:none;">Sign in</a>
+</td></tr></table>
+</td></tr></table>
+</td></tr></table>
+</body>
+</html>
+"##;
 
 pub const SES_SERVICE: &str = "ses";
 pub const SES_PATH: &str = "/v2/email/outbound-emails";
@@ -162,23 +184,48 @@ pub fn apex_host(base_url: &str) -> Result<String, EmailConfigError> {
     Ok(host.to_string())
 }
 
-/// Subject and body for an invitation, delivered by `ufo-control invite`. It names the granted
-/// address rather than a secret: the flow identifies the domain from the email the member verifies,
-/// so there is nothing to carry back into the terminal.
+/// One invitation rendered for clients that accept HTML and clients that accept only text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteEmail {
+    pub subject: String,
+    pub text: String,
+    pub html: String,
+}
+
+/// The invitation delivered by `ufo-control invite`.
 pub fn invite_email(
     email: &str,
     expires_at: DateTime<Utc>,
     apex_host: &str,
-) -> Result<(String, String), WorkEmailError> {
-    let (_, domain) = normalize_email(email)?;
+    workspace_url: &str,
+) -> Result<InviteEmail, WorkEmailError> {
+    normalize_email(email)?;
     let expires = expires_at.format("%Y-%m-%d %H:%M");
-    let body = format!(
-        "  curl -fsSL https://{apex_host}/ufo | sh\n\
-         \n\
-         \x20 Sign in as {email}. Expires {expires} UTC.\n\
-         \x20 Anyone at {domain} can sign in with the same invite.\n"
+    let workspace_url = workspace_url.trim_end_matches('/');
+    let first_run_url = format!("{workspace_url}/surface/web#/first-run");
+    let text = format!(
+        "Sign in: {first_run_url}\n\n\
+         Or install it: curl -fsSL https://{apex_host}/ufo | sh\n\n\
+         Sign in as {email}. This invitation expires {expires} UTC.\n"
     );
-    Ok((INVITE_SUBJECT.to_string(), body))
+    let html = INVITE_HTML
+        .replace("{workspace_url}", &html_escape(workspace_url))
+        .replace("{first_run_url}", &html_escape(&first_run_url))
+        .replace("{email}", &html_escape(email))
+        .replace("{expires}", &expires.to_string());
+    Ok(InviteEmail {
+        subject: INVITE_SUBJECT.to_string(),
+        text,
+        html,
+    })
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,7 +299,13 @@ pub struct SesEmailSender {
 }
 
 impl SesEmailSender {
-    pub async fn send(&self, email: &str, subject: &str, text: &str) -> Result<(), SendError> {
+    pub async fn send(
+        &self,
+        email: &str,
+        subject: &str,
+        text: &str,
+        html: &str,
+    ) -> Result<(), SendError> {
         let credentials = self.assume_role().await?;
         let body = serde_json::json!({
             "FromEmailAddress": self.source,
@@ -260,7 +313,10 @@ impl SesEmailSender {
             "Content": {
                 "Simple": {
                     "Subject": {"Data": subject},
-                    "Body": {"Text": {"Data": text}},
+                    "Body": {
+                        "Text": {"Data": text},
+                        "Html": {"Data": html},
+                    },
                 }
             },
         })
@@ -459,9 +515,15 @@ pub enum EmailSender {
 }
 
 impl EmailSender {
-    pub async fn send(&self, email: &str, subject: &str, text: &str) -> Result<(), SendError> {
+    pub async fn send(
+        &self,
+        email: &str,
+        subject: &str,
+        text: &str,
+        html: &str,
+    ) -> Result<(), SendError> {
         match self {
-            Self::Ses(sender) => sender.send(email, subject, text).await,
+            Self::Ses(sender) => sender.send(email, subject, text, html).await,
             Self::Console => {
                 tracing::info!(
                     target: "ufo_control::email",

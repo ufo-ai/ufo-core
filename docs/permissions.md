@@ -112,7 +112,7 @@ same `surface_identity → member` row:
 | Surface | External id | Authentication |
 |---|---|---|
 | Slack | Slack user id | workspace-selected signing secret verifies the original request bytes; Slack-confirmed same-domain email may join as a new member |
-| Web portal | email | `ufo_session` cookie (HMAC bearer), entered by one POST from the gateway's signed-in card — never a URL bearer |
+| Web portal | email | `ufo_session` cookie (HMAC bearer), entered by one automatic POST from gateway sign-in — never a URL bearer |
 | Terminal / CLI | email | long-lived CLI token from `ufoctl init` or the hosted gateway, sent as a bearer |
 | Hosted sites | email | same session cookie; the site's own visibility rule gates the render |
 | Debug / memory explorer | operator bearer | email domain must equal `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace |

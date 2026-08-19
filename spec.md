@@ -574,7 +574,7 @@ conversation in that same conversation view read-only — headed the way a chat 
 ran under and the model it ran on, with the surface holding it marked at the far end of that header,
 that mark the way out to it where the surface reported one. A link into the portal from another
 surface names its target as `?c=<conversation_id>`,
-because a fragment never reaches the server: the sign-in redirect and the signed-in card carry that
+because a fragment never reaches the server: the sign-in redirect and the sign-in form carry that
 target, so a signed-out click lands on the conversation rather than a new chat, and a permalink
 whose id is not a conversation id reports the bad link rather than opening one. The
 conversations view lists the member's own plus the workspace-shared ones and opens each as its

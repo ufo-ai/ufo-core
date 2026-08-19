@@ -151,9 +151,9 @@ export function artifactTarget(search: string): string | null {
   return target && target.startsWith(ARTIFACT_PATH_PREFIX) ? target : null;
 }
 
-/** Where a fresh page load lands. A signed-in card carries the conversation or artifact it was
+/** Where a fresh page load lands. The sign-in form carries the conversation or artifact it was
  *  opened for, and the sign-in that founded the workspace carries `first`, which is the query form
- *  of the first run's own address — a form the signed-in card can post to, since a fragment never
+ *  of the first run's own address — a form sign-in can post to, since a fragment never
  *  reaches the server. The shell puts the address itself in the bar on arrival. A member returning
  *  later carries neither and lands where they always do.
  *

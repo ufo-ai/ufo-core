@@ -245,7 +245,7 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
     posting a fresh token instead of being locked behind the stale cookie. An unresolved GET of
     the portal page redirects to the deploy's one sign-in page, so the portal offers no second way
     in and nothing of the shell is served to a stranger. Only a urlencoded body is read for the
-    token — the type the signed-in card posts — so an unauthenticated multipart request is
+    token — the type gateway sign-in posts — so an unauthenticated multipart request is
     rejected without its parse ever running. A conversation the arrival names (`?c=<uuid>`) rides
     on to the sign-in page, so the target survives signing in; it is re-parsed as a UUID, so only
     a conversation id ever reaches that redirect. The handler re-verifies the same bearer for the
@@ -418,7 +418,7 @@ async def open_session(ctx: SurfaceContext, request: Request) -> Response:
     authentication: nothing outside the bearer alphabet can BE a bearer, and the worst of it
     (control characters, non-latin-1) would raise inside the cookie writer, so it answers 400
     before a header is built. The cookie is `lax`, not `strict`, because arrival IS a cross-site
-    navigation (the gateway's signed-in card posts here) and the redirected GET must already
+    navigation (gateway sign-in posts here) and the redirected GET must already
     carry it."""
     refused = _framed_length(request, MAX_FORM_BYTES)
     if refused is not None:

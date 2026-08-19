@@ -31,8 +31,6 @@
           color: var(--ink-soft); }
   #prompt-say strong { font-weight: 600; color: var(--ink); }
   .card h1 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1; color: var(--ink); }
-  .hint { font-size: 13px; color: var(--ink-soft); }
-  .stack { display: flex; flex-direction: column; gap: 8px; }
   #log { display: flex; flex-direction: column; gap: 4px; font-size: 14px;
          color: var(--ink-soft); }
   #log:empty { display: none; }
@@ -85,14 +83,6 @@
   a.button.secondary:hover, button.secondary:hover { opacity: 1; background: var(--fill); }
   #go { margin-top: 16px; }
   #google { display: none; }
-  #home { display: none; }
-  #slack-line { display: none; }
-  #debugger-row { display: none; }
-  code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
-         background: var(--fill); padding: 1px 5px; border-radius: var(--radius); }
-  pre { overflow-x: auto; margin: 0; padding: 12px; border-radius: var(--radius);
-        background: var(--fill);
-        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
   @media (min-width: 768px) { body { padding: 40px; } }
 </style>
 </head>
@@ -121,28 +111,8 @@
     <a class="button secondary" id="google">Continue with Google</a>
   </section>
 
-  <section class="card" id="home">
-    <div class="head">
-      <h1>Signed in</h1>
-      <div class="hint"><code id="member-email"></code> · <code id="workspace-url"></code></div>
-    </div>
-    <form id="portal-row" method="post">
-      <input type="hidden" name="token" id="portal-token">
-      <button type="submit">Open your workspace</button>
-    </form>
-    <div class="hint" id="slack-line"></div>
-    <div class="stack">
-      <div class="hint">From your terminal:</div>
-      <pre id="curl-line"></pre>
-    </div>
-    <form id="debugger-row" method="post">
-      <input type="hidden" name="token" id="debugger-token">
-      <button type="submit" class="secondary">Session debugger</button>
-    </form>
-  </section>
 </main>
 <script>
-const SIGNED_IN = 'Signed in: ';
 const START = '/v1/onboard/auth/start';
 const params = new URLSearchParams(location.search);
 const fault = params.get('error');
@@ -162,12 +132,11 @@ const target = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.
   new URLSearchParams(location.search).get('c') || '');
 const artifactRaw = new URLSearchParams(location.search).get('a') || '';
 const artifact = artifactRaw.startsWith('/artifacts/') ? artifactRaw : null;
+const firstRun = location.hash === '#/first-run' || params.get('first') === '1';
 let token = null;
 let workspace = null;
 let debuggerUrl = null;
-let slackAsk = null;
 let founding = false;
-let email = null;
 let member = null;
 let choosing = false;
 let filled = false;
@@ -299,44 +268,32 @@ function complete() {
   finished = true;
   promptRow.style.display = 'none';
   google.style.display = 'none';
-  document.getElementById('board').style.display = 'none';
-  document.getElementById('member-email').textContent = email || '';
-  document.getElementById('workspace-url').textContent = workspace;
-  const portal = document.getElementById('portal-row');
-  portal.action = workspace + '/surface/web' +
+  const portal = document.createElement('form');
+  portal.method = 'post';
+  const portalUrl = workspace + '/surface/web' +
     (target ? '?c=' + target[0] : artifact ? '?a=' + encodeURIComponent(artifact)
-      : founding ? '?first=1' : '');
-  document.getElementById('portal-token').value = token;
-  document.getElementById('curl-line').textContent =
-    'curl -fsSL ' + location.origin + '/ufo | sh';
-  if (slackAsk) {
-    const slackLine = document.getElementById('slack-line');
-    slackLine.textContent = 'To install ufo in Slack, ask your workspace: ' + slackAsk;
-    slackLine.style.display = 'block';
-  }
-  if (debuggerUrl) {
-    const row = document.getElementById('debugger-row');
-    row.action = debuggerUrl;
-    document.getElementById('debugger-token').value = token;
-    row.style.display = 'block';
-  }
-  document.getElementById('home').style.display = 'flex';
-  document.title = 'Signed in · ufo';
+      : founding || firstRun ? '?first=1' : '');
+  portal.action = target || artifact || firstRun ? portalUrl : debuggerUrl || portalUrl;
+  const credential = document.createElement('input');
+  credential.type = 'hidden';
+  credential.name = 'token';
+  credential.value = token;
+  portal.appendChild(credential);
+  document.body.appendChild(portal);
+  portal.requestSubmit();
 }
 
 function handle(directive) {
   const arg = directive.fields[0] || '';
   if (directive.verb === 'say') {
-    if (arg.startsWith(SIGNED_IN)) email = arg.slice(SIGNED_IN.length);
     line(arg);
   }
   else if (directive.verb === 'ask') prompt(arg);
   else if (directive.verb === 'choose') prompt(arg, directive.fields.slice(1));
   else if (directive.verb === 'token') token = arg;
   else if (directive.verb === 'workspace') workspace = arg;
-  else if (directive.verb === 'slack') slackAsk = arg;
-  else if (directive.verb === 'first') founding = true;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
+  else if (directive.verb === 'first') founding = true;
   else if (directive.verb === 'exit') {
     if (arg !== '0') line('Failed — reload to retry.', 'error');
     finished = true;
@@ -387,6 +344,7 @@ promptRow.addEventListener('submit', (event) => {
 const gq = new URLSearchParams();
 if (target) gq.set('c', target[0]);
 if (artifact) gq.set('a', artifact);
+if (firstRun) gq.set('first', '1');
 google.href = START + (gq.size ? '?' + gq : '');
 
 if (fault) {

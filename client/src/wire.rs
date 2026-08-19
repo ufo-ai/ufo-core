@@ -791,7 +791,7 @@ mod tests {
                 }
                 None => {
                     assert!(
-                        matches!(row.verb.as_str(), "debugger" | "slack" | "first"),
+                        matches!(row.verb.as_str(), "debugger" | "first"),
                         "verb {:?} parsed to Unknown",
                         row.verb
                     );
@@ -800,7 +800,7 @@ mod tests {
             }
         }
         assert_eq!(replayed + dropped, raw.lines().count());
-        assert_eq!(dropped, 3);
+        assert_eq!(dropped, 2);
         assert!(replayed > 0);
     }
 

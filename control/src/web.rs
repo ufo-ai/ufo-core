@@ -30,6 +30,8 @@ pub const LOGIN_PAGE: &str = include_str!("login.html");
 /// and a test holds the two copies identical.
 pub const LOGO_PATH: &str = "/login/logo.svg";
 pub const LOGO_BYTES: &[u8] = include_bytes!("assets/ufo-logo.svg");
+pub const LOGO_PNG_PATH: &str = "/login/logo.png";
+pub const LOGO_PNG_BYTES: &[u8] = include_bytes!("assets/ufo-logo.png");
 pub const LOGO_CACHE: &str = "public, max-age=31536000, immutable";
 
 /// One directive line, as the page's JSON reads it.
@@ -192,5 +194,25 @@ mod tests {
         ));
         assert!(LOGIN_PAGE.contains("banner.textContent = said();"));
         assert!(!LOGIN_PAGE.contains("Sign in again"));
+    }
+
+    #[test]
+    fn a_completed_sign_in_posts_the_session_and_opens_the_requested_route() {
+        assert!(!LOGIN_PAGE.contains("Open your workspace"));
+        assert!(!LOGIN_PAGE.contains("<h1>Signed in</h1>"));
+        assert!(LOGIN_PAGE.contains(
+            "const firstRun = location.hash === '#/first-run' || params.get('first') === '1';"
+        ));
+        assert!(LOGIN_PAGE.contains("if (firstRun) gq.set('first', '1');"));
+        assert!(LOGIN_PAGE.contains("const portalUrl = workspace + '/surface/web' +"));
+        assert!(LOGIN_PAGE.contains("founding || firstRun ? '?first=1' : ''"));
+        assert!(LOGIN_PAGE.contains("portal.requestSubmit();"));
+    }
+
+    #[test]
+    fn a_requested_portal_route_precedes_the_operator_debugger() {
+        assert!(LOGIN_PAGE.contains(
+            "portal.action = target || artifact || firstRun ? portalUrl : debuggerUrl || portalUrl;"
+        ));
     }
 }

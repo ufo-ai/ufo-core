@@ -21,6 +21,5 @@
 {"wire": "onboard", "verb": "first", "fields": ["1"], "line": "first\t1"}
 {"wire": "onboard", "verb": "install", "fields": [], "line": "install"}
 {"wire": "onboard", "verb": "say", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "say\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}
-{"wire": "onboard", "verb": "slack", "fields": ["Connect Slack"], "line": "slack\tConnect Slack"}
 {"wire": "onboard", "verb": "token", "fields": ["bearer.value"], "line": "token\tbearer.value"}
 {"wire": "onboard", "verb": "workspace", "fields": ["https://ws.example"], "line": "workspace\thttps://ws.example"}

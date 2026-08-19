@@ -260,8 +260,8 @@ the page was holding, restarting the email-code walk it was meant to shorten. A 
 has to end on a workspace-host URL that binds the cookie before forwarding, which spans the gateway,
 the web surface, and the edge worker — its own unit, not this RFC's. Until then an unauthenticated
 viewer of a non-public site is told that this browser is not signed in to the hosting workspace and
-sent to `/login`; after that walk and the one button on its card they hold a session, and the
-permanent link opens.
+sent to `/login`; after that walk the browser opens the portal and holds a session. Opening the
+permanent link again succeeds.
 
 ## Dependencies and named risks
 

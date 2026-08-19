@@ -54,7 +54,7 @@ agent's prompt — where they already live.
 | `UFO_ONBOARD_CONTROL_TOKEN` | Gates `/internal/onboard/*`; core `serve` holds the same value. |
 | `UFO_CONTROL_POSTGRES_OWNER_DSN` | `migrate` and `rls-bootstrap` only — the deploy Jobs, never the gateway pod. |
 | `UFO_CONTROL_PG_ROLE_SEED` | Deterministic `ufo_serve` and `ufo_control` passwords. |
-| `UFO_WORKSPACE_BASE_URL` | Workspace URL returned after sign-in. |
+| `UFO_WORKSPACE_BASE_URL` | Workspace URL returned after sign-in and used by invitation links. |
 | `UFO_TOKEN_SECRET` | Member bearer signing. |
 | `UFO_PUBLIC_BASE_URL` | URL stamped into the terminal installer. |
 

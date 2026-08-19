@@ -61,6 +61,7 @@ pub struct AuthCarry {
     pub session: String,
     pub conversation: Option<String>,
     pub artifact: Option<String>,
+    pub first_run: bool,
 }
 
 #[derive(serde::Serialize, Deserialize)]
@@ -68,6 +69,7 @@ struct StatePayload {
     s: String,
     c: Option<String>,
     a: Option<String>,
+    f: bool,
 }
 
 /// The OAuth `state`: the onboarding session and what the member clicked to reach sign-in, under a
@@ -78,6 +80,7 @@ pub fn pack_state(carry: &AuthCarry, secret: &str) -> String {
         s: carry.session.clone(),
         c: carry.conversation.clone(),
         a: carry.artifact.clone(),
+        f: carry.first_run,
     };
     let json = serde_json::to_vec(&payload).expect("the carry serializes");
     let body = URL_SAFE_NO_PAD.encode(json);
@@ -111,6 +114,7 @@ pub fn unpack_state(raw: &str, secret: &str) -> Result<AuthCarry, StateError> {
         artifact: payload
             .a
             .filter(|value| value.starts_with(ARTIFACT_CARRY_PREFIX)),
+        first_run: payload.f,
     })
 }
 

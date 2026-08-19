@@ -503,16 +503,15 @@ CASES = (
     ),
     CapabilityCase(
         "web-portal",
-        "Is there a web page where I can chat with the agent instead of the terminal?",
+        "The invite link dropped me on a dashboard. Where should it take me after I sign in?",
         corpus_scorer("capabilities.md", "getting-started.md"),
         samples=3,
         digest_tag="onboarding:web-portal",
         rubric=(
-            "The answer affirms the web portal exists: the sign-in page's signed-in card carries "
-            "'Open your workspace', which opens the portal where a member chats with the "
-            "workspace's main agent in the browser.",
-            "The answer does not deny a web portal exists or describe the terminal as the only "
-            "way to reach the agent.",
+            "The answer says the invitation opens the portal's first-run page and sign-in returns "
+            "there automatically.",
+            "The answer does not tell the member to use a second button, the default dashboard, "
+            "or the terminal to continue.",
         ),
     ),
     CapabilityCase(

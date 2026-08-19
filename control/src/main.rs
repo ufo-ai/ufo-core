@@ -19,7 +19,9 @@ use ufo_control::rls::{
     PG_ROLE_SEED_ENV,
 };
 use ufo_control::schema::{require_control_schema, shape_control_schema};
-use ufo_control::shared::{SharedWorkspaces, ONBOARD_CONTROL_TOKEN_ENV, SERVE_INTERNAL_URL_ENV};
+use ufo_control::shared::{
+    SharedWorkspaces, ONBOARD_CONTROL_TOKEN_ENV, SERVE_INTERNAL_URL_ENV, WORKSPACE_BASE_URL_ENV,
+};
 use ufo_control::slack_connect::{rearm_failed_delivery, slack_connect_from_env};
 use ufo_control::store::OnboardStore;
 use ufo_control::token::TOKEN_SECRET_ENV;
@@ -166,7 +168,7 @@ async fn gateway() -> Result<(), String> {
     let token_secret = require_env(TOKEN_SECRET_ENV)?;
     let control_token = require_env(ONBOARD_CONTROL_TOKEN_ENV)?;
     let serve_internal_url = require_env(SERVE_INTERNAL_URL_ENV)?;
-    let workspace_url = require_env("UFO_WORKSPACE_BASE_URL")?;
+    let workspace_url = require_env(WORKSPACE_BASE_URL_ENV)?;
     let public_base_url =
         std::env::var(PUBLIC_BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_PUBLIC_BASE_URL.to_string());
     let apex = apex_host(&public_base_url).map_err(|error| error.to_string())?;
@@ -279,6 +281,7 @@ async fn invite(
         _ => None,
     };
     let apex = public_apex_host_from_env().map_err(|error| error.to_string())?;
+    let workspace_url = require_env(WORKSPACE_BASE_URL_ENV)?;
     // The gateway's own role, not the owner's. This verb writes one row of `ufo_control.invite_code`
     // and reads nothing else, and it is run by exec'ing into a gateway pod — which holds the gateway
     // DSN and the SES identity, and deliberately holds no owner DSN. Asking for the owner's here
@@ -304,9 +307,17 @@ async fn invite(
         Some(number) => format!("object #{number}"),
         None => minted.email.clone(),
     };
-    let (subject, body) =
-        invite_email(&minted.email, minted.expires_at, &apex).map_err(|error| error.to_string())?;
-    if let Err(error) = sender.send(&minted.email, &subject, &body).await {
+    let message = invite_email(&minted.email, minted.expires_at, &apex, &workspace_url)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = sender
+        .send(
+            &minted.email,
+            &message.subject,
+            &message.text,
+            &message.html,
+        )
+        .await
+    {
         return Err(format!(
             "{} is granted, but the invitation could not be emailed ({error}); the grant stands \
              — tell them to run the installer",

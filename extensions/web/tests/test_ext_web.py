@@ -5834,7 +5834,7 @@ async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_ope
     """The portal offers no second way in: a GET with no session redirects to the deploy's one
     sign-in page, serving nothing of the shell. The bearer never rides a URL — the one POST that
     opens a session lands the form token as the host-only session cookie — HttpOnly, Secure, and
-    `lax`, because arrival is a cross-site navigation from the gateway's signed-in card — then
+    `lax`, because arrival is a cross-site navigation from gateway sign-in — then
     redirects into the portal. The shell it serves is `no-store`: it names the build to load, and a
     cached copy would go on naming assets a later deploy no longer holds."""
     client, workspace_id, _agent_id = web
@@ -5941,7 +5941,7 @@ async def test_a_clicked_conversation_survives_the_sign_in_it_lands_in(
 ) -> None:
     """A `view on web` click by a signed-out member keeps its target: the conversation names itself
     in the query (a fragment would never reach the server), so it rides the redirect to the
-    sign-in page and the POST the card makes there redirects onto the same conversation. The
+    sign-in page and its automatic POST redirects onto the same conversation. The
     target is re-parsed as a UUID, so a mixed-case id normalizes and anything else is dropped
     rather than reflected into the redirect."""
     client, workspace_id, _agent_id = web

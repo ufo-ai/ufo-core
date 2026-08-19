@@ -25,8 +25,8 @@ use crate::shared::{EnsuredWorkspace, SeatError, SharedWorkspaces, WorkspaceChoi
 use crate::store::{OnboardClaim, OnboardStore};
 use crate::token;
 use crate::web::{
-    parse_directives, LOGIN_PAGE, LOGO_BYTES, LOGO_CACHE, LOGO_PATH, ONBOARD_SESSION_COOKIE,
-    WEB_CHANNEL,
+    parse_directives, LOGIN_PAGE, LOGO_BYTES, LOGO_CACHE, LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH,
+    ONBOARD_SESSION_COOKIE, WEB_CHANNEL,
 };
 use crate::workos::{
     console_signin_page, open_session, pack_state, seal_session, unpack_state, AuthCarry, Verifier,
@@ -349,15 +349,11 @@ impl Onboarding {
         }
     }
 
-    /// The signed-in cap: token and workspace for every member, plus the `debugger` directive — the
-    /// operator session debugger's base URL — only when the claim's channel-verified email domain is
-    /// the operator's. The gate is server-side policy; every renderer (the terminal client drops
-    /// unknown verbs) simply carries or ignores the extra line.
-    ///
-    /// A terminal owner caps on `choose` rather than `ask`, so setting up billing costs one
-    /// selection. A joined teammate caps on the ordinary prompt — billing is not theirs to set up.
-    /// The web renderer ends on its signed-in card rather than a prompt, so it is never handed a menu
-    /// it cannot drive.
+    /// The signed-in cap: token and workspace for every member, plus the operator debugger target
+    /// only when the verified email domain is the operator's. A terminal owner caps on `choose`
+    /// rather than `ask`, so setting up billing costs one selection. A joined teammate caps on the
+    /// ordinary prompt. The web renderer posts the token to its target as soon as both values
+    /// arrive, so it is never handed a menu it cannot drive.
     fn signed_in(
         &self,
         claim: &OnboardClaim,
@@ -390,11 +386,6 @@ impl Onboarding {
             directive("say", &[&format!("Signed in: {}", claim.email)]),
             if ensured.founding {
                 directive("first", &["1"])
-            } else {
-                Vec::new()
-            },
-            if ensured.admin {
-                directive("slack", &[SLACK_CHOICE])
             } else {
                 Vec::new()
             },
@@ -458,6 +449,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/fleet", get(fleet))
         .route("/login", get(login))
         .route(LOGO_PATH, get(logo))
+        .route(LOGO_PNG_PATH, get(logo_png))
         .route(AUTH_START_PATH, get(auth_start))
         .route(AUTH_CALLBACK_PATH, get(auth_callback))
         .route("/v1/onboard/web", post(onboard_web))
@@ -560,6 +552,17 @@ async fn logo() -> Response {
         .into_response()
 }
 
+async fn logo_png() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, LOGO_CACHE),
+        ],
+        LOGO_PNG_BYTES,
+    )
+        .into_response()
+}
+
 /// The `Continue with Google` button's target: it mints the onboarding session, binds it to this
 /// browser as the cookie the page cannot read (never taken from the query), and 302s to WorkOS with
 /// `provider=GoogleOAuth`, so WorkOS goes straight to Google with no hosted page. Packing the carry
@@ -576,6 +579,7 @@ async fn auth_start(
         session: session.clone(),
         conversation: query.get("c").cloned(),
         artifact: query.get("a").cloned(),
+        first_run: query.get("first").is_some_and(|value| value == "1"),
     };
     let honored = match unpack_state(&pack_state(&carry, secret), secret) {
         Ok(honored) => honored,
@@ -628,6 +632,9 @@ async fn auth_callback(
     }
     if let Some(artifact) = &carry.artifact {
         landing.push(("a".to_string(), artifact.clone()));
+    }
+    if carry.first_run {
+        landing.push(("first".to_string(), "1".to_string()));
     }
     let bound = onboard_session(&headers, secret);
     let refusal = match bound {

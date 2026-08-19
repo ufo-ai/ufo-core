@@ -61,15 +61,42 @@ fn apex_host_rejects_a_schemeless_value() {
 #[test]
 fn invite_email_names_the_granted_address_and_carries_no_secret() {
     let expires = Utc.with_ymd_and_hms(2026, 7, 26, 18, 45, 0).unwrap();
-    let (subject, body) = invite_email("founder@acme.com", expires, "flyingobject.ai").unwrap();
-    assert_eq!(subject, "Your ufo invite");
+    let email = invite_email(
+        "founder@acme.com",
+        expires,
+        "flyingobject.ai",
+        "https://app.flyingobject.ai",
+    )
+    .unwrap();
+    assert_eq!(email.subject, "Your invitation");
     assert_eq!(
-        body,
-        "  curl -fsSL https://flyingobject.ai/ufo | sh\n\
-         \n\
-         \x20 Sign in as founder@acme.com. Expires 2026-07-26 18:45 UTC.\n\
-         \x20 Anyone at acme.com can sign in with the same invite.\n"
+        email.text,
+        "Sign in: https://app.flyingobject.ai/surface/web#/first-run\n\n\
+         Or install it: curl -fsSL https://flyingobject.ai/ufo | sh\n\n\
+         Sign in as founder@acme.com. This invitation expires 2026-07-26 18:45 UTC.\n"
     );
+    assert!(email
+        .html
+        .contains("https://app.flyingobject.ai/login/logo.png"));
+    assert!(email
+        .html
+        .contains("https://app.flyingobject.ai/surface/web#/first-run"));
+    assert!(!email.html.contains("Anyone at"));
+    assert!(email.html.contains(">Sign in</a>"));
+}
+
+#[test]
+fn invite_email_escapes_markup_fields() {
+    let expires = Utc.with_ymd_and_hms(2026, 7, 26, 18, 45, 0).unwrap();
+    let email = invite_email(
+        r#"founder&"<@acme.com"#,
+        expires,
+        "flyingobject.ai",
+        "https://app.flyingobject.ai",
+    )
+    .unwrap();
+    assert!(email.html.contains("founder&amp;&quot;&lt;@acme.com"));
+    assert!(!email.html.contains(r#"founder&"<@acme.com"#));
 }
 
 #[test]
@@ -278,7 +305,12 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
     .await;
     let (_directory, token_file) = projected_token();
     sender(&base, token_file)
-        .send("founder@acme.com", "Your ufo invite", "body text")
+        .send(
+            "founder@acme.com",
+            "Your invitation",
+            "body text",
+            "<p>body markup</p>",
+        )
         .await
         .unwrap();
 
@@ -307,11 +339,15 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
     assert_eq!(payload["Destination"]["ToAddresses"][0], "founder@acme.com");
     assert_eq!(
         payload["Content"]["Simple"]["Subject"]["Data"],
-        "Your ufo invite"
+        "Your invitation"
     );
     assert_eq!(
         payload["Content"]["Simple"]["Body"]["Text"]["Data"],
         "body text"
+    );
+    assert_eq!(
+        payload["Content"]["Simple"]["Body"]["Html"]["Data"],
+        "<p>body markup</p>"
     );
     // The send is signed with the credentials STS just returned, not with anything ambient.
     let authorization = ses.authorization.as_deref().unwrap_or_default();
@@ -331,7 +367,7 @@ async fn send_surfaces_the_ses_denial_body() {
     .await;
     let (_directory, token_file) = projected_token();
     let refused = sender(&base, token_file)
-        .send("founder@acme.com", "s", "t")
+        .send("founder@acme.com", "s", "t", "<p>t</p>")
         .await
         .unwrap_err()
         .to_string();
@@ -345,7 +381,7 @@ async fn assume_role_surfaces_the_sts_error_body() {
     let (base, _log) = serve(vec![(403, denial.to_string())]).await;
     let (_directory, token_file) = projected_token();
     let refused = sender(&base, token_file)
-        .send("founder@acme.com", "s", "t")
+        .send("founder@acme.com", "s", "t", "<p>t</p>")
         .await
         .unwrap_err()
         .to_string();
@@ -360,7 +396,7 @@ async fn assume_role_surfaces_the_sts_error_body() {
 async fn an_unreadable_token_file_fails_loud_before_any_call() {
     let (base, log) = serve(vec![(200, STS_RESPONSE.to_string())]).await;
     let refused = sender(&base, PathBuf::from("/nonexistent/token"))
-        .send("founder@acme.com", "s", "t")
+        .send("founder@acme.com", "s", "t", "<p>t</p>")
         .await
         .unwrap_err()
         .to_string();
@@ -450,7 +486,7 @@ async fn console_mode_needs_no_ses_configuration() {
     .unwrap();
     assert!(matches!(built, EmailSender::Console));
     built
-        .send("founder@acme.com", "Your ufo invite", "body")
+        .send("founder@acme.com", "Your invitation", "body", "<p>body</p>")
         .await
         .unwrap();
 }

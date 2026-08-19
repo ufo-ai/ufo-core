@@ -109,11 +109,10 @@ landed by then, so whichever option the admin picks posts to
 `/surface/ufo` as their first chat message and the agent drives it from there — the gateway
 mints no billing link, no install link, and adds no directive for either.
 
-Slack leads that list because the install is what moves a customer onto their own surface, and the
-browser card carries the same push as a `slack` directive naming what to ask. Neither renderer can
-carry the link itself: an "Add to Slack" URL seals one workspace and one member for fifteen minutes
-(`CREDENTIAL_REQUEST_TTL_SECONDS`), so only the turn that answers the member can mint one that still
-works when they click it. Both are admin-only, since only an admin installs.
+Slack leads that list because the install is what moves a customer onto their own surface. The
+gateway cannot carry the link itself: an "Add to Slack" URL seals one workspace and one member for
+fifteen minutes (`CREDENTIAL_REQUEST_TTL_SECONDS`), so only the turn that answers the member can mint
+one that still works when they click it. Slack and billing setup are admin-only.
 
 ### Driving billing locally
 
@@ -160,8 +159,9 @@ prompt states that the member is believed over it wherever the two differ. A gra
 them leaves a workspace reading exactly as one `ufoctl init` seats. The flow burns the domain's
 live grant and stamps the claim's `invite_id` in one transaction — no third prompt, and nothing for
 the member to carry from the invitation back into the terminal. The invitation therefore holds no
-secret, and a colleague at the granted domain is identified by the same grant, which is who usually
-runs the installer. An exact membership admits its workspace without spending a domain grant. A
+secret. It opens the web portal at `#/first-run` and includes the terminal installer. A colleague at
+the granted domain is identified by the same grant. An exact membership admits its workspace
+without spending a domain grant. A
 live grant appears as a separate creation choice when that address already holds a membership, so
 the member decides which workspace becomes active and the grant cannot be spent into the wrong one.
 Delivery rides the
@@ -209,9 +209,10 @@ a granted domain, or a signup that created a workspace
   +-- delivered     invitation id persisted, then the row settles
 ```
 
-The invitation email carries the terminal installer alone, so the channel message is the only place
-`/login` appears. It is the one act that accepts a duplicate: `greeted_at` is written *after* Slack
-answers, so a lost response reposts rather than leaving a channel that names nowhere to sign in.
+The invitation email opens `/surface/web#/first-run` and also carries the terminal installer. The
+channel greeting names both browser and terminal doors. It is the one act that accepts a duplicate:
+`greeted_at` is written *after* Slack answers, so a lost response reposts rather than leaving a
+channel that names nowhere to sign in.
 
 The unique channel is the idempotency boundary: a lost create response recovers by name, a lost
 invitation response recovers from Slack's own state, and ambiguity Slack will not expose lands
@@ -253,7 +254,7 @@ cookie is always host-only and a session can never cross a subdomain, environmen
 host redirects to the surface claiming `SurfaceSpec.home` — the portal (`/surface/web`) — which
 serves its shell only to a resolved session and redirects an arrival without one to `/login`; a
 session that expires under an open page leaves the shell offering the same link. The portal takes
-no bearer from a member: the bearer enters through the one POST the signed-in card makes, so there
+no bearer from a member: the bearer enters through the one automatic POST sign-in makes, so there
 is exactly one place a bearer becomes a session.
 
 A self-hosted node runs no gateway, so it has no sign-in page and verifies no email — the member at
@@ -261,7 +262,7 @@ the terminal is the owner `ufoctl init` seated, and their CLI token is the proof
 settings are read at gateway boot alone, so `ufoctl serve` starts without them. `ufoctl portal`
 spends it: a loopback listener serves one page at an unguessable path, the browser posts the bearer
 from that page's form to `/surface/web`, and the listener closes behind the request that took it.
-Same route, same act, same cookie as the hosted card — the deploy differs, the door does not.
+Same route, same act, same cookie as hosted sign-in — the deploy differs, the door does not.
 `ufoctl serve` names the portal and that verb at startup.
 
 `GET /login` serves a self-contained sign-in page — a second renderer of the identical
@@ -273,18 +274,19 @@ so a claim is only started under a session minted here and keyed by it, and ever
 sends rides that same-origin POST under that cookie (channel `web` — the claim index isolates
 it from a terminal session with the same ref) and comes back as JSON directives
 (`gateway_web.parse_directives` inverts the wire escaping exactly). It renders `say`/`ask`/`exit`
-and, on `token` + `workspace`, a signed-in home card: the member's email, the workspace URL, and
-the terminal install one-liner. No `install` preamble is sent on the web channel, and the token
-never appears in a human-visible line.
+and, on `token` + `workspace`, posts the bearer to `/surface/web` and opens the portal. A founding
+sign-in or an invitation opened at `#/first-run` carries `?first=1` through that POST; the portal
+replaces it with its own `#/first-run` address. No `install` preamble is sent on the web channel,
+and the token never appears in a human-visible line.
 
 A web session with no claim is asked for its work email, exactly as the terminal is: the address
 runs `WorkEmailPolicy` and only then does Magic Auth mail the code — a denylisted address is refused
 with no code sent — the code confirms, and resolution continues. `Continue with Google` is the one
 act that leaves the page: it navigates top-level to `GET /v1/onboard/auth/start` with the
-`?c=`/`?a=` carry, and `start` mints and binds that same `__Host-ufo_onboard` cookie and 302s to WorkOS
-with `provider=GoogleOAuth`, the session and carry packed into the OAuth `state` under an HMAC
-signature — a conversation id that is not a uuid and a target that is not an artifact path are
-dropped before they ride it. WorkOS goes straight to Google, with no hosted page in between.
+`?c=`/`?a=`/`?first=1` carry, and `start` mints and binds that same `__Host-ufo_onboard` cookie and
+302s to WorkOS with `provider=GoogleOAuth`, the session and carry packed into the OAuth `state` under
+an HMAC signature — a conversation id that is not a uuid and a target that is not an artifact path
+are dropped before they ride it. WorkOS goes straight to Google, with no hosted page in between.
 `GET /v1/onboard/auth/callback` requires the state's signature and requires the session it names to
 be the one that browser holds in the cookie, exchanges the returned code for the account's email,
 applies the same work-email denylist — so a personal Google account is refused — inserts the claim
@@ -313,12 +315,11 @@ logs its code the same way. The route is mounted only under `WORKOS_MODE=console
 `workos` mode requires the three `WORKOS_*` values at boot and serves no such door.
 
 When the claim's channel-verified email domain equals `OPERATOR_EMAIL_DOMAIN`, `_signed_in` adds
-one extra machine-consumed directive — `debugger <workspace-url>/surface/debug` — and the card
-also shows a "Session debugger" form that POSTs the token in its body (the debug surface exchanges
-it for its `ufo_debug` cookie and redirects; the bearer never rides a URL into the debugger,
-so no access log captures it — `spec.md` "Surfaces" covers that surface). The directive is emitted
-channel-blind — the terminal client drops unknown verbs — and never emitted when the env is unset.
-The gate is the server's; the page merely renders what arrives.
+one extra machine-consumed directive — `debugger <workspace-url>/surface/debug`. The automatic form
+POSTs the token to that target instead of the member portal; the debug surface exchanges it for its
+`ufo_debug` cookie and redirects. The bearer never rides a URL into the debugger, so no access log
+captures it — `spec.md` "Surfaces" covers that surface. The directive is emitted channel-blind, and
+the terminal client drops unknown verbs. The gate is the server's; the page uses the target it gets.
 
 ## Connecting Slack
 

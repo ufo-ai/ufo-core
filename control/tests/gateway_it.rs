@@ -13,12 +13,12 @@ use reqwest::StatusCode;
 use ufo_control::claim::ClaimWorkflow;
 use ufo_control::gateway::{
     parse_invite_required, router, stamped_script, GatewayState, Onboarding, BILLING_CHOICE,
-    FIRST_MOVE_PROMPT, MAX_BODY_BYTES, OPERATOR_EMAIL_DOMAIN, SLACK_CHOICE, WORKSPACE_PROMPT,
+    FIRST_MOVE_PROMPT, MAX_BODY_BYTES, OPERATOR_EMAIL_DOMAIN, WORKSPACE_PROMPT,
 };
 use ufo_control::invite::InviteCodes;
 use ufo_control::shared::SharedWorkspaces;
 use ufo_control::store::OnboardStore;
-use ufo_control::web::{LOGO_PATH, ONBOARD_SESSION_COOKIE};
+use ufo_control::web::{LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE};
 use ufo_control::workos::{Verifier, WorkosVerifier, CONSOLE_CODE};
 
 const SECRET: &str = "local-dev-token-secret";
@@ -183,6 +183,19 @@ async fn the_login_page_is_served_as_html() {
         .await
         .unwrap()
         .starts_with("<!doctype html>"));
+}
+
+#[tokio::test]
+async fn the_invitation_logo_is_served_as_a_png() {
+    let rig = rig(vec![], vec![], true).await;
+    let response = client()
+        .get(format!("{}{LOGO_PNG_PATH}", rig.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), LOGO_PNG_BYTES);
 }
 
 #[tokio::test]
@@ -361,15 +374,9 @@ async fn a_granted_domain_founds_its_workspace_and_signs_the_founder_in() {
         "{screen}"
     );
     assert!(screen.contains(BILLING_CHOICE), "{screen}");
-    assert!(
-        screen.contains(&format!("slack\t{SLACK_CHOICE}")),
-        "{screen}"
-    );
-    // The sign-in that seated the first member carries the first run; the card reads it and opens
-    // the workspace there.
+    // The sign-in that seated the first member carries the first run; the browser opens the
+    // workspace there.
     assert!(screen.contains("first\t1"), "{screen}");
-    // A non-operator domain gets no debugger line.
-    assert!(!screen.contains("debugger\t"), "{screen}");
 }
 
 #[tokio::test]
@@ -456,7 +463,7 @@ fn base64_decode(value: &str) -> String {
 }
 
 #[tokio::test]
-async fn an_operator_address_earns_the_debugger_line() {
+async fn an_operator_address_opens_the_debugger() {
     let operator = format!("staff@{OPERATOR_EMAIL_DOMAIN}");
     let rig = rig(
         vec![
@@ -683,7 +690,7 @@ async fn a_callback_without_the_bound_cookie_refuses_and_lands_on_the_page() {
     let rig = rig(vec![], vec![], true).await;
     // A state this gateway signed, replayed in a browser that never left.
     let start = client()
-        .get(format!("{}/v1/onboard/auth/start", rig.base))
+        .get(format!("{}/v1/onboard/auth/start?first=1", rig.base))
         .send()
         .await
         .unwrap();
@@ -706,6 +713,7 @@ async fn a_callback_without_the_bound_cookie_refuses_and_lands_on_the_page() {
         .to_str()
         .unwrap();
     assert!(landing.starts_with("/login?error="), "{landing}");
+    assert!(landing.ends_with("&first=1"), "{landing}");
 }
 
 #[tokio::test]

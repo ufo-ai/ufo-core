@@ -56,8 +56,8 @@ def test_a_pack_that_ships_coding_registers_the_escalation_model() -> None:
 
 
 def test_assistant_packs_mount_the_member_portal() -> None:
-    """The gateway's signed-in card posts every member's bearer to /surface/web, so any pack a
-    deploy fronts with that card must mount the web surface — the hosted fleet answering the
+    """The gateway posts every signed-in member's bearer to /surface/web, so any pack a deploy
+    fronts with that sign-in must mount the web surface — the hosted fleet answering the
     portal with 404 is the outage this pins."""
     for pack in (assistant, assistant_hosted):
         manifests = load_manifests(pack.NAME)

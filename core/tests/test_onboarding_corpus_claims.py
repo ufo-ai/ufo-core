@@ -53,18 +53,18 @@ class Claim:
 
 CLAIMS = (
     Claim(
-        claim="the signed-in card carries an 'Open your workspace' button",
+        claim="the invitation opens first run and sign-in continues there",
         corpus="references/getting-started.md",
-        phrase='signed-in card carries "Open your workspace"',
+        phrase="invitation opens the workspace's first-run page",
         source=GATEWAY_WEB,
-        pattern=r"Open your workspace",
+        pattern=r"founding \|\| firstRun \? '\?first=1' : ''",
     ),
     Claim(
-        claim="the card's button opens the web portal",
+        claim="web sign-in opens the portal without another action",
         corpus="references/capabilities.md",
-        phrase='"Open your workspace" button opens the web portal',
+        phrase="sign-in opens the web portal automatically",
         source=GATEWAY_WEB,
-        pattern=r"portal\.action = workspace \+ '/surface/web'",
+        pattern=r"portal\.requestSubmit\(\)",
     ),
     Claim(
         claim="signup asks for nothing but an email and a verification code",
@@ -124,13 +124,6 @@ CLAIMS = (
         phrase="offered connecting Slack, then billing setup at the end",
         source=GATEWAY,
         pattern=(r"\[FIRST_MOVE_PROMPT, SLACK_CHOICE, BILLING_CHOICE, TOUR_CHOICE\]"),
-    ),
-    Claim(
-        claim="the browser card names connecting Slack to an admin, and never carries the link",
-        corpus="references/getting-started.md",
-        phrase="card names connecting Slack for an admin",
-        source=GATEWAY,
-        pattern=r'directive\("slack", &\[SLACK_CHOICE\]\)',
     ),
     Claim(
         claim="the shared Slack channel's invitation is a deploy switch away, so never promise it",

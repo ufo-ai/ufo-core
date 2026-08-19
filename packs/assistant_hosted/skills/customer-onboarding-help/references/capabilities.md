@@ -49,11 +49,10 @@ No memory crosses between customer workspaces.
 
 ## The web portal
 
-Signing in on the web ends on a signed-in card whose "Open your workspace" button opens the web
-portal, where a member chats with the workspace's main agent in the browser. A workspace admin
-reaches every agent there. Another agent appears for a member only after an admin shares it, said
-in that agent's own chat ("let alex@example.com reach this agent on the web") — the same way it is
-revoked.
+Web sign-in opens the web portal automatically, where a member chats with the workspace's main agent
+in the browser. A workspace admin reaches every agent there. Another agent appears for a member only
+after an admin shares it, said in that agent's own chat ("let alex@example.com reach this agent on
+the web") — the same way it is revoked.
 
 ## Members and admins
 

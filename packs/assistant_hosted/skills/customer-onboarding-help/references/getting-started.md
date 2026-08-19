@@ -2,19 +2,20 @@
 
 ## The shape of the flow
 
-A new customer is invited by the UFO team, by email. Signup is command-line first: the customer runs
-the install command, signs in with their work email, and lands in their own workspace. The sign-in
-page reaches the same workspace, and its signed-in card carries "Open your workspace" — the web
-portal, where a member chats with the workspace's main agent in the browser. An admin reaches
-every agent there; other agents appear once an admin shares them (see `capabilities.md`).
+A new customer is invited by the UFO team, by email. The invitation opens the workspace's first-run
+page. The customer signs in with their work email, and sign-in continues to that page without
+another action. A member chats with the workspace's main agent there. An admin reaches every agent;
+other agents appear once an admin shares them (see `capabilities.md`). The invitation also gives the
+terminal install command.
 
 ## Step by step, as the customer experiences it
 
-1. **The team emails them an invitation.** There is nothing in it to retype. The invitation covers
-   their whole email domain, so the person who runs the installer does not have to be the person who
-   received it.
-2. **They run the install command and enter their work email.** A verification code is emailed to
-   them, and they enter it. Those two prompts are the whole sign-in.
+1. **The team emails them an invitation.** Its link opens first run. There is nothing in it to
+   retype. The invitation covers their whole email domain, so the person who opens it does not have
+   to be the person who received it.
+2. **They enter their work email.** A verification code is emailed to them, and they enter it. Those
+   two prompts are the whole sign-in. The portal opens automatically after verification. They can
+   use the install command in the invitation if they want the terminal client.
 3. **Their verified email domain opens the workspace.** Nothing else is asked for. The invitation
    works once per domain, and lapses if it goes unused for a couple of weeks.
 4. **Joining an existing workspace needs no invitation.** A teammate whose email domain already has a
@@ -26,11 +27,8 @@ every agent there; other agents appear once an admin shares them (see `capabilit
 5. **A workspace admin is offered connecting Slack, then billing setup at the end.** In the terminal
    the admin gets a choice on the concluding screen; picking one starts a chat with the agent, which
    returns either an "Add to Slack" link or a link for saving a payment method. A joined teammate
-   gets the ordinary prompt instead, and signing in through the
-   web page ends on a signed-in card without the menu; "Open your workspace" there opens the web
-   portal, where the workspace's main agent already answers them. The card names connecting Slack
-   for an admin, since an install link is only good for fifteen minutes and has to come from the
-   agent that answers them.
+   gets the ordinary prompt instead. The web page opens the portal directly, where the workspace's
+   main agent already answers them.
 6. **Slack comes next.** See `slack-install.md`.
 
 ## What to say when asked
