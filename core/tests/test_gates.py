@@ -19,6 +19,7 @@ EXT_SHIPPED_MODULE = Path("extensions/perplexity/ufo_ext_perplexity.py")
 EXT_SHIPPED_PACKAGE = Path("extensions/memory/ufo_ext_memory/store.py")
 CORE_MIGRATIONS = Path("core/src/ufo/schema/migrations/versions")
 EXT_MIGRATIONS = Path("extensions/probe/migrations")
+CORE_STAMPS = ("20260801000001", "20260801000002", "20260801000003", "20260801000004")
 INGRESS_FILE = Path("core/src/ufo/sandbox/ingress.py")
 
 
@@ -167,45 +168,84 @@ def test_skill_content_is_held_out_of_the_code_gates() -> None:
 
 
 def test_migration_gate_allows_one_core_merge_head() -> None:
+    base, left, right, merge = CORE_STAMPS
     trees = {
-        CORE_MIGRATIONS / "a.py": _migration("a", "None"),
-        CORE_MIGRATIONS / "b.py": _migration("b", "'a'"),
-        CORE_MIGRATIONS / "c.py": _migration("c", "'a'"),
-        CORE_MIGRATIONS / "d.py": _migration("d", "('b', 'c')"),
+        CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
+        CORE_MIGRATIONS / f"{left}_left.py": _migration(left, repr(base)),
+        CORE_MIGRATIONS / f"{right}_right.py": _migration(right, repr(base)),
+        CORE_MIGRATIONS / f"{merge}_merge.py": _migration(merge, repr((left, right))),
     }
     assert gates._migration_failures(trees) == []
 
 
 def test_migration_gate_checks_every_merge_parent() -> None:
+    base, left, _, merge = CORE_STAMPS
     trees = {
-        CORE_MIGRATIONS / "a.py": _migration("a", "None"),
-        CORE_MIGRATIONS / "b.py": _migration("b", "'a'"),
-        CORE_MIGRATIONS / "merge.py": _migration("merge", "('b', 'missing')"),
+        CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
+        CORE_MIGRATIONS / f"{left}_left.py": _migration(left, repr(base)),
+        CORE_MIGRATIONS / f"{merge}_merge.py": _migration(merge, repr((left, "missing"))),
     }
     failures = gates._migration_failures(trees)
     assert any("references no known revision" in failure for failure in failures)
 
 
 def test_migration_gate_rejects_cross_owner_merge_parents() -> None:
+    base, left, _, merge = CORE_STAMPS
     trees = {
-        CORE_MIGRATIONS / "a.py": _migration("a", "None"),
-        CORE_MIGRATIONS / "b.py": _migration("b", "'a'"),
-        CORE_MIGRATIONS / "merge.py": _migration("merge", "('b', 'probe_1')"),
-        EXT_MIGRATIONS / "probe_1.py": _migration("probe_1", "None", "'a'"),
+        CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
+        CORE_MIGRATIONS / f"{left}_left.py": _migration(left, repr(base)),
+        CORE_MIGRATIONS / f"{merge}_merge.py": _migration(merge, repr((left, "probe_1"))),
+        EXT_MIGRATIONS / "probe_1.py": _migration("probe_1", "None", repr(base)),
     }
     failures = gates._migration_failures(trees)
     assert any("chains across owners" in failure for failure in failures)
 
 
 def test_migration_gate_still_rejects_multiple_heads_with_a_merge() -> None:
+    base, left, right, merge = CORE_STAMPS
     trees = {
-        CORE_MIGRATIONS / "a.py": _migration("a", "None"),
-        CORE_MIGRATIONS / "b.py": _migration("b", "'a'"),
-        CORE_MIGRATIONS / "c.py": _migration("c", "'a'"),
-        CORE_MIGRATIONS / "merge.py": _migration("merge", "('b',)"),
+        CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
+        CORE_MIGRATIONS / f"{left}_left.py": _migration(left, repr(base)),
+        CORE_MIGRATIONS / f"{right}_right.py": _migration(right, repr(base)),
+        CORE_MIGRATIONS / f"{merge}_merge.py": _migration(merge, repr((left,))),
     }
     failures = gates._migration_failures(trees)
     assert any("has 2 heads" in failure for failure in failures)
+
+
+def test_migration_gate_rejects_a_new_core_revision_that_is_not_a_stamp() -> None:
+    """A hand-numbered id races: two branches read the same directory listing, both write the next
+    number, and one of them is renumbered before it can land."""
+    base, *_ = CORE_STAMPS
+    trees = {
+        CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
+        CORE_MIGRATIONS / "0114_next.py": _migration("0114", repr(base)),
+    }
+    failures = gates._migration_failures(trees)
+    assert any("is not a UTC stamp" in failure for failure in failures)
+
+
+def test_migration_gate_grandfathers_the_ids_that_predate_the_stamp_rule() -> None:
+    """A live database is stamped with the hand-numbered chain, and both test targets and extension
+    `depends_on` values name those ids, so nothing renumbers them."""
+    trees = {
+        CORE_MIGRATIONS / "0001_base.py": _migration("0001", "None"),
+        CORE_MIGRATIONS / "0113_last.py": _migration("0113", "'0001'"),
+        CORE_MIGRATIONS / "knowledge_graph_0001_graph.py": _migration(
+            "knowledge_graph_0001", "'0113'"
+        ),
+    }
+    assert gates._migration_failures(trees) == []
+
+
+def test_migration_gate_leaves_an_extension_family_to_its_own_ids() -> None:
+    """An extension namespaces its ids by its own name, so two extensions never race for one."""
+    base, *_ = CORE_STAMPS
+    trees = {
+        CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
+        EXT_MIGRATIONS / "0001_probe.py": _migration("probe_0001", "None", repr(base)),
+    }
+    assert gates._migration_failures(trees) == []
 
 
 def test_job_selector_gate_rejects_a_jobspec_without_candidates() -> None:

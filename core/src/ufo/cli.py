@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -11,7 +12,7 @@ import webbrowser
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -32,7 +33,16 @@ from ufo.bundle import Bundle, wheel_name
 from ufo.cancellation import cancel_one_turn
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
-from ufo.db import apply_migrations, dispose_db, init_db, init_owner_db, owner_tx, workspace_tx
+from ufo.db import (
+    MIGRATIONS_DIR,
+    apply_migrations,
+    core_migration_head,
+    dispose_db,
+    init_db,
+    init_owner_db,
+    owner_tx,
+    workspace_tx,
+)
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
@@ -40,6 +50,7 @@ from ufo.grants import GrantSummary, workspace_grant_summaries
 from ufo.ingress_serve import run as ingress_run
 from ufo.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.proxy_serve import OWNER_DSN_ENV
+from ufo.sandbox.containment import contained_file
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import email_domain
@@ -71,6 +82,24 @@ search_provider = "perplexity"
 
 [connect]
 public_base_url = "http://localhost:8710"
+"""
+CORE_VERSIONS_DIR = MIGRATIONS_DIR / "versions"
+MIGRATION_STAMP = "%Y%m%d%H%M%S"
+MIGRATION_FILE_MODE = 0o644
+MIGRATION_SLUG = re.compile(r"[a-z][a-z0-9_]*")
+MIGRATION_TEMPLATE = """\
+revision: str = "{revision}"
+down_revision: str | None = "{down_revision}"
+branch_labels: str | None = None
+depends_on: str | None = None
+
+
+def upgrade() -> None:
+    pass
+
+
+def downgrade() -> None:
+    pass
 """
 
 
@@ -278,6 +307,30 @@ def migrate() -> None:
         url = config.database.url
     apply_migrations(url, config.pack.name)
     click.echo("schema at head")
+
+
+def _one_slug(_ctx: click.Context, _param: click.Parameter, value: str) -> str:
+    if not MIGRATION_SLUG.fullmatch(value):
+        raise click.BadParameter(f"{value!r} is not a snake_case name.")
+    return value
+
+
+@main.command(name="new-migration")
+@click.argument("slug", callback=_one_slug)
+def new_migration(slug: str) -> None:
+    """Write core's next migration file, named and revisioned by the current UTC timestamp.
+
+    The stamp is the id, so two branches open the same day never claim the same one and neither has
+    to be renumbered to land. The id carries no ordering: `down_revision` does, and this writes
+    core's head right now. When another branch's migration merges first, repoint `down_revision` at
+    the new head and keep the stamp — the single-head gate is what catches a fork."""
+    head = core_migration_head()
+    stamp = datetime.now(UTC).strftime(MIGRATION_STAMP)
+    with contained_file(f"{stamp}_{slug}.py", CORE_VERSIONS_DIR) as target:
+        target.replace_text(
+            MIGRATION_TEMPLATE.format(revision=stamp, down_revision=head), MIGRATION_FILE_MODE
+        )
+        click.echo(f"wrote {target.path} — revision {stamp}, down_revision {head}")
 
 
 @main.command()

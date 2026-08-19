@@ -1,6 +1,7 @@
 """ufoctl's operator verbs: init's refusals, the portal browser handoff, and the config boot."""
 
 import os
+import re
 import threading
 import tomllib
 import webbrowser
@@ -17,10 +18,12 @@ from ufo.cli import (
     BrowserHandoff,
     _load_dotenv,
     init,
+    new_migration,
     portal,
 )
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialStore
+from ufo.db import core_migration_head
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.ext.surface import SurfaceSpec
@@ -90,6 +93,35 @@ def test_init_refuses_an_owner_address_that_is_not_one_local_at_domain(address: 
     result = CliRunner().invoke(init, ["--email", address])
     assert result.exit_code == 2
     assert f"{address!r} is not one local@domain address." in result.output
+
+
+def test_new_migration_stamps_the_id_and_chains_onto_core_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two branches scaffolding on the same day take different ids without asking each other, so
+    neither is renumbered to land. The stamp orders nothing: `down_revision` names core's head, and
+    that is what the single-head gate reads."""
+    monkeypatch.setattr("ufo.cli.CORE_VERSIONS_DIR", tmp_path)
+
+    result = CliRunner().invoke(new_migration, ["probe_ledger_split"])
+
+    assert result.exit_code == 0, result.output
+    written = list(tmp_path.glob("*.py"))
+    assert len(written) == 1
+    stamp, _, slug = written[0].stem.partition("_")
+    assert re.fullmatch(r"\d{14}", stamp)
+    assert slug == "probe_ledger_split"
+    body = written[0].read_text()
+    assert f'revision: str = "{stamp}"' in body
+    assert f'down_revision: str | None = "{core_migration_head()}"' in body
+
+
+@pytest.mark.parametrize("slug", ["Ledger Split", "ledger-split", "0114_ledger"])
+def test_new_migration_refuses_a_slug_that_is_not_snake_case(slug: str) -> None:
+    """The slug becomes a module name the tests import by filename."""
+    result = CliRunner().invoke(new_migration, [slug])
+    assert result.exit_code == 2
+    assert f"{slug!r} is not a snake_case name." in result.output
 
 
 def _handoff_page(fetch: Callable[[str], None], monkeypatch: pytest.MonkeyPatch) -> str:

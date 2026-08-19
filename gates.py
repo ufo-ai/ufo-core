@@ -112,6 +112,10 @@ AA_RATIOS = {"body": 4.5, "18px+": 3.0}
 PRINTED_RATIO_TOLERANCE = 0.05
 MIGRATION_DIR_PART = "migrations"
 CORE_OWNER = "core"
+STAMP_REVISION = re.compile(r"\d{14}")
+HAND_NUMBERED_REVISION = re.compile(r"\d{4}")
+LAST_HAND_NUMBERED_REVISION = "0113"
+GRANDFATHERED_CORE_REVISIONS = frozenset({"knowledge_graph_0001"})
 NAME_SEPARATOR = "-"
 CANDIDATES_FIELD = "candidates"
 ENV_ROOTS = Path("infra/envs")
@@ -1343,23 +1347,48 @@ def _revisions(trees: dict[Path, ast.Module]) -> list[Revision]:
     return found
 
 
+def _stamped_or_grandfathered(revision: str) -> bool:
+    """A core revision id the stamp rule accepts: a UTC stamp, or one of the ids that predate the
+    rule — the hand-numbered chain, which ends at its last number, plus the one labelled branch
+    base."""
+    return (
+        STAMP_REVISION.fullmatch(revision) is not None
+        or revision in GRANDFATHERED_CORE_REVISIONS
+        or (
+            HAND_NUMBERED_REVISION.fullmatch(revision) is not None
+            and revision <= LAST_HAND_NUMBERED_REVISION
+        )
+    )
+
+
 def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """The migration seam's single-head discipline, generalized across owners so it composes with
     optional table-owning extensions. Each owner (core, each extension) has one base and one head,
     chaining only within itself — an extension never chains onto core or a sibling via down_revision
     (that would fork core or dangle when the sibling is not pinned), it attaches by declaring
     depends_on a core revision so `upgrade heads` applies core's shared tables first. So the DAG is
-    deterministic and core-first, with no orphan reference."""
+    deterministic and core-first, with no orphan reference.
+
+    A new core revision id is a UTC stamp, never the next number: two branches pick the same number
+    and one of them is renumbered to land, while two stamps never collide. The ids already merged
+    keep working — they are the graph a live database is stamped with — so the rule reaches only
+    ids the hand-numbered chain does not already hold."""
     revisions = _revisions(trees)
     owner_of = {revision: owner for _, owner, revision, _, _ in revisions}
     failures: list[str] = []
     seen: dict[str, Path] = {}
-    for rel, _, revision, _, _ in revisions:
+    for rel, owner, revision, _, _ in revisions:
         if revision in seen:
             failures.append(
                 f"migrations: revision {revision!r} defined in {rel} and {seen[revision]}"
             )
         seen[revision] = rel
+        if owner == CORE_OWNER and not _stamped_or_grandfathered(revision):
+            failures.append(
+                f"migrations: {rel} revision {revision!r} is not a UTC stamp; scaffold a new core "
+                f"migration with `ufoctl new-migration <slug>` — the id carries no ordering, "
+                f"down_revision does"
+            )
     down_by_owner: dict[str, set[str]] = defaultdict(set)
     revs_by_owner: dict[str, set[str]] = defaultdict(set)
     bases_by_owner: dict[str, list[str]] = defaultdict(list)

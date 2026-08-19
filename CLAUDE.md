@@ -210,6 +210,14 @@ as a portfolio, not a single bet:
   consumer without a producer is a lie to the reader. If one end can't be built yet, the
   declaration doesn't land — this repo has no punch list and nothing declared "for later". A
   migration adds only the columns its unit wires; later units bring their own migrations.
+- **A new migration's id is a UTC stamp** — scaffold it with `uv run ufoctl new-migration <slug>`,
+  which writes `core/src/ufo/schema/migrations/versions/<YYYYMMDDHHMMSS>_<slug>.py` carrying that
+  stamp as `revision` and core's head as `down_revision`. Never take the next number: two branches
+  read the same listing, both write it, and one is renumbered before it can land. The id carries no
+  ordering — `down_revision` does, and the single-head gate is the guard. When another branch's
+  migration merges first, repoint `down_revision` at the new head and keep the stamp. The ids
+  already merged (`0001`–`0113`, plus each extension's own family) stay exactly as they are: a live
+  database is stamped with them.
 - Prove the chain end-to-end: realistic input → durable state → a user or agent can use it.
 - Failed experiments are reverted in the same session, with the revert committed.
 - Docs (spec.md, README.md) update in the same commit as the architectural change they

@@ -433,6 +433,17 @@ def _seal_sqlite_journal(url: str) -> None:
     connection.close()
 
 
+def core_migration_head() -> str:
+    """Core's single head — the revision a new core migration chains onto. Core's version location
+    alone, so an extension's branch head is never what comes back."""
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    head = ScriptDirectory.from_config(config).get_current_head()
+    if head is None:
+        raise RuntimeError("core's migration graph has no head")
+    return head
+
+
 def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None:
     dbapi_connection.isolation_level = None
     cursor = dbapi_connection.cursor()
