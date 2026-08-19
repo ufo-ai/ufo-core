@@ -1,5 +1,6 @@
 import json
 import re
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -10,15 +11,20 @@ from pydantic import BaseModel, Field, field_validator
 
 from ufo.sdk.surfaces import SurfaceInstallationConflict
 from ufo.sdk.tools import TextContent, ToolContext, ToolResult
-from ufo_ext_imessage.provider import (
-    MessageProvider,
-    ProviderNotConfigured,
-    TargetNotOptedIn,
+from ufo_ext_imessage.provider import MessageProvider, ProviderNotConfigured
+from ufo_ext_imessage.surface import (
+    OPT_IN_CODE_ALPHABET,
+    OPT_IN_CODE_LENGTH,
+    OPT_IN_TEXT,
+    SURFACE_IMESSAGE,
+    PendingClaim,
+    phone_key,
+    read_claim,
 )
-from ufo_ext_imessage.surface import OPT_IN_TEXT, SURFACE_IMESSAGE, PendingClaim, phone_key
 
 E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
-PHONE_CLAIM_TTL = timedelta(minutes=10)
+PHONE_CLAIM_MINUTES = 30
+PHONE_CLAIM_TTL = timedelta(minutes=PHONE_CLAIM_MINUTES)
 
 
 def opt_in_link(assigned_phone_number: str, opt_in_code: str) -> str:
@@ -58,7 +64,8 @@ def _opt_in_result(assigned_phone_number: str, opt_in_code: str) -> ToolResult:
     opt_in_text = f"{OPT_IN_TEXT} {opt_in_code}"
     return _result(
         "pending",
-        f'Text "{opt_in_text}" to {assigned_phone_number} from that phone within 10 minutes.',
+        f'Text "{opt_in_text}" to {assigned_phone_number} from that phone within '
+        f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter.",
         assigned_phone_number=assigned_phone_number,
         opt_in_text=opt_in_text,
         opt_in_link=opt_in_link(assigned_phone_number, opt_in_code),
@@ -92,38 +99,43 @@ class ImessageConnect:
                 return _result(
                     "not_connected", "This iMessage provider is connected to another workspace."
                 )
+        linked = await ctx.ext.installations.linked_member(SURFACE_IMESSAGE, args.phone_number)
+        if linked is not None and linked != ctx.speaker_member_id:
+            return _result("not_connected", "That phone belongs to another workspace member.")
         key = phone_key(args.phone_number)
         stored = await ctx.ext.store.get(key)
-        now = datetime.now(UTC)
-        if stored is not None:
-            existing = PendingClaim.model_validate(stored)
-            if existing.expires_at > now:
-                if existing.member_id != ctx.speaker_member_id:
-                    return _result(
-                        "not_connected", "This phone number is claimed by another member."
-                    )
-                return _opt_in_result(existing.assigned_phone_number, existing.opt_in_code)
-        registration_idempotency_key = f"imessage-registration:{ctx.idempotency_key or uuid4()}"
-        opt_in_code = uuid4().hex.upper()
-        try:
-            user = await provider.register_phone(args.phone_number, registration_idempotency_key)
-        except TargetNotOptedIn as refusal:
-            if not refusal.assigned_phone_number:
-                raise
-            conversation_id = None
-            assigned_phone_number = refusal.assigned_phone_number
-        else:
-            conversation_id = user.conversation_id
-            assigned_phone_number = user.assigned_phone_number
-        claim = PendingClaim(
-            member_id=ctx.speaker_member_id,
-            phone_number=args.phone_number,
-            conversation_id=conversation_id,
-            assigned_phone_number=assigned_phone_number,
-            opt_in_code=opt_in_code,
-            expires_at=datetime.now(UTC) + PHONE_CLAIM_TTL,
+        claim = read_claim(stored)
+        if claim is not None and claim.expires_at <= datetime.now(UTC):
+            claim = None
+        if claim is not None and claim.member_id != ctx.speaker_member_id:
+            return _result("not_connected", "Another workspace member is connecting that phone.")
+        line_idempotency_key = f"imessage-line:{ctx.idempotency_key or uuid4()}"
+        if linked is not None:
+            assigned_phone_number = await provider.assign_line(
+                args.phone_number, line_idempotency_key
+            )
+            return _result(
+                "connected",
+                f"That phone is connected. Text {assigned_phone_number} from it.",
+                assigned_phone_number=assigned_phone_number,
+            )
+        if claim is not None:
+            return _opt_in_result(claim.assigned_phone_number, claim.opt_in_code)
+        assigned_phone_number = await provider.assign_line(args.phone_number, line_idempotency_key)
+        opt_in_code = "".join(
+            secrets.choice(OPT_IN_CODE_ALPHABET) for _ in range(OPT_IN_CODE_LENGTH)
         )
-        landed = await ctx.ext.store.put_if(key, claim.model_dump(mode="json"), expected=stored)
+        landed = await ctx.ext.store.put_if(
+            key,
+            PendingClaim(
+                member_id=ctx.speaker_member_id,
+                phone_number=args.phone_number,
+                assigned_phone_number=assigned_phone_number,
+                opt_in_code=opt_in_code,
+                expires_at=datetime.now(UTC) + PHONE_CLAIM_TTL,
+            ).model_dump(mode="json"),
+            expected=stored,
+        )
         if not landed:
             return _result("not_connected", "The phone connection changed. Ask again.")
         return _opt_in_result(assigned_phone_number, opt_in_code)

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ufo.sdk.audience import conversation_audience, room_audience
 from ufo.sdk.context import ScopedStore
@@ -34,15 +34,19 @@ IMESSAGE_EXTENSION = "imessage"
 SURFACE_IMESSAGE = "imessage"
 IMESSAGE_INBOX_DIR = "inbox/imessage"
 CURSOR_KEY = "stream:shared:cursor"
-CLAIM_PREFIX = "opt-in-claim:"
-CONFIRMATION_REPLY_PREFIX = "opt-in-receipt:"
+CLAIM_PREFIX = "phone-claim:"
+CONFIRMATION_REPLY_PREFIX = "phone-receipt:"
 RECONNECT_SECONDS = 2.0
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 LIVE_BUFFER_FRAMES = 1_000
 CONNECTED_TEXT = "Connected. Send your request."
+CODE_UNKNOWN_TEXT = "That code does not match. Check the chat and send the code again."
+CODE_EXPIRED_TEXT = "That code expired. Ask in chat for a new one."
 CONTACT_CARD_NAME = "ufo"
 CONTACT_CARD_FILENAME = "ufo.vcf"
 OPT_IN_TEXT = "UFO"
+OPT_IN_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+OPT_IN_CODE_LENGTH = 6
 OPT_OUT_REPLIES = frozenset(
     {"cancel", "end", "optout", "quit", "revoke", "stop", "stopall", "unsubscribe"}
 )
@@ -51,10 +55,22 @@ OPT_OUT_REPLIES = frozenset(
 class PendingClaim(BaseModel):
     member_id: UUID
     phone_number: str
-    conversation_id: str | None
     assigned_phone_number: str
-    opt_in_code: str = Field(pattern=r"^[0-9A-F]{32}$")
+    opt_in_code: str = Field(pattern=rf"^[{OPT_IN_CODE_ALPHABET}]{{{OPT_IN_CODE_LENGTH}}}$")
     expires_at: datetime
+
+
+def read_claim(stored: object) -> PendingClaim | None:
+    """The claim one stored row carries, or None when the row holds no readable claim. A claim is
+    worth no more than the next `imessage_connect` call, so a row this model rejects is discarded by
+    its caller: raising instead would stop every inbound message the surface admits."""
+    if stored is None:
+        return None
+    try:
+        return PendingClaim.model_validate(stored)
+    except ValidationError:
+        log("imessage.claim.unreadable")
+        return None
 
 
 @dataclass(frozen=True)
@@ -316,35 +332,42 @@ class ImessageSurface:
         )
         receipt = await store.get(receipt_key)
         linked = await ctx.linked_member(message.sender)
-        if receipt is None and linked is not None:
-            await store.delete(phone_key(message.sender))
-            return MemberLink(member_id=linked, confirmation_receipt_key=None)
         key = phone_key(message.sender)
+        if receipt is None and linked is not None:
+            await store.delete(key)
+            return MemberLink(member_id=linked, confirmation_receipt_key=None)
+        source_key = receipt_key if receipt is not None else key
         stored = receipt if receipt is not None else await store.get(key)
         if stored is None:
             return None
-        claim = PendingClaim.model_validate(stored)
-        if receipt is None and claim.expires_at <= datetime.now(UTC):
-            await store.delete(key)
+        claim = read_claim(stored)
+        if claim is None:
+            await store.delete(source_key)
             return None
-        if (
-            not message.direct
-            or claim.phone_number != message.sender
-            or (
-                claim.conversation_id is not None
-                and claim.conversation_id != message.conversation_id
-            )
-        ):
+        if not message.direct or claim.phone_number != message.sender:
             return None
-        reply = message.text.strip().casefold()
-        if receipt is None and reply in OPT_OUT_REPLIES:
-            await store.delete(key)
-            return None
-        expected_reply = f"{OPT_IN_TEXT} {claim.opt_in_code}".casefold()
-        if receipt is None and (reply != expected_reply or message.attachments):
-            return None
-        if receipt is None and not await store.put_if(receipt_key, stored, expected=None):
-            return None
+        if receipt is None:
+            if claim.expires_at <= datetime.now(UTC):
+                await store.delete(key)
+                await provider.send_text(
+                    message.conversation_id,
+                    CODE_EXPIRED_TEXT,
+                    f"imessage-code-expired:{message.id}",
+                )
+                return None
+            if message.text.strip().casefold() in OPT_OUT_REPLIES:
+                await store.delete(key)
+                return None
+            typed = "".join(character for character in message.text.upper() if character.isalnum())
+            if claim.opt_in_code not in typed:
+                await provider.send_text(
+                    message.conversation_id,
+                    CODE_UNKNOWN_TEXT,
+                    f"imessage-code-unknown:{message.id}",
+                )
+                return None
+            if not await store.put_if(receipt_key, stored, expected=None):
+                return None
         if linked is None:
             linked = await ctx.link_member_id(message.sender, claim.member_id)
         if linked is None:
@@ -356,13 +379,12 @@ class ImessageSurface:
             CONNECTED_TEXT,
             f"imessage-connected:{message.id}",
         )
-        if claim.assigned_phone_number:
-            await provider.send_attachment(
-                message.conversation_id,
-                CONTACT_CARD_FILENAME,
-                contact_card(claim.assigned_phone_number),
-                f"imessage-contact-card:{message.id}",
-            )
+        await provider.send_attachment(
+            message.conversation_id,
+            CONTACT_CARD_FILENAME,
+            contact_card(claim.assigned_phone_number),
+            f"imessage-contact-card:{message.id}",
+        )
         await store.delete(key)
         return MemberLink(member_id=linked, confirmation_receipt_key=receipt_key)
 

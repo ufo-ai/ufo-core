@@ -5,12 +5,6 @@ from typing import Protocol
 
 
 @dataclass(frozen=True)
-class RegisteredPhone:
-    assigned_phone_number: str
-    conversation_id: str
-
-
-@dataclass(frozen=True)
 class MessageAttachment:
     id: str
     filename: str
@@ -38,21 +32,11 @@ class ProviderNotConfigured(RuntimeError):
     pass
 
 
-class TargetNotOptedIn(RuntimeError):
-    """The provider refused an outbound message because the target phone has not texted the
-    assigned line yet, so the member must send the first message. `assigned_phone_number` carries
-    the line when the refused call knows it."""
-
-    def __init__(self, assigned_phone_number: str = "") -> None:
-        self.assigned_phone_number = assigned_phone_number
-        super().__init__(assigned_phone_number)
-
-
 class MessageProvider(Protocol):
     @property
     def installation_id(self) -> str: ...
 
-    async def register_phone(self, phone_number: str, idempotency_key: str) -> RegisteredPhone: ...
+    async def assign_line(self, phone_number: str, idempotency_key: str) -> str: ...
 
     def catch_up(self, after_sequence: int | None) -> AsyncIterator[ProviderEvent]: ...
 

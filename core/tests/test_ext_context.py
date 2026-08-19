@@ -602,6 +602,40 @@ async def test_installation_access_rejects_operations_for_an_undeclared_surface(
             await context.installations.installation("slack")
         with pytest.raises(UndeclaredSurface, match="slack"):
             await context.installations.bind("slack", "team-a")
+        with pytest.raises(UndeclaredSurface, match="slack"):
+            await context.installations.linked_member("slack", "U1")
+
+
+async def test_installation_access_reads_the_member_a_declared_surface_knows(db: None) -> None:
+    first, second = await _workspace(), await _workspace()
+    member_id = uuid4()
+    context = context_for("slack", frozenset(), surfaces=frozenset({"slack"}))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=first,
+                email="member@example.com",
+                is_admin=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=first,
+                member_id=member_id,
+                surface="slack",
+                external_id="U1",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(first):
+        assert await context.installations.linked_member("slack", "U1") == member_id
+        assert await context.installations.linked_member("slack", "U2") is None
+    with ws(second):
+        assert await context.installations.linked_member("slack", "U1") is None
 
 
 async def test_installation_access_preserves_fleet_wide_uniqueness(db: None) -> None:

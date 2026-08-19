@@ -3729,9 +3729,29 @@ class UndeclaredSurface(KeyError):
 
 @dataclass(frozen=True)
 class SurfaceInstallationAccess:
-    """A tool's manifest-scoped installation registry under the ambient workspace."""
+    """A tool's manifest-scoped view of its declared surfaces under the ambient workspace: the
+    installation this workspace is bound to, and the member a surface already knows an external id
+    by."""
 
     declared: frozenset[str]
+
+    async def linked_member(self, surface: str, external_id: str) -> UUID | None:
+        """The member one declared surface's external id is linked to, or None. A setup tool reads
+        this to answer a member the surface already knows, instead of staging a claim that the
+        member has nothing left to complete."""
+        if surface not in self.declared:
+            raise UndeclaredSurface(surface)
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.surface_identity.c.member_id).where(
+                        tables.surface_identity.c.workspace_id == ws_current().workspace_id,
+                        tables.surface_identity.c.surface == surface,
+                        tables.surface_identity.c.external_id == external_id,
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else row.member_id
 
     async def installation(self, surface: str) -> str | None:
         """Return this workspace's installation identity for one declared surface."""

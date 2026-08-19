@@ -12,11 +12,8 @@ import httpx
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from ufo_ext_imessage.proto.photon.imessage.v1 import (
-    address_types_pb2,
     attachment_service_pb2,
     attachment_service_pb2_grpc,
-    chat_service_pb2,
-    chat_service_pb2_grpc,
     event_service_pb2,
     event_service_pb2_grpc,
     message_service_pb2,
@@ -28,8 +25,6 @@ from ufo_ext_imessage.provider import (
     MessageAttachment,
     ProviderEvent,
     ProviderNotConfigured,
-    RegisteredPhone,
-    TargetNotOptedIn,
 )
 
 SPECTRUM_PROJECT_ID_ENV = "SPECTRUM_PROJECT_ID"
@@ -137,7 +132,10 @@ class SpectrumProject:
             self._loops[loop] = state
             return state
 
-    async def register_phone(self, phone_number: str, idempotency_key: str) -> RegisteredPhone:
+    async def assign_line(self, phone_number: str, idempotency_key: str) -> str:
+        """The shared line Spectrum sends this phone's messages from, registering the phone the
+        first time. A shared line cannot open a conversation with a phone that has not texted it, so
+        the member's own first message is what opens one."""
         try:
             page = TypeAdapter(CloudEnvelope[UserPage]).validate_python(
                 await self._request("GET", f"/projects/{self.project_id}/users/")
@@ -149,44 +147,22 @@ class SpectrumProject:
         existing = next(
             (user for user in page.data.users if user.phone_number == phone_number), None
         )
-        if existing is None:
-            try:
-                created = TypeAdapter(CloudEnvelope[SpectrumUser]).validate_python(
-                    await self._request(
-                        "POST",
-                        f"/projects/{self.project_id}/users/",
-                        json={"type": "shared", "phoneNumber": phone_number},
-                        idempotency_key=f"{idempotency_key}:user",
-                    )
+        if existing is not None:
+            return existing.assigned_phone_number
+        try:
+            created = TypeAdapter(CloudEnvelope[SpectrumUser]).validate_python(
+                await self._request(
+                    "POST",
+                    f"/projects/{self.project_id}/users/",
+                    json={"type": "shared", "phoneNumber": phone_number},
+                    idempotency_key=f"{idempotency_key}:user",
                 )
-            except ValidationError as error:
-                raise SpectrumCloudError("Spectrum returned an invalid registered user") from error
-            if not created.succeed:
-                raise SpectrumCloudError("Spectrum rejected the user registration request")
-            existing = created.data
-        line = await self.line()
-        request = chat_service_pb2.CreateChatRequest(
-            addresses=(phone_number,),
-            service=address_types_pb2.CHAT_SERVICE_TYPE_IMESSAGE,
-            client_message_id=f"{idempotency_key}:conversation",
-        )
-        async with self.channel() as channel:
-            try:
-                response = await chat_service_pb2_grpc.ChatServiceStub(channel).CreateChat(
-                    request,
-                    metadata=rpc_metadata(line.token, f"{idempotency_key}:conversation"),
-                    timeout=RPC_TIMEOUT_SECONDS,
-                )
-            except grpc.aio.AioRpcError as error:
-                if error.code() != grpc.StatusCode.PERMISSION_DENIED:
-                    raise
-                raise TargetNotOptedIn(existing.assigned_phone_number) from error
-        if not response.chat.guid:
-            raise SpectrumCloudError("Spectrum returned a direct chat without an id")
-        return RegisteredPhone(
-            assigned_phone_number=existing.assigned_phone_number,
-            conversation_id=response.chat.guid,
-        )
+            )
+        except ValidationError as error:
+            raise SpectrumCloudError("Spectrum returned an invalid registered user") from error
+        if not created.succeed:
+            raise SpectrumCloudError("Spectrum rejected the user registration request")
+        return created.data.assigned_phone_number
 
     async def _request(
         self,
@@ -228,9 +204,7 @@ class SpectrumProject:
         )
 
     def external_error(self, error: Exception) -> bool:
-        return isinstance(
-            error, (grpc.aio.AioRpcError, SpectrumCloudError, TargetNotOptedIn, httpx.HTTPError)
-        )
+        return isinstance(error, (grpc.aio.AioRpcError, SpectrumCloudError, httpx.HTTPError))
 
     def error_code(self, error: Exception) -> str:
         if isinstance(error, grpc.aio.AioRpcError):
@@ -286,18 +260,11 @@ class SpectrumProject:
             client_message_id=idempotency_key,
         )
         async with self.channel() as channel:
-            try:
-                response = await message_service_pb2_grpc.MessageServiceStub(
-                    channel
-                ).SendTextMessage(
-                    request,
-                    metadata=rpc_metadata(line.token, idempotency_key),
-                    timeout=RPC_TIMEOUT_SECONDS,
-                )
-            except grpc.aio.AioRpcError as error:
-                if error.code() != grpc.StatusCode.PERMISSION_DENIED:
-                    raise
-                raise TargetNotOptedIn from error
+            response = await message_service_pb2_grpc.MessageServiceStub(channel).SendTextMessage(
+                request,
+                metadata=rpc_metadata(line.token, idempotency_key),
+                timeout=RPC_TIMEOUT_SECONDS,
+            )
         return response.message.guid
 
     async def send_attachment(

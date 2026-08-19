@@ -24,9 +24,9 @@ def manifest() -> Manifest:
                 name="imessage_connect",
                 description=(
                     "Connect the requesting member's iMessage phone. An admin connects the "
-                    "provider; each member proves control by sending the pending result's "
-                    "per-claim UFO code to the assigned line. The result carries the line and an "
-                    "sms: link. Relay both exactly."
+                    "provider; each member proves control by texting the pending result's code to "
+                    "the assigned line. Relay the line, the code and the sms: link exactly. A "
+                    "connected result means that phone already reaches this workspace."
                 ),
                 input_model=ImessageConnectInput,
                 handler=connect.run,
