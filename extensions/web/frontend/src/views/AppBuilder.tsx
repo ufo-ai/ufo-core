@@ -66,10 +66,7 @@ export function AppBuilder({ agent, member, onSettled, onClose }: AppBuilderProp
   }, [key, agent.id]);
 
   return (
-    <section
-      aria-label={APP_BUILDER_TITLE}
-      className="flex min-h-0 min-w-0 flex-col max-narrow:absolute max-narrow:inset-0 max-narrow:z-10 max-narrow:bg-surface"
-    >
+    <section aria-label={APP_BUILDER_TITLE} className="flex min-h-0 min-w-0 flex-col">
       <header className="flex h-(--size-control) shrink-0 items-center gap-2xl border-b border-edge px-2xl py-lg box-content">
         <h2 className="m-0 min-w-0 flex-1 truncate text-subtitle font-medium">New application</h2>
         <Button size="bar" onClick={onClose}>

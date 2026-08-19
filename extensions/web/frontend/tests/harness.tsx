@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, vi } from "vitest";
 
+import { NARROW } from "@/App";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 import {
@@ -117,6 +118,21 @@ export function saying(line: string | RegExp) {
 export function useStreamFake() {
   StreamFake.reset();
   vi.stubGlobal("EventSource", StreamFake);
+}
+
+/** Draws as a phone does: the shell's own breakpoint answers true, and every other query a component
+ *  asks — reduced motion, colour scheme — answers as it does at a desk width. */
+export function atPhoneWidth() {
+  vi.stubGlobal("matchMedia", (media: string) => ({
+    media,
+    matches: media === NARROW,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  }));
 }
 
 export type Route = (url: string, init?: RequestInit) => Response | Promise<Response>;

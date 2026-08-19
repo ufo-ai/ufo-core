@@ -194,6 +194,20 @@ test("the top bar names the categories on the left and workspace and the member 
   expect(bar.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
+/** The bar draws one mark, wherever it stands: leading the row at a desk width, centred between the
+ *  hamburger and the account at a phone width. It is centred out of the row — absolutely placed — so
+ *  the row it stands over keeps one line whatever the mark's own width. */
+test("the bar's mark stands at a phone width too, centred out of the row", () => {
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const mark = screen.getByRole("img", { name: "ufo" });
+  expect(mark.className).not.toContain("max-narrow:hidden");
+  expect(mark.className).toContain("max-narrow:absolute");
+  expect(mark.className).toContain("max-narrow:start-1/2");
+  expect(mark.closest("header")!.className).toContain("max-narrow:relative");
+});
+
 test("the menu drawer carries the bar's destinations and the act that starts a conversation", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);

@@ -26,6 +26,7 @@ import {
   CHAT_ROW,
   CONVO_ID,
   MEMBER,
+  atPhoneWidth,
   NO_ARTIFACTS,
   SECOND,
   SECOND_ID,
@@ -236,19 +237,28 @@ test("the filter admits a surface into the rail and the browser keeps the choice
   expect(await screen.findByRole("button", { name: /Migration run/ })).toBeTruthy();
 });
 
-/** The narrow layout drops every heading and scrolls the rows sideways. The filter still applies
- *  there, so a control the layout hides is a rail with rows missing and no way to ask for them
- *  back. */
-test("the settings control survives the narrow layout that hides the rail's headings", async () => {
+/** A phone screen has no width for a column beside the page, so the nav drawer holds the rail
+ *  there: the same rows under the same headings, the filter that governs them, and a pick that both
+ *  opens the conversation and shuts the drawer. */
+test("the drawer holds the rail at a phone width, and a pick shuts it", async () => {
+  atPhoneWidth();
   wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const nav = screen.getByRole("navigation", { name: "Conversations" });
-  let held = await screen.findByRole("button", { name: "Conversation settings" });
-  while (held !== nav) {
-    expect(held.className).not.toContain("max-narrow:hidden");
-    held = held.parentElement!;
-  }
+  expect(screen.queryByRole("navigation", { name: "Conversations" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  const rail = within(drawer).getByRole("navigation", { name: "Conversations" });
+  expect(within(rail).getByRole("button", { name: "Conversation settings" })).toBeTruthy();
+  const headings = within(rail).getAllByRole("heading", { level: 2 });
+  expect(headings[0].textContent).toBe("Conversations");
+  expect(headings).toHaveLength(2);
+
+  await userEvent.click(await within(rail).findByRole("button", { name: /Pick one thread/ }));
+
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
 test("a tick leaves the filter open, so both surfaces are named in one visit", async () => {

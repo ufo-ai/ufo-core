@@ -20,6 +20,7 @@ import {
   StreamFake,
   TURN_ID,
   agentIndex,
+  atPhoneWidth,
   json,
   openAgentRow,
   openAgentSettings,
@@ -336,6 +337,27 @@ test("the app the last phase creates reaches the rail when the turn settles", as
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
   expect(screen.queryByText("No such agent.")).toBeNull();
+  expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
+});
+
+/** A phone screen has no width for a column beside the page, so the nav drawer holds the index
+ *  there and the app's own pane is the page — the main app's until the member picks another. */
+test("the drawer holds the apps index at a phone width, and a pick shuts it", async () => {
+  atPhoneWidth();
+  location.hash = "#/agents";
+  wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
+  render(<Portal />);
+
+  expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
+  expect(screen.queryByRole("navigation", { name: "Agents" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  const index = within(drawer).getByRole("navigation", { name: "Agents" });
+  await userEvent.click(within(index).getByRole("button", { name: /^Research/ }));
+
+  expect(location.hash).toBe("#/agents/" + SECOND_ID);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 

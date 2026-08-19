@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ObjectPane } from "@/kernel/objects";
 import { BesideHost } from "@/kernel/beside";
+import { useDrawerList, useShutDrawer } from "@/kernel/drawer";
 import { BANDS } from "@/kernel/pane";
 import { TabPanel, TabRow } from "@/kernel/tabs";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -55,8 +56,8 @@ const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
 
 /** The apps screen: a thin index — the New application act over one row per app, the open app's
  *  settings behind the gear beside it — next to a wide pane holding the selected app, or the
- *  app-building wizard while a run is open. On a narrow screen the index is the page and a
- *  hash-named app overlays it. */
+ *  app-building wizard while a run is open. On a narrow screen the pane is the page and the nav
+ *  drawer holds the index. */
 export function Agents({
   agents,
   member,
@@ -85,118 +86,120 @@ export function Agents({
   const runTitle = held.founded?.title ?? null;
   const [settling, setSettling] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(SETTINGS_TABS[0]);
+  const shutDrawer = useShutDrawer();
+  /** Raising the wizard draws it on the page, so a drawer holding the index that raised it is shut
+   *  the way navigating out of the drawer shuts it. */
+  const build = () => {
+    setWanting(true);
+    shutDrawer();
+  };
+
+  const index = useDrawerList(
+    <div
+      className={cn(
+        "flex min-h-0 flex-col gap-2xl overflow-y-auto",
+        "border-r border-edge bg-sidebar px-sm py-2xl max-narrow:border-r-0 max-narrow:py-0",
+      )}
+    >
+      <nav aria-label="Agents" className="flex shrink-0 flex-col gap-sm">
+        {/* Every member is offered the act: the `agent` kind admits a create from any speaking
+            member and stamps them the owner, and the wizard rides the main agent's own chat. */}
+        {mainAgent ? (
+          <Button variant="send" size="bar" className="shrink-0" onClick={build}>
+            New application
+          </Button>
+        ) : null}
+        <ul className="m-0 flex list-none flex-col gap-px p-0">
+          {/* The run in flight, named the way the wizard's own pane is until the conversation has
+              a title of its own. While the pane shows it states where the member already is;
+              while an app holds the pane instead, the row is the way back to the run. It is not
+              an app: nothing here opens one, and the app's real row arrives from the apps read
+              when it lands. */}
+          {building || running ? (
+            <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
+              {building ? (
+                <div
+                  aria-current
+                  className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
+                >
+                  <span className="min-w-0 truncate text-label">
+                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                  </span>
+                  <span className="w-full truncate font-mono text-small text-ink-soft">
+                    Building
+                  </span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={build}
+                  className={cn(
+                    "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
+                    "rounded-row text-left text-inherit hover:bg-fill",
+                  )}
+                >
+                  <span className="min-w-0 max-w-full truncate text-label">
+                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                  </span>
+                  <span className="w-full truncate font-mono text-small text-ink-soft">
+                    Building
+                  </span>
+                </button>
+              )}
+            </li>
+          ) : null}
+          {agents.map((agent) => {
+            const open = !building && agent.id === shown?.id;
+            return (
+              /** The whole row is the one control: it opens the app, and nothing else stands on
+               *  it. What acts on the open app is worn by that app's own pane, beside its name. */
+              <li
+                key={agent.id}
+                className={cn(
+                  "flex items-center rounded-row hover:bg-fill",
+                  open && "bg-fill",
+                )}
+              >
+                <button
+                  type="button"
+                  aria-current={open}
+                  onClick={() => {
+                    setWanting(false);
+                    onOpen(agent.id);
+                  }}
+                  className={cn(
+                    "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent",
+                    "px-sm py-xs text-left text-inherit",
+                  )}
+                >
+                  {/* Both facts are read in the row's own ink rather than the soft tone: soft ink
+                      clears the contrast floor over the pane's surface and not over the fill an
+                      open or hovered row draws, and these two words are the smallest text in the
+                      rail. Size and the mono face carry the hierarchy instead. */}
+                  <Avatar>
+                    <AvatarFallback>
+                      <AgentIcon name={agent.icon} />
+                    </AvatarFallback>
+                  </Avatar>
+                  <span className="flex min-w-0 flex-1 flex-col gap-2xs">
+                    <span className="flex w-full items-baseline gap-sm">
+                      <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
+                      {agent.main ? <span className="text-small">{MAIN}</span> : null}
+                    </span>
+                    <span className="w-full truncate font-mono text-small">{agent.model}</span>
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+    </div>,
+  );
 
   return (
     <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1">
-      <div
-        className={cn(
-          "flex min-h-0 flex-col gap-2xl overflow-y-auto",
-          "border-r border-edge bg-sidebar px-sm py-2xl max-narrow:border-r-0",
-          /* The pane covers this index on a narrow screen, so the index stops answering while
-             it is covered: a row behind the cover is still a tab stop and still a row a reader
-             reads out, and neither states where the member actually is. */
-          selected && "max-narrow:invisible",
-        )}
-      >
-        <nav aria-label="Agents" className="flex shrink-0 flex-col gap-sm">
-          {/* Every member is offered the act: the `agent` kind admits a create from any speaking
-              member and stamps them the owner, and the wizard rides the main agent's own chat. */}
-          {mainAgent ? (
-            <Button
-              variant="send"
-              size="bar"
-              className="shrink-0"
-              onClick={() => setWanting(true)}
-            >
-              New application
-            </Button>
-          ) : null}
-          <ul className="m-0 flex list-none flex-col gap-px p-0">
-            {/* The run in flight, named the way the wizard's own pane is until the conversation has
-                a title of its own. While the pane shows it states where the member already is;
-                while an app holds the pane instead, the row is the way back to the run. It is not
-                an app: nothing here opens one, and the app's real row arrives from the apps read
-                when it lands. */}
-            {building || running ? (
-              <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
-                {building ? (
-                  <div
-                    aria-current
-                    className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
-                  >
-                    <span className="min-w-0 truncate text-label">
-                      {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
-                    </span>
-                    <span className="w-full truncate font-mono text-small text-ink-soft">
-                      Building
-                    </span>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setWanting(true)}
-                    className={cn(
-                      "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
-                      "rounded-row text-left text-inherit hover:bg-fill",
-                    )}
-                  >
-                    <span className="min-w-0 max-w-full truncate text-label">
-                      {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
-                    </span>
-                    <span className="w-full truncate font-mono text-small text-ink-soft">
-                      Building
-                    </span>
-                  </button>
-                )}
-              </li>
-            ) : null}
-            {agents.map((agent) => {
-              const open = !building && agent.id === shown?.id;
-              return (
-                /** The whole row is the one control: it opens the app, and nothing else stands on
-                 *  it. What acts on the open app is worn by that app's own pane, beside its name. */
-                <li
-                  key={agent.id}
-                  className={cn(
-                    "flex items-center rounded-row hover:bg-fill",
-                    open && "bg-fill",
-                  )}
-                >
-                  <button
-                    type="button"
-                    aria-current={open}
-                    onClick={() => {
-                      setWanting(false);
-                      onOpen(agent.id);
-                    }}
-                    className={cn(
-                      "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent",
-                      "px-sm py-xs text-left text-inherit",
-                    )}
-                  >
-                    {/* Both facts are read in the row's own ink rather than the soft tone: soft ink
-                        clears the contrast floor over the pane's surface and not over the fill an
-                        open or hovered row draws, and these two words are the smallest text in the
-                        rail. Size and the mono face carry the hierarchy instead. */}
-                    <Avatar>
-                      <AvatarFallback>
-                        <AgentIcon name={agent.icon} />
-                      </AvatarFallback>
-                    </Avatar>
-                    <span className="flex min-w-0 flex-1 flex-col gap-2xs">
-                      <span className="flex w-full items-baseline gap-sm">
-                        <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
-                        {agent.main ? <span className="text-small">{MAIN}</span> : null}
-                      </span>
-                      <span className="w-full truncate font-mono text-small">{agent.model}</span>
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </nav>
-      </div>
+      {index}
       {building && mainAgent ? (
         <AppBuilder
           agent={mainAgent}
@@ -217,7 +220,6 @@ export function Agents({
           agent={shown}
           tab={tab}
           tabs={AGENT_TABS}
-          selected={selected !== null}
           onTab={onTab}
           onSettings={() => {
             setSettingsTab(SETTINGS_TABS[0]);
@@ -227,7 +229,7 @@ export function Agents({
           onPlace={onPlace}
         />
       ) : (
-        <div className="m-auto max-w-empty text-center text-ink-soft max-narrow:hidden">
+        <div className="m-auto max-w-empty text-center text-ink-soft">
           No agent is visible to you.
         </div>
       )}

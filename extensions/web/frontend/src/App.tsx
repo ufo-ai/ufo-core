@@ -43,6 +43,7 @@ import {
   surfaceWord,
   useViewer,
 } from "@/lib/audience";
+import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Pane, PaneHeader } from "@/kernel/pane";
 import { agentName } from "@/lib/agentName";
 import { MainAgentProvider } from "@/lib/mainAgent";
@@ -138,6 +139,16 @@ export function App({ agents, member, onAgents }: AppProps) {
     setRailShown(next);
     holdRailShown(next);
   }, []);
+  const [menu, setMenu] = useState(false);
+  const shutMenu = useCallback(() => setMenu(false), []);
+  const narrow = useNarrow();
+
+  /** A drawer left open while the window grows past the breakpoint would trap focus behind a
+   *  hamburger the layout no longer draws. */
+  useEffect(() => {
+    if (!narrow) setMenu(false);
+  }, [narrow]);
+
   const [railShut, setRailShut] = useState<string[] | null>(heldRailShut);
   const setRailShutHeld = useCallback((next: string[]) => {
     setRailShut(next);
@@ -180,9 +191,12 @@ export function App({ agents, member, onAgents }: AppProps) {
     };
   }, [reloads]);
 
+  /** Every act that moves the page comes through here, so the drawer standing over that page is
+   *  shut here too — whether the member picked a destination, a conversation, or an app. */
   const go = useCallback((hash: string, next: Route) => {
     if (location.hash !== hash) location.hash = hash;
     setRoute(next);
+    setMenu(false);
   }, []);
 
   // The card reaches the first run by query, since a fragment never reaches the server; the address
@@ -356,63 +370,67 @@ export function App({ agents, member, onAgents }: AppProps) {
     <Viewer.Provider value={member.email}>
       <MainAgentProvider agents={agents}>
         <TooltipProvider>
-          <div className="grid h-dvh grid-cols-1 grid-rows-[auto_1fr]">
-            <TopBar
-              route={route}
-              member={member}
-              agents={agents}
-              mainAgent={mainAgent}
-              onHome={openHome}
-              onAgents={openAgents}
-              onNewChat={openNewChat}
-              onSection={(section) => placeSection(section, {}, "push")}
-              onWorkspace={() => placeWorkspace("team", {}, "push")}
-              onAdmin={openAdmin}
-            />
-            <div
-              className={cn(
-                "grid min-h-0 grid-cols-1",
-                inChat(route.kind) &&
-                  "grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
-              )}
-            >
-              {inChat(route.kind) ? (
-                <ChatSidebar
+          <DrawerHost hosted={narrow} shut={shutMenu}>
+            <div className="grid h-dvh grid-cols-1 grid-rows-[auto_1fr]">
+              <TopBar
+                route={route}
+                member={member}
+                agents={agents}
+                mainAgent={mainAgent}
+                menu={menu}
+                onMenu={setMenu}
+                onHome={openHome}
+                onAgents={openAgents}
+                onNewChat={openNewChat}
+                onSection={(section) => placeSection(section, {}, "push")}
+                onWorkspace={() => placeWorkspace("team", {}, "push")}
+                onAdmin={openAdmin}
+              />
+              <div
+                className={cn(
+                  "grid min-h-0 grid-cols-1",
+                  inChat(route.kind) &&
+                    "grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1",
+                )}
+              >
+                {inChat(route.kind) ? (
+                  <ChatSidebar
+                    mainAgent={mainAgent}
+                    rail={rail}
+                    route={route}
+                    sort={railSort}
+                    onSort={setRailSortHeld}
+                    shown={railShown}
+                    onShown={setRailShownHeld}
+                    shut={railShut}
+                    onShut={setRailShutHeld}
+                    onNewChat={openNewChat}
+                    onOpen={openChat}
+                    onRetry={() => setReloads((count) => count + 1)}
+                  />
+                ) : null}
+                <RoutedPane
+                  route={route}
+                  agents={agents}
+                  member={member}
                   mainAgent={mainAgent}
                   rail={rail}
-                  route={route}
-                  sort={railSort}
-                  onSort={setRailSortHeld}
-                  shown={railShown}
-                  onShown={setRailShownHeld}
-                  shut={railShut}
-                  onShut={setRailShutHeld}
+                  onAgents={onAgents}
+                  onCreated={created}
+                  onActivity={activity}
+                  onOpenAgent={openAgent}
                   onNewChat={openNewChat}
-                  onOpen={openChat}
-                  onRetry={() => setReloads((count) => count + 1)}
+                  onOpenSlot={openSlot}
+                  onPlaceWorkspace={placeWorkspace}
+                  onPlaceSection={placeSection}
+                  onPlaceAgent={placeAgent}
+                  sought={sought}
+                  linked={linked}
                 />
-              ) : null}
-              <RoutedPane
-                route={route}
-                agents={agents}
-                member={member}
-                mainAgent={mainAgent}
-                rail={rail}
-                onAgents={onAgents}
-                onCreated={created}
-                onActivity={activity}
-                onOpenAgent={openAgent}
-                onNewChat={openNewChat}
-                onOpenSlot={openSlot}
-                onPlaceWorkspace={placeWorkspace}
-                onPlaceSection={placeSection}
-                onPlaceAgent={placeAgent}
-                sought={sought}
-                linked={linked}
-              />
+              </div>
+              <Toast state={toast} onDone={() => setToast(SILENT)} />
             </div>
-            <Toast state={toast} onDone={() => setToast(SILENT)} />
-          </div>
+          </DrawerHost>
         </TooltipProvider>
       </MainAgentProvider>
     </Viewer.Provider>
@@ -439,6 +457,8 @@ function TopBar({
   member,
   agents,
   mainAgent,
+  menu,
+  onMenu,
   onHome,
   onAgents,
   onNewChat,
@@ -450,6 +470,8 @@ function TopBar({
   member: Member;
   agents: Agent[];
   mainAgent: Agent | null;
+  menu: boolean;
+  onMenu: (open: boolean) => void;
   onHome: () => void;
   onAgents: () => void;
   onNewChat: (agentId: string) => void;
@@ -457,15 +479,6 @@ function TopBar({
   onWorkspace: () => void;
   onAdmin: () => void;
 }) {
-  const [menu, setMenu] = useState(false);
-  const narrow = useNarrow();
-
-  /** A drawer left open while the window grows past the breakpoint would trap focus behind a
-   *  hamburger the layout no longer draws. */
-  useEffect(() => {
-    if (!narrow) setMenu(false);
-  }, [narrow]);
-
   const leading: Destination[] = [
     { label: "Chat", current: inChat(route.kind), onSelect: onHome },
     {
@@ -486,20 +499,26 @@ function TopBar({
   };
 
   return (
-    <header className="flex items-center gap-lg border-b border-edge bg-sidebar px-2xl py-md max-narrow:gap-md max-narrow:px-lg">
+    <header className="flex items-center gap-lg border-b border-edge bg-sidebar px-2xl py-md max-narrow:relative max-narrow:gap-md max-narrow:px-lg">
       <button
         type="button"
         aria-label="Menu"
         aria-expanded={menu}
-        onClick={() => setMenu(true)}
+        onClick={() => onMenu(true)}
         className="hidden size-(--size-control) shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 text-inherit hover:bg-fill max-narrow:flex"
       >
         <IconMenu2 className="size-(--size-glyph)" aria-hidden />
       </button>
+      {/* The mark leads the bar at a desk width. At a phone width the hamburger leads it and search
+          and the account close it, so the mark is centred between them — lifted out of the row, which
+          keeps one line whatever the mark's width. */}
       <span
         role="img"
         aria-label="ufo"
-        className="h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current max-narrow:hidden"
+        className={cn(
+          "h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current",
+          "max-narrow:absolute max-narrow:start-1/2 max-narrow:-translate-x-1/2 max-narrow:rtl:translate-x-1/2",
+        )}
         style={{ mask: `url(${logo}) center / contain no-repeat` }}
       />
       <nav aria-label="Primary" className="flex min-w-0 flex-1 items-center">
@@ -530,7 +549,7 @@ function TopBar({
       <AccountMenu member={member} onAdmin={onAdmin} />
       <NavDrawer
         open={menu}
-        onClose={() => setMenu(false)}
+        onClose={() => onMenu(false)}
         mainAgent={mainAgent}
         onNewChat={onNewChat}
         destinations={[...leading, workspace]}
@@ -539,9 +558,10 @@ function TopBar({
   );
 }
 
-/** The bar's destinations at a phone width, where six of them will not sit on one row. It carries
- *  the same list and the same current mark the bar does, and picking one both moves and shuts:
- *  a drawer still standing over the page it just reached states nothing about where the member is. */
+/** The bar's destinations at a phone width, where six of them will not sit on one row, and under
+ *  them the selected section's own list — the conversations on Chat, the apps on Apps — which the
+ *  page has no second column for at that width. It carries the same destination list and the same
+ *  current mark the bar does. */
 function NavDrawer({
   open,
   onClose,
@@ -555,6 +575,7 @@ function NavDrawer({
   onNewChat: (agentId: string) => void;
   destinations: Destination[];
 }) {
+  const hold = useDrawerSlot();
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogPrimitive.Portal>
@@ -587,26 +608,20 @@ function NavDrawer({
             <Button
               variant="send"
               size="bar"
-              className="w-full"
-              onClick={() => {
-                onNewChat(mainAgent.id);
-                onClose();
-              }}
+              className="w-full shrink-0"
+              onClick={() => onNewChat(mainAgent.id)}
             >
               New conversation
             </Button>
           ) : null}
-          <nav aria-label="Primary">
+          <nav aria-label="Primary" className="shrink-0">
             <ul className="m-0 flex list-none flex-col gap-xs p-0">
               {destinations.map((place) => (
                 <li key={place.label}>
                   <button
                     type="button"
                     aria-current={place.current}
-                    onClick={() => {
-                      place.onSelect();
-                      onClose();
-                    }}
+                    onClick={place.onSelect}
                     className={cn(
                       "flex h-(--size-row) w-full items-center rounded-full border-0 bg-transparent px-lg text-left text-label text-inherit hover:bg-fill",
                       place.current && "bg-fill",
@@ -618,6 +633,7 @@ function NavDrawer({
               ))}
             </ul>
           </nav>
+          <div ref={hold} className="flex min-h-0 flex-1 flex-col" />
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
@@ -731,13 +747,13 @@ function ChatSidebar({
   onOpen: (conversationId: string) => void;
   onRetry: () => void;
 }) {
-  return (
+  return useDrawerList(
     <nav
       aria-label="Conversations"
-      className="flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0"
+      className="flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl max-narrow:border-r-0 max-narrow:py-0"
     >
       {/* The drawer carries this act below the breakpoint, where a full-width pill above the rail
-          spends a row of a phone screen on a control the hamburger already reaches. */}
+          repeats the one the drawer already draws over its own destinations. */}
       <ul className="m-0 flex list-none flex-col gap-px px-sm py-0 max-narrow:hidden">
         <li>
           {mainAgent ? (
@@ -752,13 +768,13 @@ function ChatSidebar({
           ) : null}
         </li>
       </ul>
-      <div className="flex h-(--size-row) shrink-0 items-center justify-between px-sm max-narrow:px-0">
-        <h2 className="m-0 pl-sm font-sans text-label font-medium text-ink-soft max-narrow:hidden">
+      <div className="flex h-(--size-row) shrink-0 items-center justify-between px-sm">
+        <h2 className="m-0 pl-sm font-sans text-label font-medium text-ink-soft">
           Conversations
         </h2>
         <RailSettings sort={sort} onSort={onSort} shown={shown} onShown={onShown} />
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:py-0 max-narrow:scroll-fade-x">
+      <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm">
         <RailList
           rail={rail}
           route={route}
@@ -771,7 +787,7 @@ function ChatSidebar({
           onRetry={onRetry}
         />
       </div>
-    </nav>
+    </nav>,
   );
 }
 
@@ -1110,8 +1126,8 @@ function RailSettings({
 
 export const NARROW = "(width < 720px)";
 
-/** Whether the shell is drawing its phone layout, which both the bar's drawer and the rail's
- *  groups turn on. */
+/** Whether the shell is drawing its phone layout, where the hamburger stands on the bar and the
+ *  drawer it opens holds the selected section's own list. */
 function useNarrow(): boolean {
   const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
   useEffect(() => {
@@ -1145,10 +1161,6 @@ function RailList({
   onRetry: () => void;
 }) {
   const now = new Date();
-  /** The rail draws no group heading in the narrow layout, so a group shut there would hold its
-   *  rows behind a control the layout never draws. Below the breakpoint every group stands open,
-   *  and what the member shut is waiting for them at the width that can reopen it. */
-  const narrow = useNarrow();
   const groups = railGroups(rail.rows, sort, shown, now);
   const standing = railShut(
     shut,
@@ -1175,7 +1187,7 @@ function RailList({
         <Collapsible
           key={group.label}
           asChild
-          open={narrow || !standing.includes(group.label)}
+          open={!standing.includes(group.label)}
           onOpenChange={(open) =>
             onShut(
               open
@@ -1184,8 +1196,8 @@ function RailList({
             )
           }
         >
-          <section className="max-narrow:contents">
-            <h2 className="m-0 max-narrow:hidden">
+          <section>
+            <h2 className="m-0">
               <CollapsibleTrigger className="group/rail flex h-(--size-row) w-full items-center gap-2xs rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill">
                 <span className="min-w-0 truncate">{group.label}</span>
                 <IconChevronRight
@@ -1195,7 +1207,7 @@ function RailList({
               </CollapsibleTrigger>
             </h2>
             <CollapsibleContent asChild>
-              <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">
+              <ul className="m-0 flex list-none flex-col gap-px p-0">
                 {group.rows.map((row) => {
                   const facts = [
                     row.speaker ? speakerName(row.speaker) : null,
@@ -1250,7 +1262,6 @@ function RailRow({
       onClick={onClick}
       className={cn(
         "flex h-(--size-row) w-full items-center gap-xs rounded-row border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
-        "max-narrow:w-auto max-narrow:max-w-sidebar max-narrow:whitespace-nowrap",
         current && "bg-fill",
       )}
     >
