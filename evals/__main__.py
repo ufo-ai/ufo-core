@@ -23,6 +23,7 @@ from importlib.metadata import version
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from httpx import AsyncClient, Timeout
 from pydantic import ValidationError
@@ -121,16 +122,24 @@ from evals.wandr.runner import (
     load_boundary as load_wandr_boundary,
 )
 from ufo.agent_scope import agent
+from ufo.agent_setup import setup_skill
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
-from ufo.db import dispose_db, init_db
+from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.context import context_for
-from ufo.ext.loader import embed_backend, index_backend, load_manifests, skill_registry
+from ufo.ext.loader import (
+    embed_backend,
+    index_backend,
+    load_manifests,
+    skill_registry,
+    turn_runtime_skills,
+)
 from ufo.governance import prompt_digest
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.models.registry import ModelRegistry, model_registry
+from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, ReasoningEffort
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.workspace import init_workspace_credentials, ws
@@ -504,6 +513,12 @@ def main(argv: list[str] | None = None) -> None:
         if workspace_id is not None and workspace_id != recall_workspace_id:
             parser.error("--workspace does not match the recall readiness workspace")
         workspace_id = recall_workspace_id
+        forgetful = sorted({task.name for task in tasks} & {"skill_loading", "new_application"})
+        if forgetful:
+            parser.error(
+                f"{', '.join(forgetful)} forget the workspace's memories before each case; "
+                "running them against a recall corpus would delete it"
+            )
     collector = (
         None
         if recall_workspace_id is None
@@ -663,6 +678,19 @@ async def _run(
                 loadable_skills: frozenset[str] | None = None
                 if any(task.suite == "skill_loading" for task in tasks):
                     loadable_skills = frozenset(skill_registry(manifests).by_name)
+                    generated = await turn_runtime_skills(manifests, credentials)
+                    loadable_skills |= frozenset(skill.name for skill in generated)
+                    async with workspace_tx() as connection:
+                        main_agent = (
+                            await connection.execute(
+                                sa.select(tables.agent.c.is_main).where(
+                                    tables.agent.c.id == agent_id
+                                )
+                            )
+                        ).scalar_one()
+                    waiting = await setup_skill(agent_id, main_agent, True)
+                    if waiting is not None:
+                        loadable_skills |= frozenset((waiting.name,))
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):
                     resolved_model = registry.resolve(agent_model)

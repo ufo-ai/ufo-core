@@ -19,6 +19,7 @@ from uuid import UUID
 
 from evals.harness.capability import WorkspaceFile
 from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject, digest_payload
+from evals.harness.memory_fence import forget_workspace_memory
 from evals.harness.mounts import (
     TERMINAL_STATUSES,
     MountObservation,
@@ -33,7 +34,7 @@ from evals.harness.target import (
     trajectory_snapshot,
 )
 
-GRADER_REVISION = "expected-present-3"
+GRADER_REVISION = "expected-present-4"
 LOAD_DEADLINE_SECONDS = 120.0
 
 
@@ -172,6 +173,7 @@ class SkillLoadingSuite:
         return await self._case(case, target)
 
     async def _case(self, case: SkillLoadCase, target: SkillLoadRunTarget) -> EvalCaseResult:
+        await forget_workspace_memory()
         conversation_id = await target.conversations.open(
             case.name, workspace_files=case.workspace_files
         )

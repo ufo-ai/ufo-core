@@ -15,6 +15,7 @@ import sqlalchemy as sa
 import yaml
 
 from evals.harness.capability import CapabilityOutput, CapabilityVerdict, DescribedGrader
+from evals.harness.memory_fence import forget_workspace_memory
 from evals.harness.scenario import EvalSeed, ScenarioCase, ScenarioOutcome, ScenarioUser
 from ufo.agents import AGENT_KIND
 from ufo.db import workspace_tx
@@ -33,37 +34,54 @@ SATISFIED_INSTRUCTION = (
 )
 
 
-async def _applications() -> tuple[sa.Row, ...]:
-    """Every application a member created in this workspace, oldest first. The main agent and a
-    provisioned agent have no owner, so this reads exactly what a member's own turns wrote."""
+async def _application(name: str) -> sa.Row | None:
+    """One application as its durable row, by the name this conversation's own apply wrote — so an
+    application another trial left in the workspace can never stand in this case's count."""
     async with workspace_tx() as connection:
-        return tuple(
-            (
-                await connection.execute(
-                    sa.select(
-                        tables.agent.c.name,
-                        tables.agent.c.prompt,
-                        tables.agent.c.model,
-                        tables.agent.c.reasoning,
-                        tables.agent.c.visibility,
-                    )
-                    .where(
-                        tables.agent.c.workspace_id == ws_current().workspace_id,
-                        tables.agent.c.is_main.is_(False),
-                        tables.agent.c.owner_member_id.is_not(None),
-                    )
-                    .order_by(tables.agent.c.created_at)
+        return (
+            await connection.execute(
+                sa.select(
+                    tables.agent.c.name,
+                    tables.agent.c.prompt,
+                    tables.agent.c.model,
+                    tables.agent.c.reasoning,
+                    tables.agent.c.visibility,
+                ).where(
+                    tables.agent.c.workspace_id == ws_current().workspace_id,
+                    tables.agent.c.name == name,
+                    tables.agent.c.is_main.is_(False),
                 )
-            ).all()
-        )
+            )
+        ).one_or_none()
+
+
+async def _fixture_row() -> sa.Row | None:
+    """The suite's own fixture as it stands, by name."""
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.agent.c.name, tables.agent.c.prompt).where(
+                    tables.agent.c.workspace_id == ws_current().workspace_id,
+                    tables.agent.c.name == EXISTING_APPLICATION,
+                    tables.agent.c.is_main.is_(False),
+                )
+            )
+        ).one_or_none()
 
 
 def _seeded(*existing: str) -> EvalSeed:
-    """Clear the applications an earlier trial created, then insert the ones this case starts with.
+    """Clear the applications an earlier trial created, then seed the ones this case starts with.
     Only a member-owned application with no conversation is cleared, so a provisioned agent the
-    deploy shipped and anything a member has actually talked to both survive."""
+    deploy shipped and anything a member has actually talked to both survive — except a row
+    bearing the suite's own fixture name, which the seed takes back to fixture state by name
+    rather than colliding on the insert: an application's first homepage turn soon gives it a
+    conversation the spare-clear rightly spares. A leftover it cannot clear it leaves standing —
+    deleting would chase every table that references a talked-to agent, and disowning changes the
+    workspace the next case routes in — so the graders read this conversation's own applies
+    instead of counting the workspace."""
 
     async def seed(workspace_id: UUID, _agent_id: UUID) -> None:
+        await forget_workspace_memory()
         async with workspace_tx() as connection:
             spare = (
                 (
@@ -105,30 +123,45 @@ def _seeded(*existing: str) -> EvalSeed:
                 )
             ).scalar_one()
             for name in existing:
+                fixture = {
+                    "prompt": EXISTING_PROMPT,
+                    "model": AUTO_MODEL,
+                    "reasoning": "auto",
+                    "visibility": "private",
+                    "internet_access_allowed": True,
+                    "sandbox_size": "small",
+                    "owner_member_id": owner,
+                }
+                reclaimed = await connection.execute(
+                    sa.update(tables.agent)
+                    .values(updated_at=sa.func.now(), **fixture)
+                    .where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.name == name,
+                        tables.agent.c.is_main.is_(False),
+                    )
+                )
+                if reclaimed.rowcount:
+                    continue
                 await connection.execute(
                     sa.insert(tables.agent).values(
                         id=uuid4(),
                         workspace_id=workspace_id,
                         name=name,
                         icon=auto_agent_icon(name, ()),
-                        prompt=EXISTING_PROMPT,
-                        model=AUTO_MODEL,
-                        reasoning="auto",
                         is_main=False,
-                        visibility="private",
-                        internet_access_allowed=True,
-                        sandbox_size="small",
-                        owner_member_id=owner,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
+                        **fixture,
                     )
                 )
 
     return seed
 
 
-def _agent_applies(output: CapabilityOutput) -> tuple[int, ...]:
-    """Where in the trajectory a successful object_apply carried a well-formed agent manifest."""
+def _agent_applies(output: CapabilityOutput) -> tuple[tuple[int, str], ...]:
+    """Where in the trajectory a successful object_apply carried a well-formed agent manifest, and
+    the name each applied."""
     applies = []
     for index, call in enumerate(output.calls):
         if call.name != "object_apply" or not call.succeeded:
@@ -142,7 +175,7 @@ def _agent_applies(output: CapabilityOutput) -> tuple[int, ...]:
             and set(document) == ENVELOPE_KEYS
             and document.get("kind") == AGENT_KIND
         ):
-            applies.append(index)
+            applies.append((index, str(document.get("name", ""))))
     return tuple(applies)
 
 
@@ -159,7 +192,7 @@ def _interviews(output: CapabilityOutput) -> tuple[int, ...]:
     after the create is the closing move the skill itself teaches (offer to attach an account) and
     counts toward nothing here."""
     applies = _agent_applies(output)
-    return tuple(index for index in _asks(output) if index < applies[0]) if applies else ()
+    return tuple(index for index in _asks(output) if index < applies[0][0]) if applies else ()
 
 
 async def _creation_failure(outcome: ScenarioOutcome, visibility: str) -> CapabilityVerdict | None:
@@ -169,15 +202,15 @@ async def _creation_failure(outcome: ScenarioOutcome, visibility: str) -> Capabi
         for call in outcome.output.calls
     ):
         return CapabilityVerdict(False, f"never loaded {SKILL!r}")
-    rows = await _applications()
-    if len(rows) != 1:
-        return CapabilityVerdict(
-            False, f"expected one new application, found {[row.name for row in rows]}"
-        )
-    row = rows[0]
     applies = _agent_applies(outcome.output)
     if not applies:
         return CapabilityVerdict(False, "no successful object_apply carried an agent manifest")
+    names = list(dict.fromkeys(name for _, name in applies))
+    if len(names) != 1:
+        return CapabilityVerdict(False, f"expected one new application, applied {names}")
+    row = await _application(names[0])
+    if row is None:
+        return CapabilityVerdict(False, f"applied {names[0]!r} but no such application stands")
     if not _interviews(outcome.output):
         return CapabilityVerdict(False, "created the application before confirming it")
     if (row.model, row.reasoning) != (AUTO_MODEL, "auto"):
@@ -220,12 +253,10 @@ async def _graded_stated_up_front(outcome: ScenarioOutcome) -> CapabilityVerdict
 
 
 async def _graded_existing_untouched(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    rows = await _applications()
-    if [row.name for row in rows] != [EXISTING_APPLICATION]:
-        return CapabilityVerdict(
-            False, f"expected only {EXISTING_APPLICATION!r}, found {[row.name for row in rows]}"
-        )
-    if rows[0].prompt != EXISTING_PROMPT:
+    fixture = await _fixture_row()
+    if fixture is None:
+        return CapabilityVerdict(False, f"{EXISTING_APPLICATION!r} is gone")
+    if fixture.prompt != EXISTING_PROMPT:
         return CapabilityVerdict(False, f"{EXISTING_APPLICATION} was rewritten")
     if applies := _agent_applies(outcome.output):
         return CapabilityVerdict(False, f"applied {len(applies)} agent manifest(s) to a wiring ask")

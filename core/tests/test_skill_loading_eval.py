@@ -14,6 +14,7 @@ from evals.skill_loading.runner import (
     skill_load_verdict,
     skill_loading_task,
 )
+from ufo.agent_setup import SETUP_SKILL_NAME
 from ufo.ext.context import Trajectory
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.governance import prompt_digest
@@ -197,8 +198,8 @@ def test_catalog_names_are_unique() -> None:
     assert len(names) == len(set(names))
 
 
-def test_every_catalog_skill_is_assistant_carried() -> None:
-    carried = set(skill_registry(load_manifests("assistant")).by_name)
+def test_every_catalog_skill_is_loadable_by_the_target() -> None:
+    carried = set(skill_registry(load_manifests("assistant")).by_name) | {SETUP_SKILL_NAME}
     for case in CASES:
         assert case.expected in carried, (case.name, case.expected)
         missing = [name for name in case.forbidden if name not in carried]

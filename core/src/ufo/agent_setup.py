@@ -87,7 +87,8 @@ def _wants(missing: AgentSetup) -> str:
 SETUP_SKILL_NAME = "agent-setup"
 SETUP_SKILL_DESCRIPTION = (
     "Finish setting up an agent this workspace installed: grant it the accounts it works from. "
-    "Load when a member asks to set one up, or asks why one is not working."
+    "Load when a member asks to set one up, or asks why one is not working. Not for creating a "
+    "new application of their own."
 )
 SETUP_HEADER = (
     "You are installed but not set up. Ask the member for what is missing, then call "
