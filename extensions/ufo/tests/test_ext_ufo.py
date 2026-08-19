@@ -200,6 +200,10 @@ def test_a_cancel_divides_on_whether_it_carries_words() -> None:
     assert directives_for(stopped, streamed=True) == (b"say\tcancelled\n", b"ask\t>\n")
     refused = Terminal(frame=TerminalFrame(status="cancelled", text="Over the daily cap."))
     assert directives_for(refused, streamed=True) == (b"say\tOver the daily cap.\n", b"exit\t0\n")
+    assert directives_for(refused, streamed=True, exits=False) == (
+        b"say\tOver the daily cap.\n",
+        b"ask\t>\n",
+    ), "a stream that did not admit the refused turn keeps the session"
 
 
 def _request() -> CredentialRequest:
@@ -333,6 +337,8 @@ async def test_only_a_terminal_frame_reads_what_the_turn_shared() -> None:
         b"txt\tpartial\n",
         b"file\tone.txt\t3\thttps://ufo.test/artifacts/1\n",
         b"ask\t>\n",
+        b"since\t77777777-7777-4777-8777-777777777777\tc2\n",
+        b"listen\t2\n",
     ]
 
 
@@ -360,6 +366,8 @@ async def test_stream_privately_renders_a_connect_handoff() -> None:
         b"say\tUse the connection control.\n",
         b"say\t[Complete the connection](https://oauth.example.test/authorize)\n",
         b"ask\t>\n",
+        b"since\t77777777-7777-4777-8777-777777777777\tc1\n",
+        b"listen\t2\n",
     ]
 
 
@@ -508,7 +516,10 @@ async def test_a_stream_resumed_from_its_cursor_states_the_cursor_it_was_given()
     assert _lines(out) == [["since", str(TURN), "9"], ["poll", "1"]]
 
 
-async def test_a_terminal_frame_names_no_cursor_because_nothing_resumes_it() -> None:
+async def test_a_terminal_frame_ends_with_its_cursor_and_a_listen() -> None:
+    """A turn's own end leaves the prompt, and the conversation can be woken without the member —
+    so the terminal names where the client got to and tells it to reconnect on the listen
+    interval, never on a `poll` that would read as a turn still running."""
     frames = _feed(
         [("1", TextDelta(text="echo:1")), ("2", Terminal(frame=TerminalFrame(status="done")))]
     )
@@ -520,23 +531,65 @@ async def test_a_terminal_frame_names_no_cursor_because_nothing_resumes_it() -> 
             )
         ]
     )
-    assert [line[0] for line in _lines(out)] == ["txt", "ask"]
+    assert _lines(out) == [
+        ["txt", "echo:1"],
+        ["ask", ">"],
+        ["since", str(TURN), "2"],
+        ["listen", "2"],
+    ]
 
 
-async def test_terminal_frame_closes_the_stream_without_polling() -> None:
-    frames = _feed(
-        [("1", TextDelta(text="echo:1")), ("2", Terminal(frame=TerminalFrame(status="done")))]
-    )
+async def test_a_cancel_that_carries_words_exits_without_a_listen() -> None:
+    """An admission refusal ends the client session, so nothing is left to reconnect."""
+    refused = Terminal(frame=TerminalFrame(status="cancelled", text="Over the daily cap."))
     out = b"".join(
         [
             chunk
             async for chunk in stream_directives(
-                aclosing(frames), hold_seconds=HOLD_SECONDS, turn_id=TURN
+                aclosing(_feed([("1", refused)])), hold_seconds=HOLD_SECONDS, turn_id=TURN
             )
         ]
     )
-    lines = _lines(out)
-    assert lines == [["txt", "echo:1"], ["ask", ">"]]
+    assert _lines(out) == [["say", "Over the daily cap."], ["exit", "0"]]
+
+
+async def test_a_worded_cancel_on_a_listen_stream_prompts_and_keeps_listening() -> None:
+    """The refused turn was not this member's act — a scheduled firing a cap refused — so their
+    idle terminal reads the reason and stays open, still listening."""
+    refused = Terminal(frame=TerminalFrame(status="cancelled", text="Over the daily cap."))
+    out = b"".join(
+        [
+            chunk
+            async for chunk in stream_directives(
+                aclosing(_feed([("1", refused)])),
+                hold_seconds=HOLD_SECONDS,
+                turn_id=TURN,
+                exits=False,
+            )
+        ]
+    )
+    assert _lines(out) == [
+        ["say", "Over the daily cap."],
+        ["ask", ">"],
+        ["since", str(TURN), "1"],
+        ["listen", "2"],
+    ]
+
+
+async def test_a_park_ends_without_a_listen() -> None:
+    """A parked turn resumes under its own id, so a listen bounce would re-render its notice on
+    every reconnect; the park keeps the parked shape and the member's next message resumes."""
+    out = b"".join(
+        [
+            chunk
+            async for chunk in stream_directives(
+                aclosing(_feed([("1", Parked(message="over cap"))])),
+                hold_seconds=HOLD_SECONDS,
+                turn_id=TURN,
+            )
+        ]
+    )
+    assert _lines(out) == [["say", "over cap"], ["ask", ">"]]
 
 
 @dataclass(frozen=True)
@@ -754,7 +807,8 @@ async def test_shared_fleet_scopes_each_turn_to_its_token_workspace(
     for lines in (lines_a, lines_b):
         answer = "".join(f for verb, *rest in lines if verb in ("txt", "say") for f in rest)
         assert "echo:1" in answer
-        assert lines[-1] == ["ask", ">"]
+        assert ["ask", ">"] in lines
+        assert lines[-1] == ["listen", "2"]
     turn_a, status_a = await _sole_turn(ws_a)
     turn_b, status_b = await _sole_turn(ws_b)
     assert (status_a, status_b) == ("done", "done")
@@ -775,7 +829,9 @@ async def test_shared_fleet_rejects_a_forged_or_missing_bearer(shared_ufo: Async
     assert await _turn_count(ws) == 0
 
 
-async def _seed_running_turn(workspace_id: UUID, conversation_id: UUID, member_id: UUID) -> UUID:
+async def _seed_running_turn(
+    workspace_id: UUID, conversation_id: UUID, member_id: UUID, seq: int = 1
+) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
         agent_id = (
@@ -789,7 +845,7 @@ async def _seed_running_turn(workspace_id: UUID, conversation_id: UUID, member_i
                 workspace_id=workspace_id,
                 conversation_id=conversation_id,
                 agent_id=agent_id,
-                seq=1,
+                seq=seq,
                 status="running",
                 inbound="list files in this dir",
                 admission_source="member",
@@ -848,7 +904,7 @@ async def test_a_resumed_stream_does_not_reprint_what_the_terminal_already_showe
     resumed = await _resume(turn_id)
     stale = await _resume(uuid4())
 
-    assert [line[0] for line in resumed] == ["say", "ask"]
+    assert [line[0] for line in resumed] == ["say", "ask", "since", "listen"]
     assert resumed[0] == ["say", "Listed."]
     assert ["note", "running glob: Listing the folder"] in stale
 
@@ -888,7 +944,10 @@ async def test_a_stop_ends_the_running_turn_and_returns_the_prompt(
     response = await _post_stop(client, token)
 
     assert response.status_code == 200
-    assert _lines(response.content) == [["say", "cancelled"], ["ask", ">"]]
+    lines = _lines(response.content)
+    assert lines[:2] == [["say", "cancelled"], ["ask", ">"]]
+    assert lines[2][:2] == ["since", str(turn_id)]
+    assert lines[3] == ["listen", "2"]
     stopped, status = await _sole_turn(workspace_id)
     assert (stopped, status) == (turn_id, "cancelled")
 
@@ -1070,7 +1129,8 @@ async def test_a_stop_with_no_live_turn_resumes_the_tail(ufo: tuple[AsyncClient,
     assert finished.status_code == 200
     answer = "".join(f for verb, *rest in _lines(finished.content) if verb == "say" for f in rest)
     assert "echo:1" in answer
-    assert _lines(finished.content)[-1] == ["ask", ">"]
+    assert ["ask", ">"] in _lines(finished.content)
+    assert _lines(finished.content)[-1] == ["listen", "2"]
     assert (await _sole_turn(workspace_id))[1] == "done"
 
 
@@ -1131,7 +1191,7 @@ async def test_message_admits_a_turn_streams_it_and_links_the_member(
     lines = await _post(client, "main", token, b"hello")
     answer = "".join(field for verb, *rest in lines if verb in ("txt", "say") for field in rest)
     assert "echo:1" in answer
-    assert lines[-1][0] in ("ask", "exit")
+    assert lines[-1][0] in ("ask", "exit", "listen")
     async with workspace_tx() as connection:
         linked = (
             await connection.execute(
@@ -1313,7 +1373,10 @@ async def test_the_tail_names_the_arrival_the_ack_promised(
     await hub.publish(turn_id, Absorbed(arrivals=(arrival,)))
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="Both done.")))
 
-    assert await held == [["absorbed", str(arrival)], ["say", "Both done."], ["ask", ">"]]
+    lines = await held
+    assert lines[:3] == [["absorbed", str(arrival)], ["say", "Both done."], ["ask", ">"]]
+    assert lines[3][0] == "since"
+    assert lines[4] == ["listen", "2"]
 
 
 async def test_a_resent_delivery_admits_once_and_names_the_same_turn(
@@ -1356,7 +1419,8 @@ async def test_a_send_with_nothing_running_opens_a_turn_the_stream_reads(
     lines = await _post(client, "main", token, b"")
     answer = "".join(field for verb, *rest in lines if verb in ("txt", "say") for field in rest)
     assert "echo:1" in answer
-    assert lines[-1] == ["ask", ">"]
+    assert ["ask", ">"] in lines
+    assert lines[-1] == ["listen", "2"]
 
 
 async def test_a_resent_send_that_founded_a_turn_names_it_without_reopening_it(
@@ -1512,7 +1576,7 @@ async def test_a_shared_file_reaches_the_terminal_as_an_openable_link(
         datetime.now(UTC),
     )
     assert claims.blob_key == f"artifacts/{turn_id}/report.pdf"
-    assert lines[-1] == ["ask", ">"]
+    assert ["ask", ">"] in lines
 
 
 async def test_a_deploy_that_mints_no_link_still_names_the_shared_file(
@@ -1562,7 +1626,8 @@ async def test_empty_body_polls_without_admitting_a_turn(ufo: tuple[AsyncClient,
     assert await _turn_count(workspace_id) == 1
     answer = "".join(field for verb, *rest in polled if verb in ("txt", "say") for field in rest)
     assert "echo:1" in answer
-    assert polled[-1][0] in ("ask", "exit")
+    assert ["ask", ">"] in polled
+    assert polled[-1] == ["listen", "2"]
 
 
 async def test_empty_body_privately_opens_the_latest_connect_handoff(
@@ -2127,3 +2192,150 @@ async def test_a_fresh_resume_replays_history_and_a_poll_does_not(
     assert response.status_code == 200
     polled = _lines(response.content)
     assert ["you", "what is up"] not in polled, f"a poll must not replay history: {polled}"
+    assert ["say", "the reply"] in polled, (
+        f"an unmarked reconnect may hold a mid-turn cursor, so it drains the durable end: {polled}"
+    )
+    assert polled[-1] == ["listen", "2"]
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        marked = await client.post(
+            "/surface/ufo/main",
+            content=b"",
+            headers={
+                "authorization": f"Bearer {token}",
+                "x-ufo-since": f"{turn_id}:",
+                "x-ufo-listen": "1",
+            },
+        )
+    bounced = _lines(marked.content)
+    assert bounced == [["since", str(turn_id), ""], ["listen", "2"]], (
+        f"a marked idle listen answers its cursor and the interval alone: {bounced}"
+    )
+
+
+async def test_a_marked_bounce_renders_a_refused_wakeup_without_exiting(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """A cap refuses a turn the member never founded — a scheduled firing, say — and the idle
+    terminal's next bounce renders the refusal. The member pressed nothing, so their session
+    survives: the reason is said, the prompt returns, and the listen keeps them reachable."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    rendered = uuid4()
+    refused = uuid4()
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        for turn_id, seq, status, frame, inbound, source in (
+            (rendered, 1, "done", TerminalFrame(status="done", text="ok"), "hello", "member"),
+            (
+                refused,
+                2,
+                "cancelled",
+                TerminalFrame(status="cancelled", text="Over the daily cap."),
+                "scheduled: check the feeds",
+                "internal",
+            ),
+        ):
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=seq,
+                    status=status,
+                    inbound=inbound,
+                    admission_source=source,
+                    speaker_member_id=member_id if source == "member" else None,
+                    terminal=frame.model_dump(mode="json"),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        response = await client.post(
+            "/surface/ufo/main",
+            content=b"",
+            headers={
+                "authorization": f"Bearer {token}",
+                "x-ufo-since": f"{rendered}:4",
+                "x-ufo-listen": "1",
+            },
+        )
+    lines = _lines(response.content)
+    assert ["say", "Over the daily cap."] in lines
+    assert ["exit", "0"] not in lines, f"a background refusal must not end the session: {lines}"
+    assert ["ask", ">"] in lines
+    assert lines[-2][:2] == ["since", str(refused)]
+    assert lines[-1] == ["listen", "2"]
+
+
+async def test_an_idle_listen_reconnect_prints_the_turn_the_conversation_woke_on(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The conversation speaks while nobody types — a delivered subagent result, a fired monitor —
+    and the idle client's next reconnect finds the newer turn and streams it from its first frame:
+    the `since` names the turn already rendered, so nothing re-says and nothing replays history."""
+    client, workspace_id = ufo
+    hub = runtime[1]
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    rendered = uuid4()
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=rendered,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="start the job",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(status="done", text="Running it.").model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    headers = {
+        "authorization": f"Bearer {token}",
+        "x-ufo-since": f"{rendered}:3",
+        "x-ufo-listen": "1",
+    }
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        quiet = await client.post("/surface/ufo/main", content=b"", headers=headers)
+    assert _lines(quiet.content) == [["since", str(rendered), "3"], ["listen", "2"]]
+
+    woken = await _seed_running_turn(workspace_id, conversation_id, member_id, seq=2)
+
+    async def _speak_when_tailed() -> None:
+        await _tailing(hub, woken)
+        await hub.publish(woken, TextDelta(text="the job finished"))
+        await hub.publish(woken, Terminal(frame=TerminalFrame(status="done")))
+
+    speaking = asyncio.ensure_future(_speak_when_tailed())
+    try:
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            response = await client.post("/surface/ufo/main", content=b"", headers=headers)
+    finally:
+        speaking.cancel()
+    lines = _lines(response.content)
+    assert ["txt", "the job finished"] in lines
+    assert ["you", "start the job"] not in lines, f"a listen never replays history: {lines}"
+    assert lines[-2][:2] == ["since", str(woken)]
+    assert lines[-1] == ["listen", "2"]

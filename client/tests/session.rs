@@ -31,6 +31,8 @@ struct Request {
     send_id: Option<String>,
     unsend_header: Option<String>,
     timezone_header: Option<String>,
+    since_header: Option<String>,
+    listen_header: Option<String>,
 }
 
 fn serve(script: Vec<Exchange>) -> Served {
@@ -66,6 +68,19 @@ fn serve(script: Vec<Exchange>) -> Served {
                 .iter()
                 .map(|line| format!("{line}\n"))
                 .collect();
+            // 599 severs the stream mid-body: the declared length outruns what is sent, and the
+            // reset makes the client's next read an error rather than a clean end.
+            if exchange.status == 599 {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len() + 64
+                );
+                stream.write_all(head.as_bytes()).expect("respond");
+                stream.flush().expect("flush");
+                thread::sleep(std::time::Duration::from_millis(100));
+                rst_close(stream);
+                continue;
+            }
             let status_line = match exchange.status {
                 200 => "200 OK",
                 500 => "500 Internal Server Error",
@@ -86,6 +101,30 @@ fn serve(script: Vec<Exchange>) -> Served {
     }
 }
 
+#[cfg(unix)]
+fn rst_close(stream: std::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            &linger as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        );
+    }
+    drop(stream);
+}
+
+#[cfg(not(unix))]
+fn rst_close(stream: std::net::TcpStream) {
+    drop(stream);
+}
+
 fn read_request(stream: &mut std::net::TcpStream) -> Request {
     let mut raw = Vec::new();
     let mut buffer = [0u8; 4096];
@@ -99,6 +138,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         mut send_id,
         mut unsend_header,
         mut timezone_header,
+        mut since_header,
+        mut listen_header,
     ) = loop {
         let read = stream.read(&mut buffer).expect("read");
         raw.extend_from_slice(&buffer[..read]);
@@ -114,6 +155,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         let mut send_key = None;
         let mut unsend = None;
         let mut timezone = None;
+        let mut since = None;
+        let mut listen = None;
         for line in head.lines() {
             let lower = line.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("content-length:") {
@@ -140,6 +183,12 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
             if lower.starts_with("x-ufo-timezone:") {
                 timezone = Some(line.split_once(':').unwrap().1.trim().to_string());
             }
+            if lower.starts_with("x-ufo-since:") {
+                since = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
+            if lower.starts_with("x-ufo-listen:") {
+                listen = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
         }
         break (
             end + 4,
@@ -151,6 +200,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
             send_key,
             unsend,
             timezone,
+            since,
+            listen,
         );
     };
     while raw.len() < headers_end + content_length {
@@ -170,6 +221,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         send_id: send_id.take(),
         unsend_header: unsend_header.take(),
         timezone_header: timezone_header.take(),
+        since_header: since_header.take(),
+        listen_header: listen_header.take(),
     }
 }
 
@@ -1458,6 +1511,263 @@ fn a_tty_send_settles_into_the_transcript_when_the_turn_absorbs_it() {
         .expect("the absorbed message joins the transcript as the member's own");
     let reply = printed.find("done").expect("the reply follows");
     assert!(member < reply, "{printed}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A turn's end arms the idle listen: the client reconnects empty on the interval carrying its
+/// cursor, a quiet bounce leaves the prompt (and the session) standing, and the turn the
+/// conversation wakes on prints without a keystroke.
+#[cfg(unix)]
+#[test]
+fn an_idle_tty_listens_and_prints_the_turn_that_wakes_the_conversation() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "txt\tanswer one",
+                "ask\t>",
+                "since\tturn-1\t5",
+                "listen\t0.05",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["since\tturn-1\t5", "listen\t0.05"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tthe job finished", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("tty-listen");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !session.ended() {
+        assert!(std::time::Instant::now() < deadline, "client never exited");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.wait();
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert_eq!(requests[0].body, "go");
+    assert_eq!(
+        requests[1].body, "",
+        "a listen reconnect admits nothing: {requests:?}"
+    );
+    assert_eq!(
+        requests[1].since_header.as_deref(),
+        Some("turn-1:5"),
+        "the bounce carries the cursor it was given: {requests:?}"
+    );
+    assert_eq!(
+        requests[1].listen_header.as_deref(),
+        Some("1"),
+        "the bounce marks itself an idle listen: {requests:?}"
+    );
+    assert_eq!(requests[2].body, "");
+    assert_eq!(requests[2].listen_header.as_deref(), Some("1"));
+    let printed = session.painted();
+    let answer = printed
+        .find("answer one")
+        .expect("the turn's answer prints");
+    let woken = printed
+        .find("the job finished")
+        .expect("the wakeup prints with nobody typing");
+    assert!(answer < woken, "{printed}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Ctrl+B on a turn founded from the listening prompt stays a detach: the turn's later frames
+/// must not re-open the presentation, and the member's next message takes the queueing lane that
+/// rejoins the turn — never the send lane a working session uses.
+#[cfg(unix)]
+#[test]
+fn a_detach_holds_while_the_listen_armed_turn_keeps_streaming() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["ask\t>", "since\tturn-1\t1", "listen\t30"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["sent\tturn-2\t1\t"],
+        },
+        Exchange {
+            delay_ms: 3000,
+            status: 200,
+            reply_lines: &["txt\tpartial", "poll\t9"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tdone", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("tty-detach-listen");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the opening turn posts");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    session
+        .keys
+        .write_all(b"next\r")
+        .expect("the prompt message types");
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the send lane posts");
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the woken wire resumes the tail");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    session.keys.write_all(b"\x02").expect("Ctrl+B detaches");
+    std::thread::sleep(std::time::Duration::from_millis(3300));
+    session
+        .keys
+        .write_all(b"again\r")
+        .expect("the post-detach message types");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !session.ended() {
+        assert!(std::time::Instant::now() < deadline, "client never exited");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.wait();
+    assert_eq!(requests.len(), 4, "{requests:?}");
+    assert_eq!(requests[1].send_header.as_deref(), Some("1"));
+    assert_eq!(requests[1].body, "next");
+    assert_eq!(
+        requests[3].send_header, None,
+        "a detached member's message rejoins through the queue: {requests:?}"
+    );
+    assert_eq!(requests[3].body, "again");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A listen bounce that already streamed a woken turn's frames is that turn's live stream: when
+/// it severs and the resume keeps failing, the reconnect ladder must end the wait with its error
+/// rather than parking a working presentation forever.
+#[cfg(unix)]
+#[test]
+fn a_severed_bounce_runs_the_reconnect_ladder_to_its_end() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["ask\t>", "since\tturn-1\t1", "listen\t0.2"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 599,
+            reply_lines: &["txt\twoken"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 500,
+            reply_lines: &["boom"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 500,
+            reply_lines: &["boom"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 500,
+            reply_lines: &["boom"],
+        },
+    ]);
+    let home = scratch_home("tty-severed-bounce");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !session.ended() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failed resume parked instead of ending the session"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let requests = served.handle.join().unwrap();
+    let status = session.child.wait().expect("the client exits");
+    assert!(!status.success(), "a dead link ends with the error, not 0");
+    assert_eq!(requests.len(), 5, "{requests:?}");
+    assert_eq!(requests[1].listen_header.as_deref(), Some("1"));
+    assert_eq!(
+        requests[2].listen_header, None,
+        "the ladder's resume is no idle bounce: {requests:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// An idle bounce that ends while the member is typing a credential must not reset the entry:
+/// the value posted is everything they typed, on both sides of the bounce.
+#[cfg(unix)]
+#[test]
+fn a_listen_bounce_does_not_clear_the_secret_being_typed() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "secret\tsealed-1\tapi_key\tPaste the key",
+                "ask\t>",
+                "since\tturn-1\t3",
+                "listen\t1",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["since\tturn-1\t3", "listen\t30"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tstored api_key"],
+        },
+    ]);
+    let home = scratch_home("tty-secret-listen");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the turn's own post reaches the gateway");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    session
+        .keys
+        .write_all(b"ab")
+        .expect("the first half types before the bounce");
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the idle bounce reaches the gateway");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    session
+        .keys
+        .write_all(b"c\r")
+        .expect("the second half types after the bounce");
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the secret posts");
+    let _ = session.child.kill();
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.wait();
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert_eq!(requests[1].listen_header.as_deref(), Some("1"));
+    assert_eq!(requests[2].slot_header.as_deref(), Some("api_key"));
+    assert_eq!(
+        requests[2].body, "abc",
+        "the bounce must not clear what was already typed: {requests:?}"
+    );
     let _ = std::fs::remove_dir_all(&home);
 }
 

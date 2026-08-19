@@ -32,6 +32,7 @@ WORKSPACE_WIRE = frozenset(
         "secret",
         "since",
         "poll",
+        "listen",
         "run",
         "install",
     }
@@ -56,6 +57,7 @@ WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "secret": ("sealed-blob", "perplexity_api_key", "Paste your Perplexity key"),
     "since": ("turn-1", "cursor-9"),
     "poll": ("1",),
+    "listen": ("2",),
     "run": ("op-1", "exec", "exec", "120", "", '{"argv":["ls"]}'),
     "install": (),
 }

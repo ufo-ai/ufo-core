@@ -566,6 +566,10 @@ impl App {
         self.focus = Focus::Secret;
     }
 
+    pub fn collecting_secret(&self) -> bool {
+        self.secret.is_some()
+    }
+
     pub fn push_queued(&mut self, text: &str) {
         self.queued.push_back(QueuedSend {
             text: text.to_string(),

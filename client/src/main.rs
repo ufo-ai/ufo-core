@@ -432,6 +432,7 @@ enum WireEvent {
     },
     StreamEnd {
         continues: bool,
+        listening: bool,
     },
     Fatal(String),
 }
@@ -444,6 +445,7 @@ enum WireCmd {
         value: String,
     },
     Detach,
+    Wake,
     Shutdown,
 }
 
@@ -456,6 +458,8 @@ struct Wire {
     queue: VecDeque<String>,
     op_reply: Option<PostBody>,
     poll: Option<f64>,
+    listen: Option<f64>,
+    heed_listen: bool,
     detached: bool,
     recorded: bool,
     opened: bool,
@@ -488,6 +492,12 @@ impl Wire {
             let stream = match self.session.post(post.clone()) {
                 Ok(stream) => stream,
                 Err(error) => {
+                    // A failed idle listen is nobody's action: park as an unlistened session
+                    // does, and the member's next message re-opens the wire.
+                    if matches!(post, PostBody::Listen) {
+                        body = self.next_body();
+                        continue;
+                    }
                     if !self.reconnect(&mut attempts, &error) {
                         return;
                     }
@@ -495,6 +505,7 @@ impl Wire {
                     continue;
                 }
             };
+            self.listen = None;
             let mut got = false;
             let mut severed = None;
             for item in stream {
@@ -513,6 +524,10 @@ impl Wire {
                 }
             }
             if let Some(error) = severed {
+                if !got && matches!(post, PostBody::Listen) {
+                    body = self.next_body();
+                    continue;
+                }
                 let resend = if got { None } else { Some(post) };
                 if !self.reconnect(&mut attempts, &error) {
                     return;
@@ -533,7 +548,15 @@ impl Wire {
             }
             let continues =
                 self.op_reply.is_some() || self.poll.is_some() || !self.queue.is_empty();
-            if self.evt.send(WireEvent::StreamEnd { continues }).is_err() {
+            let listening = self.listen.is_some();
+            if self
+                .evt
+                .send(WireEvent::StreamEnd {
+                    continues,
+                    listening,
+                })
+                .is_err()
+            {
                 return;
             }
             body = self.next_body();
@@ -561,6 +584,12 @@ impl Wire {
             }
             Directive::Poll(seconds) => {
                 self.poll = Some(seconds);
+                false
+            }
+            Directive::Listen(seconds) => {
+                if self.heed_listen {
+                    self.listen = Some(seconds);
+                }
                 false
             }
             Directive::Token(token) => {
@@ -659,6 +688,22 @@ impl Wire {
                     continue;
                 }
             }
+            // The idle listen: a member command wins the wait instantly; the interval
+            // elapsing posts an empty reconnect that asks whether the conversation spoke.
+            if let Some(seconds) = self.listen.filter(|_| !self.detached) {
+                match self
+                    .cmd
+                    .recv_timeout(Duration::from_secs_f64(seconds.max(0.0)))
+                {
+                    Ok(command) => self.apply_cmd(command),
+                    Err(RecvTimeoutError::Timeout) => {
+                        self.listen = None;
+                        return Some(PostBody::Listen);
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return None,
+                }
+                continue;
+            }
             match self.cmd.recv() {
                 Ok(command) => self.apply_cmd(command),
                 Err(_) => return None,
@@ -693,10 +738,15 @@ impl Wire {
                 value,
             } => self.fulfill_secret(&sealed, &slot, &value),
             WireCmd::Detach => self.detached = true,
+            WireCmd::Wake => {
+                self.detached = false;
+                self.poll = Some(0.0);
+            }
             WireCmd::Shutdown => {
                 self.queue.clear();
                 self.op_reply = None;
                 self.poll = None;
+                self.listen = None;
             }
         }
     }
@@ -812,6 +862,8 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         queue: VecDeque::new(),
         op_reply: None,
         poll: None,
+        listen: None,
+        heed_listen: true,
         detached: false,
         recorded: false,
         opened: false,
@@ -828,6 +880,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     let mut stop: Option<Stop> = None;
     let mut sends: Option<SendLane> = None;
     let mut clip_pending = false;
+    let mut listening = false;
     let mut latest_workspace = workspace_url;
     let mut latest_channel = channel_name;
     let code = loop {
@@ -859,6 +912,19 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                             app.push_queued(&text);
                             match sends.clone() {
                                 Some(lane) => {
+                                    send_instant(lane, text, stop_evt.clone(), cmd_tx.clone())
+                                }
+                                None => {
+                                    let _ = cmd_tx.send(WireCmd::Say(text));
+                                }
+                            }
+                        } else if listening {
+                            // The wire may be mid-bounce, so the message rides the send lane
+                            // rather than waiting for that stream to end.
+                            app.begin_turn();
+                            match sends.clone() {
+                                Some(lane) => {
+                                    app.push_queued(&text);
                                     send_instant(lane, text, stop_evt.clone(), cmd_tx.clone())
                                 }
                                 None => {
@@ -924,6 +990,10 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                         None => app.retracted(&text, &arrival_id, false),
                     },
                     Reply::Detach => {
+                        // A detached member left the turn: its frames must not re-open the
+                        // presentation, and their next message takes the queueing lane that
+                        // rejoins the turn.
+                        listening = false;
                         let _ = cmd_tx.send(WireCmd::Detach);
                         app.end_turn(false);
                         app.note("Detached; the turn continues, and a new message rejoins it.");
@@ -985,6 +1055,9 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             LoopEvent::StdinClosed => {}
             LoopEvent::Wire(wire_event) => match wire_event {
                 WireEvent::Dir(directive) => {
+                    if listening && !app.is_working() && wakes_display(&directive) {
+                        app.begin_turn();
+                    }
                     apply_directive(&mut app, &mut gate, directive);
                     app.paint();
                 }
@@ -1028,6 +1101,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                             app.begin_turn();
                         }
                         app.queued_sent(&text);
+                        let _ = cmd_tx.send(WireCmd::Wake);
                     } else if ack.arrival_id.is_empty() {
                         app.settle_queued(&text);
                     } else {
@@ -1043,7 +1117,11 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     app.retracted(&text, &arrival_id, retracted);
                     app.paint();
                 }
-                WireEvent::StreamEnd { continues } => {
+                WireEvent::StreamEnd {
+                    continues,
+                    listening: armed,
+                } => {
+                    listening = armed;
                     if let Some(code) = gate.exit.take() {
                         break code;
                     }
@@ -1052,10 +1130,20 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                         continue;
                     }
                     if !gate.secrets.is_empty() {
-                        app.end_turn(false);
-                        let prompt = gate.secrets.front().map(|(_, _, p)| p.clone());
-                        if let Some(prompt) = prompt {
-                            app.secret_begin(&prompt);
+                        // Only the stream that delivered the prompts opens the entry: an idle
+                        // bounce ending here must not reset what the member is typing.
+                        if !app.collecting_secret() {
+                            app.end_turn(false);
+                            let prompt = gate.secrets.front().map(|(_, _, p)| p.clone());
+                            if let Some(prompt) = prompt {
+                                app.secret_begin(&prompt);
+                            }
+                        }
+                    } else if armed && !gate.asked && gate.questions.is_empty() {
+                        // An idle bounce: the prompt already stands, and the wire reconnects on
+                        // its own.
+                        if app.is_working() {
+                            app.end_turn(false);
                         }
                     } else if !settle(&mut app, &mut gate) {
                         break 0;
@@ -1098,6 +1186,19 @@ fn settle(app: &mut App, gate: &mut Gate) -> bool {
     }
     app.end_turn(false);
     false
+}
+
+/// Whether a directive arriving on an idle listen puts something in front of the member — the
+/// conversation woke without them, and the turn presentation opens for it.
+fn wakes_display(directive: &Directive) -> bool {
+    matches!(
+        directive,
+        Directive::Say(_)
+            | Directive::Txt(_)
+            | Directive::Note(_)
+            | Directive::Status(_)
+            | Directive::File { .. }
+    )
 }
 
 fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
@@ -1156,6 +1257,8 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
         queue: VecDeque::new(),
         op_reply: None,
         poll: None,
+        listen: None,
+        heed_listen: false,
         detached: false,
         recorded: false,
         opened: false,
@@ -1210,7 +1313,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
             }
             WireEvent::Stoppable(_) => {}
             WireEvent::Sendable(_) | WireEvent::Sent { .. } | WireEvent::Retracted { .. } => {}
-            WireEvent::StreamEnd { continues } => {
+            WireEvent::StreamEnd { continues, .. } => {
                 if let Some(code) = gate.exit.take() {
                     out.end_stream();
                     break code;
@@ -1305,6 +1408,8 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
         queue: VecDeque::new(),
         op_reply: None,
         poll: None,
+        listen: None,
+        heed_listen: false,
         detached: false,
         recorded: false,
         opened: false,
@@ -1407,7 +1512,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                     emit_json(&driver.message_sent(&ack));
                 }
                 WireEvent::Retracted { .. } => {}
-                WireEvent::StreamEnd { continues } => {
+                WireEvent::StreamEnd { continues, .. } => {
                     if continues {
                         continue;
                     }
@@ -1570,5 +1675,82 @@ mod tests {
             resume_command(Some("https://w"), "abc").as_deref(),
             Some("ufo --resume abc")
         );
+    }
+
+    fn listening_wire(listen: Option<f64>) -> (Wire, Sender<WireCmd>, Receiver<WireEvent>) {
+        let (evt_tx, evt_rx) = channel::<WireEvent>();
+        let (cmd_tx, cmd_rx) = channel::<WireCmd>();
+        let dir = env::temp_dir();
+        let wire = Wire {
+            session: Session::new(
+                "https://gw".into(),
+                None,
+                "abc".into(),
+                None,
+                "sid".into(),
+                None,
+                false,
+                false,
+            ),
+            runtime: OpRuntime {
+                workdir: dir.clone(),
+                cwd: dir.clone(),
+            },
+            home: config::Home { root: dir },
+            evt: evt_tx,
+            cmd: cmd_rx,
+            queue: VecDeque::new(),
+            op_reply: None,
+            poll: None,
+            listen,
+            heed_listen: true,
+            detached: false,
+            recorded: false,
+            opened: false,
+            install: false,
+            installed_this_run: false,
+        };
+        (wire, cmd_tx, evt_rx)
+    }
+
+    #[test]
+    fn an_armed_listen_times_out_into_a_marked_bounce() {
+        let (mut wire, _cmd, _evt) = listening_wire(Some(0.01));
+        let body = wire.next_body();
+        assert!(matches!(body, Some(PostBody::Listen)));
+        assert!(wire.listen.is_none());
+    }
+
+    #[test]
+    fn a_member_message_wins_the_listen_wait() {
+        let (mut wire, cmd, _evt) = listening_wire(Some(30.0));
+        let typing = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            let _ = cmd.send(WireCmd::Say("hello".into()));
+        });
+        let started = std::time::Instant::now();
+        let body = wire.next_body();
+        typing.join().expect("the sender thread ends");
+        assert!(matches!(body, Some(PostBody::Message(text)) if text == "hello"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_detached_wire_ignores_the_listen() {
+        let (mut wire, cmd, _evt) = listening_wire(Some(0.01));
+        wire.detached = true;
+        drop(cmd);
+        assert!(wire.next_body().is_none());
+    }
+
+    #[test]
+    fn a_wake_reattaches_and_polls_at_once() {
+        let (mut wire, cmd, _evt) = listening_wire(None);
+        wire.detached = true;
+        cmd.send(WireCmd::Wake)
+            .expect("the wire holds its receiver");
+        let body = wire.next_body();
+        assert!(matches!(body, Some(PostBody::Empty)));
+        assert!(!wire.detached);
     }
 }

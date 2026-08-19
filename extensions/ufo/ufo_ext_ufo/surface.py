@@ -15,6 +15,15 @@ tailed as directives up to `HOLD_SECONDS` (just under the shell's `curl --max-ti
 that outruns the hold ends the stream with `poll` and the shell reconnects with an empty body, which
 admits nothing and resumes tailing the conversation's latest turn.
 
+A turn's own end leaves the member at the prompt, and the conversation can still speak first: a
+delivered subagent result or a fired monitor admits a turn no member message founded. So a stream
+that ends on its terminal also ends with `since` and `listen`, and the client reconnects empty
+every `LISTEN_SECONDS` while it idles, marking each reconnect with `x-ufo-listen`. A marked
+reconnect whose `since` names the conversation's latest turn — already terminal, already
+rendered — answers `since` and `listen` alone, so idling costs one line; one that finds a newer
+turn falls into the resume tail and prints it as it runs. An unmarked empty reconnect is a `poll`
+or severed-stream resume whose cursor may stand mid-turn, so it always drains the tail.
+
 A send (`x-ufo-send`) is the one POST that holds nothing: it admits its body, answers with the
 `sent` ack, and returns. It is the request a member's second message rides while their first turn
 still runs — admission speed rather than the held stream's next boundary — and the consequences
@@ -69,6 +78,7 @@ SOURCE = "ufo cli"
 PROMPT = ">"
 RESUMED_NOTE = "the service restarted; this turn resumed"
 POLL_SECONDS = 1
+LISTEN_SECONDS = 2
 MAX_MESSAGE_BYTES = 40_000
 MAX_SECRET_BYTES = 4_096
 MAX_OP_REPLY_BYTES = 100 * 1024 * 1024
@@ -81,6 +91,7 @@ SEND_HEADER = "x-ufo-send"
 SEND_ID_HEADER = "x-ufo-send-id"
 UNSEND_HEADER = "x-ufo-unsend"
 SINCE_HEADER = "x-ufo-since"
+LISTEN_HEADER = "x-ufo-listen"
 OP_ERR_HEADER = "x-ufo-op-err"
 SCRIPT_HEADER = "x-ufo-script"
 TIMEZONE_HEADER = "x-ufo-timezone"
@@ -228,6 +239,7 @@ def directives_for(
     collect: tuple[CredentialPrompt, ...] = (),
     connect_message: str | None = None,
     files: tuple[SharedFile, ...] = (),
+    exits: bool = True,
 ) -> tuple[bytes, ...]:
     """The directive lines one live frame renders to. Token deltas stream as `txt`; tool and skill
     activity narrates as `note`; a running cost meter is a transient `status`; the terminal frame
@@ -252,7 +264,7 @@ def directives_for(
             cost = frame.cost_micro_usd / MICRO_USD_PER_USD
             return (directive("status", f"{frame.tokens} tok - ${cost:.6f}"),)
         case Terminal():
-            return _answer(frame, streamed, collect, connect_message, files)
+            return _answer(frame, streamed, collect, connect_message, files, exits)
         case Parked():
             return (directive("say", frame.message), directive("ask", PROMPT))
         case Absorbed():
@@ -289,6 +301,7 @@ def _answer(
     collect: tuple[CredentialPrompt, ...] = (),
     connect_message: str | None = None,
     files: tuple[SharedFile, ...] = (),
+    exits: bool = True,
 ) -> tuple[bytes, ...]:
     """Cap a turn. A done turn prompts (`ask`) after its answer — already streamed as `txt`, else
     said now, followed by one `file` line per file the turn shared and one `secret` line per
@@ -296,9 +309,12 @@ def _answer(
     a failure says what to do next and prompts.
 
     A cancel divides on whether it carries words. An admission refusal cancels with its reason: the
-    member reads it and the client session ends (`exit`), the conversation resuming on the next
-    `ufo`. A member's own stop carries none — the turn ended because they pressed Esc — so the turn
-    is capped and the prompt returns.
+    member reads it and, on the stream whose request admitted the refused turn (`exits`), the
+    client session ends (`exit`), the conversation resuming on the next `ufo`. On any other
+    stream — an idle listen or a reconnect rendering a turn the member did not found — the reason
+    is said and the prompt returns, because ending a session over a background turn's refusal would
+    close a terminal nobody touched. A member's own stop carries none — the turn ended because they
+    pressed Esc — so the turn is capped and the prompt returns.
 
     Files render on every terminal status, not only `done`: the upload committed before the turn
     reached its end, so a turn that shared a file and then failed or was cancelled still owes the
@@ -329,7 +345,8 @@ def _answer(
             )
         case "cancelled":
             if frame.text:
-                return (*_say_lines(frame.text), *shared, directive("exit", "0"))
+                closing = directive("exit", "0") if exits else directive("ask", PROMPT)
+                return (*_say_lines(frame.text), *shared, closing)
             return (directive("say", "cancelled"), *shared, directive("ask", PROMPT))
     raise ValueError(f"unmapped terminal status {frame.status!r}")
 
@@ -349,6 +366,7 @@ async def stream_directives(
     turn_id: UUID,
     since: str = "",
     moved_on: Callable[[], Awaitable[bool]] | None = None,
+    exits: bool = True,
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
@@ -371,15 +389,26 @@ async def stream_directives(
     its first note three times. The cursor is the one the client was given back when this stream
     rendered nothing, so a quiet hold never walks it backwards, and a frame taken off the
     subscription but not rendered — one in flight when the op won the race — is replayed rather than
-    lost, because it stands after the cursor this names. A stream that ends on its own terminal
-    names none: nothing resumes it — unless `moved_on` says the conversation already holds a newer
-    live turn, as it does when a stop founds the next turn on a message the member had already
-    sent; then the terminal is followed by `since` and an immediate `poll`, so the reconnect is a
-    cursor-carrying resume onto that turn rather than a fresh join that would replay history."""
+    lost, because it stands after the cursor this names.
+
+    A stream that ends on its own terminal divides on what that end leaves the member. When
+    `moved_on` says the conversation already holds a newer live turn — a stop founded the next turn
+    on a message the member had already sent — the terminal is followed by `since` and an immediate
+    `poll`, a cursor-carrying resume onto that turn rather than a fresh join that would replay
+    history. When the terminal leaves the prompt, it is followed by `since` and `listen`: the
+    conversation can be woken without the member — a subagent result delivered, a monitor fired —
+    and the reconnects the listen names are how those turns reach a terminal nobody is typing into.
+    A cancel that carries words exits the client unless this stream answers a marked idle listen
+    (`exits` false): the member did not found the refused turn — a scheduled firing a cap refused,
+    say — and ending their idle session over it would close a terminal nobody touched, so the
+    reason is said and the prompt returns, listening. A park resumes under the same turn id, so a
+    listen that would re-render its notice on every reconnect never follows one; a parked turn's
+    resumption reaches the member on their next message."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + hold_seconds
     streamed = False
     terminated = False
+    prompting = False
     ran = False
     rendered_cursor = since
     frame_task: asyncio.Task[tuple[str, LiveFrame] | None] | None = None
@@ -453,7 +482,9 @@ async def stream_directives(
                 shared: tuple[SharedFile, ...] = ()
                 if isinstance(frame, Terminal) and files is not None:
                     shared = await files()
-                lines = directives_for(frame, streamed, collect, connect_message, shared)
+                lines = directives_for(
+                    frame, streamed, collect, connect_message, shared, exits=exits
+                )
                 if lines and isinstance(frame, TextDelta):
                     streamed = True
                 for line in lines:
@@ -461,6 +492,9 @@ async def stream_directives(
                 rendered_cursor = cursor
                 if isinstance(frame, Terminal | Parked):
                     terminated = True
+                    prompting = isinstance(frame, Terminal) and not (
+                        exits and frame.frame.status == "cancelled" and bool(frame.frame.text)
+                    )
                     break
         finally:
             for task in (frame_task, op_task):
@@ -476,6 +510,9 @@ async def stream_directives(
     elif terminated and moved_on is not None and await moved_on():
         yield directive("since", str(turn_id), rendered_cursor)
         yield directive("poll", "0")
+    elif prompting:
+        yield directive("since", str(turn_id), rendered_cursor)
+        yield directive("listen", str(LISTEN_SECONDS))
 
 
 async def _next(frames: AsyncIterator[tuple[str, LiveFrame]]) -> tuple[str, LiveFrame] | None:
@@ -541,7 +578,13 @@ def _turn_context(email: str, request: Request) -> TurnContext:
 async def channel(ctx: SurfaceContext, request: Request) -> Response:
     """One held turn on a channel. The bearer names the member; the channel path scopes their
     conversation. A body admits a turn and streams it; an empty body admits nothing and resumes
-    tailing the conversation's latest turn (or prompts when it holds none).
+    tailing the conversation's latest turn (or prompts when it holds none). An empty body carrying
+    `x-ufo-listen` whose `since` names that latest turn, found already terminal, is the idle
+    listen: the client only sends the header once a `listen` directive armed it, and a `listen` is
+    only ever issued after the turn's end was rendered — so the answer is `since` and `listen`
+    alone, and the tail is never re-opened on a turn it would only re-say. A `poll` or severed-
+    stream reconnect carries no header, so a turn that committed while the client was off the wire
+    still drains its durable end through the tail.
 
     A client standing in a directory names it in `x-ufo-cwd`, and that terminal is the
     conversation's sandbox: the first admitted turn claims the binding on the row and tells the
@@ -575,6 +618,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     note: bytes | None = None
     resumed = False
     update = b""
+    marked = bool(request.headers.get(LISTEN_HEADER, "").strip())
     op_id = request.headers.get(OP_HEADER, "").strip()
     if op_id:
         reply = await request.body()
@@ -604,6 +648,11 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
             turn_id = await ctx.latest_turn(conversation_id)
             if turn_id is None:
                 return PlainTextResponse(update + directive("ask", PROMPT))
+            named, _, held = request.headers.get(SINCE_HEADER, "").strip().partition(":")
+            if marked and named == str(turn_id) and await ctx.turn_is_terminal(turn_id):
+                return PlainTextResponse(
+                    directive("since", named, held) + directive("listen", str(LISTEN_SECONDS))
+                )
         else:
             if len(body.encode()) > MAX_MESSAGE_BYTES:
                 return PlainTextResponse("message too large", status_code=413)
@@ -639,6 +688,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         turn_id=turn_id,
         since=since,
         moved_on=moved_on,
+        exits=not marked,
     )
 
     async def bound() -> AsyncIterator[bytes]:

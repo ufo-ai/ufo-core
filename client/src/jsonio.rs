@@ -178,6 +178,7 @@ impl Driver {
             }],
             Directive::Sent { .. }
             | Directive::Poll(_)
+            | Directive::Listen(_)
             | Directive::Since(_)
             | Directive::Run(_)
             | Directive::Token(_)

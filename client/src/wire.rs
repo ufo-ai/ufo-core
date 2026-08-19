@@ -47,6 +47,7 @@ pub enum Directive {
         prompt: String,
     },
     Poll(f64),
+    Listen(f64),
     Since(String),
     Run(OpRequest),
     Token(String),
@@ -120,6 +121,7 @@ pub fn parse_line(line: &str) -> Directive {
             prompt: fields[2].clone(),
         },
         "poll" => Directive::Poll(field(&fields, 0).parse().unwrap_or(1.0)),
+        "listen" => Directive::Listen(field(&fields, 0).parse().unwrap_or(2.0)),
         "since" if fields.len() >= 2 => Directive::Since(format!("{}:{}", fields[0], fields[1])),
         "run" => Directive::Run(OpRequest {
             op_id: field(&fields, 0),
@@ -144,11 +146,13 @@ pub fn parse_line(line: &str) -> Directive {
     }
 }
 
-/// The body one request carries: a member message, an empty resume, or an op's reply.
+/// The body one request carries: a member message, an empty resume, an idle listen (empty, marked
+/// with `x-ufo-listen` so the surface knows the turn's end was already rendered), or an op's reply.
 #[derive(Clone)]
 pub enum PostBody {
     Message(String),
     Empty,
+    Listen,
     OpReply {
         op_id: String,
         reply: Result<Vec<u8>, String>,
@@ -246,6 +250,7 @@ impl Session {
         let outcome = match body {
             PostBody::Message(text) => request.send_string(&text),
             PostBody::Empty => request.send_string(""),
+            PostBody::Listen => request.set("x-ufo-listen", "1").send_string(""),
             PostBody::OpReply { op_id, reply } => {
                 request = request.set("x-ufo-op", &header_safe(&op_id));
                 match reply {
@@ -657,6 +662,8 @@ mod tests {
             Directive::Since("turn-1:cursor-9".into())
         );
         assert_eq!(parse_line("poll\t1"), Directive::Poll(1.0));
+        assert_eq!(parse_line("listen\t2"), Directive::Listen(2.0));
+        assert_eq!(parse_line("listen"), Directive::Listen(2.0));
         assert_eq!(parse_line("token\ttok"), Directive::Token("tok".into()));
         assert_eq!(
             parse_line("workspace\thttps://w"),
@@ -725,6 +732,7 @@ mod tests {
                 prompt,
             } => Some(("secret", vec![sealed.clone(), slot.clone(), prompt.clone()])),
             Directive::Poll(seconds) => Some(("poll", vec![format!("{seconds}")])),
+            Directive::Listen(seconds) => Some(("listen", vec![format!("{seconds}")])),
             Directive::Since(cursor) => {
                 Some(("since", cursor.splitn(2, ':').map(str::to_string).collect()))
             }
