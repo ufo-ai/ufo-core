@@ -1108,3 +1108,60 @@ resource "datadog_dashboard" "prompt_cache" {
     }
   }
 }
+
+# The nightly eval sweep's scores over time. The sweep submits counts, not rates, so every query
+# here divides: averaging per-suite rates would weight a one-case suite like a sixty-nine-case one.
+# The points arrive once a night from `.github/workflows/evals-nightly.yml`, which is sparse enough
+# that a line joins two points a day apart — read a step as one night's result, never as a trend
+# between them, and read the digest events below before reading a drop as a regression, since a
+# suite whose cases changed is a different test under the same name.
+
+resource "datadog_dashboard" "evals" {
+  title       = "ufo evals"
+  layout_type = "ordered"
+
+  # `sweep` is the nightly run of every suite; `smoke` is the proving subset a dispatch asks for.
+  # They are different populations, so nothing here mixes them.
+  template_variable {
+    name             = "mode"
+    prefix           = "mode"
+    defaults         = ["sweep"]
+    available_values = ["sweep", "smoke"]
+  }
+
+  widget {
+    timeseries_definition {
+      title = "pass rate across every suite"
+      request {
+        q            = "sum:ufo.evals.cases_passed{$mode} / sum:ufo.evals.cases_scored{$mode}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "pass rate by suite"
+      request {
+        q            = "sum:ufo.evals.cases_passed{$mode} by {suite} / sum:ufo.evals.cases_scored{$mode} by {suite}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    toplist_definition {
+      title = "cases failing last night, by suite"
+      request {
+        q = "top(sum:ufo.evals.cases_scored{$mode} by {suite}.last('1d') - sum:ufo.evals.cases_passed{$mode} by {suite}.last('1d'), 25, 'max', 'desc')"
+      }
+    }
+  }
+
+  widget {
+    event_stream_definition {
+      title = "suite digests, per sweep"
+      query = "source:github ufo evals"
+    }
+  }
+}

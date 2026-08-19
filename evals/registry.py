@@ -131,7 +131,7 @@ TASKS: tuple[EvalTask, ...] = (
         serial=True,
     ),
     capability_task("app_builder", app_builder.CASES),
-    capability_task("first_run", first_run.CASES),
+    capability_task("first_run", first_run.CASES, packs=first_run.FIRST_RUN_PACKS),
     capability_task("connector_refs", connector_refs.CASES),
     capability_task(
         "writing_subagent",
@@ -150,12 +150,13 @@ TASKS: tuple[EvalTask, ...] = (
         judge_max_tokens=16_000,
         judge_reasoning="high",
     ),
-    capability_task("cos_workflows", cos_workflows.CASES),
+    capability_task("cos_workflows", cos_workflows.CASES, packs=cos_workflows.COS_WORKFLOWS_PACKS),
     capability_task(
         "onboarding_help",
         onboarding_help.CASES,
         judge_model=SEMANTIC_JUDGE_MODEL,
         serial=True,
+        packs=onboarding_help.ONBOARDING_HELP_PACKS,
     ),
     arc_task("handback", handback.CASES),
     arc_task("fanout", fanout.CASES),

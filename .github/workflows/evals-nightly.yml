@@ -1,0 +1,265 @@
+name: Nightly evals
+
+# Every registered capability, scenario, and arc suite, once a night.
+# `.github/scripts/nightly_eval_matrix.py` reads `evals.registry.TASKS` and splits it into shards,
+# so a suite that is added, renamed, or bound to a pack moves through the sweep with no list here
+# to keep in step. One shard is one job: a GitHub-hosted runner stops a job at six hours, and the
+# whole suite set run serially in one job passes that, so the shards also hold the sweep inside the
+# ceiling and let a shard fail without taking the night's other records with it.
+#
+# Suites bound to a pack run under it: `cos_workflows` needs `chief_of_staff` and `onboarding_help`
+# needs `assistant_hosted`, and `python -m evals` refuses either under any other pack. The planner
+# groups by that binding, so each shard carries one pack, one template, and its own knobs — a knob
+# naming an extension its pack does not ship fails `serve` at boot.
+#
+# A pull request touching the sweep, and a dispatch asking for it, run the proving subset instead:
+# a handful of cases per arm, each arm booting its own serve, so the machinery is exercised for a
+# few dollars before a night's run depends on it.
+#
+# The full sweep spends real provider money (hundreds of dollars a night at ~350-450 target turns).
+# It ends red when any case fails: a failing case is the finding, so read the job summary and the
+# archived records, not only the job status.
+#
+# Corpus suites (`--memory-100`, `--issue-recall`, `--dsqa-100`, `--gdpval-100`, `--jobbench`,
+# `--wandr`, `--hle-gold`, `--compaction`, `--handbook`, `--coding-repo`, `mcp_atlas_100`) are not
+# here: each needs a built snapshot, is one run of its own, and several need a second offline
+# grading pass.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      smoke:
+        description: Run the proving subset instead of the sweep
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/evals-nightly.yml
+      - .github/scripts/nightly_eval_matrix.py
+      - .github/scripts/eval_sweep_summary.py
+
+concurrency:
+  group: evals-nightly-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Always a single token, so every call below quotes it.
+  SWEEP_SMOKE: >-
+    ${{ (github.event_name == 'pull_request' || inputs.smoke) && '--smoke' || '--no-smoke' }}
+  SWEEP_MODE: >-
+    ${{ (github.event_name == 'pull_request' || inputs.smoke) && 'smoke' || 'sweep' }}
+  AWS_REGION: us-east-1
+  ARCHIVE_ROLE_ARN: arn:aws:iam::899147036157:role/github-deploy
+  # The testing platform's blob bucket: versioned, encrypted, `prevent_destroy`
+  # (infra/modules/platform/s3.tf). The sandbox cache bucket beside it expires objects after 60
+  # days, so it is not an archive.
+  ARCHIVE_BUCKET: ufo-testing-ufo-blob-899147036157
+  ARCHIVE_PREFIX: eval-reports/runs
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+      - id: shards
+        run: |
+          shards="$(uv run python .github/scripts/nightly_eval_matrix.py --plan "$SWEEP_SMOKE")"
+          echo "$shards"
+          echo "shards=$shards" >>"$GITHUB_OUTPUT"
+
+  sweep:
+    name: ${{ matrix.label }}
+    needs: plan
+    # The org-hosted larger runner `integration.yaml` already uses: 4 vCPU, 16 GB, ~87 GB free
+    # disk. GitHub stops any job at six hours; the step deadline below fires first, so a shard that
+    # overruns still uploads what it recorded.
+    runs-on: linux-4-core
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        label: ${{ fromJSON(needs.plan.outputs.shards) }}
+    services:
+      # A serve fleet, its scheduler, and the eval driver on one server: SQLite's single writer
+      # cannot carry that, and `index_default` retrieves through pgvector.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: ufo
+          POSTGRES_PASSWORD: ufo
+          POSTGRES_DB: ufo
+        ports:
+          - 5541:5432
+        options: >-
+          --health-cmd "pg_isready -U ufo"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      # Process keys the target, the judges, and the simulator read directly.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Every shard's workspace is created fresh by `ufoctl init` and holds no BYOK credential row,
+      # so `WorkspaceScope.credential` (core/src/ufo/workspace.py) resolves the `perplexity_api_key`
+      # slot from this platform default — the same fallback
+      # `test_search_reads_platform_perplexity_api_key` pins. The stack hands its whole environment
+      # to serve, so seeding it here seeds the shard and no key is written to disk.
+      PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+      # The `assistant_hosted` shard's index, which `onboarding_help` recalls through. Its
+      # `browserbase` CDP provider needs no key here: `serve` resolves the provider at boot without
+      # one, and only suites bound to that pack reach the shard, none of which browse.
+      TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync
+
+      # The stack boots `ufo-egress` beside its serve so an in-sandbox fetch has a proxy to reach.
+      # It locates the built binary and fails loud without it.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: egress
+      - run: cargo build --manifest-path egress/Cargo.toml
+
+      - name: Write the shard's stack input
+        run: |
+          uv run python .github/scripts/nightly_eval_matrix.py "$SWEEP_SMOKE" \
+            --write "$MATRIX_LABEL" --dir "$RUNNER_TEMP/shard"
+          cat "$RUNNER_TEMP/shard/ufo.toml" "$RUNNER_TEMP/shard/matrix.toml"
+        env:
+          MATRIX_LABEL: ${{ matrix.label }}
+
+      # Deadlined on the step, not the job: a job GitHub cancels at its own ceiling takes the
+      # upload below with it, while a step that ends leaves the records this shard did produce.
+      - name: Run the shard
+        timeout-minutes: 300
+        run: uv run python -m evals.stack "$RUNNER_TEMP/shard/matrix.toml"
+
+      - name: Upload the run records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-run-records-${{ matrix.label }}
+          path: eval-reports/runs/*.json
+          # A shard that died before it recorded a run has nothing to upload and already said so.
+          # The archive below is where a missing suite is caught, once, for the whole sweep.
+          if-no-files-found: warn
+          retention-days: 90
+
+      # The stack's own seed, serve, egress, and eval logs. A shard that dies before it records a
+      # run leaves nothing else to read, and the runner keeps nothing.
+      - name: Upload the stack logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-stack-logs-${{ matrix.label }}
+          path: .local/evals/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  archive:
+    name: archive
+    needs: sweep
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eval-run-records-*
+          merge-multiple: true
+          path: eval-reports/runs
+
+      # The sweep's reader-facing outputs: the summary GitHub shows on the run page, the same
+      # summary in the archive, and one viewer over every shard's records — a record itself is
+      # megabytes of case evidence, so nothing else in the archive is small enough to open first.
+      - name: Summarize the sweep
+        run: |
+          if [ -z "$(ls -A eval-reports/runs 2>/dev/null)" ]; then
+            echo "no run record was written — every shard failed before it recorded a run" >&2
+            exit 1
+          fi
+          uv run python .github/scripts/eval_sweep_summary.py eval-reports "$SWEEP_SMOKE" \
+            | tee eval-reports/summary.md >>"$GITHUB_STEP_SUMMARY"
+
+      # The whole night as one artifact: `summary.md` to read, `index.html` to open, and every
+      # shard's run record beneath. A reader — or an agent asked to display the night — reaches all
+      # three here; the S3 copy below is the durable one, and an agent sandbox does not reach it.
+      - name: Upload the sweep archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-sweep
+          path: eval-reports
+          if-no-files-found: error
+          retention-days: 90
+
+      # The archive the trend point below will refer to years from now, when the artifact above has
+      # long expired. The role's own session outlives this job, which runs for minutes; only the
+      # sweep is long, and it ended in another job.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ARCHIVE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # One prefix per sweep, dated so the archive reads as the time series the trend graphs need
+      # and a re-run overwrites nothing.
+      - name: Archive the sweep
+        run: |
+          aws s3 cp eval-reports \
+            "s3://$ARCHIVE_BUCKET/$ARCHIVE_PREFIX/$(date -u +%F)/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --recursive --no-progress
+
+      # The trend, last: a point Datadog holds for years must not outlive the records that
+      # substantiate it, so nothing is submitted until the durable archive above has landed. One
+      # point per suite per sweep, as counts, so a query can divide them. A pull request's smoke is
+      # not a trend point, so only a schedule or a dispatch reports. The digest event beside it is
+      # where a graph learns a suite's cases changed, which is the one way a score drop means
+      # nothing.
+      - name: Report the scores to Datadog
+        if: github.event_name != 'pull_request'
+        env:
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_HOST: api.us5.datadoghq.com
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          test -n "$DD_API_KEY" || { echo 'DD_API_KEY secret is unset' >&2; exit 1; }
+          uv run python .github/scripts/eval_sweep_metrics.py eval-reports \
+            --mode "$SWEEP_MODE" --timestamp "$(date -u +%s)" \
+            | curl -sS --fail-with-body -X POST "https://$DD_HOST/api/v2/series" \
+                -H "DD-API-KEY: $DD_API_KEY" -H 'Content-Type: application/json' --data-binary @-
+          uv run python .github/scripts/eval_sweep_metrics.py eval-reports \
+            --mode "$SWEEP_MODE" --timestamp 0 --run-url "$RUN_URL" --event \
+            | curl -sS --fail-with-body -X POST "https://$DD_HOST/api/v1/events" \
+                -H "DD-API-KEY: $DD_API_KEY" -H 'Content-Type: application/json' --data-binary @-

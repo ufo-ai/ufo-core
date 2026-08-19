@@ -41,7 +41,6 @@ from evals.coding_repo.runner import (
 )
 from evals.compaction.runner import CompactionRun, load_compaction
 from evals.compaction.target import CompactionTarget
-from evals.cos_workflows import COS_WORKFLOWS_PACKS
 from evals.document_visual import (
     WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS,
 )
@@ -53,7 +52,6 @@ from evals.driver import (
     seed_candidate_agent,
 )
 from evals.dsqa_100.runner import DSQA100Run, load_dsqa_100
-from evals.first_run import FIRST_RUN_PACKS
 from evals.gdpval_100.runner import (
     TREATMENTS,
     GDPvalCalibration,
@@ -104,7 +102,6 @@ from evals.memory_ingestion.runner import (
     WORKFLOW_WAIT_SECONDS as MEMORY_INGESTION_WORKFLOW_WAIT_SECONDS,
 )
 from evals.memory_ingestion.runner import MemoryIngestionRun, load_memory_ingestion
-from evals.onboarding_help import ONBOARDING_HELP_PACKS
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
@@ -498,26 +495,11 @@ def main(argv: list[str] | None = None) -> None:
             f"handbook grades the conversation workspace on the host, so it requires "
             f"[sandbox] backend in {HANDBOOK_BACKENDS}, found {config.sandbox.backend!r}"
         )
-    if any(task.name == "cos_workflows" for task in tasks) and (
-        config.pack.name not in COS_WORKFLOWS_PACKS
-    ):
-        parser.error(
-            f"cos_workflows requires [pack] name in {COS_WORKFLOWS_PACKS}, "
-            f"found {config.pack.name!r}"
-        )
-    if any(task.name == "onboarding_help" for task in tasks) and (
-        config.pack.name not in ONBOARDING_HELP_PACKS
-    ):
-        parser.error(
-            f"onboarding_help requires [pack] name in {ONBOARDING_HELP_PACKS}, "
-            f"found {config.pack.name!r}"
-        )
-    if any(task.name == "first_run" for task in tasks) and (
-        config.pack.name not in FIRST_RUN_PACKS
-    ):
-        parser.error(
-            f"first_run requires [pack] name in {FIRST_RUN_PACKS}, found {config.pack.name!r}"
-        )
+    for task in tasks:
+        if task.packs and config.pack.name not in task.packs:
+            parser.error(
+                f"{task.name} requires [pack] name in {task.packs}, found {config.pack.name!r}"
+            )
     workspace_id = args.workspace
     recall_workspace_id = (
         memory_run.readiness.workspace_id

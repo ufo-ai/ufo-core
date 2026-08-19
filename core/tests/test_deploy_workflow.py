@@ -3773,6 +3773,7 @@ def test_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
         "turns",
         "coding_quality",
         "prompt_cache",
+        "evals",
     ]
     assert "env:testing" not in dashboards
     assert "env:prod" not in dashboards
@@ -3808,6 +3809,7 @@ def test_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
         '"testing", "prod"',
         '"ufo-testing-postgres", "prod-postgres"',
         '"testing", "prod"',
+        '"sweep", "smoke"',
     ]
 
 
