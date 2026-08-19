@@ -1,615 +1,510 @@
-# Prompt construction and context compaction  `stage-8.1`
+# Built-in and extension skill loading  `stage-8.1`
 
-This stage happens just before the AI model is called. Its job is to prepare the instructions and conversation history so the model gets the right guidance without being overloaded. Think of it as packing a suitcase: the most important current items stay in full, older items may be folded into a smaller summary, and everything must still be checkable later.
+This stage is shared behind-the-scenes support used during a turn, when the agent needs reusable abilities called “skills.” A skill is a small bundle of instructions and optional helper files, like a recipe card with the tools needed to follow it. Some skills come with the core system, some come from extensions such as document, research, sweep, brief, sample, or scheduling features, and some are created by users.
 
-The prompt rendering code builds the final system prompt from templates. A template is text with blanks to fill in, like a form letter. It fills the required slots, checks that no unfinished placeholders remain, and creates a fingerprint, which is a stable ID based on the prompt content so changes can be noticed and traced.
-
-The compaction code watches the conversation length. If the history is too large for the model’s context window, meaning the amount of text the model can read at once, it keeps recent messages unchanged and summarizes older ones. It also records both the full and compacted histories for inspection. The package marker simply makes the prompt code importable.
+The package marker file simply makes the core skills folder importable by Python, so the rest of the system can find it. The runtime file does the real loading work: it defines the shape of a skill, reads skill folders, follows any “this skill needs that skill too” links, and copies allowed files into a protected workspace. The model catalog file builds a live skill that lists available AI models, costs, and capabilities. The user skill store saves custom skills per workspace and agent, checks names, blocks replacing built-in skills, and keeps the registry from growing without limits.
 
 ## Files in this stage
 
-### Context compaction
-Compacts long conversation histories by summarizing older messages while preserving recent context and audit records.
+### Skill runtime foundation
+Package markers and runtime primitives define how skills are imported, loaded, resolved, and exposed safely inside a workspace.
 
-### `core/src/ufo/loop/compaction.py`
+### `core/src/ufo/skills/__init__.py`
 
-`domain_logic` · `request handling when a conversation window grows too large`
+`other` · `import time`
 
-AI models can only read a limited amount of text at once. As a conversation grows, the system may hit that limit and fail. This file solves that by doing transcript compaction: it replaces the older part of the conversation with a structured summary while keeping the recent tail exactly as it was. Think of it like packing old paperwork into a labeled archive box while leaving today’s papers on the desk.
+This is an empty package initializer. In Python, a file named `__init__.py` tells the language that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to modules under `ufo.skills` using normal Python import paths.
 
-The main class, Compaction, decides when compaction is needed. It estimates how many tokens the current messages use, where a token is a rough unit of model input size. If the conversation is too large, it splits the messages into safe “rounds” so tool calls and their tool results stay together. The old rounds become the head to summarize, and the newest rounds become the tail to keep.
+Because the file is empty, it does not set up shared objects, run startup code, or re-export anything from the package. Its value is structural: it gives the project a clear place for skill-related code to live. You can think of it like a label on a drawer. The label does not contain the tools, but it makes the drawer recognizable and usable by the rest of the workshop.
 
-The file then asks the model to produce a CompactionSummary, checks that the model returned valid JSON, and verifies that important literal facts were not lost. These important facts include tool output file paths, error names, loaded skills, and active request references. If the summary missed something, it tries once more with explicit instructions to keep those facts.
+If this file were removed, behavior would depend on the Python version and packaging setup. Modern Python can sometimes import folders without `__init__.py`, but keeping this file makes the package boundary explicit and avoids surprises in tools, packaging, or older import behavior.
 
-Finally, it makes sure the compacted window is actually smaller, writes compressed before/after/summary records to blob storage, logs the verification result, and returns the new message window to use for the next model call.
+
+### `core/src/ufo/skills/runtime.py`
+
+`domain_logic` · `startup and skill loading during a conversation`
+
+A skill is a small package of guidance for the agent: a folder with a `SKILL.md` file plus optional extra files. The `SKILL.md` starts with YAML frontmatter, which is structured metadata such as the skill name, description, and dependencies, followed by the human-readable instructions the agent should see.
+
+This file is the bridge between those folders and the running agent. First, it can parse a skill from disk or from already-loaded bytes. It checks that the declared name matches the folder name, separates metadata from instructions, and keeps the original `SKILL.md` text so it can be mounted exactly as written.
+
+It also understands nested child skills. A child skill can live inside a parent folder and gets a name like `parent/child`, but nesting alone does not automatically load the parent. If one skill needs another, it must say so through `depends`.
+
+At runtime, `SkillRegistry` acts like the skill catalog. Given one or more requested names, it finds those skills plus all their dependencies, only once, and in a safe order. `loaded_context` then builds the text shown to the model: new workflows are included, already-seen workflows are summarized, and a small file tree tells the agent where mounted files live. Finally, `mount_skill` writes the skill files into `.skills/<name>/` inside the sandbox, using path containment checks so a skill cannot write outside its own mount area.
 
 #### Function details
 
-##### `is_context_overflow`  (lines 102–108)
+##### `skill_mount_root`  (lines 44–47)
 
 ```
-def is_context_overflow(error: Exception) -> bool
+def skill_mount_root(name: str) -> str
 ```
 
-**Purpose**: Detects whether an error means the AI provider rejected a request because the input was too large. This lets the compaction flow shrink and retry instead of treating the failure as unrelated.
+**Purpose**: Builds the workspace path where one skill’s files should live. It gives every skill its own area under `.skills`, like assigning each tool its own labeled drawer.
 
-**Data flow**: It receives an exception, combines the exception class name and message into lowercase text, then looks for phrases such as “context length” or “prompt is too large”. It returns true when the error appears to be a context-window overflow, and false otherwise.
+**Data flow**: It takes a skill name as text, combines it with the shared skills mount directory, and returns a path string such as `workspace/.skills/example-skill`. It does not touch the filesystem.
 
-**Call relations**: Compaction._summarize calls this after a summarization attempt fails. If this detector says the prompt was too large, the summarizer drops older rounds and tries again; otherwise the error is allowed to stop the process.
+**Call relations**: A `RuntimeSkill` asks this helper for its mount location through `RuntimeSkill.mount_root`. Later, `mount_skill` uses that location before writing the skill’s files into the sandbox.
 
-*Call graph*: called by 1 (_summarize).
+*Call graph*: called by 1 (mount_root).
 
 
-##### `harvest_anchors`  (lines 111–137)
+##### `RuntimeSkill.mounted_files`  (lines 66–67)
 
 ```
-def harvest_anchors(head_text: str, loaded_skills: tuple[str, ...], active_requests: tuple[str, ...]) -> tuple[Anchor, ...]
+def mounted_files(self) -> dict[str, bytes]
 ```
 
-**Purpose**: Finds important literal facts in the old conversation that the compacted version must still carry forward. These anchors are used to grade whether the summary lost something load-bearing.
+**Purpose**: Returns all files that should be copied into the sandbox for this skill. This includes the original `SKILL.md` plus any bundled asset files.
 
-**Data flow**: It receives rendered text from the head of the transcript, the names of loaded skills, and active request text. It searches for durable tool-output paths, error class names, skill names, and message references, keeps only a bounded recent set for each kind, and returns Anchor objects describing those facts.
+**Data flow**: It reads the skill’s stored raw `SKILL.md` text and its stored asset file list, turns the markdown into bytes, and returns a dictionary from file path to file contents. The result is ready to be written into the sandbox.
 
-**Call relations**: Compaction._compact calls this after selecting the transcript head. The anchors it returns are later checked by Compaction._verify through missing_anchors, so the model’s own summary cannot define what counts as preserved.
+**Call relations**: `mount_skill` calls this when it is time to actually place a skill’s files in the workspace. It relies on this method so all skills are mounted with the same file set and with `SKILL.md` preserved exactly.
 
-*Call graph*: called by 1 (_compact); 1 external calls (__init__).
+*Call graph*: called by 1 (mount_skill).
 
 
-##### `missing_anchors`  (lines 140–144)
+##### `RuntimeSkill.mount_root`  (lines 69–70)
 
 ```
-def missing_anchors(anchors: tuple[Anchor, ...], carried: str) -> tuple[Anchor, ...]
+def mount_root(self) -> str
 ```
 
-**Purpose**: Checks which required literal facts did not appear in the compacted text. It is a strict check: the exact text must be present.
+**Purpose**: Reports the sandbox folder where this particular skill should be mounted. It keeps the naming rule in one place so the rest of the code does not have to rebuild paths by hand.
 
-**Data flow**: It receives a tuple of anchors and a string representing what will be carried forward. It tests each anchor’s literal text against that string and returns only the anchors that are absent.
+**Data flow**: It reads the skill’s `name`, passes that name to `skill_mount_root`, and returns the resulting mount path string. It does not change the skill or the sandbox.
 
-**Call relations**: Compaction._verify calls this while grading a proposed compacted window. The result decides whether Compaction._compact should ask the model for a second summary that explicitly includes the missing facts.
+**Call relations**: `mount_skill` calls this before writing files. Internally, this method delegates the path-building detail to `skill_mount_root`.
 
-*Call graph*: called by 1 (_verify).
+*Call graph*: calls 1 internal fn (skill_mount_root); called by 1 (mount_skill).
 
 
-##### `_CompactionRequest.__repr__`  (lines 182–186)
+##### `LoadedSkill.prompt_body`  (lines 82–92)
 
 ```
-def __repr__(self) -> str
+def prompt_body(self) -> str
 ```
 
-**Purpose**: Provides a short, safe text representation of a compaction request for debugging. It avoids printing the full conversation content.
+**Purpose**: Builds the text block that one loaded skill contributes to the model’s context. It labels whether the skill was directly requested or came along as a dependency, then includes the skill’s instructions.
 
-**Data flow**: It reads the request’s message count, reason, and active request count. It returns a compact string with those counts rather than the full data.
+**Data flow**: It reads the `LoadedSkill`’s skill name, optional `dependency_of` marker, and instruction text. It produces a markdown block with a heading and the workflow body; it does not include asset file contents.
 
-**Call relations**: The request object is created by Compaction.maybe_compact and passed into Compaction._compact. This representation helps logs or debugging tools show what is happening without dumping huge or sensitive message bodies.
+**Call relations**: This is the per-skill building block used when loaded skills are turned into prompt text. It makes sure the model can tell the difference between a skill it asked for and one loaded because another skill needed it.
 
 
-##### `Compaction.__repr__`  (lines 217–218)
+##### `LoadedSkills.reseed`  (lines 108–125)
 
 ```
-def __repr__(self) -> str
+def reseed(self, loads: Iterable[tuple[LoadedSkill, ...]], preloaded: tuple[LoadedSkill, ...]=()) -> None
 ```
 
-**Purpose**: Provides a compact label for a Compaction object. It identifies the conversation and model without printing all internal state.
+**Purpose**: Rebuilds the tracker of which skill workflows are already visible to the model. This prevents repeated loads from pasting the same instructions into the conversation again.
 
-**Data flow**: It reads the conversation ID and model name from the object. It returns a short string containing those two values.
+**Data flow**: It receives previous loaded skill groups and optional preloaded skills, clears the old tracking state, then records every skill currently in context. Skills directly requested by the agent are also recorded separately as `asked_for`; preloaded skills are counted as visible but not as requested.
 
-**Call relations**: This is used implicitly by Python debugging, logging, or interactive inspection when a Compaction instance is displayed.
+**Call relations**: It starts by calling `LoadedSkills.reset` so the tracker reflects the current conversation window rather than stale history. Other parts of the system can then use this tracker to decide whether a future load should repeat full instructions or just mention that they are already present.
 
+*Call graph*: calls 1 internal fn (reset).
 
-##### `Compaction.maybe_compact`  (lines 220–240)
 
-```
-async def maybe_compact(self, messages: tuple[Message, ...], force: bool=False, active_requests: tuple[str, ...]=()) -> tuple[tuple[Message, ...], tuple[Usage, ...]]
-```
-
-**Purpose**: Decides whether the current conversation should be compacted now. It is the safe public entry point for normal automatic compaction and forced compaction after an overflow.
-
-**Data flow**: It receives the current messages, a force flag, and active request text. It first refuses to compact very short windows, then estimates tokens and compares them with the trigger unless force is true. If compaction is needed, it builds a _CompactionRequest and returns the compacted messages plus model usage records; otherwise it returns the original messages and no usage.
-
-**Call relations**: This calls Compaction._tokens and Compaction._trigger to make the decision, then hands real work to Compaction._compact. It is the function other conversation-loop code would call when preparing a model request.
-
-*Call graph*: calls 3 internal fn (_compact, _tokens, _trigger); 1 external calls (__init__).
-
-
-##### `Compaction._trigger`  (lines 242–248)
-
-```
-def _trigger(self) -> int
-```
-
-**Purpose**: Calculates the token size at which compaction should start. It leaves room for the summary output and a safety buffer before the model’s true limit.
-
-**Data flow**: It reads either an explicit trigger override or the configured context window, summary size, and buffer. It returns one integer token threshold.
-
-**Call relations**: Compaction.maybe_compact uses this to decide whether to compact. Compaction._require_budget uses the same threshold to ensure the replacement window will not immediately trigger another compaction.
-
-*Call graph*: called by 2 (_require_budget, maybe_compact).
-
-
-##### `Compaction._compact`  (lines 251–329)
-
-```
-async def _compact(self, request: _CompactionRequest) -> tuple[tuple[Message, ...], tuple[Usage, ...]]
-```
-
-**Purpose**: Runs the full compaction pipeline: choose what to summarize, call the model, verify the result, save records, fire hooks, and return the replacement window. It is the central workflow of the file.
-
-**Data flow**: It receives a _CompactionRequest containing messages, reason, and active requests. It splits old and recent messages, records pre-compaction state, asks for a summary, drains loaded skill names, builds a boundary for verification, retries once if important anchors were missed, enforces the size budget, writes compressed records, logs metrics, fires hooks, and returns the new messages plus usage data.
-
-**Call relations**: Compaction.maybe_compact calls this when compaction is needed. This function coordinates almost every helper in the file: selection, summarization, reference harvesting, verification, budget checks, persistence, and observability.
-
-*Call graph*: calls 11 internal fn (_next_index, _persist, _record_verification, _references, _require_budget, _select, _summarize, _tokens, _verify, _window_text (+1 more)); called by 1 (maybe_compact); 6 external calls (__init__, __init__, __init__, replace, from_iterable, warn).
-
-
-##### `Compaction._select`  (lines 331–347)
-
-```
-def _select(self, messages: tuple[Message, ...]) -> tuple[tuple[tuple[Message, ...], ...], tuple[Message, ...]] | None
-```
-
-**Purpose**: Chooses which messages will be summarized and which recent messages will stay verbatim. It protects recent context and avoids splitting related tool messages apart.
-
-**Data flow**: It receives all messages, groups them into rounds, then keeps enough whole trailing rounds to cover the configured number of recent messages. It returns the older rounds as the head and the kept messages as the tail, or returns none if there is no safe head to summarize.
-
-**Call relations**: Compaction._compact calls this at the start of the pipeline. It relies on Compaction._rounds to build safe message groups.
-
-*Call graph*: calls 1 internal fn (_rounds); called by 1 (_compact).
-
-
-##### `Compaction._rounds`  (lines 349–363)
-
-```
-def _rounds(self, messages: tuple[Message, ...]) -> tuple[tuple[Message, ...], ...]
-```
-
-**Purpose**: Groups messages into model-interaction rounds so related assistant and tool-result messages stay together. This prevents compaction from cutting a tool call away from its answer.
-
-**Data flow**: It receives a sequence of messages and walks through them in order. A new round begins when an assistant message appears after existing content; all accumulated messages become one round. It returns a tuple of these rounds.
-
-**Call relations**: Compaction._select calls this before choosing the summarized head and kept tail. The grouping shapes the rest of compaction.
-
-*Call graph*: called by 1 (_select).
-
-
-##### `Compaction._summarize`  (lines 365–391)
-
-```
-async def _summarize(self, head_rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]=()) -> tuple[CompactionSummary, tuple[Usage, ...]]
-```
-
-**Purpose**: Asks the model to summarize the old transcript head, with recovery if the summarization prompt itself is too large. It returns a validated summary and usage records.
-
-**Data flow**: It receives head rounds and optionally anchors missed by a previous attempt. It calls Compaction._summarize_once. If the provider says the input is too large, it drops the oldest portion of the head and tries again up to the configured limit. On success it returns the summary and the usage from the successful call.
-
-**Call relations**: Compaction._compact calls this first for the normal summary and possibly again after a failed anchor check. It uses is_context_overflow to decide when shrinking-and-retrying is appropriate, and Compaction._drop_oldest to shrink the prompt.
-
-*Call graph*: calls 3 internal fn (_drop_oldest, _summarize_once, is_context_overflow); called by 1 (_compact).
-
-
-##### `Compaction._summarize_once`  (lines 393–414)
-
-```
-async def _summarize_once(self, rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]) -> tuple[CompactionSummary, Usage]
-```
+##### `LoadedSkills.drain`  (lines 127–132)
 
-**Purpose**: Performs one actual model request to turn rendered old messages into a CompactionSummary. It is the single-call version underneath the retry wrapper.
-
-**Data flow**: It receives rounds and any missed anchors, prepares prompt text, builds a ModelRequest with the compaction system prompt, streams text deltas from the model client, captures usage, and parses the final text into a validated CompactionSummary. It returns that summary and the usage record.
-
-**Call relations**: Compaction._summarize calls this for each attempt. It delegates prompt construction to Compaction._prepare and output validation to Compaction._parse_summary.
-
-*Call graph*: calls 2 internal fn (_parse_summary, _prepare); called by 1 (_summarize); 2 external calls (__init__, __init__).
-
-
-##### `Compaction._prepare`  (lines 416–438)
-
-```
-def _prepare(self, rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]) -> str
-```
-
-**Purpose**: Builds the text prompt that asks the model to summarize the old conversation. It preserves useful structure while reducing wasteful repetition.
-
-**Data flow**: It receives rounds and any missed anchors. It renders each message as role plus readable content, folds long repeated text runs, optionally appends a correction listing missed anchors, and finishes with a clear instruction to return one JSON object. It returns the complete prompt string.
-
-**Call relations**: Compaction._summarize_once calls this before sending a model request. It uses Compaction._text to render message content, Compaction._fold_repeated_runs to reduce bulk, and Compaction._bullets to format retry anchors.
-
-*Call graph*: calls 3 internal fn (_bullets, _fold_repeated_runs, _text); called by 1 (_summarize_once).
-
-
-##### `Compaction._fold_repeated_runs`  (lines 440–453)
-
-```
-def _fold_repeated_runs(self, text: str) -> str
-```
-
-**Purpose**: Compresses obvious repeated text inside the summarization prompt. This keeps spammy or looped output from making the summarization request too large.
-
-**Data flow**: It receives a text string, searches for short word sequences repeated many times in a row, and replaces each run with one copy plus a marker saying how many times it repeated. It returns the shorter text.
-
-**Call relations**: Compaction._prepare calls this while building the summarizer input. Its inner fold function performs the replacement for each regular-expression match.
-
-*Call graph*: called by 1 (_prepare).
-
-
-##### `Compaction._fold_repeated_runs.fold`  (lines 448–451)
-
-```
-def fold(match: re.Match[str]) -> str
-```
-
-**Purpose**: Builds the replacement text for one repeated run found by Compaction._fold_repeated_runs. It keeps the repeated unit once and records the repetition count.
-
-**Data flow**: It receives one regular-expression match, extracts the repeated phrase, calculates roughly how many copies were present, and returns text like the phrase followed by a repeated-count marker.
-
-**Call relations**: This helper is used only inside Compaction._fold_repeated_runs as the replacement callback for the repeated-run search.
-
-
-##### `Compaction._drop_oldest`  (lines 455–460)
-
-```
-def _drop_oldest(self, rounds: tuple[tuple[Message, ...], ...]) -> tuple[tuple[Message, ...], ...]
-```
-
-**Purpose**: Shrinks the summarization input after a prompt-too-large failure. It removes the oldest slice of the head before trying again.
-
-**Data flow**: It receives the current head rounds. It drops at least one round, or about one fifth of the rounds, from the front and returns the remaining newer rounds.
-
-**Call relations**: Compaction._summarize calls this when Compaction._summarize_once fails with a context-overflow error detected by is_context_overflow.
-
-*Call graph*: called by 1 (_summarize).
-
-
-##### `Compaction._parse_summary`  (lines 462–503)
-
-```
-def _parse_summary(self, text: str) -> CompactionSummary
 ```
-
-**Purpose**: Turns the model’s raw text response into a valid CompactionSummary object. It rejects empty, malformed, or schema-invalid summaries rather than installing bad compacted context.
-
-**Data flow**: It receives raw model output text. It finds the first balanced JSON object, validates it against the CompactionSummary schema, checks that the intent field is not empty, and returns the typed summary. If any step fails, it raises a RuntimeError.
-
-**Call relations**: Compaction._summarize_once calls this after collecting streamed model text. The validated result is later checked by Compaction._verify before it can replace live messages.
-
-*Call graph*: called by 1 (_summarize_once); 1 external calls (model_validate_json).
-
-
-##### `Compaction._references`  (lines 505–522)
-
+def drain(self) -> tuple[str, ...]
 ```
-def _references(self, head_rounds: tuple[tuple[Message, ...], ...], tail: tuple[Message, ...]) -> tuple[str, ...]
-```
 
-**Purpose**: Finds durable tool-output file paths from the old head that should be carried forward. These paths let future model calls re-read large outputs without copying their full contents into the summary.
+**Purpose**: Returns the skill names the agent explicitly asked for, then clears the tracker. This is useful when a boundary, such as context compaction, needs to remember what to reload later.
 
-**Data flow**: It receives the head rounds and kept tail. It first notes paths already visible in the tail, then scans the head for tool-output paths not already visible, preserves first-seen order without duplicates, keeps only the most recent bounded set, and returns them.
+**Data flow**: It reads the `asked_for` set, sorts it into a stable tuple of names, clears both tracking sets, and returns the names. After it runs, the object no longer claims any skills are in context.
 
-**Call relations**: Compaction._compact calls this while building the verification boundary. Compaction._render later places these references into the replacement message.
+**Call relations**: It calls `LoadedSkills.reset` after collecting the names. The returned names can be carried forward so the agent can reload the same requested skills and regain their dependencies.
 
-*Call graph*: calls 1 internal fn (_text); called by 1 (_compact).
+*Call graph*: calls 1 internal fn (reset).
 
 
-##### `Compaction._render`  (lines 524–563)
+##### `LoadedSkills.reset`  (lines 134–136)
 
 ```
-def _render(self, summary: CompactionSummary, references: tuple[str, ...], active_requests: tuple[str, ...]) -> str
+def reset(self) -> None
 ```
 
-**Purpose**: Turns a validated summary plus preserved references and active requests into the single replacement message for the old conversation head. It creates stable, readable compacted context.
+**Purpose**: Clears all memory of which skills are in the model context and which were directly requested. It is the simple reset button for the loaded-skill tracker.
 
-**Data flow**: It receives a CompactionSummary, durable reference paths, and active request text. It creates only the sections that have content, formats lists as bullets, includes active requests verbatim, prefixes the whole thing as compacted context, and returns the rendered string.
+**Data flow**: It takes no new input beyond the existing object. It empties the `in_context` and `asked_for` sets, leaving both blank.
 
-**Call relations**: Compaction._verify calls this to build the proposed replacement message. Compaction._require_budget also calls it with an empty summary to estimate the unavoidable minimum size of the compacted message.
+**Call relations**: `LoadedSkills.reseed` uses it before rebuilding state from known loads, and `LoadedSkills.drain` uses it after exporting the requested skill names.
 
-*Call graph*: calls 1 internal fn (_bullets); called by 2 (_require_budget, _verify).
+*Call graph*: called by 2 (drain, reseed).
 
 
-##### `Compaction._bullets`  (lines 565–566)
+##### `_split_frontmatter`  (lines 139–145)
 
 ```
-def _bullets(self, items: tuple[str, ...]) -> str
+def _split_frontmatter(text: str) -> tuple[str, str]
 ```
 
-**Purpose**: Formats plain strings as markdown-style bullet lines. It is a small helper for readable prompts and summaries.
+**Purpose**: Separates a `SKILL.md` file into its metadata section and its instruction body. It also checks that the file uses the required frontmatter format.
 
-**Data flow**: It receives a tuple of strings and prefixes each one with “- ”. It returns the joined bullet-list text.
+**Data flow**: It takes the full markdown text, verifies that it starts with the `---` fence, finds the closing fence, and returns two strings: the YAML metadata and the remaining body. If the fences are missing or incomplete, it raises an error instead of guessing.
 
-**Call relations**: Compaction._prepare uses this for missed-anchor retry instructions. Compaction._render uses it for summary sections and durable references.
+**Call relations**: `parse_skill_content` calls this before reading the YAML metadata. This keeps malformed skill files from being accepted silently.
 
-*Call graph*: called by 2 (_prepare, _render).
+*Call graph*: called by 1 (parse_skill_content).
 
 
-##### `Compaction._window_text`  (lines 568–569)
+##### `_child_skill_dirs`  (lines 148–153)
 
 ```
-def _window_text(self, messages: tuple[Message, ...]) -> str
+def _child_skill_dirs(skill_dir: Path) -> list[Path]
 ```
 
-**Purpose**: Renders a whole sequence of messages into one searchable text block. It is used when checking what facts the conversation contains or carries forward.
+**Purpose**: Finds immediate child folders that are themselves skills. A folder counts as a child skill only if it contains its own `SKILL.md`.
 
-**Data flow**: It receives messages, converts each message to text with Compaction._text, joins them with newlines, and returns the result.
+**Data flow**: It reads the entries directly inside a skill directory, keeps only directories with a `SKILL.md` file, sorts them, and returns their paths. It does not look through every nested level itself.
 
-**Call relations**: Compaction._compact uses this to build pre-compaction text and anchor text. Compaction._verify uses it to check whether anchors survived in the proposed after-window.
+**Call relations**: `parse_skill` uses this to exclude child skill folders from the parent’s asset files. `discover_skills` uses it to recurse into each child and register it separately.
 
-*Call graph*: calls 1 internal fn (_text); called by 2 (_compact, _verify).
+*Call graph*: called by 2 (discover_skills, parse_skill); 1 external calls (iterdir).
 
 
-##### `Compaction._verify`  (lines 571–607)
+##### `parse_skill_content`  (lines 156–189)
 
 ```
-def _verify(self, summary: CompactionSummary, boundary: _Boundary, retried: bool) -> _Candidate
+def parse_skill_content(dir_name: str, files: Mapping[str, bytes], registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
 ```
 
-**Purpose**: Checks whether one proposed summary is safe to install. It removes invented file references, renders the replacement, counts missing anchors, and records token sizes.
+**Purpose**: Turns an in-memory collection of skill files into a validated `RuntimeSkill`. This is used when the files have already been gathered as bytes, not necessarily read directly from disk at this moment.
 
-**Data flow**: It receives a summary, a fixed boundary describing the original window, and a retry flag. It keeps only summary file paths that appeared in the original pre-compaction text, injects the known loaded skills, renders the replacement message, combines it with the kept tail, computes token counts, finds missing anchors, and returns a _Candidate containing the checked summary, rendered text, after-window, and verification record.
+**Data flow**: It receives a claimed directory name, a mapping of file paths to bytes, and optional registry naming information. It finds and decodes `SKILL.md`, splits frontmatter from body, parses the YAML metadata, checks that the metadata name matches the folder name, gathers non-`SKILL.md` assets, and returns a `RuntimeSkill` with description, instructions, dependencies, parent, files, and original markdown.
 
-**Call relations**: Compaction._compact calls this after each summarization attempt. It uses Compaction._render, Compaction._tokens, Compaction._window_text, and missing_anchors; its result determines whether to retry, persist, or fail.
+**Call relations**: `parse_skill` calls this after collecting files from a real directory. It relies on `_split_frontmatter`, YAML parsing, and `RuntimeSkill` construction to turn raw files into the standard runtime object.
 
-*Call graph*: calls 4 internal fn (_render, _tokens, _window_text, missing_anchors); called by 1 (_compact); 4 external calls (__init__, __init__, __init__, model_copy).
+*Call graph*: calls 1 internal fn (_split_frontmatter); called by 1 (parse_skill); 3 external calls (__init__, PurePosixPath, safe_load).
 
 
-##### `Compaction._require_budget`  (lines 609–647)
+##### `parse_skill`  (lines 192–201)
 
 ```
-def _require_budget(self, verification: CompactionVerification, boundary: _Boundary) -> None
+def parse_skill(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
 ```
 
-**Purpose**: Makes sure compaction did not make the conversation worse. It raises an error if the replacement should have been able to shrink but did not, or if it should have fit under the trigger but still does not.
+**Purpose**: Reads a skill folder from disk and parses it into a `RuntimeSkill`. It treats nested child skills as separate packages, not as ordinary files belonging to the parent.
 
-**Data flow**: It receives a verification record and the fixed boundary. It calculates the trigger, estimates the unavoidable carried text using an empty summary, compares old head size, tail size, summary allowance, and after-window size, and either returns silently or raises a RuntimeError.
+**Data flow**: It receives a filesystem path to a skill directory. It first finds child skill directories, then walks the parent directory for files while skipping those child subtrees, reads each file as bytes, and passes the collected files to `parse_skill_content`. The output is one parsed skill for that directory.
 
-**Call relations**: Compaction._compact calls this after verification and before persistence. It uses Compaction._trigger, Compaction._render, and Compaction._tokens to enforce the size invariant.
+**Call relations**: `discover_skills` calls this for each skill directory it registers. It uses `_child_skill_dirs` to avoid mixing parent and child files, then hands parsing to `parse_skill_content`.
 
-*Call graph*: calls 3 internal fn (_render, _tokens, _trigger); called by 1 (_compact); 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill_content); called by 1 (discover_skills); 1 external calls (rglob).
 
 
-##### `Compaction._record_verification`  (lines 649–672)
+##### `discover_skills`  (lines 204–222)
 
 ```
-def _record_verification(self, index: int, reason: Literal['auto', 'force'], verification: CompactionVerification) -> None
+def discover_skills(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> dict[str, RuntimeSkill]
 ```
 
-**Purpose**: Writes observability data about how well compaction preserved important facts. This makes compaction quality visible in logs and metrics.
+**Purpose**: Finds a skill and all of its nested child skills, then returns them in one flat lookup table. This lets the registry address child skills by names like `parent/child`.
 
-**Data flow**: It receives the compaction index, reason, and verification record. It logs token counts, missing anchors, dropped paths, and retry status, then emits a metric labeled clean or lossy and whether a retry was used.
+**Data flow**: It receives a skill directory plus optional registry and parent names. It parses the current directory, stores it by its registry name, finds immediate child skill directories, recursively discovers each child with a path-style name, and returns one dictionary of all discovered skills.
 
-**Call relations**: Compaction._compact calls this after persisting the compacted record. It hands the outcome to the project’s logging and metric systems.
+**Call relations**: `_load_core_skills` uses this while building the built-in skill set at import/startup time. Inside the recursion, it calls `parse_skill` for the current folder and `_child_skill_dirs` to find children.
 
-*Call graph*: called by 1 (_compact); 2 external calls (emit_metric, log).
+*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill); called by 1 (_load_core_skills).
 
 
-##### `Compaction._persist`  (lines 674–685)
+##### `_load_core_skills`  (lines 225–232)
 
 ```
-async def _persist(self, index: int, before: tuple[Message, ...], after: tuple[Message, ...], summary: CompactionSummary) -> None
+def _load_core_skills(root: Path) -> dict[str, RuntimeSkill]
 ```
 
-**Purpose**: Saves the before-window, after-window, and structured summary for a completed compaction. This gives operators and evaluators an audit trail.
+**Purpose**: Loads the built-in skills that ship with the project. These become the core skill catalog available before packs or user-defined skills are added.
 
-**Data flow**: It receives an index, original messages, compacted messages, and summary. It writes before and after windows through Compaction._write, serializes the summary to JSON, compresses it with lz4, and stores it in the blob store under the summary key.
+**Data flow**: It receives the root directory containing core skills, lists visible skill directories, discovers each one and its children, and combines them into a dictionary keyed by skill name. The result is used to create the module-level core skill registry.
 
-**Call relations**: Compaction._compact calls this once a candidate passes verification and budget checks. It uses Compaction._key to place records at stable conversation-specific paths.
+**Call relations**: This runs when the module is imported to populate `CORE_SKILLS_BY_NAME` and related constants. It calls `discover_skills` for each core skill directory.
 
-*Call graph*: calls 2 internal fn (_key, _write); called by 1 (_compact); 1 external calls (model_dump_json).
+*Call graph*: calls 1 internal fn (discover_skills); 1 external calls (iterdir).
 
 
-##### `Compaction._next_index`  (lines 687–691)
+##### `SkillRegistry.named`  (lines 249–254)
 
 ```
-async def _next_index(self) -> int
+def named(self, name: str) -> RuntimeSkill
 ```
 
-**Purpose**: Finds the next unused compaction record number for this conversation. This avoids overwriting earlier compaction records.
+**Purpose**: Looks up one skill by name and gives a clear error if it is not available. This is the registry’s front desk: ask for a name, get the matching skill or a list of valid choices.
 
-**Data flow**: It starts at index 1 and checks whether an “after” blob already exists for that index. It increments until it finds a free slot and returns that number.
+**Data flow**: It reads the registry’s `by_name` dictionary using the requested name. If found, it returns the `RuntimeSkill`; if missing, it builds an error message listing available skill names and raises `ValueError`.
 
-**Call relations**: Compaction._compact calls this before writing records. It uses Compaction._key to ask the blob store about each possible location.
+**Call relations**: `SkillRegistry.closure` and its inner dependency-walking helper call this whenever they need to turn a requested or dependent skill name into the actual skill object.
 
-*Call graph*: calls 1 internal fn (_key); called by 1 (_compact).
+*Call graph*: called by 2 (closure, add).
 
 
-##### `Compaction.read_record`  (lines 693–700)
+##### `SkillRegistry.closure`  (lines 256–279)
 
 ```
-async def read_record(self, index: int) -> CompactionRecord | None
+def closure(self, *names: str) -> tuple[LoadedSkill, ...]
 ```
 
-**Purpose**: Reads a previously saved compaction record. It returns none if the requested record does not exist.
+**Purpose**: Computes the full set of skills needed for a load request: the directly requested skills plus all dependencies they pull in. It also records which skills were requested directly and which arrived because another skill depended on them.
 
-**Data flow**: It receives an index, tries to read the compressed before, after, and summary blobs from storage, and returns None if any are missing. If all are present, it passes them to decode_compaction and returns the decoded CompactionRecord.
+**Data flow**: It receives one or more skill names. It first creates direct `LoadedSkill` entries for the unique requested names, then walks each skill’s `depends` list, adding each dependency once and labeling it with the skill that pulled it. It returns the ordered tuple of `LoadedSkill` entries.
 
-**Call relations**: This is a retrieval helper for tools, audits, or evaluations that need to inspect past compactions. It uses Compaction._key to locate the saved blobs.
+**Call relations**: The engine’s skill-loading flow calls this to decide what must be mounted and shown to the model. It uses `SkillRegistry.named` for lookups and the nested `SkillRegistry.closure.add` helper for recursive dependency walking.
 
-*Call graph*: calls 1 internal fn (_key); 1 external calls (decode_compaction).
+*Call graph*: calls 1 internal fn (named); called by 1 (_loaded_skill_closures); 1 external calls (__init__).
 
 
-##### `Compaction._write`  (lines 702–710)
+##### `SkillRegistry.closure.add`  (lines 269–274)
 
 ```
-async def _write(self, index: int, half: Literal['before', 'after'], messages: tuple[Message, ...]) -> None
+def add(skill: RuntimeSkill, dependency_of: str | None) -> None
 ```
 
-**Purpose**: Writes either the before or after message window to compressed blob storage. It stores messages in a deterministic JSON form.
+**Purpose**: Adds one dependency skill and then adds that dependency’s dependencies. It is careful not to add the same skill twice, which also prevents dependency cycles from causing endless recursion.
 
-**Data flow**: It receives an index, a label of before or after, and messages. It wraps the messages in a CompactionWindow, dumps compact sorted JSON, compresses the bytes with lz4, and writes them to the blob store.
+**Data flow**: It receives a `RuntimeSkill` and the name of the skill that depended on it. If the skill is already in the loaded set, it stops; otherwise it stores a `LoadedSkill` marked as a dependency, looks up each dependency named by that skill, and repeats the process.
 
-**Call relations**: Compaction._persist calls this for the before-window and after-window. It uses Compaction._key to choose the storage path.
+**Call relations**: This helper lives inside `SkillRegistry.closure` and is used only during closure calculation. It calls `SkillRegistry.named` to resolve dependency names and creates `LoadedSkill` records for newly discovered dependencies.
 
-*Call graph*: calls 1 internal fn (_key); called by 1 (_persist); 2 external calls (__init__, dumps).
+*Call graph*: calls 1 internal fn (named); 1 external calls (__init__).
 
 
-##### `Compaction._key`  (lines 712–713)
+##### `SkillRegistry.index`  (lines 281–289)
 
 ```
-def _key(self, index: int, half: Literal['before', 'after', 'summary']) -> str
+def index(self) -> tuple[tuple[str, str], ...]
 ```
-
-**Purpose**: Builds the storage key for one compaction artifact. It keeps before, after, and summary records organized by conversation and index.
 
-**Data flow**: It receives an index and artifact kind. It passes the conversation ID, index, and kind to compaction_key and returns the resulting blob path.
+**Purpose**: Builds the list of skills that should appear in the public skill index shown to the model. It includes only top-level skills, not child skills.
 
-**Call relations**: Compaction._persist, Compaction._write, Compaction._next_index, and Compaction.read_record all use this so they agree on where compaction records live.
+**Data flow**: It reads the registry’s skills in registration order, keeps those without a parent, and returns pairs of skill name and description. It does not include instructions or files.
 
-*Call graph*: called by 4 (_next_index, _persist, _write, read_record); 1 external calls (compaction_key).
+**Call relations**: This supports the system prompt’s skill catalog. Child skills are intentionally left out because the parent skill’s instructions are expected to explain when and how to use them.
 
 
-##### `Compaction._tokens`  (lines 715–738)
+##### `SkillRegistry.merged_with`  (lines 291–303)
 
 ```
-def _tokens(self, messages: tuple[Message, ...]) -> int
+def merged_with(self, user_skills: tuple[RuntimeSkill, ...]) -> 'SkillRegistry'
 ```
 
-**Purpose**: Estimates how much model context a set of messages will consume. This drives when compaction starts and whether the compacted result is small enough.
+**Purpose**: Creates a new registry that includes saved user skills after the base skills. It refuses to let a user skill replace a core or pack skill with the same name.
 
-**Data flow**: It receives messages. For each message it counts role text, rendered content text, hidden reasoning bytes, and inline image estimates, converts character counts to approximate tokens, and sums everything into one integer.
+**Data flow**: It copies the current registry’s name-to-skill dictionary, then examines each user skill. If the name is new, it adds the skill; if the name already exists, it logs that the shadowing attempt was refused and skips it. It returns a new `SkillRegistry`.
 
-**Call relations**: Compaction.maybe_compact uses this to decide whether to compact. Compaction._compact records before size, Compaction._verify records after size, and Compaction._require_budget enforces size rules using it.
+**Call relations**: This is used when a workspace’s saved skills are added to the active catalog. It calls the logging function when a user skill collides and constructs a fresh registry for the merged result.
 
-*Call graph*: calls 3 internal fn (_image_count, _opaque_chars, _text); called by 4 (_compact, _require_budget, _verify, maybe_compact).
+*Call graph*: 2 external calls (__init__, log).
 
 
-##### `Compaction._opaque_chars`  (lines 740–759)
+##### `_mounted_tree`  (lines 309–327)
 
 ```
-def _opaque_chars(self, message: Message) -> int
+def _mounted_tree(loaded: tuple[LoadedSkill, ...]) -> str
 ```
 
-**Purpose**: Counts hidden reasoning data that is sent to the model but not useful as readable summary text. Without this, token estimates would be too low for reasoning-heavy messages.
+**Purpose**: Creates a compact, readable tree of all files mounted for a skill load. This tells the agent where files are available without repeating long paths over and over.
 
-**Data flow**: It receives one message. If the content is plain text, it returns zero. Otherwise it scans structured blocks for thinking signatures, redacted data, and encrypted reasoning content, adds their lengths, and returns the total.
+**Data flow**: It receives the loaded skill entries, asks each skill for the paths of files that will be mounted, sorts them, and formats them as an indented tree under the `.skills` directory. The output is plain text for the prompt.
 
-**Call relations**: Compaction._tokens calls this for each message while estimating context size. The value is counted but not rendered by Compaction._text.
+**Call relations**: `loaded_context` calls this after building workflow instruction blocks. The tree covers the whole closure at once, so dependencies and requested skills appear together in one file map.
 
-*Call graph*: called by 1 (_tokens).
+*Call graph*: called by 1 (loaded_context); 1 external calls (PurePosixPath).
 
 
-##### `Compaction._image_count`  (lines 761–771)
+##### `loaded_context`  (lines 330–344)
 
 ```
-def _image_count(self, message: Message) -> int
+def loaded_context(loaded: tuple[LoadedSkill, ...], in_context: Container[str]=frozenset()) -> str
 ```
 
-**Purpose**: Counts inline images in a message so token estimates include their cost. Images may have little text but still consume a lot of model context.
+**Purpose**: Builds the full text that a skill load contributes to the model. It includes new skill instructions, notes any instructions already present, and appends the mounted-file tree.
 
-**Data flow**: It receives one message. If the content is plain text, it returns zero. Otherwise it scans image blocks and image parts inside tool results, counts them, and returns the number.
+**Data flow**: It receives loaded skill entries and a set of skill names already in context. For each new skill, it includes the prompt body; for each repeated skill, it adds its name to an “already loaded” note. It then appends `Mounted files:` followed by the tree from `_mounted_tree` and returns the final text.
 
-**Call relations**: Compaction._tokens calls this for each message and multiplies the count by a fixed image token estimate.
+**Call relations**: This is shared by normal skill loading and subagent preloading so skills look the same in both places. It calls `_mounted_tree` to describe the files that `mount_skill` will make available.
 
-*Call graph*: called by 1 (_tokens).
+*Call graph*: calls 1 internal fn (_mounted_tree).
 
 
-##### `Compaction._text`  (lines 773–797)
+##### `mount_skill`  (lines 347–355)
 
 ```
-def _text(self, message: Message) -> str
+async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None
 ```
-
-**Purpose**: Converts a message’s different content block types into readable text for summarization, searching, and token estimation. Non-text items get clear markers instead of silently disappearing.
-
-**Data flow**: It receives one message. If the content is already a string, it returns it. Otherwise it walks through text, thinking, redacted reasoning, reasoning summaries, images, tool results, and tool uses, rendering each into plain text or markers such as “[image]”, then joins the pieces with newlines.
-
-**Call relations**: Compaction._prepare uses this to build the summarizer input. Compaction._references and Compaction._window_text use it for searching, and Compaction._tokens uses it for size estimation.
-
-*Call graph*: called by 4 (_prepare, _references, _tokens, _window_text); 1 external calls (dumps).
-
-
-### Prompt rendering
-Provides the prompt package entry point and renders validated, fingerprinted system prompts from templates.
 
-### `core/src/ufo/loop/prompts/__init__.py`
+**Purpose**: Writes one skill’s files into the sandboxed workspace under that skill’s own `.skills/<name>/` folder. The containment check is important because skill file paths can come from user-controlled saved data.
 
-`other` · `import setup`
+**Data flow**: It receives a sandbox session and a `RuntimeSkill`. It gets the skill’s mount root, gets all files to mount, checks each file path so it stays inside that mount root, and writes the bytes into the sandbox. The sandbox filesystem changes; the function returns nothing.
 
-This is an empty package marker file. In Python, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, it makes `ufo.loop.prompts` a named place in the codebase where prompt-related modules can live and be imported from elsewhere.
+**Call relations**: This is the step that turns a resolved skill into actual reachable files. It calls `RuntimeSkill.mount_root`, `RuntimeSkill.mounted_files`, the containment helper, and the sandbox’s `write_file` method.
 
-Think of it like a label on a drawer. The drawer may contain useful documents, but the label itself does not do the work; it just makes the drawer recognizable and easy to refer to. Without this file, some Python tooling or older import setups might not reliably recognize this directory as a package, which could make imports fail or behave inconsistently.
+*Call graph*: calls 3 internal fn (write_file, mount_root, mounted_files); 1 external calls (contained_relative).
 
-There are no functions, classes, settings, or side effects here. Its importance is structural: it helps organize the project and supports clean imports for the prompt code that belongs under this directory.
 
+### Built-in catalog skill
+The model catalog skill uses the runtime to expose the live model registry as reusable built-in skill content.
 
-### `core/src/ufo/loop/prompts/render.py`
+### `core/src/ufo/models/catalog_skill.py`
 
-`domain_logic` · `prompt construction before a model turn`
+`domain_logic` · `startup`
 
-This file is the prompt assembly room. The project keeps reusable prompt text in nearby Markdown files, with blank spaces such as `{{agent-prompt}}`, `{{sections}}`, and `{{knowledge_cutoff}}`. This renderer fills those spaces with the agent’s instructions, contributed capability sections, available skill descriptions, citation guidance, and the model’s knowledge cutoff date.
+This file solves a documentation problem: the list of available models must match what the system can actually run. If people wrote that list by hand, it could become stale when a model is added, removed, repriced, or changed. Instead, this file builds the catalog directly from the same model records the runtime uses for routing requests, pricing usage, and choosing prompts.
 
-The main reason this file exists is safety and repeatability. A prompt with an unfilled `{{something}}` placeholder could confuse the model or hide a bug. So the renderer is strict: if the agent prompt declares a variable, the caller must supply it; if the caller supplies an extra variable, that is also an error. After all replacements are done, it checks again for any leftover `{{...}}` text and fails loudly if one remains.
+At startup, the system can call `model_catalog_skill` with a `ModelRegistry`, which is the live collection of known model descriptions. The function walks through every registered model, sorts them by model id, and renders a Markdown table. Each row shows useful facts: provider, knowledge cutoff, context window, input and output price, whether reasoning is supported, and what API surface the model uses. Think of it like printing a restaurant menu from the kitchen’s actual inventory system instead of from a separate paper note.
 
-It also tidies the finished prompt by collapsing long runs of blank lines and trimming the end. Finally, it computes a SHA-256 digest, which is a stable fingerprint of the exact prompt text. Like a label on a sealed package, that digest lets logs and observability tools show exactly which prompt version was used.
+The result is wrapped as a `RuntimeSkill`, meaning it can be loaded and read like other skills in the system. The raw skill text also includes a small front matter header with the skill name and description, so it looks like a normal skill document while still being generated from live data.
 
 #### Function details
 
-##### `rendered_prompt`  (lines 53–54)
+##### `_per_mtok`  (lines 18–19)
 
 ```
-def rendered_prompt(content: str) -> RenderedPrompt
+def _per_mtok(micro_usd_per_mtok: int) -> str
 ```
 
-**Purpose**: This function wraps finished prompt text in a `RenderedPrompt` object and adds a digest, which is a fingerprint of the exact content. It is used when the prompt is ready to send or record.
+**Purpose**: This small helper turns a price stored in micro-dollars into a readable dollar amount. It is used so the catalog can show prices like `$1.25` instead of an internal integer unit.
 
-**Data flow**: It receives plain prompt text. It encodes that text, computes a SHA-256 hash from it, prefixes the hash with `sha256:`, and returns a `RenderedPrompt` containing both the fingerprint and the original content. It does not change any outside state.
+**Data flow**: It receives an integer price measured in micro-USD per million tokens. It divides that by the number of micro-USD in one USD, formats the result with two decimal places, and returns a string with a dollar sign.
 
-**Call relations**: After `render_template` has filled and checked the prompt, it calls `rendered_prompt` as the final packaging step. `rendered_prompt` relies on the standard hashing library and the `RenderedPrompt` data container to produce the final object.
+**Call relations**: When `model_catalog_skill` is building each model’s table row, it calls `_per_mtok` for the input price and again for the output price. The formatted strings are then placed into the catalog table.
 
-*Call graph*: called by 1 (render_template); 2 external calls (__init__, sha256).
-
-
-##### `render_system_prompt`  (lines 57–74)
-
-```
-def render_system_prompt(agent_prompt: str, sections: Sequence[tuple[str, str]], skills: Sequence[tuple[str, str]]=(), *, knowledge_cutoff: str) -> RenderedPrompt
-```
-
-**Purpose**: This is the high-level builder for the main agent’s system prompt. It combines the shared shell prompt, the agent-specific instructions, skill information, contributed sections, and the model’s knowledge cutoff.
-
-**Data flow**: It receives the agent prompt, a list of section name/body pairs, an optional list of skill name/description pairs, and a required knowledge cutoff in machine form such as `2026-02`. It turns that date into a human-readable form such as `February 2026`, inserts it into the knowledge cutoff block, places that block into the shell template, and then passes everything to `render_template`. The output is a fully rendered prompt with a digest.
-
-**Call relations**: This function is the usual front door for building the main system prompt. It prepares the special knowledge cutoff text using date parsing, then hands the real template filling work to `render_template`.
-
-*Call graph*: calls 1 internal fn (render_template); 1 external calls (strptime).
+*Call graph*: called by 1 (model_catalog_skill).
 
 
-##### `render_template`  (lines 77–95)
+##### `model_catalog_skill`  (lines 22–50)
 
 ```
-def render_template(template: str, agent_prompt: str, variables: Mapping[str, str], skills: Sequence[tuple[str, str]], sections: Sequence[tuple[str, str]]) -> RenderedPrompt
+def model_catalog_skill(registry: ModelRegistry) -> RuntimeSkill
 ```
 
-**Purpose**: This function fills a prompt template and enforces that every placeholder has been dealt with. It is the central checker that prevents half-rendered prompt text from reaching the model.
+**Purpose**: This function builds the actual model-catalog skill from the live model registry. Someone would use it during boot so users can inspect the models this deployment really supports.
 
-**Data flow**: It receives a template, an agent prompt, replacement variables for that agent prompt, skill entries, and section entries. First it asks `_substitute_vars` to fill variables inside the agent prompt. If there is an agent prompt but the template has no place for it, it raises an error. Then it replaces the skill, citation, section, and agent-prompt slots. It checks the final text for any remaining `{{...}}` placeholders, raises an error if any are found, cleans up extra blank lines, trims the end, and returns a `RenderedPrompt` through `rendered_prompt`.
+**Data flow**: It receives a `ModelRegistry`, which contains the current model specifications. It reads each model’s id, provider, knowledge cutoff, context window, pricing, reasoning support, and API surface. It formats those facts into a Markdown table, combines that table with a name and description, and returns a `RuntimeSkill` containing both the readable instructions and the raw skill document.
 
-**Call relations**: `render_system_prompt` calls this after preparing the shell template. Inside the flow, `render_template` delegates variable replacement to `_substitute_vars`, skill block formatting to `render_skill_index`, and final packaging plus fingerprinting to `rendered_prompt`.
+**Call relations**: This is the main builder in the file. As it prepares the table, it hands price values to `_per_mtok` so they become human-readable dollar amounts. At the end, it creates a `RuntimeSkill`, which lets the generated catalog behave like a normal skill elsewhere in the runtime.
 
-*Call graph*: calls 3 internal fn (_substitute_vars, render_skill_index, rendered_prompt); called by 1 (render_system_prompt).
+*Call graph*: calls 1 internal fn (_per_mtok); 1 external calls (__init__).
 
 
-##### `render_skill_index`  (lines 98–107)
+### User skill storage
+User-created skill storage persists per-agent skills while validating names, avoiding built-in overrides, and enforcing limits.
+
+### `extensions/skill_create/ufo_ext_skill_create/store.py`
+
+`io_transport` · `request handling and cross-cutting persistence`
+
+A “skill” here is a small bundle of files, such as a SKILL.md file plus any assets, that an agent can save and use later. This file is the safe storage layer for those bundles. Without it, user-authored skills could disappear between runs, collide with built-in skills, or be saved under unsafe names like paths with slashes.
+
+The file defines the database table used to keep each saved skill. A skill is keyed by workspace, agent, and name, which means two agents can have different skills with the same name without mixing them up. The actual files are stored as JSON, with each file’s bytes converted to base64 text. Base64 is a common way to turn raw bytes into plain text so they can fit safely inside a database text column.
+
+The main class, UserSkillStore, always works in the “current agent” scope. Think of it like a labeled drawer: every save, load, delete, and count operation opens only the drawer for the current workspace and agent. When saving, it checks the name, parses the skill to make sure it is usable, refuses to shadow core or pack skills, enforces the maximum number of saved skills, then inserts or updates the database row. When loading, it skips corrupt saved content and logs a warning instead of breaking all skill loading.
+
+#### Function details
+
+##### `UserSkillStore.save`  (lines 69–126)
 
 ```
-def render_skill_index(skills: Sequence[tuple[str, str]]) -> str
+async def save(self, name: str, files: Mapping[str, bytes], registry_names: frozenset[str]) -> RuntimeSkill
 ```
 
-**Purpose**: This function turns the list of available skills into the prompt block that tells the model what skills can be loaded. If there are no skills, it returns an empty string so the prompt does not include a useless empty section.
+**Purpose**: Saves one user-created skill for the current workspace and agent. It checks that the name is safe, that the skill content can be parsed, that it does not illegally replace a built-in skill, and that the agent has not exceeded the saved-skill limit.
 
-**Data flow**: It receives a sequence of skill name and description pairs. With no entries, it outputs an empty string. With entries, it creates a small text block wrapped in `<available_skills>` and `</available_skills>`, with one bullet line per skill.
+**Data flow**: It receives a skill name, a mapping of file paths to raw file bytes, and the set of names already present in the active skill registry. It reads the current workspace and agent, validates the name, parses the files into a runtime skill, checks whether this agent already owns that name, and counts existing user skills if needed. It then turns the files into base64 text, wraps them in the StoredSkill format, computes a sha256 digest as a fingerprint, and writes the row to the database by updating an existing skill or inserting a new one. It returns the parsed RuntimeSkill that can be registered or used immediately.
 
-**Call relations**: `render_template` calls this when it reaches the skill slot in the prompt template. The formatted block is then inserted into the larger prompt alongside the agent instructions, sections, and citation text.
+**Call relations**: This is the main write path for the store. During a save request, it calls UserSkillStore._owns to decide whether the operation is a new skill or an update, and UserSkillStore._count to enforce the per-agent cap only when adding a new skill. It also hands the incoming file bundle to parse_skill_content before saving, so bad skill content is rejected before it becomes persistent data.
 
-*Call graph*: called by 1 (render_template).
+*Call graph*: calls 2 internal fn (_count, _owns); 10 external calls (__init__, __init__, __init__, __init__, b64encode, sha256, insert, update, agent_current, parse_skill_content).
 
 
-##### `_substitute_vars`  (lines 110–117)
+##### `UserSkillStore.load_all`  (lines 128–162)
 
 ```
-def _substitute_vars(template: str, variables: Mapping[str, str]) -> str
+async def load_all(self) -> tuple[RuntimeSkill, ...]
 ```
 
-**Purpose**: This helper fills variables inside the agent prompt while checking both sides: every declared variable must be supplied, and every supplied variable must actually be declared. This prevents silent mistakes such as misspelled variable names.
+**Purpose**: Loads every saved user skill belonging to the current workspace and agent. It is used when the system needs to rebuild the agent’s available user-authored skills from the database.
 
-**Data flow**: It receives a prompt template and a mapping of variable names to replacement text. It scans the template for placeholders like `{{user_name}}`, compares those names with the supplied mapping keys, and raises an error if anything is missing or extra. If the names match exactly, it replaces each placeholder with its supplied value and returns the filled text.
+**Data flow**: It reads the current workspace and agent, queries the database for all matching saved skill names and stored content, and processes them in name order. For each row, it validates the stored JSON shape, decodes each base64 file back into bytes, and parses the file bundle into a RuntimeSkill. If one saved skill is corrupt, it logs a warning and continues with the rest. It returns a tuple of successfully loaded RuntimeSkill objects.
 
-**Call relations**: `render_template` calls this at the start, before placing the agent prompt into the larger shell. Its strict check is an early guardrail, so the later full-template check is not the first time mistakes are caught.
+**Call relations**: This is the bulk read path. It relies on the same StoredSkill format that UserSkillStore.save writes, and it passes each decoded bundle to parse_skill_content so the rest of the system receives normal runtime skill objects rather than raw database rows.
 
-*Call graph*: called by 1 (render_template).
+*Call graph*: 4 external calls (b64decode, select, agent_current, parse_skill_content).
+
+
+##### `UserSkillStore.files`  (lines 164–180)
+
+```
+async def files(self, name: str) -> dict[str, bytes] | None
+```
+
+**Purpose**: Fetches the original files for one saved user skill, if that skill exists for the current workspace and agent. This is useful when the system needs the stored bundle itself, not just the parsed runtime skill.
+
+**Data flow**: It receives a skill name and reads the current workspace and agent. It looks up that exact database row. If no row exists, it returns None. If a row exists, it validates the stored JSON, decodes each base64 string back into raw bytes, and returns a dictionary from file path to file bytes.
+
+**Call relations**: This is a focused read path for one skill. It reads the data written by UserSkillStore.save, but unlike UserSkillStore.load_all it does not parse the files into a RuntimeSkill; it hands back the raw saved files for callers that need to inspect, export, or reuse the bundle.
+
+*Call graph*: 3 external calls (b64decode, select, agent_current).
+
+
+##### `UserSkillStore.delete`  (lines 182–191)
+
+```
+async def delete(self, name: str) -> None
+```
+
+**Purpose**: Deletes one saved user skill for the current workspace and agent. It lets an agent remove a skill from its own persistent drawer without touching other agents’ skills.
+
+**Data flow**: It receives a skill name and reads the current workspace and agent. It sends a delete command to the database for the row matching that workspace, agent, and name. It returns nothing; after it finishes, the matching saved skill is gone if it existed.
+
+**Call relations**: This is the removal path for the store. It uses the same scoping rule as save and load operations, so deletion is limited to the current agent’s saved skills and cannot remove a core skill or another agent’s skill.
+
+*Call graph*: 2 external calls (delete, agent_current).
+
+
+##### `UserSkillStore.timestamps`  (lines 193–205)
+
+```
+async def timestamps(self, name: str) -> tuple[datetime, datetime] | None
+```
+
+**Purpose**: Looks up when a saved skill was first created and last updated. This gives callers simple history information without loading the whole skill content.
+
+**Data flow**: It receives a skill name and reads the current workspace and agent. It queries only the created_at and updated_at fields for that saved skill. If no matching row exists, it returns None. Otherwise, it returns the two datetime values as a pair.
+
+**Call relations**: This is a lightweight metadata read. It fits alongside UserSkillStore.files and UserSkillStore.load_all by using the same agent-scoped lookup, but it avoids decoding or parsing skill files because callers only need timing information.
+
+*Call graph*: 2 external calls (select, agent_current).
+
+
+##### `UserSkillStore._count`  (lines 207–219)
+
+```
+async def _count(self) -> int
+```
+
+**Purpose**: Counts how many user-created skills the current workspace and agent already have saved. It exists to help enforce the maximum saved-skill limit.
+
+**Data flow**: It reads the current workspace and agent, queries the database for the number of rows matching that pair, and returns that number as an integer. It does not change any stored data.
+
+**Call relations**: This helper is called by UserSkillStore.save when the requested name is not already owned by the agent. In that moment, save needs to know whether adding one more skill would exceed the allowed cap, and _count supplies that answer.
+
+*Call graph*: called by 1 (save); 2 external calls (select, agent_current).
+
+
+##### `UserSkillStore._owns`  (lines 221–233)
+
+```
+async def _owns(self, name: str) -> bool
+```
+
+**Purpose**: Checks whether the current workspace and agent already have a saved skill with a given name. It helps distinguish updating an existing user skill from trying to add or override something new.
+
+**Data flow**: It receives a skill name and reads the current workspace and agent. It searches the database for a row with that workspace, agent, and name. It returns true if such a row exists and false otherwise.
+
+**Call relations**: This helper is called by UserSkillStore.save before collision and quota checks. If the agent already owns the name, save can treat the operation as a re-save; if not, save must reject names that belong to core or pack skills and may need to call UserSkillStore._count before adding a new row.
+
+*Call graph*: called by 1 (save); 2 external calls (select, agent_current).

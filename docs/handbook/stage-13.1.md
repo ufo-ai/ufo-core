@@ -1,1942 +1,2260 @@
-# Planning, delegation, automations, and monitors  `stage-13.1`
+# Brokered and keyed connector backends  `stage-13.1`
 
-This stage is shared support for work that lasts longer than one chat turn. It gives the system a notebook, an alarm clock, and a watchman. The objectives tools and store let agents write plans, record attempts, blockers, and evidence, and delegate separate steps to subagents; the store rebuilds progress from saved facts, not from a worker’s memory. Scheduled task tools expose repeating jobs and “pause until later” workflows; cron code validates calendar-like rules and finds the next due time; schedules stores ownership and due times and lets background runners safely claim work; pauses does the same for sleeping conversations; scheduled_fire defines one common ID text for a particular scheduled run. The monitor package marker just makes the extension importable. Its monitor tool starts a one-shot watch by running a shell command now, saving it only if this first probe succeeds; monitor_kind shows armed watches as stoppable objects; monitors stores them and decides when probes run, fire, fail, or get skipped. Sweep uses these pieces to make private daily briefs: it gathers context, sends scout subagents, then schedules drafting after each member’s morning starts.
+This stage is shared behind-the-scenes support for connecting the agent to outside tools and accounts. It is the “switchboard” that lets the rest of the system ask for a tool without needing to know where the user’s secret login token is kept.
+
+The Composio files form one backend: the client talks to Composio’s API, the broker presents Composio tools in the system’s normal connector shape, the proxy forwards ordinary web requests through Composio, the resolver chooses an allowed Composio toolkit by name, and the MCP session helper makes one tool call over MCP, a standard way for services to expose tools. The Pipedream files do the same kind of job for Pipedream Connect: define safe connected accounts, discover actions, run them, and proxy requests without exposing secrets. The connector objects file shows connected accounts as workspace items that can be shared, revoked, or disconnected with permission checks. Keyed connectors cover simpler services that use API keys. The MCP extension discovers tools from configured MCP servers. The evaluation manifest supplies fake mailbox, calendar, and code-search connectors for repeatable tests.
 
 ## Files in this stage
 
-### Scheduled workflows
-These files define user-facing scheduled tasks and workflow pauses, plus the shared identifiers, cron rules, and durable storage needed to run them safely later.
+### Composio backend
+Composio integration discovers tools, routes dynamic providers, executes tool calls, and proxies provider HTTP access without exposing user secrets.
 
-### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py`
+### `extensions/composio/ufo_ext_composio/broker.py`
 
-`domain_logic` · `request handling and scheduled-work setup`
+`io_transport` · `request handling for connector discovery, execution, file transfer, and credential proxying`
 
-This file is the public doorway for the scheduled-tasks extension. A scheduled task is treated like a workspace object: it has a name, a schedule, a prompt to run, an owner, visibility rules, and create/update/delete behavior. Without this file, users could not create recurring agent work through the normal object commands, and the system would not know how to show, protect, or modify those tasks.
+ComposioBroker is the shared doorway every Composio-backed connector uses. Think of it like a front desk: the rest of the system asks for “tools for Gmail” or “run this Slack action,” and this file translates that request into Composio API calls, then returns the result in the project’s own simple shapes.
 
-The main model, ScheduledTaskSpec, describes what a task can contain: a cron schedule, prompt, description, expiry time, and paused flag. A cron schedule is a compact text pattern such as “run at 9 every weekday.” ScheduledTaskObjects is the adapter between the generic object system and the schedule database. It lists tasks, builds the rows users see, checks who may read or change them, validates schedules, creates new tasks, updates existing ones, and cancels tasks.
+The broker is intentionally stateless. It fetches the Composio client each time a method runs, so tests can swap in a fake transport and long-lived connections do not leak across calls.
 
-The file also defines pause_and_wait. This is not a normal workspace object because it is not something a member browses or edits. It is more like setting an alarm while leaving a note on the desk. The tool records a pause row with the conversation, agent, wake-up time, and instructions for the resumed turn, then tells the agent to reply and stop until either a member speaks or the timer fires.
+It supports several main jobs. It can list available tools and fetch a single tool’s schema, rewriting Composio’s file-upload fields into the system’s own “workspace file” vocabulary. It can execute a tool for a workspace-specific broker user. If execution fails because the tool slug is wrong, it tries to include real available slugs in the error so the next attempt can improve. If execution fails because an old or missing connected account is being used, it gives reconnect guidance instead of pretending the tool name was the problem.
+
+It also finds file outputs buried inside tool responses, creates upload slots for tool inputs, searches tools through Composio’s tool router, and builds a credential object whose HTTP transport proxies through Composio. That last part matters because provider tokens stay with Composio; this system only receives a safe proxy path.
 
 #### Function details
 
-##### `ScheduledTaskSpec.validate_utc_expiry`  (lines 103–106)
+##### `ComposioBroker.tools`  (lines 48–49)
 
 ```
-def validate_utc_expiry(cls, value: datetime | None) -> datetime | None
+async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]
 ```
 
-**Purpose**: Checks that a task expiry time, if supplied, is written in UTC, the shared time standard used by the scheduler. This prevents a task from expiring at the wrong moment because of a local time zone.
+**Purpose**: Finds tools offered by a provider, optionally narrowed by a search query. It returns them in the project’s standard BrokerTool form so callers do not need to understand Composio’s raw catalog format.
 
-**Data flow**: It receives the proposed expires_at value from the task specification. If there is no value, it passes it through. If there is a value, it checks that the timestamp has UTC time-zone information; otherwise it raises a validation error before the task can be saved.
+**Data flow**: It receives a workspace id, provider name, and query text. It asks the current Composio client for matching tools, then passes the returned rows through _discovered_tools, which keeps usable slugs, short descriptions, and input schemas. The result is a tuple of BrokerTool objects.
 
-**Call relations**: This runs automatically while ScheduledTaskSpec is being built or parsed by the data-validation layer. It protects later scheduling code from having to guess what time zone an expiry belongs to.
+**Call relations**: This is the quick discovery path used when the connector layer needs to show or choose available provider tools. It gets the Composio client for the current call, then hands the raw Composio list to _discovered_tools to normalize it.
 
-*Call graph*: 2 external calls (utcoffset, timedelta).
-
-
-##### `_require_scheduler`  (lines 127–128)
-
-```
-def _require_scheduler(ext: ExtensionContext | None) -> ScheduleStore
-```
-
-**Purpose**: Turns the extension context into a ScheduleStore, which is the storage-facing object used to read and write scheduled tasks. It is a small safety gate that refuses to continue if the scheduled-tasks extension context is missing.
-
-**Data flow**: It receives an optional ExtensionContext. It first requires that the context really exists, then wraps it in a ScheduleStore and returns that store to the caller.
-
-**Call relations**: Most task operations call this right before touching schedule data: listing rows, showing conversation grants, reading status, creating or updating a task, deleting a task, or finding a task by name. It hands them the storage tool they need.
-
-*Call graph*: calls 1 internal fn (_require_ext); called by 6 (_apply_owned, _delete_owned, _find, _rows, _status, member_conversation_rows); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_discovered_tools); 1 external calls (composio_client).
 
 
-##### `_require_ext`  (lines 131–134)
+##### `ComposioBroker.schema`  (lines 51–64)
 
 ```
-def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
+async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool
 ```
 
-**Purpose**: Ensures code that depends on this extension actually has an ExtensionContext to work with. If not, it fails loudly instead of letting later database or conversation calls break in confusing ways.
+**Purpose**: Fetches the detailed input schema for one tool slug. This tells the rest of the system what arguments the tool expects before trying to run it.
 
-**Data flow**: It receives an optional ExtensionContext. If it is present, the same context comes back. If it is missing, the function raises a RuntimeError explaining that scheduled tasks require this context.
+**Data flow**: It receives a workspace id, provider name, and tool slug. It asks Composio for that tool’s schema, converts any file-upload fields into this system’s workspace-file format, and returns a BrokerTool with the slug, description, and input schema. If Composio says the slug does not exist, it raises UnknownBrokerTool so the caller knows the requested tool is invalid.
 
-**Call relations**: _require_scheduler uses this before creating a ScheduleStore, and pause_and_wait uses it before writing a pause. It is the shared guardrail at the edge of extension-specific work.
+**Call relations**: The connector layer calls this when it needs exact instructions for one tool. It relies on the Composio client for the raw schema and on workspace_file_schema to translate Composio’s file input shape into the form used by dynamic connector tools.
 
-*Call graph*: called by 2 (_require_scheduler, pause_and_wait).
-
-
-##### `_summary`  (lines 137–138)
-
-```
-def _summary(task: ScheduledTask) -> str
-```
-
-**Purpose**: Builds the short one-line label shown for a scheduled task in lists. It combines the schedule with either the description or, if there is no description, the prompt.
-
-**Data flow**: It receives a ScheduledTask. It reads the task schedule, description, and prompt, joins them into a readable string, trims the result to the configured maximum length, and returns that text.
-
-**Call relations**: ScheduledTaskObjects._rows calls this while building list entries. It provides the human-friendly summary that appears when the viewer is allowed to see the task content.
-
-*Call graph*: called by 1 (_rows).
+*Call graph*: 4 external calls (__init__, __init__, composio_client, workspace_file_schema).
 
 
-##### `_owner`  (lines 141–149)
+##### `ComposioBroker.execute`  (lines 66–89)
 
 ```
-def _owner(listed: ListedTask) -> GeneratedObjectOwner
+async def execute(self, workspace_id: UUID, provider: str, slug: str, arguments: Mapping[str, object], account_id: str, idempotency_key: str | None) -> dict[str, object]
 ```
 
-**Purpose**: Describes who owns a listed task and how broadly it is shared. The ownership record lets the generic object system apply the same visibility and editing rules it uses for other objects.
+**Purpose**: Runs a Composio tool for a workspace and connected account. It also turns two common confusing failures into more helpful errors: stale accounts get reconnect guidance, and missing tool slugs can get a list of real alternatives.
 
-**Data flow**: It receives a ListedTask, which includes the task and the audience of the conversation it reports into. It takes the creator member id, converts the conversation audience into a shared/not-shared marker, attaches the task id as the generation, and returns a GeneratedObjectOwner.
+**Data flow**: It receives the workspace id, provider, tool slug, arguments, connected account id, and an optional idempotency key, which is a repeat-safe request marker. It builds the Composio broker-user id from the workspace id, sends the execution request, and returns Composio’s response dictionary. If Composio reports an error, it checks whether the account looks stale, whether the slug was missing, or whether the error should simply be re-raised.
 
-**Call relations**: Rows and conversation grants use this when they need to decide whether a member or admin can see a task. It bridges scheduled-task facts into the generic object permission machinery.
+**Call relations**: This is the main run path for provider actions. It calls _stale_account to recognize dead connected accounts, _reconnect_error to explain what the user should do next, and _slug_miss to enrich a missing-tool error with useful tool names.
 
-*Call graph*: called by 2 (_rows, member_conversation_rows); 2 external calls (__init__, subject_shared).
-
-
-##### `ScheduledTaskObjects._admin_can_apply`  (lines 170–173)
-
-```
-def _admin_can_apply(self, _old: ScheduledTaskSpec, spec: ScheduledTaskSpec) -> bool
-```
-
-**Purpose**: Decides which updates an admin is allowed to make to someone else’s scheduled task. Admins may adjust operation details such as schedule, expiry, or pause state, but not rewrite the creator’s prompt or description.
-
-**Data flow**: It receives the old spec and the proposed new spec. It looks at which fields the update is trying to set. If the update includes prompt or description, it returns false for admin-only permission; otherwise it returns true.
-
-**Call relations**: The object framework consults this as part of applying updates through ScheduledTaskObjects. It supports the file’s core rule: cadence control can be administrative, but content stays with the creator.
+*Call graph*: calls 3 internal fn (_slug_miss, _reconnect_error, _stale_account); 1 external calls (composio_client).
 
 
-##### `ScheduledTaskObjects.member_page`  (lines 175–197)
+##### `ComposioBroker.file_outputs`  (lines 91–96)
 
 ```
-async def member_page(self, ext: ExtensionContext | None, *, member_id: UUID, admin: bool, query: ObjectListQuery) -> ObjectPage
+def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]
 ```
 
-**Purpose**: Builds a page of scheduled-task rows for a member, with special support for filtering by conversation. This lets a user see tasks tied to a particular conversation without exposing tasks they should not see.
+**Purpose**: Extracts files produced by a tool run from anywhere inside the response. This lets later parts of the system download or present generated files without knowing the exact nesting of Composio’s response.
 
-**Data flow**: It receives the extension context, member identity, admin flag, and list query. If the query does not contain a conversation filter, it falls back to the base object listing behavior. If it does, it parses the conversation id, gathers rows for that conversation, removes rows not visible to this viewer, and returns a paged result.
+**Data flow**: It receives the full tool response dictionary. It creates an empty list, asks _collect_files to walk through the nested response, and returns the found files as BrokerFile objects in a tuple. It does not modify the response.
 
-**Call relations**: This is called by the generic object-listing path when a member asks for scheduled_task objects. It relies on _rows to assemble the raw task rows, then packages the visible ones into the standard object page format.
+**Call relations**: This is called after tool execution when the connector layer wants to know whether the result contains downloadable files. The actual recursive search is delegated to _collect_files.
 
-*Call graph*: calls 1 internal fn (_rows); 3 external calls (__init__, object_page, UUID).
-
-
-##### `ScheduledTaskObjects.member_conversation_rows`  (lines 199–219)
-
-```
-async def member_conversation_rows(self, ext: ExtensionContext | None, conversation_id: UUID, *, member_id: UUID, admin: bool, limit: int) -> tuple[ConversationObjectGrant, ...]
-```
-
-**Purpose**: Returns the scheduled tasks that should appear inside a conversation’s object area. It shows that a task reports into that conversation and whether its content is visible to the current member.
-
-**Data flow**: It receives a conversation id, member identity, admin flag, and limit. It asks the schedule store for tasks reporting to that conversation, checks visibility, marks whether content can be shown, and returns compact conversation grants.
-
-**Call relations**: Conversation views call this when they need to populate the scheduled-task slot for a conversation. It uses _owner for ownership/visibility facts and task_content_visible to decide whether prompt-like content can be displayed.
-
-*Call graph*: calls 2 internal fn (_owner, _require_scheduler); 2 external calls (__init__, task_content_visible).
+*Call graph*: calls 1 internal fn (_collect_files).
 
 
-##### `ScheduledTaskObjects._member_rows`  (lines 221–224)
+##### `ComposioBroker.stage_upload`  (lines 98–114)
 
 ```
-async def _member_rows(self, ext: ExtensionContext | None, *, member_id: UUID | None) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
+async def stage_upload(self, workspace_id: UUID, provider: str, slug: str, filename: str, mimetype: str, md5: str) -> StagedUpload
 ```
 
-**Purpose**: Provides the full set of task rows used when listing scheduled tasks for a member-level object view. It delegates the actual row construction to the shared row builder.
+**Purpose**: Creates a temporary upload destination for a file that will be passed into a Composio tool. This lets the system upload bytes to Composio’s file store first, then give the tool a small reference to that file.
 
-**Data flow**: It receives the extension context and an optional member id. It asks _rows for all reported tasks, with no prompt truncation limit, and returns the resulting owned rows.
+**Data flow**: It receives the workspace id, provider, tool slug, filename, MIME type, and MD5 checksum. It asks Composio to create an upload slot and gets back a URL plus a storage key. It returns a StagedUpload containing the URL to upload to, the content type to use, and the argument object that should later be placed in the tool call.
 
-**Call relations**: The base MemberReadableObjects flow calls this when it needs the rows for a member-readable object kind. It keeps the public listing path small by reusing _rows.
+**Call relations**: This is used before executing a tool that needs a file input. It relies on the Composio client to mint the upload slot, then packages Composio’s upload details into the project’s StagedUpload shape.
 
-*Call graph*: calls 1 internal fn (_rows).
-
-
-##### `ScheduledTaskObjects._owned_rows`  (lines 226–233)
-
-```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
-```
-
-**Purpose**: Builds the rows that are placed into an agent turn’s context when the agent lists objects. It intentionally limits prompt text to an excerpt so a large task prompt cannot flood the model’s context.
-
-**Data flow**: It receives the current ToolContext, including the extension context and acting member id. It calls _rows with that member id and a prompt excerpt limit, then returns the owned rows.
-
-**Call relations**: The object-tool system calls this when an agent reads scheduled_task listings during a turn. It uses the shared row builder but chooses a safer prompt length for model context.
-
-*Call graph*: calls 1 internal fn (_rows).
+*Call graph*: 2 external calls (__init__, composio_client).
 
 
-##### `ScheduledTaskObjects._rows`  (lines 235–281)
+##### `ComposioBroker.search`  (lines 116–119)
 
 ```
-async def _rows(self, ext: ExtensionContext | None, *, member_id: UUID | None, prompt_max: int | None, conversation_id: UUID | None=None) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
+async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch
 ```
 
-**Purpose**: Creates the detailed list rows that represent scheduled tasks in object listings. This is the main formatting point where stored schedule records become readable fields such as next run time, owner email, paused state, and prompt visibility.
+**Purpose**: Searches for relevant connector tools using Composio’s tool router, which is a search service for matching a query to tools. It gives the system a richer search path than a simple catalog list.
 
-**Data flow**: It receives the extension context, the viewer’s member id if any, an optional prompt length limit, and optionally a conversation id. It reads listed tasks from the schedule store, looks up owner emails, inspects recent run status, checks whether each viewer may see content, and returns OwnedRow records with summaries and fields.
+**Data flow**: It receives a workspace id, provider name, and query text. It gets the current Composio client and passes everything to search_connector_tools. The returned BrokerSearch result is passed back unchanged.
 
-**Call relations**: Several listing paths call this: member_page, _member_rows, and _owned_rows. It gathers information from storage, owner lookup, run inspection, and visibility checks, then hands back rows that the generic object system can page and display.
+**Call relations**: The connector layer uses this when it wants search-style discovery rather than a plain provider listing. This method is mostly a clean adapter: it supplies the current client and workspace context to Composio’s search helper.
 
-*Call graph*: calls 3 internal fn (_owner, _require_scheduler, _summary); called by 3 (_member_rows, _owned_rows, member_page); 3 external calls (__init__, owner_emails, task_content_visible).
-
-
-##### `ScheduledTaskObjects._member_object`  (lines 283–312)
-
-```
-async def _member_object(self, ext: ExtensionContext | None, name: str, owner: GeneratedObjectOwner, *, member_id: UUID | None) -> ObjectDetail[ScheduledTaskSpec] | None
-```
-
-**Purpose**: Builds the detailed view of one scheduled task. It returns the saved task specification, timestamps, a link to the conversation it reports into, and whether the viewer may see the spec content.
-
-**Data flow**: It receives the extension context, task name, expected owner record, and viewer member id. It finds the named task, confirms it is the same generation the caller expected, copies stored fields into a ScheduledTaskSpec, adds a reports_to conversation link, checks content visibility, and returns an ObjectDetail. If the task is missing or changed, it returns nothing.
-
-**Call relations**: The object-get flow calls this when someone opens a specific scheduled_task object. It relies on _find to locate the task and uses task_content_visible so private prompts are not revealed to the wrong reader.
-
-*Call graph*: calls 1 internal fn (_find); 5 external calls (__init__, __init__, __init__, __init__, task_content_visible).
+*Call graph*: 2 external calls (composio_client, search_connector_tools).
 
 
-##### `ScheduledTaskObjects._status`  (lines 314–346)
+##### `ComposioBroker.credential`  (lines 121–137)
 
 ```
-async def _status(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> dict[str, JsonValue] | None
+async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
 ```
 
-**Purpose**: Returns live status information for a scheduled task, including whether it is paused, when it will run next, when it last ran, and a short excerpt of the last response when the viewer may see it.
+**Purpose**: Builds a safe credential object for making provider HTTP calls through Composio’s proxy. It first confirms that the connected account belongs to this workspace’s broker user, which prevents one workspace from accidentally using another workspace’s account.
 
-**Data flow**: It receives the current ToolContext, task name, and expected owner. It finds the task, asks the schedule store to inspect its run state, builds a status dictionary, and includes last-run response text only if the acting member is allowed to see task content.
+**Data flow**: It receives the workspace id, provider, and connected account id. It builds the expected broker-user id, asks Composio to confirm the account is connected for that user and provider, and then returns a Credential whose transport sends requests through ComposioProxyTransport. If the account is missing, it raises a reconnect-style error instead of returning a credential.
 
-**Call relations**: The object status path calls this after a task has been identified. It combines _find, scheduler inspection, and visibility rules to produce safe operational status for the caller.
+**Call relations**: This is used when a connector needs HTTP access to the provider but should not receive the provider’s secret token. It calls _reconnect_error for missing accounts, constructs ComposioProxyTransport for proxied HTTP, and wraps that transport in the project’s Credential object.
 
-*Call graph*: calls 2 internal fn (_find, _require_scheduler); 1 external calls (task_content_visible).
-
-
-##### `ScheduledTaskObjects._apply_owned`  (lines 348–400)
-
-```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: ScheduledTaskSpec, old: ScheduledTaskSpec | None, owner: GeneratedObjectOwner | None) -> None
-```
-
-**Purpose**: Creates a new scheduled task or updates an existing one after checking the schedule, identity, and permissions. This is where the user’s requested task definition becomes a durable recurring task in storage.
-
-**Data flow**: It receives the current ToolContext, object name, proposed spec, previous spec if any, and owner if this is an update. It validates the cron schedule, requires an acting member for creation, checks whether the named task already exists, enforces edit rules, computes the next fire time, and writes either a create or update through the schedule store.
-
-**Call relations**: The generic object-apply command calls this when a user applies a scheduled_task manifest. It uses _find to guard against stale edits, _require_scheduler to write storage, validate_cron and next_fire to prepare timing, and speaker_is_admin when permission depends on admin status.
-
-*Call graph*: calls 3 internal fn (speaker_is_admin, _find, _require_scheduler); 4 external calls (__init__, now, next_fire, validate_cron).
+*Call graph*: calls 1 internal fn (_reconnect_error); 4 external calls (__init__, __init__, AsyncHTTPTransport, composio_client).
 
 
-##### `ScheduledTaskObjects._delete_owned`  (lines 402–406)
+##### `ComposioBroker._slug_miss`  (lines 139–160)
 
 ```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None
+async def _slug_miss(self, client: composio.ComposioClient, provider: str, slug: str, error: composio.ComposioError) -> composio.ComposioError
 ```
 
-**Purpose**: Cancels a scheduled task that the object system has authorized for deletion. It also protects against deleting the wrong version if the task changed while the caller was editing.
+**Purpose**: Improves a “tool not found” error by trying to include real tool slugs for the provider. This helps an agent recover from a bad tool name instead of blindly repeating the same mistake.
 
-**Data flow**: It receives the current ToolContext, task name, and expected owner. It finds the task, verifies that the stored task id matches the expected generation, and then tells the schedule store to cancel it. If the task is missing or changed, it raises an error.
+**Data flow**: It receives the Composio client, provider, missing slug, and original error. It turns the bad slug into search words, asks Composio for nearby tools, and if needed falls back to listing broader provider tools. If useful tools are found, it returns a new ComposioError whose message includes their slugs; otherwise it returns the original error.
 
-**Call relations**: The generic object-delete path calls this for scheduled_task objects. It uses _find for the safety check and _require_scheduler for the actual cancellation.
+**Call relations**: ComposioBroker.execute calls this only after Composio reports a missing tool slug. It uses _discovered_tools to normalize candidate tools before adding their names to the error message.
 
-*Call graph*: calls 2 internal fn (_find, _require_scheduler).
-
-
-##### `ScheduledTaskObjects._find`  (lines 408–416)
-
-```
-async def _find(self, ext: ExtensionContext | None, name: str) -> ListedTask | None
-```
-
-**Purpose**: Looks up a scheduled task by its object name. It is a simple helper used whenever code needs to turn a name from the object system into the stored task record.
-
-**Data flow**: It receives the extension context and the task name. It asks the schedule store for reported tasks, scans them for a matching name, and returns the first matching ListedTask or nothing if no match exists.
-
-**Call relations**: Apply, delete, detail, and status operations all call this before acting on a named task. It centralizes the name lookup so those flows can focus on permissions and output.
-
-*Call graph*: calls 1 internal fn (_require_scheduler); called by 4 (_apply_owned, _delete_owned, _member_object, _status).
+*Call graph*: calls 2 internal fn (_discovered_tools, list_tools); called by 1 (execute); 2 external calls (sub, ComposioError).
 
 
-##### `pause_and_wait`  (lines 479–517)
+##### `_collect_files`  (lines 163–172)
 
 ```
-async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResult
+def _collect_files(value: object, found: list[BrokerFile]) -> None
 ```
 
-**Purpose**: Pauses the current workflow until either a member sends a new message or a timer expires. It is useful when the agent must wait for something outside the system, such as an approval, verification email, or cooldown period.
+**Purpose**: Walks through a nested response and collects objects that look like Composio file outputs. A file output is recognized by the presence of a non-empty presigned URL plus a name and MIME type.
 
-**Data flow**: It receives the current ToolContext and pause arguments: the message to show now, how long to wait, resumed-turn instructions, reason, metadata, and user-facing description. It calculates the resume time, records a pause row with the conversation, agent, current turn position, arrival watermark, and resume prompt, then returns a ToolResult telling the agent what to say and that it must end its turn.
+**Data flow**: It receives any value and a list being used as the collection basket. If the value is a matching file-shaped dictionary, it appends a BrokerFile with the file name and URL. If the value is a dictionary or list, it searches each child value; other values are ignored.
 
-**Call relations**: The tool framework calls this when the PAUSE_AND_WAIT_TOOL handler is invoked. It requires the extension context, writes the durable pause through PauseStore, formats the resume payload as JSON, and wraps it in TextContent for the tool result.
+**Call relations**: ComposioBroker.file_outputs starts this search after a tool run. _collect_files does the detailed walking so file_outputs can offer a simple public method.
 
-*Call graph*: calls 1 internal fn (_require_ext); 6 external calls (__init__, __init__, __init__, now, timedelta, dumps).
+*Call graph*: called by 1 (file_outputs); 1 external calls (__init__).
 
 
-### `core/src/ufo/ext/scheduled_fire.py`
+##### `_stale_account`  (lines 175–186)
 
-`domain_logic` · `scheduled task admission and run lookup`
+```
+def _stale_account(error: composio.ComposioError, account_id: str) -> bool
+```
 
-A scheduled task can fire many times, so the system needs a durable name for each specific firing. This file creates that name from two pieces: the task's unique ID and the exact time that occurrence was meant to run. Think of it like writing both a train number and departure time on a ticket; either one alone is not enough to identify the trip.
+**Purpose**: Decides whether a Composio execution error likely means the connected account is no longer valid for this broker. This distinction matters because a stale account should lead to reconnect instructions, not a misleading list of tool names.
 
-The key is used as an idempotency key, meaning it helps the system avoid admitting the same scheduled occurrence twice. Because these keys may be stored and compared across deploys, the exact spelling matters. The timestamp is kept in Python's normal ISO text form, including timezone text like `+00:00`, so old and new code continue to recognize the same occurrence.
+**Data flow**: It receives a Composio error and the account id that was used. It lowercases the error body and looks for narrow signs of a missing connected account: Composio’s own “connected account not found” wording or the specific account id plus “not found.” It returns true if those signs are present, otherwise false.
 
-The file also provides the reverse operation: given a key, try to recover the task ID at the front. If the key does not begin with a valid UUID (a standard unique identifier), it returns `None`. That matters because not every turn in the system comes from a scheduled task; for example, a resumed timer may use a different kind of key.
+**Call relations**: ComposioBroker.execute uses this before treating a 404 as a missing tool slug. That ordering keeps old account grants from being mistaken for bad tool names.
+
+*Call graph*: called by 1 (execute).
+
+
+##### `_reconnect_error`  (lines 189–190)
+
+```
+def _reconnect_error(error: composio.ComposioError, provider: str) -> composio.ComposioError
+```
+
+**Purpose**: Adds plain reconnect guidance to a Composio error. It keeps the original status and body, but appends advice telling the user to reconnect the provider account.
+
+**Data flow**: It receives the original Composio error and provider name. It asks stale_grant_guidance for provider-specific reconnect wording, combines that with the original error body, and returns a new ComposioError with the same status.
+
+**Call relations**: ComposioBroker.execute calls this when a run appears to use a stale account. ComposioBroker.credential calls it when the requested connected account cannot be confirmed for this workspace.
+
+*Call graph*: called by 2 (credential, execute); 2 external calls (stale_grant_guidance, ComposioError).
+
+
+##### `_discovered_tools`  (lines 193–213)
+
+```
+def _discovered_tools(rows: tuple[dict[str, object], ...]) -> tuple[BrokerTool, ...]
+```
+
+**Purpose**: Converts Composio’s raw tool-list rows into the project’s BrokerTool objects. It filters out rows without a usable slug and trims long descriptions so discovery results stay compact.
+
+**Data flow**: It receives a tuple of dictionaries from Composio. For each row, it chooses the slug from the slug field or name field, skips invalid rows, shortens the description if needed, converts the input parameters into workspace-file-aware schema form, and returns all valid tools as a tuple.
+
+**Call relations**: ComposioBroker.tools uses this for normal catalog discovery. ComposioBroker._slug_miss also uses it when building a helpful error message after a bad tool slug.
+
+*Call graph*: called by 2 (_slug_miss, tools); 2 external calls (__init__, workspace_file_schema).
+
+
+### `extensions/composio/ufo_ext_composio/client.py`
+
+`io_transport` · `request handling and connector discovery/execution`
+
+Composio acts like a switchboard for external services such as GitHub and many others. Instead of this project hard-coding every provider’s tools and holding every user’s access token, it asks Composio what tools exist and tells Composio to run the chosen tool on the user’s connected account. This file is the bridge to that switchboard.
+
+The main class, ComposioClient, wraps Composio’s web API. It can create an OAuth connection link, check that a returned account really belongs to the expected workspace user, list available tools, fetch a tool’s input shape, run a tool, and create temporary upload slots when a tool needs a file. It also opens Tool Router sessions, which are Composio-hosted search sessions used to find the right tool for a plain-language task.
+
+The file also decides which Composio toolkits are safe and useful to offer. A toolkit must have Composio-managed authentication, must actually contain tools, and must not be on the project’s manually banned list. This prevents users from connecting services that would appear available but cannot complete meaningful work.
+
+A few helper functions keep the rest of the project insulated from Composio’s raw response shapes. They turn API replies into simple project objects, rewrite file-upload fields into workspace-file paths the agent understands, and raise clear errors when Composio answers with a failure or an unexpected shape.
 
 #### Function details
 
-##### `scheduled_fire_key`  (lines 14–16)
+##### `connectable`  (lines 122–146)
 
 ```
-def scheduled_fire_key(task_id: UUID, fire_at: datetime) -> str
+def connectable(slug: str, toolkit: Mapping[str, object]) -> bool
 ```
 
-**Purpose**: Builds the durable key for one scheduled occurrence of one task. Code uses this when it needs a stable label that says, in one string, which task fired and at what scheduled time.
+**Purpose**: Decides whether a Composio toolkit should be offered to users through this project. It filters out banned toolkits, toolkits that cannot use Composio-managed login, and toolkits that have no tools to run.
 
-**Data flow**: It receives a task ID and a scheduled datetime. It turns the datetime into ISO text, joins it to the task ID with a colon, and returns the finished key string. It does not change anything outside itself.
+**Data flow**: It receives a toolkit slug and a catalog record from Composio. It checks the slug against the local banned list, then reads the record to see whether managed authentication schemes exist and whether the tool count is greater than zero. It returns true only when all checks pass.
 
-**Call relations**: This is the builder side of the shared contract. When the scheduled-task runner admits a fire, it should call this function so every scheduled occurrence is named in the same way. Inside, it relies on the datetime object's `isoformat` method to produce the timestamp text.
+**Call relations**: ComposioClient.connectable_toolkit uses this when checking one specific toolkit slug, and ComposioClient.list_toolkits uses it while searching the catalog. In both paths, it is the local gatekeeper before a connector is shown or claimed.
 
-*Call graph*: 1 external calls (isoformat).
+*Call graph*: called by 2 (connectable_toolkit, list_toolkits).
 
 
-##### `scheduled_fire_task_id`  (lines 19–25)
+##### `ComposioError.__init__`  (lines 153–156)
 
 ```
-def scheduled_fire_task_id(key: str) -> UUID | None
+def __init__(self, status: int, body: str) -> None
 ```
 
-**Purpose**: Tries to read the task ID back out of a scheduled fire key. It returns the task ID when the key looks like a scheduled fire key, and `None` when the key belongs to some other kind of turn.
+**Purpose**: Creates a clear exception when Composio fails or sends data this project cannot safely use. It preserves both the HTTP status code and the response body so callers can tell what went wrong.
 
-**Data flow**: It receives a key string. It takes the text before the first colon, tries to interpret that text as a UUID, and returns the UUID if that works. If the first part is not a valid UUID, it returns `None` instead of raising an error.
+**Data flow**: It receives a numeric status and a text body. It builds a readable error message, stores the status on the error object, and stores the original body for later inspection.
 
-**Call relations**: This is the parser side of the shared contract. When another part of the system, such as a runs feed, needs to connect a run back to its scheduled task, it can call this function. It hands the extracted text to the UUID parser, which decides whether that text is a valid unique task ID.
+**Call relations**: Many client methods raise this when a required field is missing, an account is not valid, or an API response is an error. The shared _body helper also raises it for failed or malformed HTTP responses.
 
-*Call graph*: 1 external calls (UUID).
+*Call graph*: called by 6 (_auth_config, connect_link, connected_account, create_upload, tool_router_session, _body).
 
 
-### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/cron.py`
+##### `ComposioClient.connect_link`  (lines 173–182)
 
-`domain_logic` · `scheduled task creation, update, and runner scheduling`
-
-Scheduled tasks need a way to say “run every day at 9” or “run every five minutes.” This file provides that timing language using cron, a common five-part text format for repeated times. For example, a cron expression can describe minutes, hours, days of the month, months, and days of the week.
-
-The rest of the scheduled-task system stores only the next concrete run time, such as “2026-08-17 09:00.” It does not need to understand cron itself. This file keeps that cron-specific knowledge in one place, like a translator between a repeating calendar rule and the next exact appointment time.
-
-There are two main jobs here. First, `validate_cron` rejects schedules that are not exactly five fields or that the cron library cannot understand. This prevents bad schedules from entering the system. Second, `next_fire` asks the cron library for the next run time strictly after a given datetime. That detail matters: if the scheduler was late or offline, it does not create a separate run for every missed time slot. Instead, it moves forward to the next single catch-up point.
-
-#### Function details
-
-##### `validate_cron`  (lines 14–19)
-
-```
-def validate_cron(schedule: str) -> str
-```
-
-**Purpose**: Checks whether a schedule string is a valid five-field cron expression. It is used to stop malformed timing rules before they are saved or used to schedule work.
-
-**Data flow**: It receives a text schedule. First it splits the text into fields and confirms there are exactly five parts. Then it asks the cron library whether the expression is valid. If either check fails, it raises an error explaining the problem. If everything is valid, it returns the original schedule unchanged.
-
-**Call relations**: This function is the gatekeeper for cron input. When other scheduled-task code needs to accept or store a repeating schedule, it can call `validate_cron` first. Inside, it hands the detailed syntax check to `croniter.croniter.is_valid`, which is the external library’s validator.
-
-*Call graph*: 1 external calls (is_valid).
-
-
-##### `next_fire`  (lines 22–23)
-
-```
-def next_fire(schedule: str, after: datetime) -> datetime
-```
-
-**Purpose**: Calculates the next datetime when a cron schedule should run after a given moment. It turns a repeating rule into one concrete future run time.
-
-**Data flow**: It receives a cron schedule and a datetime called `after`. It gives both to the cron library, then asks for the next datetime occurrence. The result is returned as the next fire time, without changing any stored data itself.
-
-**Call relations**: This function is used when the scheduler needs to advance a task from its current or last-known time to its next planned run. It delegates the calendar math to `croniter.croniter`, which understands cron expressions and can compute the next matching datetime.
-
-*Call graph*: 1 external calls (croniter).
-
-
-### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/pauses.py`
-
-`domain_logic` · `workflow arming and scheduled pause runner ticks`
-
-A scheduled task often needs to say, “wait until this time, then continue this conversation.” This file is the storage and safety layer for that wait. It defines a database table called `pause`, where each conversation can have at most one active pause. If the same conversation is armed again, the old wait is replaced, because the workflow is only waiting for one next thing.
-
-The file also protects against two common timing problems. First, several worker processes may look for due pauses at the same time. To stop them from waking the same conversation twice, a worker must “claim” a pause for a short lease, like putting a temporary reserved sign on a library book. Second, a conversation can be re-armed while an older pause is being processed. The code checks that the worker still owns the same pause before firing it, and deletes only the exact claimed row afterward.
-
-The `Pause` dataclass is the in-memory shape of one database row. `PauseStore` is the main tool used by the rest of the extension: it arms pauses, lists them, claims due ones, verifies claims, and retires completed waits. The file is careful to filter every database operation by workspace, because the database connection itself is not automatically limited to one workspace.
-
-#### Function details
-
-##### `_aware`  (lines 77–78)
-
-```
-def _aware(when: datetime) -> datetime
-```
-
-**Purpose**: This helper makes sure a time value has a time zone. If the database gives back a time without one, it treats it as UTC, the shared standard time used by the system.
-
-**Data flow**: It receives a `datetime`. If that value already says what time zone it belongs to, it returns it unchanged. If it has no time zone, it adds UTC and returns the adjusted value.
-
-**Call relations**: When `_row` builds a `Pause` object from database data, it calls `_aware` for every stored time. This keeps the rest of the pause code from having to guess whether a time is safe to compare.
-
-*Call graph*: called by 1 (_row); 1 external calls (replace).
-
-
-##### `_row`  (lines 81–97)
-
-```
-def _row(row: sa.RowMapping) -> Pause
-```
-
-**Purpose**: This function turns a raw database row into a `Pause` object that the Python code can use comfortably. It is the single doorway from database results into the in-memory pause shape.
-
-**Data flow**: It receives a row mapping from SQLAlchemy, reads fields such as pause id, conversation id, due time, prompt, claim id, and timestamps, normalizes the time fields through `_aware`, and returns a new `Pause` value.
-
-**Call relations**: After `PauseStore.arm`, `PauseStore.armed`, and `PauseStore.claim_due` read rows from the database, they hand each row to `_row`. That means all reads produce the same clean, predictable `Pause` objects.
-
-*Call graph*: calls 1 internal fn (_aware); called by 3 (arm, armed, claim_due); 1 external calls (__init__).
-
-
-##### `_claim_available`  (lines 100–101)
-
-```
-def _claim_available(now: datetime) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: This helper expresses the rule for whether a pause can be claimed by a worker. A pause is available if nobody has claimed it, or if its previous claim has expired.
-
-**Data flow**: It receives the current time. It builds a database condition that says: `claimed_by` is empty, or `claim_expires_at` is earlier than now. The result is not a true-or-false Python value yet; it is a SQL condition used in database queries.
-
-**Call relations**: The workspace finder and the claim operation both use this same helper, so they agree on what “available to claim” means. `due_pause_workspaces.due` uses it to find workspaces with runnable pauses, and `PauseStore.claim_due` uses it to lease the actual rows.
-
-*Call graph*: called by 2 (claim_due, due); 1 external calls (or_).
-
-
-##### `due_pause_workspaces`  (lines 104–117)
-
-```
-def due_pause_workspaces() -> WorkspaceCandidates
-```
-
-**Purpose**: This function tells the job system how to find workspaces that have pause work ready to run. It is a bridge between the pause table and the broader background job scheduler.
-
-**Data flow**: It defines an inner query-building function, `due`, that finds workspace ids with at least one due and claimable pause. It then passes that query builder to `owner_candidates`, which packages it in the format expected by the job ownership system.
-
-**Call relations**: The pause runner uses this candidate source when deciding which workspaces may need attention. Inside it, `due_pause_workspaces.due` does the actual database query construction, and `owner_candidates` connects that query to the shared job framework.
-
-*Call graph*: 1 external calls (owner_candidates).
-
-
-##### `due_pause_workspaces.due`  (lines 109–115)
-
-```
-def due() -> sa.Select[tuple[UUID]]
-```
-
-**Purpose**: This nested function builds the database query for finding workspaces with pauses that should wake up now. It only includes pauses whose timer has arrived and whose claim is free or expired.
-
-**Data flow**: It reads the current UTC time, builds a SQL query over the pause table, filters for `resume_at` at or before now, filters again using `_claim_available`, and asks for distinct workspace ids.
-
-**Call relations**: It lives inside `due_pause_workspaces` because it is the query recipe handed to `owner_candidates`. `_claim_available` supplies the shared lease-availability rule, so this query matches the later claiming step.
-
-*Call graph*: calls 1 internal fn (_claim_available); 2 external calls (now, select).
-
-
-##### `PauseStore.arm`  (lines 126–183)
-
-```
-async def arm(self, *, conversation_id: UUID, agent_id: UUID, resume_at: datetime, origin_seq: int, origin_arrival_seq: int, prompt: str, user_description: str, created_by_member_id: UUID | None) -> P
-```
-
-**Purpose**: This method creates or replaces the active pause for one conversation. It is used when a workflow says, “wake me up at this time with this prompt.”
-
-**Data flow**: It receives the conversation, agent, due time, sequence markers, prompt text, user-facing description, and optional member id. It creates a fresh pause id, clears any old claim, and writes the row into the database. If that conversation already had a pause in this workspace, it overwrites it. It returns the newly stored pause as a `Pause` object.
-
-**Call relations**: This is the entry point for arming a wait. It calls `uuid4` so every new wait has its own identity, even when it replaces an old row, and then sends the returned database row through `_row` before giving it back to the caller.
-
-*Call graph*: calls 1 internal fn (_row); 1 external calls (uuid4).
-
-
-##### `PauseStore.armed`  (lines 185–191)
-
-```
-async def armed(self, conversation_id: UUID | None=None) -> tuple[Pause, ...]
-```
-
-**Purpose**: This method lists currently armed pauses in the workspace. It can show all pauses, or only the pause for one conversation.
-
-**Data flow**: It receives an optional conversation id. It builds a database query for this workspace, adds a conversation filter if one was provided, orders the results by resume time, converts each row with `_row`, and returns them as a tuple.
-
-**Call relations**: Other code can use this as a read-only view of the pause table. It relies on SQLAlchemy to fetch rows and `_row` to turn those rows into the same `Pause` objects used everywhere else.
-
-*Call graph*: calls 1 internal fn (_row); 1 external calls (select).
-
-
-##### `PauseStore.claim_due`  (lines 193–234)
-
-```
-async def claim_due(self, now: datetime, lease_seconds: int, limit: int=CLAIM_BATCH_MAX_PAUSES) -> tuple[Pause, ...]
-```
-
-**Purpose**: This method leases a batch of pauses whose timers have arrived, so one worker can process them without another worker taking the same ones. The lease is temporary, which lets work be retried if a worker crashes.
-
-**Data flow**: It receives the current time, a lease length in seconds, and a maximum number of pauses to take. It creates a unique claim id, selects the oldest due and available pauses in this workspace, updates those rows with the claim id and expiry time, then returns the claimed rows as `Pause` objects.
-
-**Call relations**: The pause runner calls this during a tick to get work. It uses `_claim_available` so it only takes unclaimed or expired rows, uses a database update so selecting and claiming happen together, and passes the returned rows through `_row` for processing.
-
-*Call graph*: calls 2 internal fn (_claim_available, _row); 4 external calls (timedelta, select, update, uuid4).
-
-
-##### `PauseStore.claim_holds`  (lines 236–261)
-
-```
-async def claim_holds(self, row: Pause) -> bool
-```
-
-**Purpose**: This method checks whether a worker still owns the pause it is about to fire. It prevents an old claimed pause from waking a workflow after that pause has already been replaced.
-
-**Data flow**: It receives a `Pause` that should already have a claim id. If there is no claim id, it raises an error because an unclaimed pause must not be fired. Otherwise it looks for the same row id, in the same workspace, with the same claim id. It returns `true` if that exact claim is still present, or `false` if the row was replaced, cleared, or claimed by someone else.
-
-**Call relations**: The pause runner’s `_fire` step calls this immediately before invoking the resume. This gives the runner one last safety check before doing something that cannot easily be undone.
-
-*Call graph*: called by 1 (_fire); 1 external calls (select).
-
-
-##### `PauseStore.retire`  (lines 263–276)
-
-```
-async def retire(self, row: Pause) -> None
-```
-
-**Purpose**: This method removes a claimed pause after the runner has finished with it. It deletes only the exact pause still owned by the same claim, so it does not accidentally remove a newer replacement.
-
-**Data flow**: It receives a claimed `Pause`. If the pause has no claim id, it raises an error because only claimed pauses can be retired. Otherwise it issues a database delete for the matching pause id, workspace id, and claim id. It returns nothing and changes the database by removing the row if the claim still matches.
-
-**Call relations**: The pause runner’s `_fire` step calls this after a pause has fired or been considered finished. The claim check in the delete is the final guard: if the lease expired or the row was re-armed, this method leaves the newer or no-longer-owned row alone.
-
-*Call graph*: called by 1 (_fire); 1 external calls (delete).
-
-
-### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py`
-
-`domain_logic` · `cross-cutting: task creation/editing, background polling, firing, and status reads`
-
-Scheduled tasks are recurring reminders for an agent: at a planned time, the system re-enters a conversation and sends a saved prompt. This file defines the database table for those tasks and a ScheduleStore class that reads and changes the rows in a careful way.
-
-The main problem it solves is coordination. A task may be edited, cancelled, expire, or become due while background workers are polling for work. To avoid double-firing, the runner first claims a due task with a short lease, like putting a temporary “I am working on this” sticky note on it. Before firing, it checks that the sticky note still belongs to it and that the task has not changed. After a successful fire, it records when the task ran and schedules the next run.
-
-Member-facing operations are narrower. They only touch tasks in the current workspace and current object-agent namespace, so one agent cannot accidentally edit another agent’s schedule. The file also normalizes timestamps to UTC, because different databases may return time values differently. Without this file, scheduled tasks would either not persist reliably, or worse, could fire twice, fire after cancellation, or leak across workspace and agent boundaries.
-
-#### Function details
-
-##### `_utc`  (lines 124–125)
-
-```
-def _utc(value: datetime) -> datetime
-```
-
-**Purpose**: This helper makes sure a datetime has UTC timezone information. It is used so the rest of the code can compare times without guessing what timezone they mean.
-
-**Data flow**: It receives one datetime. If the datetime already has timezone information, it returns it unchanged; if it is missing timezone information, it marks it as UTC. The output is always a datetime the code can treat as UTC-aware.
-
-**Call relations**: Rows coming back from the database are passed through this helper by _task and ScheduleStore.inspect_many. _utc_opt also relies on it when the timestamp might be missing.
-
-*Call graph*: called by 3 (inspect_many, _task, _utc_opt); 1 external calls (replace).
-
-
-##### `_utc_opt`  (lines 128–129)
-
-```
-def _utc_opt(value: datetime | None) -> datetime | None
-```
-
-**Purpose**: This is the nullable version of _utc. It exists for timestamp fields that may be empty, such as a task that has never run before.
-
-**Data flow**: It receives either a datetime or None. None stays None; a real datetime is passed to _utc and comes back as UTC-aware. The result is safe for optional time fields.
-
-**Call relations**: The row builder _task uses it for optional task timestamps. ScheduleStore.inspect_many uses it when preparing inspection results for fields that may not exist yet.
-
-*Call graph*: calls 1 internal fn (_utc); called by 2 (inspect_many, _task).
-
-
-##### `_claim_available`  (lines 132–136)
-
-```
-def _claim_available(now: datetime) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: This builds the database condition for deciding whether a scheduled task can be claimed by a worker. A task is available if nobody has claimed it, or if its previous claim has expired.
-
-**Data flow**: It receives the current time. It turns that time into a SQL condition that checks the task row’s claim fields. The output is not a true-or-false Python value, but a database filter used in later queries.
-
-**Call relations**: The workspace candidate search uses this condition so it does not wake a worker for tasks already leased by someone else. ScheduleStore.claim_due uses the same rule when actually leasing due tasks.
-
-*Call graph*: called by 2 (claim_due, due); 1 external calls (or_).
-
-
-##### `_expired`  (lines 139–143)
-
-```
-def _expired(now: datetime) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: This builds the database condition for deciding whether a task has passed its expiry time. Expired tasks should be removed instead of fired.
-
-**Data flow**: It receives the current time. It creates a SQL condition that matches rows with an expires_at value that is not empty and is at or before that time. The output is used inside database queries.
-
-**Call relations**: The candidate search uses it to find workspaces with expired tasks to clean up. ScheduleStore.claim_due uses it to delete expired tasks before claiming due ones.
-
-*Call graph*: called by 2 (claim_due, due); 1 external calls (and_).
-
-
-##### `_task`  (lines 146–165)
-
 ```
-def _task(row: sa.RowMapping) -> ScheduledTask
+async def connect_link(self, toolkit: str, user_id: str, callback_url: str) -> str
 ```
 
-**Purpose**: This turns a raw database row into a ScheduledTask object that the rest of the extension can use. It is the single place that translates stored task data into the in-memory shape.
+**Purpose**: Creates the web link a user opens to connect an outside service through Composio. This is the start of the consent flow, similar to clicking “Connect Google” or “Connect GitHub.”
 
-**Data flow**: It receives a row mapping from the database. It copies out identifiers, schedule text, prompt text, claim information, pause state, and timestamps, normalizing all timestamp fields to UTC as needed. It returns a ScheduledTask value object.
+**Data flow**: It takes a toolkit name, a broker user id, and a callback URL. It first gets or creates an auth configuration for that toolkit, then posts those details to Composio’s connected-account link endpoint. It returns the redirect URL Composio provides, or raises an error if no usable URL comes back.
 
-**Call relations**: ScheduleStore.create, ScheduleStore.update, ScheduleStore.list, and ScheduleStore.claim_due all use this after reading rows. That keeps every task object consistent no matter which database operation produced it.
+**Call relations**: It calls _auth_config to find the login setup, then _post to ask Composio for the hosted connection link. If Composio’s reply is missing the link, it raises ComposioError so the connection process fails loudly instead of giving the user a broken flow.
 
-*Call graph*: calls 2 internal fn (_utc, _utc_opt); called by 4 (claim_due, create, list, update); 1 external calls (__init__).
+*Call graph*: calls 3 internal fn (_auth_config, _post, __init__).
 
 
-##### `due_task_workspaces`  (lines 168–191)
+##### `ComposioClient.connected_account`  (lines 184–208)
 
 ```
-def due_task_workspaces() -> WorkspaceCandidates
+async def connected_account(self, account_id: str, expected_user_id: str, expected_toolkit: str) -> OAuthAccount
 ```
 
-**Purpose**: This tells the job system which workspaces might have scheduled-task work waiting. It is a lightweight way to avoid scanning every workspace when only some have due or expired tasks.
+**Purpose**: Verifies that a completed Composio connection is the right account for the right workspace and toolkit. This stops one user’s or one service’s connected account from being accepted in the wrong place.
 
-**Data flow**: It defines a small database query factory for finding workspace IDs with claimable due or expired tasks. It gives that factory to the job ownership system, which turns it into workspace candidates for background workers.
+**Data flow**: It receives a connected account id, the expected user id, and the expected toolkit slug. It fetches the account from Composio, checks its owner, checks that its status is active, checks that it belongs to the expected toolkit, and then returns a small OAuthAccount object containing the account id.
 
-**Call relations**: It hands its nested due query to owner_candidates. The scheduled-task runner can use the returned candidate source to decide where to poll for work.
+**Call relations**: It relies on _get to read account metadata and raises ComposioError for ownership, status, or toolkit mismatches. It hands back an OAuthAccount to the rest of the connector system only after those safety checks pass.
 
-*Call graph*: 1 external calls (owner_candidates).
+*Call graph*: calls 2 internal fn (_get, __init__); 1 external calls (__init__).
 
 
-##### `due_task_workspaces.due`  (lines 174–189)
+##### `ComposioClient.account_label`  (lines 210–213)
 
 ```
-def due() -> sa.Select[tuple[UUID]]
+async def account_label(self, account_id: str) -> str | None
 ```
 
-**Purpose**: This inner query finds workspaces that currently contain work for the scheduled-task runner. Work means either a due, unpaused task or an expired task that should be removed.
+**Purpose**: Fetches a human-friendly label for a connected account, if Composio has one. This can be used to show users which account they connected.
 
-**Data flow**: It reads the current UTC time, builds database filters for available claims and expired rows, and selects distinct workspace IDs that match. The result is a SQL query, not the final rows themselves.
+**Data flow**: It receives an account id, fetches that account from Composio, and reads the alias field. It returns the alias when it is a non-empty string, otherwise it returns nothing.
 
-**Call relations**: due_task_workspaces gives this query builder to owner_candidates. It uses the same availability and expiry helpers as ScheduleStore.claim_due, so discovery and claiming agree about what counts as runnable work.
+**Call relations**: It uses _get for the actual API call. Unlike the stricter account verification path, this is a small convenience lookup for display text.
 
-*Call graph*: calls 2 internal fn (_claim_available, _expired); 5 external calls (now, and_, not_, or_, select).
+*Call graph*: calls 1 internal fn (_get).
 
 
-##### `ScheduleStore.workspace_id`  (lines 205–206)
+##### `ComposioClient.list_tools`  (lines 215–245)
 
 ```
-def workspace_id(self) -> UUID
+async def list_tools(self, toolkit: str, query: str='') -> tuple[dict[str, object], ...]
 ```
 
-**Purpose**: This property provides the workspace ID attached to the current extension context. It keeps every database operation tied to the right workspace.
+**Purpose**: Lists tools available in a Composio toolkit, optionally filtered by a search query. It follows Composio’s paged results so tools beyond the first page are not missed.
 
-**Data flow**: It reads ctx.workspace_id from the ScheduleStore’s context and returns that UUID. It does not change anything.
+**Data flow**: It receives a toolkit slug and an optional query. It repeatedly asks Composio for pages of tools, keeps only dictionary-like tool rows, appends them to a growing list, and stops at the last page or at the project’s maximum listing size. It returns the collected rows as an immutable tuple.
 
-**Call relations**: The store’s methods use this workspace boundary whenever they read, insert, update, delete, claim, or inspect scheduled-task rows.
+**Call relations**: It calls _get for each page of /tools results. ComposioBroker._slug_miss uses it when a requested tool slug is not already known and the broker needs to look through the toolkit catalog.
 
+*Call graph*: calls 1 internal fn (_get); called by 1 (_slug_miss).
 
-##### `ScheduleStore.create`  (lines 208–267)
 
-```
-async def create(self, conversation_id: UUID, name: str, schedule: str, prompt: str, description: str, next_run_at: datetime, created_by_member_id: UUID | None=None, expires_at: datetime | None=None,
-```
-
-**Purpose**: This creates a new scheduled task for the current agent and conversation. It also prevents duplicate task names for the same workspace and agent.
-
-**Data flow**: It receives the conversation, task name, schedule, prompt, description, first run time, optional creator, optional expiry, and paused flag. It checks that the conversation belongs to the same agent that will run the task, inserts a new row with a fresh ID, and returns the new ScheduledTask. If the name already exists, it raises an error instead of silently overwriting.
-
-**Call relations**: This is used when member-facing code wants to save a new recurring task. It calls object_agent_id to bind the task to the current agent and _task to turn the inserted row into the standard task object.
-
-*Call graph*: calls 1 internal fn (_task); 2 external calls (object_agent_id, uuid4).
-
-
-##### `ScheduleStore.update`  (lines 269–323)
-
-```
-async def update(self, expected: ScheduledTask, schedule: str, prompt: str, description: str, next_run_at: datetime, expires_at: datetime | None=None, *, paused: bool) -> ScheduledTask
-```
-
-**Purpose**: This edits an existing scheduled task’s schedule, prompt, description, expiry, next run time, and paused state without changing its identity. It protects against editing the wrong row if the task changed meanwhile.
-
-**Data flow**: It receives the task version the caller believes is current, plus the new task settings. It checks that the task still belongs to the current agent, then updates only the row that matches the expected ID, agent, conversation, name, and creator. It clears any active claim because the old leased version is no longer valid, and returns the updated ScheduledTask.
-
-**Call relations**: Member-facing edit flows call this after loading a task. It uses _creator_matches to avoid mixing creator-owned and creatorless tasks, and _task to return the refreshed row.
-
-*Call graph*: calls 2 internal fn (_creator_matches, _task); 2 external calls (update, object_agent_id).
-
-
-##### `ScheduleStore.cancel`  (lines 325–341)
-
-```
-async def cancel(self, expected: ScheduledTask) -> None
-```
-
-**Purpose**: This deletes a scheduled task, but only if it still matches the exact task the caller meant to cancel. That prevents a stale screen or stale request from cancelling a different version.
-
-**Data flow**: It receives the expected ScheduledTask. It checks the current agent, then deletes a row matching the workspace, task ID, agent, conversation, name, and creator. If no row was deleted, it raises an error telling the caller the task changed while cancelling.
-
-**Call relations**: Cancellation flows use this to remove tasks. It shares the same creator-matching safeguard as update and uses the current object agent as a boundary.
-
-*Call graph*: calls 1 internal fn (_creator_matches); 2 external calls (delete, object_agent_id).
-
-
-##### `ScheduleStore._creator_matches`  (lines 343–348)
-
-```
-def _creator_matches(self, expected: ScheduledTask) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: This creates the database condition for matching the task creator correctly. It matters because a task with no creator is different from a task created by a particular member.
-
-**Data flow**: It receives the expected task. If the task has no creator, it produces an IS NULL database condition; otherwise, it produces an equality check against that member ID. The output is used as part of safer update and delete filters.
-
-**Call relations**: ScheduleStore.update and ScheduleStore.cancel call this when they need to prove they are touching the same task version the caller saw.
-
-*Call graph*: called by 2 (cancel, update).
-
-
-##### `ScheduleStore._listing`  (lines 350–371)
-
-```
-def _listing(self, selected: tuple[sa.ColumnElement[Any], ...], *, conversation_id: UUID | None, names: tuple[str, ...] | None, visible_to_member_id: UUID | None, include_all_owners: bool, limit: int
-```
-
-**Purpose**: This builds the shared database query used for listing scheduled tasks. It applies workspace, agent, conversation, name, owner, sorting, and limit rules in one place.
-
-**Data flow**: It receives the columns to select and optional filters such as conversation ID, task names, visible member, ownership mode, and limit. It starts with only tasks from the current workspace and current agent, then adds any requested filters and returns the finished SQL query.
-
-**Call relations**: ScheduleStore.list calls this before executing the query. Keeping the filter construction here makes list and list_reported follow the same visibility and ordering rules.
+##### `ComposioClient.tool_schema`  (lines 247–248)
 
-*Call graph*: called by 1 (list); 2 external calls (select, object_agent_id).
-
-
-##### `ScheduleStore.list`  (lines 373–392)
-
 ```
-async def list(self, *, conversation_id: UUID | None=None, names: tuple[str, ...] | None=None, visible_to_member_id: UUID | None=None, include_all_owners: bool=True, limit: int | None=None) -> tuple[S
+async def tool_schema(self, slug: str) -> dict[str, object]
 ```
 
-**Purpose**: This reads scheduled tasks visible under the requested filters. It returns task definitions without extra conversation display information.
+**Purpose**: Fetches the full schema for one Composio tool. A schema describes what inputs the tool expects and what it is for.
 
-**Data flow**: It receives optional filters for conversation, names, member ownership, whether to include all owners, and result limit. It builds the query with _listing, runs it inside a transaction, converts each row with _task, and returns a tuple of ScheduledTask objects.
+**Data flow**: It receives a tool slug, performs a GET request for that specific tool, and returns Composio’s response as a dictionary.
 
-**Call relations**: Member-facing code can use this for plain task lookup. ScheduleStore.list_reported builds on it when it also needs conversation audience and label information.
+**Call relations**: It is a thin wrapper around _get. Other code can call it when it needs the exact input description for a known tool rather than a search result.
 
-*Call graph*: calls 2 internal fn (_listing, _task); called by 1 (list_reported).
+*Call graph*: calls 1 internal fn (_get).
 
 
-##### `ScheduleStore.list_reported`  (lines 394–428)
+##### `ComposioClient.connectable_toolkit`  (lines 250–267)
 
 ```
-async def list_reported(self, *, conversation_id: UUID | None=None, names: tuple[str, ...] | None=None, visible_to_member_id: UUID | None=None, include_all_owners: bool=True, limit: int | None=None) -
+async def connectable_toolkit(self, slug: str) -> str | None
 ```
 
-**Purpose**: This lists tasks together with facts about the conversation they report into, such as audience and display label. It is used when a user-facing view needs to decide what should be visible and how to describe it.
+**Purpose**: Checks whether a single toolkit slug is valid, safe to look up, and connectable through this deployment. It returns the display name if the toolkit can be offered to users.
 
-**Data flow**: It first gets matching ScheduledTask objects from list. If there are tasks, it asks the context for live conversation facts for their conversation IDs, then pairs each task with the conversation audience and surface label. Tasks whose conversation no longer exists are left out.
+**Data flow**: It receives a slug. It first rejects strings with unsafe characters, then fetches the toolkit record from Composio, treats a 404 as “not found,” applies the local connectable rules, and finally returns the toolkit’s name or the slug as a fallback.
 
-**Call relations**: It depends on ScheduleStore.list for the task page itself, then adds conversation facts from the extension context. It creates ListedTask objects as the final member-facing result.
+**Call relations**: It uses _get to read the toolkit details and connectable to apply the local eligibility rules. It is the one-toolkit version of catalog discovery and protects the URL path from user-supplied slashes or dots.
 
-*Call graph*: calls 1 internal fn (list); 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (_get, connectable).
 
 
-##### `ScheduleStore.claim_due`  (lines 430–486)
+##### `ComposioClient.list_toolkits`  (lines 269–287)
 
 ```
-async def claim_due(self, now: datetime, lease_seconds: int, limit: int=CLAIM_BATCH_MAX_TASKS) -> tuple[ScheduledTask, ...]
+async def list_toolkits(self, query: str, limit: int) -> tuple[tuple[str, str], ...]
 ```
 
-**Purpose**: This is the runner’s main pickup operation. It removes expired tasks and leases a limited batch of due tasks so one worker can fire them without other workers grabbing the same rows.
+**Purpose**: Searches Composio’s toolkit catalog and returns only the services this deployment is willing and able to broker. This powers open-ended connector discovery.
 
-**Data flow**: It receives the current time, lease length in seconds, and a maximum batch size. Inside one transaction, it deletes expired claimable rows, then selects the oldest due, unpaused, claim-available tasks and stamps them with a new claim ID and claim expiry. It returns those claimed tasks as ScheduledTask objects.
+**Data flow**: It receives a search query and result limit. It asks Composio for matching toolkits, walks through the returned items, skips malformed or non-connectable records, and returns pairs of toolkit slug and display label.
 
-**Call relations**: Background polling code calls this when a workspace has possible scheduled-task work. It uses _expired and _claim_available so claiming follows the same rules as workspace discovery, and _task to return usable task objects.
+**Call relations**: It calls _get to search /toolkits and calls connectable on each result. This keeps the user-facing discovery list aligned with the same rules used when claiming an individual toolkit.
 
-*Call graph*: calls 3 internal fn (_claim_available, _expired, _task); 6 external calls (timedelta, delete, not_, select, update, uuid4).
+*Call graph*: calls 2 internal fn (_get, connectable).
 
 
-##### `ScheduleStore.claim_holds`  (lines 488–519)
+##### `ComposioClient.execute_tool`  (lines 289–303)
 
 ```
-async def claim_holds(self, task: ScheduledTask) -> bool
+async def execute_tool(self, slug: str, arguments: Mapping[str, object], user_id: str, connected_account_id: str | None=None, idempotency_key: str | None=None) -> dict[str, object]
 ```
 
-**Purpose**: This checks whether a worker’s lease still owns the exact task it is about to fire. It is a last-minute safety check against edits, cancellations, or reclaims.
+**Purpose**: Runs a Composio tool on Composio’s server side for a broker user, optionally tied to a specific connected account. This is where an actual external-service action happens.
 
-**Data flow**: It receives a claimed ScheduledTask. If the task has no claim ID, it raises an error. Otherwise it rereads the database row under a lock and checks the workspace, task ID, claim ID, conversation, agent, name, and schedule. It returns true only if the same claimed version is still present.
+**Data flow**: It receives the tool slug, tool arguments, user id, optional connected account id, and optional idempotency key. It builds a JSON request body, refuses it if it is too large, adds an idempotency header when provided, posts to Composio’s execute endpoint, and returns the response dictionary.
 
-**Call relations**: ScheduledTaskRunner._fire calls this immediately before invoking the scheduled task. If it returns false, the runner can skip firing because the task changed or no longer belongs to this claim.
+**Call relations**: It uses _post for the API call and json.dumps to measure the outgoing payload size. It deliberately executes through Composio rather than through the Tool Router, keeping account tokens and execution metering on Composio’s execute API.
 
-*Call graph*: called by 1 (_fire); 1 external calls (select).
+*Call graph*: calls 1 internal fn (_post); 1 external calls (dumps).
 
 
-##### `ScheduleStore.retire_if_expired`  (lines 521–535)
+##### `ComposioClient.create_upload`  (lines 305–329)
 
 ```
-async def retire_if_expired(self, task: ScheduledTask, now: datetime) -> bool
+async def create_upload(self, toolkit: str, slug: str, filename: str, mimetype: str, md5: str) -> 'ComposioUpload'
 ```
 
-**Purpose**: This deletes a claimed task if its expiry time has passed before it is invoked. It prevents an expired task from firing just because it was claimed earlier.
+**Purpose**: Asks Composio for a place to stage a file that a tool will later use. This lets the sandbox upload bytes directly to Composio’s storage without this client carrying the file contents.
 
-**Data flow**: It receives a claimed task and the current time. If there is no claim, it raises an error; if the task has no expiry or has not expired yet, it returns false. If the task is expired, it deletes the matching claimed row and returns true.
+**Data flow**: It receives the toolkit, tool slug, filename, MIME type, and MD5 checksum. It posts those details to Composio’s upload-request endpoint, checks that a storage key is present, then returns a ComposioUpload containing the key and, when needed, a presigned PUT URL.
 
-**Call relations**: ScheduledTaskRunner._fire calls this during the firing flow. It lets the runner stop cleanly when a task becomes expired between claiming and invocation.
+**Call relations**: It calls _post to mint the upload slot and raises ComposioError if the reply is missing the storage key or contains a malformed upload URL. It constructs ComposioUpload so later tool arguments can refer to the staged file key.
 
-*Call graph*: called by 1 (_fire); 1 external calls (delete).
+*Call graph*: calls 2 internal fn (_post, __init__); 1 external calls (__init__).
 
 
-##### `ScheduleStore.reschedule`  (lines 537–567)
+##### `ComposioClient.tool_router_session`  (lines 331–342)
 
 ```
-async def reschedule(self, task: ScheduledTask, next_run_at: datetime, last_run_at: datetime, last_turn_id: UUID | None=None) -> bool
+async def tool_router_session(self, user_id: str, toolkits: list[str]) -> ToolRouterSession
 ```
 
-**Purpose**: This advances a claimed task after it has fired. It records the latest run time, optionally records the turn that was created, sets the next run time, and releases the claim.
+**Purpose**: Starts a Composio Tool Router session for semantic tool search. The Tool Router is a Composio service that can search tools by use case rather than exact tool name.
 
-**Data flow**: It receives the claimed task, the next run time, the last run time, and optionally the ID of the turn caused by the fire. It updates the matching claimed row with those values, clears the claim fields, and returns whether a row was actually updated.
+**Data flow**: It receives a user id and a list of toolkit slugs. It posts a session request to Composio, reads the session id and MCP URL from the response, validates that both exist, and returns a ToolRouterSession with those values.
 
-**Call relations**: ScheduledTaskRunner._fire calls this after a successful fire. The later inspection path can use the recorded last_turn_id to show the most recent result.
+**Call relations**: search_connector_tools calls this when no cached session exists for a user and connector. The returned URL is later used to call the COMPOSIO_SEARCH_TOOLS tool through the MCP session helper.
 
-*Call graph*: called by 1 (_fire); 1 external calls (update).
+*Call graph*: calls 2 internal fn (_post, __init__); called by 1 (search_connector_tools); 1 external calls (__init__).
 
 
-##### `ScheduleStore.inspect`  (lines 569–573)
+##### `ComposioClient._auth_config`  (lines 344–362)
 
 ```
-async def inspect(self, expected: ScheduledTask) -> TaskInspection | None
+async def _auth_config(self, toolkit: str) -> str
 ```
 
-**Purpose**: This fetches the live status picture for one scheduled task. It is a convenience wrapper around the batch inspection method.
+**Purpose**: Finds the authentication setup that should be used for a toolkit, creating a Composio-managed one if none exists. This is needed before a user can be sent through the connection flow.
 
-**Data flow**: It receives one expected ScheduledTask. It asks inspect_many for that single task, then returns the matching TaskInspection if present, or None if the task no longer matches.
+**Data flow**: It receives a toolkit slug. It first asks Composio for an existing auth config, extracts an id if one is present, and returns it. If none exists, it posts a request to create a managed auth config, checks that the created record has an id, and returns that id.
 
-**Call relations**: Status-rendering code can call this for a single task. It delegates all real work to ScheduleStore.inspect_many so single-task and multi-task inspection behave the same way.
+**Call relations**: ComposioClient.connect_link calls this before creating a connection link. It uses _get, _post, and _auth_config_id, and raises ComposioError if Composio creates something without an id.
 
-*Call graph*: calls 1 internal fn (inspect_many).
+*Call graph*: calls 4 internal fn (_get, _post, __init__, _auth_config_id); called by 1 (connect_link).
 
 
-##### `ScheduleStore.inspect_many`  (lines 575–611)
+##### `ComposioClient._get`  (lines 364–366)
 
 ```
-async def inspect_many(self, expected: tuple[ScheduledTask, ...]) -> dict[UUID, TaskInspection]
+async def _get(self, path: str, params: dict[str, str] | None=None) -> dict[str, object]
 ```
-
-**Purpose**: This fetches live status information for several scheduled tasks at once. It shows timing marks and, when available, the latest turn outcome from the last fire.
-
-**Data flow**: It receives expected ScheduledTask objects. It reads matching rows for the current workspace and current agent, checks that each row still has the same name and conversation, then collects any last_turn_id values. It asks the context for those turn outcomes and returns a dictionary from task ID to TaskInspection, with UTC-normalized times and optional last status and response text.
-
-**Call relations**: ScheduleStore.inspect calls this for the one-task case. It uses object_agent_id to stay inside the current agent’s namespace, SQL selection to read task state, and the context’s turn outcome lookup to add the latest fire result.
-
-*Call graph*: calls 2 internal fn (_utc, _utc_opt); called by 1 (inspect); 3 external calls (__init__, select, object_agent_id).
-
-
-### Monitor watches
-These files package the monitor extension, expose monitor objects and the monitor tool, and back them with persistent watch storage and due-run handling.
-
-### `extensions/monitors/ufo_ext_monitors/__init__.py`
-
-`other` · `import time`
-
-In Python, an `__init__.py` file is like a label on a folder saying, “treat this folder as a package of code.” This particular file is empty, so it does not create objects, run setup code, or change behavior directly. Its value is structural: it lets other parts of the project import modules from `extensions/monitors/ufo_ext_monitors` using normal Python package paths. Without it, some Python environments or tooling might not recognize this directory as an importable package, which could make the monitor extension unavailable or harder to load reliably. Think of it like a blank cover page in a binder: it does not contain instructions itself, but it helps identify the binder as a coherent section of the system.
-
-
-### `extensions/monitors/ufo_ext_monitors/monitor_kind.py`
 
-`domain_logic` · `request handling`
+**Purpose**: Performs a GET request to Composio and turns the response into a plain dictionary. It is the shared read path for the client.
 
-A monitor is a watch on a shell command inside a conversation's sandbox. It checks the command from time to time, compares the result with an original baseline, and later wakes the agent if something changes, repeated failures happen, or a deadline arrives. This file is the bridge between those stored monitor records and UFO's general object system, so users and agents can ask, “what monitors exist?”, “what is this one watching?”, “what is its current status?”, and “stop this one.”
+**Data flow**: It receives an API path and optional query parameters. It opens an HTTP client, sends the GET request, passes the response to _body, and returns the parsed dictionary that _body accepts.
 
-The file defines `MonitorSpec`, the user-facing shape of a monitor: the command, the interval, the deadline, and the reason for watching. It also defines `MonitorObjects`, which knows how to read armed monitors from `MonitorStore`, turn them into list rows, show detailed information, report counters such as probe failures, and delete a monitor to disarm it.
+**Call relations**: Most read-style methods call this, including account checks, toolkit lookup, toolkit search, tool listing, and schema lookup. It delegates connection setup to _http and response validation to _body.
 
-A key rule is that applying or creating a monitor through this object kind is refused. That is intentional: arming a monitor needs a live chat turn, like setting a stopwatch only after checking the starting reading. The agent's monitor tool runs the probe once, records that baseline, and only then creates the watch. This object kind is mainly the read-and-stop interface. At the bottom, `MONITOR_OBJECT` registers this behavior with the wider system and explains which actions agents may use: list, get, and delete.
+*Call graph*: calls 2 internal fn (_http, _body); called by 7 (_auth_config, account_label, connectable_toolkit, connected_account, list_toolkits, list_tools, tool_schema).
 
-#### Function details
 
-##### `_owner`  (lines 53–58)
+##### `ComposioClient._post`  (lines 368–372)
 
 ```
-def _owner(row: Monitor) -> GeneratedObjectOwner
+async def _post(self, path: str, body: dict[str, object], headers: dict[str, str] | None=None) -> dict[str, object]
 ```
 
-**Purpose**: Builds the ownership information for one monitor. This tells the object system who created the monitor, who it is shared with, and which exact stored monitor record it refers to.
+**Purpose**: Performs a POST request to Composio and turns the response into a plain dictionary. It is the shared write/action path for the client.
 
-**Data flow**: It receives a stored `Monitor` row. It reads the creator member ID, the audience snapshot, and the monitor ID. It turns the audience into a shared-or-private ownership marker and returns a `GeneratedObjectOwner` that can be attached to list rows and later checked when fetching or deleting the monitor.
+**Data flow**: It receives an API path, a JSON body, and optional headers. It opens an HTTP client, sends the POST request, passes the response to _body, and returns the parsed dictionary that _body accepts.
 
-**Call relations**: `MonitorObjects._member_rows` calls this while turning stored monitors into object-list entries. The returned owner is what lets later operations confirm they are still talking about the same monitor, not just another monitor with the same name.
+**Call relations**: Methods that create links, create auth configs, execute tools, create upload slots, and start Tool Router sessions call this. Like _get, it keeps HTTP setup and response checking in one place.
 
-*Call graph*: called by 1 (_member_rows); 2 external calls (__init__, subject_shared).
+*Call graph*: calls 2 internal fn (_http, _body); called by 5 (_auth_config, connect_link, create_upload, execute_tool, tool_router_session).
 
 
-##### `_require_ext`  (lines 61–64)
+##### `ComposioClient._http`  (lines 374–380)
 
 ```
-def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
+def _http(self) -> httpx.AsyncClient
 ```
 
-**Purpose**: Makes sure this monitor object kind has the extension context it needs to talk to monitor storage. If the context is missing, it fails early with a clear error instead of letting a later storage call break in a confusing way.
+**Purpose**: Builds the temporary HTTP client used for one Composio API call. It attaches the base URL, API key header, timeout, and optional test transport.
 
-**Data flow**: It receives an optional extension context. If the context is present, it returns it unchanged. If it is missing, it raises an error explaining that the monitor kind requires the scheduled-tasks extension context.
+**Data flow**: It reads the ComposioClient’s API key and optional transport setting. It creates and returns an httpx asynchronous client configured for Composio’s API.
 
-**Call relations**: `MonitorObjects._member_rows`, `MonitorObjects._delete_owned`, and `MonitorObjects._find` call this before creating a `MonitorStore`. It is the small guard at the door before any code tries to read or change stored monitor records.
+**Call relations**: _get and _post call this whenever they need to contact Composio. Because each call gets its own client context, connections are closed cleanly and tests can swap in a mock transport.
 
-*Call graph*: called by 3 (_delete_owned, _find, _member_rows).
+*Call graph*: called by 2 (_get, _post); 1 external calls (AsyncClient).
 
 
-##### `MonitorObjects._member_rows`  (lines 78–97)
+##### `_body`  (lines 383–391)
 
 ```
-async def _member_rows(self, ext: ExtensionContext | None, *, member_id: UUID | None) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
+def _body(response: httpx.Response) -> dict[str, object]
 ```
 
-**Purpose**: Creates the rows shown when a member lists monitors. Each row gives a short summary of what is being watched, when it will next run, when it expires, who owns it, and whether it belongs to the requesting member.
+**Purpose**: Validates and parses an HTTP response from Composio. It turns successful JSON object replies into dictionaries and turns failures or unexpected shapes into ComposioError.
 
-**Data flow**: It receives the extension context and the member ID of the person asking, if known. It reads all currently armed monitors from `MonitorStore`, looks up owner email addresses, and builds `OwnedRow` objects. Each output row contains the monitor name, a shortened command-and-reason summary, ownership information, and list fields such as conversation ID, next probe time, deadline, owner email, and `mine`.
+**Data flow**: It receives an httpx response. If the status code is an error, it raises ComposioError with the response text. If the body is empty, it returns an empty dictionary. Otherwise it parses JSON and returns it only if it is an object-like dictionary.
 
-**Call relations**: The object system calls this when someone lists monitor objects. It asks `_require_ext` for a usable context, asks `MonitorStore` for armed monitors, uses `_owner` to describe ownership for each one, and returns rows that the broader object system can filter, sort, and show.
+**Call relations**: _get and _post both send every response through this helper. It is the common safety check that prevents callers from quietly accepting error pages, arrays, or malformed payloads.
 
-*Call graph*: calls 2 internal fn (_owner, _require_ext); 3 external calls (__init__, __init__, owner_emails).
+*Call graph*: calls 1 internal fn (__init__); called by 2 (_get, _post); 1 external calls (json).
 
 
-##### `MonitorObjects._member_object`  (lines 99–125)
+##### `workspace_file_schema`  (lines 394–420)
 
 ```
-async def _member_object(self, ext: ExtensionContext | None, name: str, owner: GeneratedObjectOwner, *, member_id: UUID | None) -> ObjectDetail[MonitorSpec] | None
+def workspace_file_schema(value: object) -> object
 ```
 
-**Purpose**: Builds the detailed view for one monitor. This is used when someone asks to inspect a specific monitor and needs its command, interval, deadline, reason, timestamps, and link back to the conversation it reports into.
+**Purpose**: Rewrites Composio file-upload input fields into the project’s simpler workspace-file format. This lets the agent provide a file path from the workspace instead of constructing Composio’s internal storage reference itself.
 
-**Data flow**: It receives the extension context, the monitor name, the expected owner information, and the requesting member ID. It looks up a currently armed monitor by name. If no monitor is found, or if the stored monitor ID does not match the owner generation, it returns nothing. Otherwise it returns an `ObjectDetail` containing a `MonitorSpec`, creation and update times, and a `reports_to` link to the watched conversation.
+**Data flow**: It receives any piece of a schema. If it finds a dictionary marked as file-uploadable, it replaces that portion with an object that asks for a workspace_file path. If it sees nested dictionaries or lists, it recursively rewrites their contents. Other values pass through unchanged.
 
-**Call relations**: The object system calls this for a get/read operation on one monitor. It delegates the lookup to `_find`, then packages the result into the standard object-detail format so other parts of UFO can display it consistently with other object kinds.
+**Call relations**: _search_result calls this while turning Tool Router search results into BrokerTool entries. It hides Composio’s raw upload details from the model-facing tool schema.
 
-*Call graph*: calls 1 internal fn (_find); 4 external calls (__init__, __init__, __init__, __init__).
+*Call graph*: called by 1 (_search_result).
 
 
-##### `MonitorObjects._status`  (lines 127–142)
+##### `_auth_config_id`  (lines 423–430)
 
 ```
-async def _status(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> dict[str, JsonValue] | None
+def _auth_config_id(payload: dict[str, object]) -> str | None
 ```
 
-**Purpose**: Returns the live status information for one monitor, such as when it was armed, how many probes have run, how many failed, and a short excerpt of the baseline output. This gives a user more than the static setup; it shows how the watch has behaved so far.
+**Purpose**: Extracts the first authentication configuration id from a Composio list response. It is a small helper for the auth setup lookup.
 
-**Data flow**: It receives a tool context, a monitor name, and the expected owner information. It looks up the monitor by name. If the monitor is missing or no longer matches the owner generation, it returns nothing. Otherwise it returns a dictionary of JSON-friendly values: timestamps as text, counters, skipped count, and a shortened baseline excerpt.
+**Data flow**: It receives a response dictionary. It looks for an items list, scans it for the first dictionary with a string id, and returns that id. If the expected shape is absent, it returns nothing.
 
-**Call relations**: This is called when the tool/object layer needs status for a specific monitor. It uses `_find` for the stored row and then translates internal fields into simple values that can be shown to an agent or user.
+**Call relations**: ComposioClient._auth_config calls this after asking Composio for existing auth configs. If it returns an id, _auth_config can reuse the existing setup instead of creating a new one.
 
-*Call graph*: calls 1 internal fn (_find).
+*Call graph*: called by 1 (_auth_config).
 
 
-##### `MonitorObjects._apply_owned`  (lines 144–152)
+##### `composio_client`  (lines 433–440)
 
 ```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: MonitorSpec, old: MonitorSpec | None, owner: GeneratedObjectOwner | None) -> None
+def composio_client() -> ComposioClient
 ```
 
-**Purpose**: Refuses attempts to create or update monitors through the generic object apply path. This protects an important rule: monitors must be armed through the live monitor tool so the first probe can run and establish the baseline.
+**Purpose**: Creates the deployment’s ComposioClient from the COMPOSIO_API_KEY environment variable. It fails immediately if the key is missing, because connector login cannot work without it.
 
-**Data flow**: It receives the tool context, requested name, requested spec, any old spec, and owner information. It does not use those values to change storage. Instead, it raises `VerbNotSupported` with a message telling the caller to use the monitor tool.
+**Data flow**: It reads COMPOSIO_API_KEY from the process environment. If the value is missing or empty, it raises a RuntimeError. Otherwise it returns a ComposioClient configured with that key.
 
-**Call relations**: The generic object system may call this when an apply-style operation is attempted. Rather than handing off to storage, it stops the flow immediately and explains why this object kind is read/delete only from that path.
+**Call relations**: Other parts of the extension can call this when they need the standard production client. It centralizes the rule that the Composio broker key must come from the environment.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `MonitorObjects._delete_owned`  (lines 154–159)
+##### `_dict`  (lines 447–448)
+
+```
+def _dict(value: object) -> dict[str, object]
+```
+
+**Purpose**: Safely treats a value as a dictionary only when it really is one. It avoids repeated type-checking in search-result parsing.
+
+**Data flow**: It receives any value. If the value is a dictionary, it returns it unchanged; otherwise it returns an empty dictionary.
+
+**Call relations**: _search_result calls this many times while reading nested Tool Router data. It makes malformed or missing nested fields behave like empty objects rather than crashing the parser.
+
+*Call graph*: called by 1 (_search_result).
+
+
+##### `_str_tuple`  (lines 451–454)
+
+```
+def _str_tuple(value: object) -> tuple[str, ...]
+```
+
+**Purpose**: Extracts clean strings from a list and returns them as an immutable tuple. It is used for Tool Router fields that should be lists of text.
+
+**Data flow**: It receives any value. If the value is not a list, it returns an empty tuple. If it is a list, it keeps only non-empty strings and returns them as a tuple.
+
+**Call relations**: _search_result uses this to read tool slugs, plan steps, guidance, and pitfalls from the Tool Router response without trusting every element blindly.
+
+*Call graph*: called by 1 (_search_result).
+
+
+##### `_search_result`  (lines 457–491)
+
+```
+def _search_result(result: dict[str, object]) -> BrokerSearch
+```
+
+**Purpose**: Turns a raw Composio Tool Router search response into the project’s BrokerSearch object. The result contains matched tools plus useful planning notes for the agent.
+
+**Data flow**: It receives a response dictionary from the Tool Router. It finds tool schemas and search results, gathers primary and related tool slugs without duplicates, builds BrokerTool objects with descriptions and rewritten input schemas, and collects recommended plan steps, guidance, and pitfalls. It returns one BrokerSearch containing all of that.
+
+**Call relations**: search_connector_tools calls this after the MCP tool call returns. It uses _dict, _str_tuple, and workspace_file_schema to safely reshape Composio’s response into the broker format used by the rest of the project.
+
+*Call graph*: calls 3 internal fn (_dict, _str_tuple, workspace_file_schema); called by 1 (search_connector_tools); 2 external calls (__init__, __init__).
+
+
+##### `search_connector_tools`  (lines 494–517)
+
+```
+async def search_connector_tools(client: ComposioClient, workspace_id: UUID, connector: str, query: str) -> BrokerSearch
+```
+
+**Purpose**: Searches for useful tools inside one connector using Composio’s semantic Tool Router. This lets the agent ask for tools by describing the task, not by already knowing exact tool slugs.
+
+**Data flow**: It receives a ComposioClient, workspace id, connector slug, and query text. It turns the workspace id into a Composio broker user id, reuses or creates a cached Tool Router session for that user and connector, calls the COMPOSIO_SEARCH_TOOLS tool over MCP, and converts the raw result into BrokerSearch.
+
+**Call relations**: It calls ComposioClient.tool_router_session only when the session cache does not already have one, then uses mcp_session.mcp_call_tool to perform the search. Finally it hands the response to _search_result so callers get the project’s normal search object.
+
+*Call graph*: calls 2 internal fn (tool_router_session, _search_result); 1 external calls (mcp_call_tool).
+
+
+### `extensions/composio/ufo_ext_composio/mcp_session.py`
+
+`io_transport` · `request handling`
+
+Composio's Tool Router can search for tools through an MCP endpoint. MCP, or Model Context Protocol, is a standard way for an app to talk to external tools and services. This file is the small bridge that opens that connection, asks for one tool call, and normalizes the answer.
+
+The main problem it solves is that MCP replies can come back in a few different forms. Sometimes the useful answer is already parsed as structured data. Sometimes it is in a separate structured-content field. Sometimes it is just a block of text that happens to contain JSON. Without this file, every caller would need to repeat the same careful unpacking logic and might misread valid results.
+
+The flow is like calling a help desk and then translating whatever format they answer in into one standard form. The function opens a temporary HTTP-based MCP session using FastMCP, calls the named tool with the given arguments and headers, then closes the session. After that, it checks the result in order of most reliable to least: parsed data first, structured content second, JSON text third, and finally a fallback wrapper. Importantly, this is only for searching via the Tool Router; actual tool execution is kept elsewhere so Composio's normal execution and metering path remains in charge.
+
+#### Function details
+
+##### `mcp_call_tool`  (lines 18–42)
+
+```
+async def mcp_call_tool(endpoint: str, tool: str, arguments: dict[str, Any], headers: dict[str, str], timeout_seconds: float) -> dict[str, object]
+```
+
+**Purpose**: This asynchronous function calls one named tool on a remote Composio MCP endpoint and returns the answer as a plain dictionary. It is used when the project needs the Tool Router's search result without exposing the rest of the code to the details of the MCP client response.
+
+**Data flow**: It receives an endpoint URL, a tool name, tool arguments, HTTP headers, and a timeout. It opens a FastMCP streamable-HTTP connection to that endpoint, sends the tool call, and receives a result object. It then looks for a dictionary in the result's parsed data, then in its structured content, then tries to parse the first text block as JSON. The output is always a dictionary, either the real structured result or a small wrapper such as text or result when the response is less structured.
+
+**Call relations**: When some higher-level Composio code needs one Tool Router MCP call, this function is the piece that actually talks over the wire. It builds a StreamableHttpTransport for the endpoint, gives that transport to fastmcp.Client to run the session, asks the client to call the requested tool, and uses json.loads only if it has to turn a text reply into structured data.
+
+*Call graph*: 3 external calls (Client, StreamableHttpTransport, loads).
+
+
+### `extensions/composio/ufo_ext_composio/proxy.py`
+
+`io_transport` · `request handling`
+
+Many connectors expect to talk directly to a provider, such as Google Sheets or another API. But with Composio, the project is not allowed to hold the provider's secret token. Composio keeps that credential and injects it on the server side. This file is the adapter that makes that arrangement feel normal to the rest of the code.
+
+The main piece, ComposioProxyTransport, acts like an HTTP transport, which is the layer that actually sends requests. When a connector tries to call a provider URL, this transport reads the method, URL, headers, and body, removes unsafe or irrelevant headers like authorization and content-length, and packages the request into a POST to Composio's proxy endpoint. Composio then performs the provider request using the connected account's stored credential.
+
+When Composio replies, the transport rebuilds the provider's status code, headers, and body so the connector can keep working as if it had called the provider directly. It also protects shared proxy processes from huge responses by optionally stopping reads after a size limit. If Composio reports a non-JSON binary file, the file is not copied through this proxy. Instead, the code returns a temporary redirect pointing to where the bytes can be downloaded. ComposioRequestForwarder uses the same transport for one-off broker forwarding, with a hard timeout so a slow or stuck backend cannot freeze the proxy.
+
+#### Function details
+
+##### `ComposioProxyTransport.handle_async_request`  (lines 66–102)
+
+```
+async def handle_async_request(self, request: httpx.Request) -> httpx.Response
+```
+
+**Purpose**: This is the main request rewrite step. It takes an ordinary provider HTTP request and sends it to Composio's proxy endpoint instead, so Composio can add the hidden credential and call the provider safely.
+
+**Data flow**: It starts with an incoming HTTP request: method, full URL, headers, body, and any timeout setting. It reads the body, copies safe headers into Composio's expected parameter format, includes the connected account id, and builds a new POST request to Composio. After the inner transport sends that proxy request, it reads the response with a size guard. If Composio itself failed, it returns that failure as-is; otherwise it converts Composio's payload back into a provider-style response.
+
+**Call relations**: This is called whenever this transport is used to send a provider request. It relies on _read_bounded to safely collect Composio's response body, then hands successful proxy payloads to _provider_response so the rest of the connector sees a normal HTTP response.
+
+*Call graph*: calls 2 internal fn (_provider_response, _read_bounded); 4 external calls (Request, aread, Response, loads).
+
+
+##### `ComposioProxyTransport._read_bounded`  (lines 104–119)
+
+```
+async def _read_bounded(self, response: httpx.Response) -> bytes
+```
+
+**Purpose**: This reads the whole response body from Composio, with an optional maximum size. The limit prevents a shared proxy process from using too much memory if a provider returns a very large response.
+
+**Data flow**: It receives an HTTP response from the Composio proxy call. If no maximum size is set, it simply reads all bytes. If a maximum is set, it reads chunk by chunk, adds each chunk to a buffer, and checks the total size. If the response grows past the limit, it closes the response and raises a Composio error; otherwise it returns the collected bytes.
+
+**Call relations**: handle_async_request uses this right after the proxy call completes. It is the safety gate before any response body is decoded or turned back into a provider response.
+
+*Call graph*: called by 1 (handle_async_request); 4 external calls (aclose, aiter_bytes, aread, ComposioError).
+
+
+##### `ComposioProxyTransport._provider_response`  (lines 121–165)
+
+```
+def _provider_response(self, payload: dict[str, Any], request: httpx.Request) -> httpx.Response
+```
+
+**Purpose**: This turns Composio's proxy result into the response shape a connector expects from the original provider. It preserves useful provider details like status, headers, and JSON bodies, while handling Composio's special binary-file case.
+
+**Data flow**: It receives a decoded Composio payload and the original provider request. First it unwraps nested data envelopes until it reaches the actual provider result. It reads the provider status and headers, dropping body-specific headers that would no longer be trustworthy after reconstruction. If the payload points to binary data, it returns a 302 redirect with a location header to the stored file. Otherwise it converts dictionaries and lists back into JSON bytes, strings into UTF-8 bytes, and missing data into an empty body, then returns an HTTP response.
+
+**Call relations**: handle_async_request calls this after a successful Composio proxy response has been read. It is the final translation step that lets downstream connector code continue as if it had spoken directly to the provider.
+
+*Call graph*: called by 1 (handle_async_request); 4 external calls (Response, dumps, cast, ComposioError).
+
+
+##### `ComposioProxyTransport.aclose`  (lines 167–168)
+
+```
+async def aclose(self) -> None
+```
+
+**Purpose**: This closes the underlying HTTP transport. It is used to release network resources when the proxy transport is no longer needed.
+
+**Data flow**: It has no input beyond the transport object itself. It forwards the close request to the inner transport, which cleans up its own connections and related resources. Nothing is returned.
+
+**Call relations**: Code that creates a ComposioProxyTransport can call this during cleanup. ComposioRequestForwarder.forward does so in a finally block, ensuring the transport is closed even if forwarding fails or times out.
+
+
+##### `ComposioRequestForwarder.forward`  (lines 185–213)
+
+```
+async def forward(self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes) -> ForwardedResponse
+```
+
+**Purpose**: This forwards one provider request through Composio for a granted account, mainly for the broker or command-line forwarding path. It wraps the same proxy behavior in a single call with a response size cap and a hard timeout.
+
+**Data flow**: It receives an account id, HTTP method, URL, headers, and raw request body. It gets the Composio client and API key, builds a ComposioProxyTransport for that account, creates an HTTP request with a timeout, and sends it through the transport. It reads the returned body, turns the result into a ForwardedResponse with status, headers, and bytes, and always closes the transport afterward. If the whole operation takes too long, it raises a Composio timeout error.
+
+**Call relations**: This is the one-shot forwarding entry within this file. Instead of a connector using ComposioProxyTransport directly, the broker calls forward when it needs to execute a single outbound provider request through Composio and return the result to its caller.
+
+*Call graph*: 8 external calls (__init__, __init__, timeout, AsyncHTTPTransport, Request, Timeout, ComposioError, composio_client).
+
+
+### `extensions/composio/ufo_ext_composio/resolver.py`
+
+`orchestration` · `connector discovery and connect flow`
+
+Composio offers many third-party toolkits, and this project does not want to list each one as a separate built-in connector. This resolver creates an “open namespace”: if a user asks for a provider slug, such as a short service name, the resolver decides whether Composio can supply it.
+
+The file’s main class, ComposioResolver, is intentionally small and mostly stateless. It keeps only a shared ConnectorBroker, which is the object that later performs the real connection and tool execution work. For each request, it asks the Composio client for fresh information, so tests or runtime configuration changes can swap the client behavior without stale connections hanging around.
+
+The flow is simple. First, claims rejects any locally banned provider names. If not banned, it asks Composio’s live catalog whether the toolkit can be connected. If accepted, descriptor builds the OAuth description used for the connection. OAuth is the common “sign in and grant access” flow; here the host is left empty because Composio keeps the account token and runs tools on its side. entry creates the connector record that routes the provider name to the shared broker. catalog powers discovery by searching Composio’s toolkit list and returning only connectable services. transfer_hosts names Composio file-store hosts that are allowed for file inputs and outputs.
+
+#### Function details
+
+##### `ComposioResolver.transfer_hosts`  (lines 32–33)
+
+```
+def transfer_hosts(self) -> tuple[str, ...]
+```
+
+**Purpose**: This property tells the rest of the system which Composio file-store hosts are trusted for moving files in and out of tool runs. It matters because tool results or inputs may include files, and those files still need to pass through the project’s sandbox rules.
+
+**Data flow**: It takes no extra input beyond the resolver object. It reads the fixed COMPOSIO_TRANSFER_HOSTS list from the Composio client module and returns it as a tuple of host names; it does not change anything.
+
+**Call relations**: When the connector system needs to know what external file locations a Composio-backed grant may use, it asks this property. The answer is handed back directly from the shared Composio constants, so the resolver stays in sync with the transport rules used elsewhere.
+
+
+##### `ComposioResolver.claims`  (lines 35–38)
+
+```
+async def claims(self, provider: str) -> bool
+```
+
+**Purpose**: This function decides whether a provider name belongs to Composio’s open connector namespace. It first blocks names that are banned locally, then checks Composio’s live catalog to see whether the requested toolkit is actually connectable.
+
+**Data flow**: It receives a provider slug as text. It lowercases the slug and compares it with the local banned set; if it is banned, the answer is immediately false. Otherwise it creates or retrieves the current Composio client with composio_client(), asks that client whether the toolkit can be connected, and returns true only when Composio confirms a matching toolkit.
+
+**Call relations**: During connector selection, registered providers get a chance first, and this resolver is used for the remaining open Composio names. claims is the gatekeeper in that story: it calls the Composio client only after the local ban check, so clearly disallowed names are rejected without a network catalog lookup.
+
+*Call graph*: 1 external calls (composio_client).
+
+
+##### `ComposioResolver.descriptor`  (lines 40–41)
+
+```
+def descriptor(self, provider: str) -> OAuthProvider
+```
+
+**Purpose**: This function builds the OAuth connection description for a provider that Composio has accepted. The description tells the surrounding connector system how the user should authorize access, while leaving token custody with Composio.
+
+**Data flow**: It receives the provider slug. It creates a ComposioOAuthProvider using that slug and an empty host value, then returns that provider description. It does not contact Composio or modify the resolver.
+
+**Call relations**: After claims has established that a provider can be served by Composio, the connect flow can ask descriptor for the authorization shape. descriptor hands the work to ComposioOAuthProvider, which packages the provider name in the form expected by the broader connector framework.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ComposioResolver.entry`  (lines 43–46)
+
+```
+def entry(self, provider: str) -> ConnectorEntry
+```
+
+**Purpose**: This function creates the connector entry that routes a provider slug to the shared Composio broker. It also turns the slug into a human-friendly label, so names with underscores look nicer in user-facing lists.
+
+**Data flow**: It receives the provider slug. It builds a label by replacing underscores with spaces and title-casing the words, then creates a ConnectorEntry containing the original provider slug, the label, and this resolver’s shared broker. The returned entry is ready for the connector registry to use.
+
+**Call relations**: Once the system decides that Composio owns a requested provider, entry turns that decision into a concrete connector record. It calls ConnectorEntry to package the provider and broker together, so later tool execution can be routed through the single ComposioBroker rather than a separate broker per toolkit.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ComposioResolver.catalog`  (lines 48–52)
+
+```
+async def catalog(self, query: str, limit: int=TOOLKIT_SEARCH_LIMIT) -> tuple[CatalogEntry, ...]
+```
+
+**Purpose**: This function searches Composio’s toolkit catalog for connectable services. It supports discovery tools, so users can find services they are actually able to connect rather than seeing unusable names.
+
+**Data flow**: It receives a search query and an optional maximum number of results. It gets the current Composio client with composio_client(), asks it for matching toolkits, then turns each returned slug and label pair into a CatalogEntry. It returns all entries as an immutable tuple and does not change the resolver.
+
+**Call relations**: When a discovery feature needs suggestions, catalog is the resolver’s search path into Composio. It delegates the lookup to the live Composio client, then wraps each result with CatalogEntry so the rest of the connector system receives a consistent catalog format.
+
+*Call graph*: 2 external calls (__init__, composio_client).
+
+
+### Pipedream backend
+Pipedream Connect integration discovers actions, validates connected accounts, runs tools, and proxies provider calls through Pipedream.
+
+### `extensions/pipedream/ufo_ext_pipedream/broker.py`
+
+`domain_logic` · `request handling`
+
+Pipedream offers many ready-made actions, such as sending an email or creating a record in another service. UFO needs to present those actions in its own connector format, so an agent can choose one, fill in safe inputs, and run it using a member’s connected account. This file is that translator.
+
+The central class, PipedreamBroker, is deliberately stateless. Each method asks for a fresh Pipedream client when it runs. That matters because tests or deployments may swap the network transport, and the broker should always honor the current setup rather than keeping an old connection around.
+
+For discovery, the broker asks Pipedream for actions belonging to one app and turns them into BrokerTool objects. It also converts Pipedream’s configurable properties into a JSON schema, which is a machine-readable description of what arguments are allowed. It hides internal fields, especially the connected-account slot, because the broker fills that in itself.
+
+For execution, it fetches the action definition, injects the account binding, checks that the account really belongs to the requested provider, and calls Pipedream’s server-side run API. It turns common stale-account failures into clearer reconnect guidance. For files, it reads Pipedream’s File Stash output and returns download URLs. Direct staged uploads are refused because Pipedream actions expect file URLs instead.
+
+#### Function details
+
+##### `PipedreamBroker.tools`  (lines 59–61)
+
+```
+async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]
+```
+
+**Purpose**: Finds Pipedream actions for a given provider and turns them into UFO broker tools. This is used when the system wants to know what actions are available for an app, optionally filtered by a search query.
+
+**Data flow**: It receives a workspace id, provider name, and query text. It looks up the provider’s Pipedream app slug, asks the current Pipedream client for matching actions, then converts those raw action records into BrokerTool objects. The result is a tuple of tools the agent can inspect or use.
+
+**Call relations**: This is the discovery path for Pipedream tools. PipedreamBroker.search calls it when a search response is needed, and it delegates the provider lookup to _spec and the conversion of raw Pipedream rows to _listed_tools.
+
+*Call graph*: calls 2 internal fn (_listed_tools, _spec); called by 1 (search); 1 external calls (pipedream_client).
+
+
+##### `PipedreamBroker.schema`  (lines 63–69)
+
+```
+async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool
+```
+
+**Purpose**: Builds the input description for one specific Pipedream action. It tells the rest of the system what arguments the action accepts, without exposing fields that the broker must fill in itself.
+
+**Data flow**: It receives a workspace id, provider name, and action slug. It fetches the action definition, extracts the configurable properties, converts those properties into a JSON-style input schema, and returns a BrokerTool with the slug, description, and schema.
+
+**Call relations**: This is used when the system already knows the action key and needs a precise form for its inputs. It relies on _definition to fetch Pipedream’s action metadata, then uses _props, _input_schema, and _str to shape that metadata into UFO’s tool format.
+
+*Call graph*: calls 4 internal fn (_definition, _input_schema, _props, _str); 1 external calls (__init__).
+
+
+##### `PipedreamBroker.execute`  (lines 71–106)
+
+```
+async def execute(self, workspace_id: UUID, provider: str, slug: str, arguments: Mapping[str, object], account_id: str, idempotency_key: str | None) -> dict[str, object]
+```
+
+**Purpose**: Runs a Pipedream action using a specific connected account. It also protects against running the action with the wrong app account and gives clearer guidance when the saved account grant has gone stale.
+
+**Data flow**: It receives the workspace, provider, action slug, user-supplied arguments, account id, and optional idempotency key. It fetches the action definition, copies the arguments, inserts the connected account into the action’s app slot, verifies the account belongs to the requested app, and asks Pipedream to run the action. It returns the action response, or raises a detailed PipedreamError if the action key is unknown, the account is wrong, the grant is stale, or the action reports an error.
+
+**Call relations**: This is the main run path. It calls _definition first; if the action is missing, it asks _key_miss to produce a more helpful not-found error. It uses _app_slot to find where the account belongs, _spec to confirm the provider’s app, and _stale_account plus _reconnect_error to turn certain failures into reconnect instructions.
+
+*Call graph*: calls 7 internal fn (_definition, _key_miss, _app_slot, _reconnect_error, _spec, _stale_account, __init__); 2 external calls (dumps, pipedream_client).
+
+
+##### `PipedreamBroker.file_outputs`  (lines 108–126)
+
+```
+def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]
+```
+
+**Purpose**: Extracts files produced by a Pipedream action and presents them as downloadable broker files. This lets the sandbox fetch output files without needing to know Pipedream’s internal response shape.
+
+**Data flow**: It receives the full action response. It looks inside the response’s exports for File Stash upload entries, keeps only entries with a valid download URL, derives a friendly file name from the local path when available, and returns BrokerFile objects. It does not modify the response.
+
+**Call relations**: This runs after an action response is available. It does not call the Pipedream API; it only translates the response’s File Stash metadata into the connector system’s file output format.
+
+*Call graph*: 2 external calls (__init__, PurePosixPath).
+
+
+##### `PipedreamBroker.stage_upload`  (lines 128–140)
+
+```
+async def stage_upload(self, workspace_id: UUID, provider: str, slug: str, filename: str, mimetype: str, md5: str) -> StagedUpload
+```
+
+**Purpose**: Refuses the normal staged-upload flow for Pipedream actions. Pipedream expects file inputs to be URLs, so this function points callers toward sharing a workspace file and passing its download link instead.
+
+**Data flow**: It receives details about a file the caller wants to upload, such as filename, mimetype, and checksum. Instead of creating an upload target, it immediately raises a ValueError explaining the correct approach. Nothing is uploaded or changed.
+
+**Call relations**: This is called only if the broader connector system tries to prepare a staged file upload for a Pipedream action. It intentionally stops that path because Pipedream’s action model uses URL-based file inputs.
+
+
+##### `PipedreamBroker.search`  (lines 142–143)
+
+```
+async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch
+```
+
+**Purpose**: Returns a search result containing Pipedream tools. Pipedream does not provide a separate planning or routing layer here, so the search result is simply the matching tools.
+
+**Data flow**: It receives the workspace, provider, and query. It asks PipedreamBroker.tools for matching tools and wraps them in a BrokerSearch object. The output is a search response suitable for the connector system.
+
+**Call relations**: This is a thin wrapper around the tools discovery flow. It calls PipedreamBroker.tools and then packages the result as BrokerSearch.
+
+*Call graph*: calls 1 internal fn (tools); 1 external calls (__init__).
+
+
+##### `PipedreamBroker.credential`  (lines 145–166)
+
+```
+async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
+```
+
+**Purpose**: Creates a proxy credential for using a connected Pipedream account. It first confirms that the account exists in the workspace and belongs to the requested provider.
+
+**Data flow**: It receives a workspace id, provider name, and account id. It looks up the provider spec, fetches the connected account from Pipedream, rejects missing accounts with reconnect guidance, rejects accounts tied to a different app, and returns a Credential containing a PipedreamProxyTransport. That transport is what later HTTP calls use to act through the connected account.
+
+**Call relations**: This is used when the system needs a live credential rather than just running a catalog action. It depends on _spec to know the expected app and _reconnect_error to explain missing stale grants. It builds PipedreamProxyTransport around the current Pipedream client transport.
+
+*Call graph*: calls 3 internal fn (_reconnect_error, _spec, __init__); 4 external calls (__init__, __init__, AsyncHTTPTransport, pipedream_client).
+
+
+##### `PipedreamBroker._definition`  (lines 168–176)
+
+```
+async def _definition(self, slug: str) -> dict[str, object]
+```
+
+**Purpose**: Fetches the full definition for one Pipedream action. It turns Pipedream’s not-found response into UFO’s UnknownBrokerTool signal.
+
+**Data flow**: It receives an action slug. It asks the current Pipedream client for that action’s definition, unwraps the data field when Pipedream returns one, and returns the definition dictionary. If Pipedream says the action does not exist, it raises UnknownBrokerTool instead.
+
+**Call relations**: PipedreamBroker.schema uses this to describe an action, and PipedreamBroker.execute uses it before running an action. It is the shared fetch-and-normalize step for action metadata.
+
+*Call graph*: called by 2 (execute, schema); 2 external calls (__init__, pipedream_client).
+
+
+##### `PipedreamBroker._key_miss`  (lines 178–192)
+
+```
+async def _key_miss(self, client: pipedream.PipedreamClient, provider: str, slug: str) -> PipedreamError
+```
+
+**Purpose**: Builds a helpful error when an action key is unknown during execution. Instead of only saying “not found,” it tries to include the real available action keys for that provider.
+
+**Data flow**: It receives a Pipedream client, provider, and missing slug. It looks up the provider’s app, asks Pipedream for that app’s actions, converts them into tools, and creates a PipedreamError that names the missing action and available alternatives. If the catalog lookup fails, it still returns a simpler not-found error.
+
+**Call relations**: PipedreamBroker.execute calls this after _definition reports an unknown tool. It uses _spec to find the app and _listed_tools to produce a readable list of valid action slugs.
+
+*Call graph*: calls 4 internal fn (_listed_tools, _spec, list_actions, __init__); called by 1 (execute).
+
+
+##### `_stale_account`  (lines 195–202)
+
+```
+def _stale_account(error: PipedreamError, account_id: str) -> bool
+```
+
+**Purpose**: Decides whether a Pipedream error looks like a stale connected account grant. A stale grant means the stored account reference no longer works and the member probably needs to reconnect.
+
+**Data flow**: It receives a PipedreamError and the account id being used. It lowercases the error body and looks for narrow signs such as “external user not found” or the same account id appearing with “not found.” It returns true only for those likely stale-account cases.
+
+**Call relations**: PipedreamBroker.execute uses this after run failures and action-level errors. When it returns true, execute asks _reconnect_error to add member-friendly reconnect guidance.
+
+*Call graph*: called by 1 (execute).
+
+
+##### `_reconnect_error`  (lines 205–206)
+
+```
+def _reconnect_error(error: PipedreamError, provider: str) -> PipedreamError
+```
+
+**Purpose**: Adds clear reconnect instructions to an existing Pipedream error. This helps the agent tell the member what to do when an old account grant no longer works.
+
+**Data flow**: It receives a PipedreamError and provider name. It keeps the original status code, appends standard stale-grant guidance for that provider to the error body, and returns a new PipedreamError.
+
+**Call relations**: PipedreamBroker.execute uses this for stale run failures, and PipedreamBroker.credential uses it when a workspace account cannot be found. It relies on the shared stale_grant_guidance helper for the wording.
+
+*Call graph*: calls 1 internal fn (__init__); called by 2 (credential, execute); 1 external calls (stale_grant_guidance).
+
+
+##### `_spec`  (lines 209–213)
+
+```
+def _spec(provider: str) -> ConnectorSpec
+```
+
+**Purpose**: Looks up UFO’s registered Pipedream connector information for a provider name. This is how the broker knows which Pipedream app slug belongs to a provider.
+
+**Data flow**: It receives a provider string. It searches the registered Pipedream connectors map and returns the ConnectorSpec when found. If the provider is not registered, it raises a KeyError.
+
+**Call relations**: This is a small but important lookup used across discovery, execution, credential creation, and missing-key error reporting. PipedreamBroker.tools, PipedreamBroker.execute, PipedreamBroker.credential, and PipedreamBroker._key_miss all depend on it before talking about a provider’s app.
+
+*Call graph*: called by 4 (_key_miss, credential, execute, tools).
+
+
+##### `_listed_tools`  (lines 216–232)
+
+```
+def _listed_tools(rows: tuple[dict[str, object], ...]) -> tuple[BrokerTool, ...]
+```
+
+**Purpose**: Converts raw Pipedream action-list entries into UFO BrokerTool objects. It filters out unusable entries and gives each tool a slug, description, and input schema.
+
+**Data flow**: It receives a tuple of dictionaries from Pipedream’s action listing. For each item with a non-empty string key, it extracts a description, reads configurable properties, converts those properties into an input schema, and adds a BrokerTool to the output tuple.
+
+**Call relations**: PipedreamBroker.tools uses this for normal tool discovery. PipedreamBroker._key_miss also uses it when building a helpful list of valid action keys after an execution request names an unknown action.
+
+*Call graph*: calls 3 internal fn (_input_schema, _props, _str); called by 2 (_key_miss, tools); 1 external calls (__init__).
+
+
+##### `_props`  (lines 235–237)
+
+```
+def _props(definition: dict[str, object]) -> list[dict[str, object]]
+```
+
+**Purpose**: Extracts the list of configurable properties from a Pipedream action definition or listing item. These properties describe the inputs and special internal slots of an action.
+
+**Data flow**: It receives a definition dictionary. It reads configurable_props, keeps only entries that are dictionaries, and returns them as a list. If the field is missing or not a list, it returns an empty list.
+
+**Call relations**: PipedreamBroker.schema and _listed_tools use this before building input schemas. _app_slot also uses it to find the special connected-account slot needed during execution.
+
+*Call graph*: called by 3 (schema, _app_slot, _listed_tools).
+
+
+##### `_app_slot`  (lines 240–247)
+
+```
+def _app_slot(definition: dict[str, object], slug: str) -> str
+```
+
+**Purpose**: Finds the special Pipedream input field where the connected account must be placed. Without this slot, the broker cannot safely run the action on behalf of the member.
+
+**Data flow**: It receives an action definition and slug. It scans the action’s properties for the app-type property with a valid name and returns that name. If no such property exists, it raises a PipedreamError saying the action cannot bind an account.
+
+**Call relations**: PipedreamBroker.execute calls this just before running an action. The returned field name is where execute inserts the account’s authProvisionId.
+
+*Call graph*: calls 2 internal fn (_props, __init__); called by 1 (execute).
+
+
+##### `_input_schema`  (lines 250–273)
+
+```
+def _input_schema(props: list[dict[str, object]]) -> dict[str, object]
+```
+
+**Purpose**: Turns Pipedream action properties into a JSON schema for the arguments an agent may provide. It hides broker-owned and Pipedream-internal fields so the model is not asked to fill in things it should not control.
+
+**Data flow**: It receives a list of property dictionaries. It skips unnamed fields, the app account slot, directory fields, and internal fields whose type starts with $. For the remaining fields, it maps Pipedream property types to simple JSON types, copies a description when available, tracks required fields, and returns an object schema.
+
+**Call relations**: PipedreamBroker.schema uses this for a single action definition, and _listed_tools uses it while listing many actions. It calls _str to safely read property type text.
+
+*Call graph*: calls 1 internal fn (_str); called by 2 (schema, _listed_tools).
+
+
+##### `_str`  (lines 276–277)
+
+```
+def _str(value: object) -> str
+```
+
+**Purpose**: Safely turns a value into a string only when it already is one. This prevents accidental non-string values from leaking into descriptions or type checks.
+
+**Data flow**: It receives any value. If the value is a string, it returns it unchanged; otherwise it returns an empty string. It has no side effects.
+
+**Call relations**: PipedreamBroker.schema, _listed_tools, and _input_schema use this as a small cleanup helper when reading Pipedream metadata that may be missing or shaped unexpectedly.
+
+*Call graph*: called by 3 (schema, _input_schema, _listed_tools).
+
+
+### `extensions/pipedream/ufo_ext_pipedream/client.py`
+
+`io_transport` · `connector consent, account lookup, and action execution`
+
+This file is the bridge between this project and Pipedream’s Connect API. Pipedream acts like a trusted valet for OAuth, the web sign-in flow where a user grants access to another app. Instead of storing a Gmail token here, the system stores only a Pipedream connected-account id. When an action runs, Pipedream injects the real credential on its side.
+
+The file starts by naming the supported Pipedream connectors. Right now the allowlist contains Gmail. This matters because not every provider is meant to go through Pipedream; only providers that need this broker belong here.
+
+The main class, PipedreamClient, knows how to ask Pipedream for a project access token, create a hosted consent link, look up connected accounts, list available actions, fetch an action’s definition, and run an action. It uses httpx, an HTTP client library, for network calls.
+
+The most important safety idea is ownership checking. A project-level Pipedream token can read many accounts in the Pipedream project, so this code checks the account’s external user id before using it. That is the “show me this badge belongs to this person” step. Without it, a confused part of the system might accidentally run a tool using someone else’s connected account.
+
+#### Function details
+
+##### `PipedreamError.__init__`  (lines 80–83)
+
+```
+def __init__(self, status: int, body: str) -> None
+```
+
+**Purpose**: Creates a clear error when Pipedream rejects a request or returns data this client cannot safely use. It keeps the HTTP status code and response body so callers can report or react to the exact failure.
+
+**Data flow**: It receives a numeric status and a text body. It turns those into a readable exception message, then stores both values on the error object for later inspection.
+
+**Call relations**: This error is raised throughout this client when token creation, account lookup, action listing, or response parsing fails. The broker code also raises it when connector setup or execution cannot continue safely.
+
+*Call graph*: called by 12 (_key_miss, credential, execute, _app_slot, _reconnect_error, access_token, connect_token, newest_account, workspace_account, _account (+2 more)).
+
+
+##### `PipedreamClient.access_token`  (lines 121–142)
+
+```
+async def access_token(self) -> str
+```
+
+**Purpose**: Gets the project-level access token this server needs before calling most Pipedream API endpoints. It reuses a cached token until it is close to expiring, avoiding an unnecessary login request on every call.
+
+**Data flow**: It first checks the process-wide token cache using the client id. If a fresh token is already available, it returns it. Otherwise it sends the client id and secret to Pipedream’s OAuth token endpoint, checks that the response contains an access token, stores the token with its expiry time, and returns the token string.
+
+**Call relations**: The lower-level request helpers, PipedreamClient._get and PipedreamClient._post, call this before making authenticated Pipedream calls. It uses PipedreamClient._http to open the HTTP client and _body to turn the HTTP response into checked data.
+
+*Call graph*: calls 3 internal fn (_http, __init__, _body); called by 2 (_get, _post); 1 external calls (monotonic).
+
+
+##### `PipedreamClient.connect_token`  (lines 144–159)
+
+```
+async def connect_token(self, external_user_id: str, success_redirect_uri: str, error_redirect_uri: str) -> ConnectToken
+```
+
+**Purpose**: Creates a short-lived Pipedream Connect token and browser link for a user to connect an account. This is the start of the hosted consent flow, where the user is sent to Pipedream to approve access.
+
+**Data flow**: It receives an external user id plus success and error return URLs. It posts those to Pipedream, expects back a token and a connect link URL, and returns them as a ConnectToken object. If either value is missing, it raises an error instead of pretending the consent link is usable.
+
+**Call relations**: This public client method hands off the actual network work to PipedreamClient._post. It raises PipedreamError if Pipedream’s answer is missing the fields the rest of the OAuth flow depends on.
+
+*Call graph*: calls 2 internal fn (_post, __init__); 1 external calls (__init__).
+
+
+##### `PipedreamClient.connected_account`  (lines 161–168)
+
+```
+async def connected_account(self, account_id: str, external_user_id: str) -> ConnectedAccount
+```
+
+**Purpose**: Reads one connected account and proves that it belongs to the expected external user. This prevents the project token from being misused to access another user’s account.
+
+**Data flow**: It receives a Pipedream account id and the external user id that should own it. It fetches the account record, unwraps the response if it is inside a data field, and passes the record through an ownership check. The result is a ConnectedAccount object if the account is healthy and owned by the expected user.
+
+**Call relations**: It uses PipedreamClient._get for the API call, _dict to safely treat optional nested data as a dictionary, and _owned_account for the real safety check.
+
+*Call graph*: calls 3 internal fn (_get, _dict, _owned_account).
+
+
+##### `PipedreamClient.account_label`  (lines 170–174)
+
+```
+async def account_label(self, account_id: str) -> str | None
+```
+
+**Purpose**: Looks up a human-friendly name for a connected account, if Pipedream has one. This is useful for showing users which account they connected, such as a mailbox name.
+
+**Data flow**: It receives an account id, fetches the account record, unwraps the response if needed, and reads the name field. It returns the name when it is a non-empty string, otherwise it returns nothing.
+
+**Call relations**: It uses PipedreamClient._get to retrieve the account and _dict to safely handle Pipedream’s response shape. Unlike the account validation methods, it only extracts a display label.
+
+*Call graph*: calls 2 internal fn (_get, _dict).
+
+
+##### `PipedreamClient.workspace_account`  (lines 176–186)
+
+```
+async def workspace_account(self, account_id: str, workspace_id: UUID) -> ConnectedAccount
+```
+
+**Purpose**: Reads a connected account and checks that it belongs to a specific workspace. This is the workspace-level guard before a connector action is allowed to run.
+
+**Data flow**: It receives an account id and a workspace id. It fetches the account, converts the record into a ConnectedAccount, then checks whether the account’s external user id matches the workspace’s allowed id pattern. If the pattern does not match, it raises a permission error; otherwise it returns the account.
+
+**Call relations**: It calls PipedreamClient._get for the account record, _account to validate the basic account fields, and _workspace_owns_external_user to decide whether the workspace owns that external user id.
+
+*Call graph*: calls 5 internal fn (_get, __init__, _account, _dict, _workspace_owns_external_user).
+
+
+##### `PipedreamClient.newest_account`  (lines 188–202)
+
+```
+async def newest_account(self, external_user_id: str, app: str) -> ConnectedAccount
+```
+
+**Purpose**: Finds the most recently connected account for a given external user and app. This is used after a user finishes the consent flow, when the system needs to identify which new account was just created.
+
+**Data flow**: It receives an external user id and a Pipedream app slug. It asks Pipedream for matching accounts, keeps valid dictionary records, chooses the one with the newest created_at value, checks that it has an id, and verifies that it belongs to the same external user. It returns a ConnectedAccount or raises an error if no usable account exists.
+
+**Call relations**: It uses PipedreamClient._get to list accounts, _dict to cleanly handle response entries, and _owned_account to apply the same ownership guard used by direct account reads.
+
+*Call graph*: calls 4 internal fn (_get, __init__, _dict, _owned_account).
+
+
+##### `PipedreamClient.list_actions`  (lines 204–233)
+
+```
+async def list_actions(self, app: str, query: str='') -> tuple[dict[str, object], ...]
+```
+
+**Purpose**: Lists the Pipedream actions available for one app, optionally filtered by a search query. It follows Pipedream’s paging system so discovery can see actions beyond the first page.
+
+**Data flow**: It receives an app slug and optional query text. It repeatedly requests pages of actions, adds valid action records to a growing list, follows the end cursor when another page is available, and stops when a page is short, the cursor is missing, or the maximum listing size is reached. It returns a tuple of action dictionaries.
+
+**Call relations**: The broker’s key-miss path calls this when it needs to search Pipedream’s action catalog. Internally it uses PipedreamClient._get for each page and _dict to safely read paging information.
+
+*Call graph*: calls 2 internal fn (_get, _dict); called by 1 (_key_miss).
+
+
+##### `PipedreamClient.action_definition`  (lines 235–236)
+
+```
+async def action_definition(self, key: str) -> dict[str, object]
+```
+
+**Purpose**: Fetches the full definition for one Pipedream action component. A caller uses this when it needs to know the action’s inputs and structure before running or describing it.
+
+**Data flow**: It receives an action key. It sends a GET request to the matching component endpoint and returns Pipedream’s response as a dictionary.
+
+**Call relations**: This is a thin public wrapper around PipedreamClient._get. The request helper supplies authentication, sends the HTTP request, and checks the response shape.
+
+*Call graph*: calls 1 internal fn (_get).
+
+
+##### `PipedreamClient.run_action`  (lines 238–256)
+
+```
+async def run_action(self, key: str, external_user_id: str, configured_props: dict[str, object]) -> dict[str, object]
+```
+
+**Purpose**: Runs one Pipedream action on the server side using the connected user account identified by the configured properties. It also asks Pipedream to create a fresh file stash so files produced by the action can be returned as downloadable links.
+
+**Data flow**: It receives an action key, an external user id, and configured action inputs. It builds the run request body, adds a fresh stash id, checks that the JSON payload is not too large, and posts it to Pipedream. The returned dictionary is Pipedream’s action result.
+
+**Call relations**: This method hands the network request to PipedreamClient._post. It uses json.dumps only to measure the request size before sending, so oversized tool arguments fail locally instead of being sent to Pipedream.
+
+*Call graph*: calls 1 internal fn (_post); 1 external calls (dumps).
+
+
+##### `PipedreamClient._get`  (lines 258–261)
+
+```
+async def _get(self, path: str, params: dict[str, str] | None=None) -> dict[str, object]
+```
+
+**Purpose**: Performs an authenticated GET request to Pipedream and returns a checked dictionary response. It is the shared path for read-style API calls.
+
+**Data flow**: It receives an API path and optional query parameters. It gets an access token, opens an HTTP client with that token, sends the GET request, and turns the response into a dictionary or raises an error.
+
+**Call relations**: Higher-level methods such as account_label, connected_account, workspace_account, newest_account, list_actions, and action_definition call this instead of repeating authentication and response checking themselves.
+
+*Call graph*: calls 3 internal fn (_http, access_token, _body); called by 6 (account_label, action_definition, connected_account, list_actions, newest_account, workspace_account).
+
+
+##### `PipedreamClient._post`  (lines 263–266)
+
+```
+async def _post(self, path: str, body: dict[str, object]) -> dict[str, object]
+```
+
+**Purpose**: Performs an authenticated POST request to Pipedream and returns a checked dictionary response. It is the shared path for API calls that create something or run something.
+
+**Data flow**: It receives an API path and a request body dictionary. It gets an access token, opens an HTTP client with that token, sends the body as JSON, and parses the checked response into a dictionary.
+
+**Call relations**: PipedreamClient.connect_token uses it to create a Connect token, and PipedreamClient.run_action uses it to execute an action. It relies on access_token, _http, and _body for the common plumbing.
+
+*Call graph*: calls 3 internal fn (_http, access_token, _body); called by 2 (connect_token, run_action).
+
+
+##### `PipedreamClient._http`  (lines 268–281)
+
+```
+def _http(self, token: str | None=None) -> httpx.AsyncClient
+```
+
+**Purpose**: Creates the HTTP client used for talking to Pipedream. For authenticated calls, it adds the bearer token and Pipedream environment header; for the token request, it leaves those headers off.
+
+**Data flow**: It receives an optional token. If a token is present, it builds headers containing authorization and environment information. It then returns an httpx AsyncClient configured with Pipedream’s base URL, timeout, optional test transport, and those headers.
+
+**Call relations**: PipedreamClient.access_token uses it for the unauthenticated OAuth token call. PipedreamClient._get and PipedreamClient._post use it for authenticated API calls.
+
+*Call graph*: called by 3 (_get, _post, access_token); 1 external calls (AsyncClient).
+
+
+##### `_dict`  (lines 284–285)
+
+```
+def _dict(value: object) -> dict[str, object]
+```
+
+**Purpose**: Safely treats a value as a dictionary only when it really is one. This avoids crashes when Pipedream returns a missing or unexpected nested field.
+
+**Data flow**: It receives any value. If the value is a dictionary, it returns it unchanged. Otherwise it returns an empty dictionary, giving callers a safe object to read from.
+
+**Call relations**: Several account and listing methods call this before reading nested response data. _account also uses it when reading the app information inside a connected account record.
+
+*Call graph*: called by 6 (account_label, connected_account, list_actions, newest_account, workspace_account, _account).
+
+
+##### `_owned_account`  (lines 288–301)
+
+```
+def _owned_account(record: dict[str, object], account_id: str, external_user_id: str) -> ConnectedAccount
+```
+
+**Purpose**: Checks that an account record is healthy and belongs to one exact external user. This is one of the core security guards in the file.
+
+**Data flow**: It receives a raw account record, the expected account id, and the expected external user id. It first turns the record into a ConnectedAccount through _account, then compares the account’s stored owner with the expected owner. It returns the account if they match, or raises a permission error if they do not.
+
+**Call relations**: PipedreamClient.connected_account and PipedreamClient.newest_account call this whenever they need user-level ownership proof. It delegates basic account validation to _account and raises PipedreamError on mismatch.
+
+*Call graph*: calls 2 internal fn (__init__, _account); called by 2 (connected_account, newest_account).
+
+
+##### `_account`  (lines 304–316)
+
+```
+def _account(record: dict[str, object], account_id: str) -> ConnectedAccount
+```
+
+**Purpose**: Converts a raw Pipedream account record into the project’s small ConnectedAccount object. It also rejects records that are missing an owner or are marked unhealthy.
+
+**Data flow**: It receives a dictionary from Pipedream and the account id being read. It checks for a non-empty external owner, rejects explicitly unhealthy accounts, extracts the app slug if present, and returns a ConnectedAccount with the id, app, and owner.
+
+**Call relations**: PipedreamClient.workspace_account calls this before workspace ownership checking. _owned_account calls it before comparing a record’s owner with the expected external user.
+
+*Call graph*: calls 2 internal fn (__init__, _dict); called by 2 (workspace_account, _owned_account); 1 external calls (__init__).
+
+
+##### `workspace_user_prefix`  (lines 319–320)
+
+```
+def workspace_user_prefix(workspace_id: UUID) -> str
+```
+
+**Purpose**: Builds the standard text prefix used for external user ids that belong to a workspace. This gives the code one consistent way to name Pipedream users created under a workspace.
+
+**Data flow**: It receives a workspace UUID. It turns the UUID into its compact hexadecimal form and combines it with the project’s external-user prefix and a trailing underscore. The result is a string prefix.
+
+**Call relations**: _workspace_owns_external_user uses this prefix to check ownership, and connection_user_id uses it when creating a new state-scoped external user id.
+
+*Call graph*: called by 2 (_workspace_owns_external_user, connection_user_id).
+
+
+##### `_workspace_owns_external_user`  (lines 323–332)
+
+```
+def _workspace_owns_external_user(workspace_id: UUID, external_user_id: str) -> bool
+```
+
+**Purpose**: Decides whether a Pipedream external user id belongs to a given workspace. It accepts both an older direct workspace id form and the newer workspace-plus-connection-id form.
+
+**Data flow**: It receives a workspace id and an external user id string. It first checks the direct legacy form. If that does not match, it checks for the workspace prefix, removes it, and verifies that the remaining connection id is exactly the expected length and made only of lowercase hexadecimal characters. It returns true or false.
+
+**Call relations**: PipedreamClient.workspace_account calls this after reading an account to decide whether the workspace is allowed to use it. It relies on workspace_user_prefix for the canonical prefix.
+
+*Call graph*: calls 1 internal fn (workspace_user_prefix); called by 1 (workspace_account).
+
+
+##### `connection_user_id`  (lines 335–337)
+
+```
+def connection_user_id(workspace_id: UUID, state: str) -> str
+```
+
+**Purpose**: Creates a stable Pipedream external user id for one workspace and one connection state value. The state is hashed so the final id is predictable for the same state but does not expose the full state text.
+
+**Data flow**: It receives a workspace UUID and a state string. It hashes the state with SHA-256, keeps the first 32 hexadecimal characters as the connection id, prefixes that with the workspace user prefix, and returns the final external user id.
+
+**Call relations**: It uses workspace_user_prefix to keep naming consistent with the ownership checker. The resulting id is later used by Pipedream account lookup and ownership checks.
+
+*Call graph*: calls 1 internal fn (workspace_user_prefix); 1 external calls (sha256).
+
+
+##### `_body`  (lines 340–348)
+
+```
+def _body(response: httpx.Response) -> dict[str, object]
+```
+
+**Purpose**: Turns an HTTP response from Pipedream into a safe dictionary, or raises a clear error. It is the central response checker for this client.
+
+**Data flow**: It receives an httpx response. If the status code is an error, it raises PipedreamError with the status and response text. If the response body is empty, it returns an empty dictionary. Otherwise it parses JSON and requires the top-level value to be a dictionary.
+
+**Call relations**: PipedreamClient.access_token, PipedreamClient._get, and PipedreamClient._post all call this after receiving a response. That keeps error handling and response-shape validation consistent across the client.
+
+*Call graph*: calls 1 internal fn (__init__); called by 3 (_get, _post, access_token); 1 external calls (json).
+
+
+##### `pipedream_client`  (lines 351–369)
+
+```
+def pipedream_client() -> PipedreamClient
+```
+
+**Purpose**: Builds a PipedreamClient from environment variables. It fails early if the deployment is missing the Pipedream client id, client secret, or project id needed to broker OAuth.
+
+**Data flow**: It reads the required Pipedream settings from the process environment. If any required value is missing, it raises a RuntimeError explaining what must be configured. Otherwise it returns a PipedreamClient, using the configured environment name or the default production environment.
+
+**Call relations**: This is the convenient factory for code that needs the deploy’s real Pipedream client. It calls the PipedreamClient constructor after validating configuration.
+
+*Call graph*: 1 external calls (__init__).
+
+
+### `extensions/pipedream/ufo_ext_pipedream/proxy.py`
+
+`io_transport` · `request handling and teardown`
+
+Pipedream keeps provider credentials on its own servers, so this project cannot simply attach a Gmail, Slack, or other provider token to outgoing requests. This file solves that by acting like a postal forwarding service. A connector writes a normal HTTP request to the provider, and this transport wraps that request so Pipedream can send it on with the right credential added safely on the server side.
+
+The main class, PipedreamProxyTransport, is an httpx transport. A transport is the low-level part of an HTTP client that actually sends requests. When a request comes in, it first asks the Pipedream client for a Pipedream access token. It then reads the original request body, copies useful headers, and adds a special prefix to those headers so Pipedream knows which ones should be forwarded to the real provider. Headers that belong only to the local HTTP connection, such as host, content length, or authorization, are deliberately left out so they do not confuse or leak into the upstream request.
+
+Next, it encodes the original provider URL into a safe text form and places it inside a Pipedream proxy URL, along with the external user id and account id. Finally, it sends this new request through an inner transport. The response is passed back unchanged, which matters because callers may depend on exact status codes or headers for pagination, retry behavior, or error handling.
+
+#### Function details
+
+##### `PipedreamProxyTransport.handle_async_request`  (lines 54–73)
+
+```
+async def handle_async_request(self, request: httpx.Request) -> httpx.Response
+```
+
+**Purpose**: This is the core forwarding step. It receives a normal HTTP request meant for a provider, rewrites it into a Pipedream Connect Proxy request, and sends it so Pipedream can inject the provider credential safely.
+
+**Data flow**: It starts with an incoming httpx request, plus the transport's stored Pipedream client, account id, external user id, and inner transport. It asks the client for a Pipedream access token, reads the request body, filters and re-prefixes headers that should be passed upstream, and base64-url-encodes the original provider URL so it can fit inside the proxy path. It builds a new request to Pipedream's proxy endpoint with the account and user identifiers in the query string, sends that request through the inner transport, and returns the resulting response unchanged.
+
+**Call relations**: In the bigger flow, an httpx AsyncClient uses this method whenever code tries to send a provider request through this custom transport. Inside the method, it uses httpx.Request.aread to collect the body, base64.urlsafe_b64encode to make the target URL safe for the proxy path, httpx.URL to build the Pipedream endpoint, and httpx.Request to create the rewritten request. It then hands the rewritten request to the inner transport, which performs the actual network send.
+
+*Call graph*: 4 external calls (urlsafe_b64encode, Request, aread, URL).
+
+
+##### `PipedreamProxyTransport.aclose`  (lines 75–76)
+
+```
+async def aclose(self) -> None
+```
+
+**Purpose**: This shuts down the wrapped inner transport when the proxy transport is no longer needed. It is important for releasing network resources cleanly, such as open connections.
+
+**Data flow**: It takes no new input beyond the transport instance itself. It calls the inner transport's close method and waits for it to finish. Nothing is returned, but the underlying network resources are given a chance to close properly.
+
+**Call relations**: This is used during cleanup, when the HTTP client or surrounding code is finished with the transport. Rather than doing its own shutdown work, it passes the close request directly to the inner transport, because that is the piece that owns the actual connection machinery.
+
+
+### Connector account objects
+Connected accounts and per-agent permissions are exposed as workspace objects with inspection, sharing, revocation, and disconnect controls.
+
+### `extensions/connectors/ufo_ext_connectors/objects.py`
+
+`domain_logic` · `request handling for workspace object listing, status, apply, and delete operations`
+
+A connector account is not just ordinary data: it represents access to a third-party service, so the system must be careful about who can see it, share it, or remove it. This file turns those accounts into two object types the rest of the workspace can understand. A `connection` is the member-owned account itself, created only through the separate account-connection flow. A `connector_grant` is one agent’s access to that account, like a key issued to one assistant rather than ownership of the whole house.
+
+The file defines small data shapes for these objects, then two object stores. `ConnectionObjects` lets the workspace list connections, inspect their details, show live status, and disconnect them. It refuses to create or edit connections directly, because connecting an account requires third-party consent. `ConnectorGrantObjects` lists and edits agent-specific grants. It can attach an already-held connection to an agent, flip a grant between private and shared, or revoke only that agent’s access.
+
+The important safety rule is that every change goes through the grants service and requires a speaking member when ownership matters. The exported `CONNECTION_OBJECT` and `CONNECTOR_GRANT_OBJECT` register these behaviors with the workspace object system so tools and the portal can use them consistently.
+
+#### Function details
+
+##### `_AccountSummary.provider`  (lines 51–51)
+
+```
+def provider(self) -> str
+```
+
+**Purpose**: This is part of a simple contract for account summary-like objects. It says any summary used here must be able to provide the name of the outside service, such as a provider name.
+
+**Data flow**: There is no real computation in this property definition. It describes that a summary object must already contain provider text, and code using that object can read the provider from it.
+
+**Call relations**: The `_named` helper relies on this property when it builds stable object names. Any connection or grant summary passed into `_named` is expected to satisfy this contract.
+
+
+##### `_AccountSummary.account_id`  (lines 54–54)
+
+```
+def account_id(self) -> str
+```
+
+**Purpose**: This is the second part of the account summary contract. It says a summary must expose the account identifier used by the external provider.
+
+**Data flow**: There is no runtime transformation here. The property promises that a summary object has an account ID value that other code can read.
+
+**Call relations**: The `_named` helper combines this account ID with the provider to create the object name used by both connection rows and grant rows.
+
+
+##### `_named`  (lines 57–58)
+
+```
+def _named(rows: tuple[SummaryT, ...]) -> dict[str, SummaryT]
+```
+
+**Purpose**: This helper gives account summaries their workspace object names. It turns a group of summaries into a dictionary keyed by the standard account name, so later code can list objects with predictable names.
+
+**Data flow**: It receives a tuple of summary objects that each expose a provider and account ID. For each summary, it asks `account_object_name` to build the canonical name, then returns a dictionary from that name to the original summary.
+
+**Call relations**: Both `ConnectionObjects._member_rows` and `ConnectorGrantObjects._member_rows` call this before building visible object rows. It is the shared naming step that keeps connections and grants speaking the same naming language.
+
+*Call graph*: called by 2 (_member_rows, _member_rows); 1 external calls (account_object_name).
+
+
+##### `ConnectionObjects._member_rows`  (lines 69–83)
+
+```
+async def _member_rows(self, ext: ExtensionContext | None, *, member_id: UUID | None) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
+```
+
+**Purpose**: This builds the list of connection objects a member-readable object store can show. Each row represents one connected provider account and includes who owns it.
+
+**Data flow**: It asks the grants layer for connection summaries, gives them stable names through `_named`, and turns each summary into an `OwnedRow`. The output is a tuple of rows with a display summary and an owner record containing the owning member and the connection generation ID.
+
+**Call relations**: The workspace object system calls this when it needs to list `connection` objects for a member or in the portal. It relies on `connection_summaries` for the raw facts and `_named` for consistent names.
+
+*Call graph*: calls 1 internal fn (_named); 3 external calls (__init__, __init__, connection_summaries).
+
+
+##### `ConnectionObjects._member_object`  (lines 85–103)
+
+```
+async def _member_object(self, ext: ExtensionContext | None, name: str, owner: GeneratedObjectOwner, *, member_id: UUID | None) -> ObjectDetail[ConnectionSpec] | None
+```
+
+**Purpose**: This returns the detailed object view for one connected account. It is used when someone opens or fetches a specific `connection` object.
+
+**Data flow**: It receives the requested object name and owner information, then looks through current connection summaries for the matching generation ID. If found, it returns an `ObjectDetail` containing the provider, account ID, creation time, and update time; if the connection no longer exists, it returns nothing.
+
+**Call relations**: The object framework calls this after a row has identified a connection. It reads from `connection_summaries` and packages the result as a `ConnectionSpec` so callers see a clean object description rather than raw grant-service data.
+
+*Call graph*: 3 external calls (__init__, __init__, connection_summaries).
+
+
+##### `ConnectionObjects._status`  (lines 105–118)
+
+```
+async def _status(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> dict[str, JsonValue] | None
+```
+
+**Purpose**: This provides live status information for a connection beyond its basic saved fields. It shows who owns the account, what host it belongs to, and which agents currently use it.
+
+**Data flow**: It receives the tool context, object name, and owner record. It finds the matching connection summary by generation ID and returns a small dictionary of status values, or returns nothing if the connection has disappeared.
+
+**Call relations**: The workspace object system calls this when a tool or portal asks for status on a `connection`. It reads the same connection summaries as the list and detail paths, but returns operational information rather than the object spec.
+
+*Call graph*: 1 external calls (connection_summaries).
+
+
+##### `ConnectionObjects._apply_owned`  (lines 120–128)
+
+```
+async def _apply_owned(self, ctx: ToolContext, name: str, spec: ConnectionSpec, old: ConnectionSpec | None, owner: GeneratedObjectOwner | None) -> None
+```
+
+**Purpose**: This deliberately blocks direct creation or editing of connection objects. A real account connection needs third-party authorization, so users must go through `connect_account` instead.
+
+**Data flow**: It receives the requested connection spec, any old spec, and ownership information, but does not apply them. It immediately raises a `VerbNotSupported` error with a message explaining that account connection must use the proper consent flow.
+
+**Call relations**: The object framework calls this when someone tries to apply changes to a `connection`. Instead of handing off to the grants service, it stops the request so the safer account-connection flow remains the only creation path.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ConnectionObjects._delete_owned`  (lines 130–140)
 
 ```
 async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None
 ```
 
-**Purpose**: Stops an armed monitor. Deleting the object is the user's way to disarm the watch so it will not fire later.
+**Purpose**: This disconnects a member-owned provider account. Deleting a `connection` removes the underlying account connection and, by implication, cuts off all agent grants that depended on it.
 
-**Data flow**: It receives the tool context, monitor name, and expected owner information. It finds the current stored monitor. If the monitor is missing or its ID no longer matches the owner generation, it raises an error because the target changed while being stopped. If it matches, it asks `MonitorStore` to disarm it. If disarming fails, it raises the same kind of changed-while-stopping error.
+**Data flow**: It receives the tool context, object name, and owner record. It checks that the grants service is available and that there is a speaking member, then asks the grants service to disconnect the connection generation as that actor. If the disconnect fails because the connection changed or disappeared, it raises an error.
 
-**Call relations**: The object system calls this after its permission checks allow a delete. The function uses `_find` to locate the monitor, `_require_ext` to get storage access, and `MonitorStore.disarm` to perform the actual stop.
-
-*Call graph*: calls 2 internal fn (_find, _require_ext); 1 external calls (__init__).
+**Call relations**: The object framework calls this for deletion of a `connection`. It is the point where an object delete turns into a real grant-service disconnect, guarded by the owner-or-admin permission gate declared on the class.
 
 
-##### `MonitorObjects._find`  (lines 161–165)
+##### `ConnectorGrantObjects._admin_can_apply`  (lines 151–152)
 
 ```
-async def _find(self, ext: ExtensionContext | None, name: str) -> Monitor | None
+def _admin_can_apply(self, old: ConnectorGrantSpec, spec: ConnectorGrantSpec) -> bool
 ```
 
-**Purpose**: Looks up one armed monitor by name. It is a shared helper for the detailed view, status view, and delete operation.
+**Purpose**: This defines the one grant edit that an admin is allowed to perform without being the connection owner: making a shared grant private. It prevents admins from broadening access while still letting them reduce exposure.
 
-**Data flow**: It receives an optional extension context and a monitor name. It checks that the context exists, reads the current armed monitors from `MonitorStore`, scans for the first row whose name matches, and returns that row. If none match, it returns nothing.
+**Data flow**: It receives the old grant spec and the requested new spec. It returns true only when the old grant was shared and the requested spec is identical except that `shared` becomes false.
 
-**Call relations**: `MonitorObjects._member_object`, `MonitorObjects._status`, and `MonitorObjects._delete_owned` all call this instead of repeating the same lookup logic. It is the common “find the current monitor record” step before showing details, reporting status, or disarming.
+**Call relations**: The member-readable object framework uses this as part of permission checking for `connector_grant` updates. It supports the file’s safety rule: owners may share, while admins may only make access more private.
 
-*Call graph*: calls 1 internal fn (_require_ext); called by 3 (_delete_owned, _member_object, _status); 1 external calls (__init__).
+*Call graph*: 1 external calls (model_copy).
 
 
-### `extensions/monitors/ufo_ext_monitors/monitor_tool.py`
+##### `ConnectorGrantObjects._member_rows`  (lines 154–171)
 
-`orchestration` · `tool call / request handling`
+```
+async def _member_rows(self, ext: ExtensionContext | None, *, member_id: UUID | None) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
+```
 
-This file exists so an agent can wait for something without staying active the whole time. For example, it can watch a build, deployment, inbox, or log by running a shell command every few minutes and comparing the output with the first run. Think of it like taking a photo now, then asking someone to take another photo later and wake you only if the scene changes.
+**Purpose**: This builds the list of connector grant objects visible through the workspace object system. Each row represents one agent’s access to one connected account and says whether that access is shared or private.
 
-The main input shape is `MonitorInput`. It asks for a short monitor name, the shell command to run, how often to check, a deadline, a message to show now, and instructions for the future turn that will happen if the monitor fires. The command output must be stable: if it includes clocks or counters, the monitor will think something changed every time.
+**Data flow**: It asks the grants layer for grant summaries, gives them canonical account-style names through `_named`, and converts each summary into an `OwnedRow`. The owner record includes the member who owns the underlying connection, whether the grant is shared, and the grant generation ID.
 
-The `monitor` function is the tool’s workhorse. It first makes sure the scheduled-task extension is available, then checks that the conversation has not reached its monitor limit and that the requested name is not already used. Before saving anything, it runs the probe command once in the current sandbox. If that command fails, the tool refuses to arm the monitor, so a broken watch is not left behind. If it succeeds, the stdout becomes the baseline, the monitor row is stored, and the result includes the baseline plus a directive telling the agent to reply and end the turn. The `MONITOR_TOOL` object at the end exposes this behavior to the wider tool system.
+**Call relations**: The object framework calls this when listing `connector_grant` objects. It mirrors `ConnectionObjects._member_rows`, but reads `grant_summaries` because it is listing agent access edges rather than the base account connections.
+
+*Call graph*: calls 1 internal fn (_named); 3 external calls (__init__, __init__, grant_summaries).
+
+
+##### `ConnectorGrantObjects._member_object`  (lines 173–214)
+
+```
+async def _member_object(self, ext: ExtensionContext | None, name: str, owner: GeneratedObjectOwner, *, member_id: UUID | None) -> ObjectDetail[ConnectorGrantSpec] | None
+```
+
+**Purpose**: This returns the detailed object view for one connector grant. It tells the caller which provider account the grant uses, whether it is shared, and what agent the grant is scoped to.
+
+**Data flow**: It receives a name and owner record, then searches current grant summaries for the matching generation ID. If found, it builds a `ConnectorGrantSpec` and an `ObjectDetail`; the detail always links to the agent that holds the grant, and for private grants it also links back to the underlying connection object. If the grant no longer exists, it returns nothing.
+
+**Call relations**: The object framework calls this after a grant row is selected or fetched. It uses `grant_summaries` for the raw grant facts and `account_object_name` to point private grants back to their related `connection` object.
+
+*Call graph*: 6 external calls (__init__, __init__, __init__, __init__, account_object_name, grant_summaries).
+
+
+##### `ConnectorGrantObjects._status`  (lines 216–230)
+
+```
+async def _status(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> dict[str, JsonValue] | None
+```
+
+**Purpose**: This provides live status information for a connector grant. It shows the owning member, host, target agent, and whether the grant is shared.
+
+**Data flow**: It receives the tool context, object name, and owner record. It finds the current grant summary by generation ID and returns a dictionary of status fields, or returns nothing if the grant is gone.
+
+**Call relations**: The object system calls this when a tool or portal asks for status on a `connector_grant`. It complements the detailed object view by exposing current operational facts from `grant_summaries`.
+
+*Call graph*: 1 external calls (grant_summaries).
+
+
+##### `ConnectorGrantObjects._apply_owned`  (lines 232–280)
+
+```
+async def _apply_owned(self, ctx: ToolContext, name: str, spec: ConnectorGrantSpec, old: ConnectorGrantSpec | None, owner: GeneratedObjectOwner | None) -> None
+```
+
+**Purpose**: This applies changes to a connector grant. It can attach an existing connection to an agent, or change only the grant’s `shared` setting; it refuses attempts to create a brand-new external account or swap a grant to a different account.
+
+**Data flow**: For a new grant with no old object or owner, it requires a grants service and a speaking member, then asks the grants service to attach the provider account to the current conversation’s agent context with the requested sharing setting. For an existing grant, it reloads the current grant summary, verifies the provider and account ID have not been changed, and if only `shared` changed, asks the grants service to update that setting. It returns nothing on success and raises clear errors if access is unavailable, data changed mid-edit, or the requested action is not allowed.
+
+**Call relations**: The object framework calls this when someone applies a `connector_grant` create or update. It is the main bridge from declarative object edits to the grants service’s attach and share-change operations, while preserving the rule that `connect_account` is the only way to create the underlying account connection.
+
+*Call graph*: 4 external calls (__init__, __init__, model_copy, grant_summaries).
+
+
+##### `ConnectorGrantObjects._delete_owned`  (lines 282–292)
+
+```
+async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None
+```
+
+**Purpose**: This revokes one agent’s access to a connected account. It leaves the underlying connection, and any other agents’ grants, in place.
+
+**Data flow**: It receives the tool context, object name, and grant owner record. It checks that the grants service exists and that a speaking member is present, then asks the grants service to revoke the grant generation as that actor. If the revoke fails because the grant changed or disappeared, it raises an error.
+
+**Call relations**: The object framework calls this for deletion of a `connector_grant`. It turns the object delete into a grants-service revoke operation, using the revoke permission gate declared on the class.
+
+
+### Declared connector sources
+Additional connector sources cover static API-key-backed services and workspace-configured MCP servers that publish callable tools.
+
+### `extensions/keyed_connectors/ufo_ext_keyed_connectors.py`
+
+`config` · `startup / manifest load`
+
+Some external services, like Datadog, do not fit the usual “connect an account through a broker” flow. A workspace member already owns an API key, and that key must be sent to the service in a specific HTTP header. This file describes those providers in one table-like format: what the service is called, what secret keys it needs, which headers they go in, and which API host is allowed.
+
+The important safety idea is the “sentinel.” The sandbox gets an environment variable that looks like a key but is only a placeholder. When the sandbox makes a request to the approved host, the egress proxy replaces that placeholder with the real stored secret on the way out. Like giving someone a valet ticket instead of the car key, the sandbox can use the access path but cannot read or leak the raw secret.
+
+The file currently declares Datadog, including its possible regional API hosts. For services with fixed hosts, the host is simple. For services like Datadog, where the customer’s account belongs to one of several published sites, the user chooses from a closed list. That prevents a key for one region from being sent to a made-up or wrong host.
+
+Finally, `manifest()` packages these declarations into the extension manifest: credential slots plus a prompt section explaining how agents should request and use them.
 
 #### Function details
 
-##### `_require_ext`  (lines 76–79)
+##### `KeyedProvider.__post_init__`  (lines 69–78)
 
 ```
-def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
+def __post_init__(self) -> None
 ```
 
-**Purpose**: This small guard makes sure the monitor tool was given the scheduled-task extension it needs. Without that extension, the tool cannot save a durable monitor to be checked later.
+**Purpose**: This checks that each provider declaration is safe and complete as soon as it is created. It prevents a provider from accidentally having both a fixed host and a selectable host list, or neither.
 
-**Data flow**: It receives the extension context, which may be missing. If the context is present, it returns it unchanged. If it is missing, it stops the operation by raising an error that explains the monitor tool cannot run without it.
+**Data flow**: It reads the provider’s `host`, `sites`, `host_env`, and `site_description` fields after construction. If the declaration is valid, nothing changes and the provider can be used. If the declaration is ambiguous or missing needed host-choice details, it stops immediately by raising an error.
 
-**Call relations**: The `monitor` function calls this at the start of its work before creating a `MonitorStore`. This makes the missing-extension problem fail early and clearly, instead of failing later while trying to save the watch.
+**Call relations**: This is the guardrail for every `KeyedProvider` row in the provider table. Before later code can build credential slots or usage text, this method makes sure the row has one clear way to decide where requests may be sent.
 
-*Call graph*: called by 1 (monitor).
 
+##### `KeyedProvider.target_host`  (lines 81–90)
 
-##### `_refusal`  (lines 82–83)
-
-```
-def _refusal(text: str) -> ToolResult
-```
-
-**Purpose**: This creates a standard error-style tool result when the monitor cannot be armed. It is used for expected refusals, such as too many monitors, a duplicate name, or a probe command that failed.
-
-**Data flow**: It receives a plain text explanation. It wraps that explanation in `TextContent`, puts it inside a `ToolResult`, marks the result as an error, and returns it to the caller.
-
-**Call relations**: The `monitor` function calls this whenever it needs to reject the request without saving anything. It hands the reason back to the tool system in the normal response format, so the agent can see what went wrong and fix the request.
-
-*Call graph*: called by 1 (monitor); 2 external calls (__init__, __init__).
-
-
-##### `monitor`  (lines 86–134)
-
-```
-async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult
-```
-
-**Purpose**: This is the handler that arms a new monitor. It validates the request, runs the watch command once now, saves the monitor only if that first run succeeds, and returns instructions telling the agent what was armed and what baseline output it is watching.
-
-**Data flow**: It receives the current tool context and a `MonitorInput` request. It reads the conversation and agent information from the context, checks the existing armed monitors from `MonitorStore`, builds the full monitor name, and runs the requested shell command in the sandbox with a timeout. If any rule fails, it returns an error result and changes nothing. If the probe succeeds, it records the current time, trims the baseline output to a safe size, stores a monitor row with the deadline and next probe time, then returns a text result containing a directive and a JSON payload with the armed monitor details.
-
-**Call relations**: This function is the central path used by `MONITOR_TOOL` when the agent calls the monitor tool. It relies on `_require_ext` before it talks to the monitor store, uses `_refusal` for safe early exits, calls the sandbox to test the command immediately, and then asks `MonitorStore` to persist the durable watch for future scheduled checking.
-
-*Call graph*: calls 2 internal fn (_refusal, _require_ext); 9 external calls (__init__, __init__, __init__, now, timedelta, dumps, capped, qualified_name, stderr_tail).
-
-
-### `extensions/monitors/ufo_ext_monitors/monitors.py`
-
-`domain_logic` · `monitor setup, scheduled runner ticks, fire delivery, and user stop requests`
-
-A monitor is like a scheduled lookout. It remembers a shell command to run, what output counts as normal, when to check again, when the watch must end, and which conversation and agent should be re-entered if something changes. This file defines the monitor table and the small set of operations allowed on it.
-
-The important safety idea is leasing. A background runner periodically asks for due monitors. Instead of simply reading them, it claims them for a short time. That claim is like putting a sticky note on a task: “I am working on this.” Other runners then skip it until the claim expires. This prevents two workers from probing or firing the same monitor at once.
-
-The file also keeps every database query scoped to one workspace, because the transaction connection it receives is not automatically limited for it. Without these filters, one workspace could accidentally read or delete another workspace’s monitors.
-
-After each probe, the store records what happened: quiet output, command failure, or skipped execution. Quiet and failure streaks are tracked separately so the system can decide when a monitor should fire. When a fire is delivered, the monitor is retired. When a user asks to stop watching, it is disarmed immediately.
-
-#### Function details
-
-##### `qualified_name`  (lines 73–84)
-
-```
-def qualified_name(conversation_id: UUID, slug: str) -> str
-```
-
-**Purpose**: Builds the stored monitor name from a conversation identifier and a user-chosen slug. This keeps names unique across a workspace while still letting different conversations reuse friendly names like “ci-run”.
-
-**Data flow**: It takes a conversation UUID and a short name chosen by the agent. It uses the first few hexadecimal characters of the conversation ID as a prefix, joins that with the slug, and returns the combined name that is safe to store and look up.
-
-**Call relations**: This helper is used when creating or referring to monitor objects so the database’s workspace-wide unique name rule has a stable name to enforce. It does not call other project functions; it is a naming convention in one place.
-
-
-##### `capped`  (lines 87–97)
-
-```
-def capped(output: str) -> str
-```
-
-**Purpose**: Shortens probe output so a monitor fire cannot carry an unbounded amount of text. It preserves the beginning and end, which are usually the most useful parts, and marks how much was omitted.
-
-**Data flow**: It receives a text output string. If the encoded bytes fit under the configured limit, it returns the string unchanged. If it is too large, it keeps the first half and last half, inserts an omission marker in the middle, and returns that bounded version.
-
-**Call relations**: This function protects later monitor comparison and fire reporting from huge command output. It stands alone and is meant to be used before storing or comparing probe output.
-
-
-##### `stderr_tail`  (lines 100–105)
-
-```
-def stderr_tail(stderr: str) -> str
-```
-
-**Purpose**: Keeps only the final part of a failed command’s error output. This is useful because command errors usually end with the most specific explanation of what went wrong.
-
-**Data flow**: It receives stderr text from a shell command. If it is small enough, it returns it all. If it is too large, it returns only the last configured number of bytes, decoded back into text.
-
-**Call relations**: This is a small support helper for failure reporting. It does not call other project functions and exists to keep monitor fires readable and bounded.
-
-
-##### `_aware`  (lines 138–139)
-
-```
-def _aware(when: datetime) -> datetime
-```
-
-**Purpose**: Makes sure a datetime value has timezone information. In this file, times are treated as UTC so scheduling and deadlines are compared consistently.
-
-**Data flow**: It receives a datetime. If the datetime already has a timezone, it returns it as-is. If it has no timezone attached, it adds UTC and returns the corrected value.
-
-**Call relations**: _row calls this whenever it builds a Monitor from database data. This matters because some database backends may return timezone-less datetimes even though the system expects timezone-aware ones.
-
-*Call graph*: called by 1 (_row); 1 external calls (replace).
-
-
-##### `_row`  (lines 142–170)
-
-```
-def _row(row: sa.RowMapping) -> Monitor
-```
-
-**Purpose**: Turns a raw database row into a Monitor object that the rest of the code can use safely. It is the single conversion point for monitor records read from the database.
-
-**Data flow**: It receives a row mapping from SQLAlchemy, reads each monitor column, normalizes datetime fields through _aware, handles a missing last-probe time, and returns a Monitor value object with named fields.
-
-**Call relations**: MonitorStore.armed, MonitorStore.arm, and MonitorStore.claim_due all call _row after reading or writing database rows. This keeps the rest of the monitor code from needing to know database row details.
-
-*Call graph*: calls 1 internal fn (_aware); called by 3 (arm, armed, claim_due); 1 external calls (__init__).
-
-
-##### `_claim_available`  (lines 173–174)
-
-```
-def _claim_available(now: datetime) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds the database condition that says a monitor can be claimed by a runner. A monitor is available if nobody has claimed it or if its old claim has expired.
-
-**Data flow**: It receives the current time. It returns a SQL condition that checks whether the claim field is empty or the claim expiration is earlier than that time.
-
-**Call relations**: MonitorStore.claim_due uses this condition when leasing work, and due_monitor_workspaces.due uses the same condition when deciding which workspaces need attention. Sharing the condition keeps both decisions aligned.
-
-*Call graph*: called by 2 (claim_due, due); 1 external calls (or_).
-
-
-##### `_due`  (lines 177–178)
-
-```
-def _due(now: datetime) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds the database condition that says a monitor needs attention now. A monitor is due if its next probe time has arrived or its final deadline has arrived.
-
-**Data flow**: It receives the current time. It returns a SQL condition that checks whether either next_probe_at or deadline_at is at or before that time.
-
-**Call relations**: MonitorStore.claim_due uses this when selecting monitors to lease, and due_monitor_workspaces.due uses it when finding candidate workspaces for the runner. This keeps workspace discovery and actual claiming based on the same idea of “due”.
-
-*Call graph*: called by 2 (claim_due, due); 1 external calls (or_).
-
-
-##### `due_monitor_workspaces`  (lines 181–190)
-
-```
-def due_monitor_workspaces() -> WorkspaceCandidates
-```
-
-**Purpose**: Creates the job-system hook that finds workspaces with monitor work ready to run. It helps the background runner avoid scanning every workspace blindly.
-
-**Data flow**: It defines a query-producing inner function that finds distinct workspace IDs with due, claimable monitors. It passes that function to owner_candidates, which wraps it in the job system’s workspace-candidate format.
-
-**Call relations**: The monitor runner’s scheduling system can call the returned WorkspaceCandidates object to discover where work exists. Inside, the nested due function does the actual database selection.
-
-*Call graph*: 1 external calls (owner_candidates).
-
-
-##### `due_monitor_workspaces.due`  (lines 186–188)
-
-```
-def due() -> sa.Select[tuple[UUID]]
-```
-
-**Purpose**: Builds the concrete database query for workspaces that currently have monitor work. It looks only for monitors that are both due and free to claim.
-
-**Data flow**: It reads the current UTC time, builds the shared “claim available” and “due” conditions, selects workspace IDs from the monitor table, removes duplicates, and returns that SQL query.
-
-**Call relations**: due_monitor_workspaces hands this function to owner_candidates. It calls _claim_available and _due so workspace discovery matches the later MonitorStore.claim_due leasing rules.
-
-*Call graph*: calls 2 internal fn (_claim_available, _due); 2 external calls (now, select).
-
-
-##### `MonitorStore.armed`  (lines 199–205)
-
-```
-async def armed(self, conversation_id: UUID | None=None) -> tuple[Monitor, ...]
-```
-
-**Purpose**: Lists the currently armed monitors in this store’s workspace. It can list all monitors or only those belonging to one conversation.
-
-**Data flow**: It receives an optional conversation ID. It builds a workspace-filtered SELECT query, adds the conversation filter if provided, reads matching rows ordered by name, converts each row with _row, and returns them as an immutable tuple.
-
-**Call relations**: Callers use this when they need to show or inspect active watches. It reads through the ExtensionContext transaction and relies on _row to turn database rows into Monitor objects.
-
-*Call graph*: calls 1 internal fn (_row); 1 external calls (select).
-
-
-##### `MonitorStore.arm`  (lines 207–263)
-
-```
-async def arm(self, *, conversation_id: UUID, agent_id: UUID, name: str, audience: str, command: str, interval_minutes: int, deadline_at: datetime, reason: str, next_steps: str, metadata: dict[str, Js
-```
-
-**Purpose**: Creates a new armed monitor in the database. This is what records a new watch after the command, baseline, schedule, and fire instructions have been chosen.
-
-**Data flow**: It receives all monitor details, including conversation, agent, command, interval, deadline, baseline, and next probe time. It inserts a new row with fresh IDs, zeroed counters, no active claim, timestamps, and returns the inserted row as a Monitor.
-
-**Call relations**: This is the write path for arming a monitor. It calls uuid4 to create the monitor ID, uses SQLAlchemy insert to store it, and passes the returned row through _row before handing it back.
-
-*Call graph*: calls 1 internal fn (_row); 2 external calls (insert, uuid4).
-
-
-##### `MonitorStore.claim_due`  (lines 265–303)
-
-```
-async def claim_due(self, now: datetime, lease_seconds: int, limit: int=CLAIM_BATCH_MAX_MONITORS) -> tuple[Monitor, ...]
-```
-
-**Purpose**: Leases a batch of due monitors for this runner to process. Leasing prevents overlapping runners from doing the same monitor work at the same time.
-
-**Data flow**: It receives the current time, a lease length in seconds, and a maximum batch size. It finds due monitors in this workspace whose claims are free or expired, chooses the oldest due ones, stamps them with a new claim ID and expiration time, and returns the claimed monitors.
-
-**Call relations**: The scheduled monitor runner calls this when it is ready to probe monitors. It uses _claim_available and _due to select only valid work, updates the database atomically, and converts returned rows through _row.
-
-*Call graph*: calls 3 internal fn (_claim_available, _due, _row); 4 external calls (timedelta, select, update, uuid4).
-
-
-##### `MonitorStore.quiet_tick`  (lines 305–315)
-
-```
-async def quiet_tick(self, row: Monitor, probed_at: datetime, next_probe_at: datetime) -> None
-```
-
-**Purpose**: Records that a claimed monitor’s probe ran successfully and matched the baseline. No fire is posted; the monitor is simply counted and scheduled for its next check.
-
-**Data flow**: It receives the claimed Monitor, the probe time, and the next probe time. It increases probes_run and quiet_streak, resets failure_streak to zero, keeps the skipped count unchanged, and passes the new values to _tick.
-
-**Call relations**: MonitorRunner._tick calls this after a normal probe result. This function is a readable wrapper around _tick for the quiet case.
-
-*Call graph*: calls 1 internal fn (_tick); called by 1 (_tick).
-
-
-##### `MonitorStore.failed_tick`  (lines 317–329)
-
-```
-async def failed_tick(self, row: Monitor, probed_at: datetime, next_probe_at: datetime) -> None
-```
-
-**Purpose**: Records that a claimed monitor’s probe ran but the shell command failed, without yet firing the monitor. It advances the failure streak and breaks the quiet streak.
-
-**Data flow**: It receives the claimed Monitor, the probe time, and the next probe time. It increases probes_run and failure_streak, resets quiet_streak to zero, keeps skipped unchanged, and sends those updated counts to _tick.
-
-**Call relations**: MonitorRunner._tick calls this when a probe exits with a failure but has not crossed the fire threshold. It delegates the shared database update and claim release to _tick.
-
-*Call graph*: calls 1 internal fn (_tick); called by 1 (_tick).
-
-
-##### `MonitorStore.skipped_tick`  (lines 331–342)
-
-```
-async def skipped_tick(self, row: Monitor, next_probe_at: datetime) -> None
-```
-
-**Purpose**: Records that a probe could not be run, for example because the client sandbox was unreachable. It counts the skip without treating it as a successful probe or a command failure.
-
-**Data flow**: It receives the claimed Monitor and the next probe time. It leaves probe and streak counts as they were, increases skipped by one, keeps the previous last_probe_at value, and passes the updated state to _tick.
-
-**Call relations**: MonitorRunner._tick calls this when it cannot execute the probe at all. Like the other tick helpers, it uses _tick for the actual database write.
-
-*Call graph*: calls 1 internal fn (_tick); called by 1 (_tick).
-
-
-##### `MonitorStore._tick`  (lines 344–376)
-
-```
-async def _tick(self, row: Monitor, *, probes_run: int, quiet_streak: int, failure_streak: int, skipped: int, last_probe_at: datetime | None, next_probe_at: datetime) -> None
-```
-
-**Purpose**: Performs the shared database update after a claimed monitor has been processed but did not fire. It also releases the claim so the monitor can be picked up again later.
-
-**Data flow**: It receives the old Monitor plus the new counters and schedule fields. It first refuses to proceed if the monitor was not claimed. Then it updates only the row with the same monitor ID, workspace ID, and claim ID, writes the new counts and times, clears the claim, and updates the timestamp.
-
-**Call relations**: quiet_tick, failed_tick, and skipped_tick all funnel into this function. The claim check in the WHERE clause makes sure a stale runner cannot overwrite a monitor that another runner has since claimed.
-
-*Call graph*: called by 3 (failed_tick, quiet_tick, skipped_tick); 1 external calls (update).
-
-
-##### `MonitorStore.claim_holds`  (lines 378–405)
-
-```
-async def claim_holds(self, row: Monitor) -> bool
-```
-
-**Purpose**: Checks whether a runner still owns the monitor it is about to fire. This prevents a fire from being delivered after a user has already disarmed the monitor, when the row is gone.
-
-**Data flow**: It receives a claimed Monitor and rejects unclaimed ones. It looks for a row with the same monitor ID, workspace ID, and claim ID, locking it while checking, and returns true if that row still exists.
-
-**Call relations**: MonitorRunner._fire calls this immediately before invoking the fire behavior. It does not retire or change the monitor; it is a final safety check before handing off to the firing flow.
-
-*Call graph*: called by 1 (_fire); 1 external calls (select).
-
-
-##### `MonitorStore.retire`  (lines 407–419)
-
-```
-async def retire(self, row: Monitor) -> None
-```
-
-**Purpose**: Deletes a monitor after its fire has been delivered. This enforces the rule that an armed monitor ends in exactly one fire.
-
-**Data flow**: It receives a claimed Monitor and rejects unclaimed ones. It deletes the database row only if the monitor ID, workspace ID, and claim ID all match, so an expired or stolen claim cannot remove someone else’s current work.
-
-**Call relations**: MonitorRunner._fire calls this after successfully delivering a fire. The claim guard ties deletion to the runner that actually held the lease.
-
-*Call graph*: called by 1 (_fire); 1 external calls (delete).
-
-
-##### `MonitorStore.disarm`  (lines 421–429)
-
-```
-async def disarm(self, row: Monitor) -> bool
-```
-
-**Purpose**: Stops watching a monitor because a member requested it. It reports whether a row was actually removed.
-
-**Data flow**: It receives a Monitor. It deletes the matching row in this workspace without requiring a claim, then returns true if exactly one row was deleted and false otherwise.
-
-**Call relations**: This is the user-driven stop path, separate from retire, which is the fire-driven removal path. Because it does not require the runner’s claim, a user can stop a monitor even while a runner may be working on it.
-
-*Call graph*: 1 external calls (delete).
-
-
-### Objective planning
-These files package the objectives extension and provide tools and durable records for plans, progress, blockers, evidence checks, and delegation.
-
-### `extensions/objectives/ufo_ext_objectives/__init__.py`
-
-`other` · `import time`
-
-This is the package marker for the objectives extension. In Python, a folder with an `__init__.py` file can be imported as a package, which means other parts of the project can refer to this extension by name. Here, the file contains only a short documentation string: “The objectives extension.”
-
-Its job is mostly structural, like a label on a folder. Without it, depending on the Python version and packaging setup, tools or import code might not recognize this directory in the expected way. The actual work of the objectives extension lives in other files in this package. This file simply announces that the package exists and provides a human-readable hint about what it is for.
-
-
-### `extensions/objectives/ufo_ext_objectives/tools.py`
-
-`domain_logic` · `tool calls during objective planning, progress recording, delegation, and status checks`
-
-This file is the user-facing toolbox for the objectives extension. An objective is a piece of work that may last longer than one turn. It has named steps, and each step can include acceptance conditions: checks against real state, such as “this file exists,” “this file contains this text,” or “this command succeeds.” Without this file, agents could write plans and claim progress, but there would be no consistent way to prove that a step is actually complete.
-
-The main idea is simple: a step does not close just because someone says it is done. When `record_step` is called with `did`, the file re-runs the step’s conditions in the sandbox and stores the result. If a condition fails, the response says exactly what is still unmet. This is like a checklist at a construction site: signing your name is not enough; the inspector still checks the doors, wiring, and smoke alarms.
-
-The file also protects against weak plans. When a plan says a future step will create a file or text, `plan_objective` refuses that condition if it is already true, because it would prove nothing about the new work. Commands are treated differently because a test suite may already pass before work starts and still be a useful guard later. The file can also read an objective, refresh its checks, and launch independent steps in parallel subagents.
-
-#### Function details
-
-##### `_require_ext`  (lines 107–110)
-
-```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
-```
-
-**Purpose**: This small guard makes sure the tool call has the extension context it needs. The extension context is the object that gives access to shared extension services, such as database transactions.
-
-**Data flow**: It receives the current tool context. If the context contains an extension context, it returns it unchanged. If not, it stops the call by raising an error, because the objective tools cannot safely work without that shared state.
-
-**Call relations**: The main tool functions call this at their start before they touch stored objectives. It acts like checking that you have the right key before trying to open the filing cabinet.
-
-*Call graph*: called by 4 (plan_objective, read_objective, record_step, run_independent_steps).
-
-
-##### `render`  (lines 113–128)
-
-```
-def render(view: ObjectiveView) -> str
-```
-
-**Purpose**: This turns an objective’s stored state into a readable text report. It is used whenever a tool needs to show the agent what the objective currently looks like.
-
-**Data flow**: It receives an `ObjectiveView`, which is a snapshot of one objective. It reads the objective name, directive, attempt counts, each step’s state, its required conditions, recent events, and any failed verdicts. It returns one plain text block summarizing all of that.
-
-**Call relations**: After planning, recording, or reading an objective, the tool functions call `render` to turn internal data into a response the agent can act on. For condition text, it asks `condition_summary` to describe each check in human-readable form.
-
-*Call graph*: called by 3 (plan_objective, read_objective, record_step); 1 external calls (condition_summary).
-
-
-##### `evaluate`  (lines 131–135)
-
-```
-async def evaluate(ctx: ToolContext, step: StepView) -> tuple[ConditionVerdict, ...]
-```
-
-**Purpose**: This checks all acceptance conditions for one step and returns the results. It is the bridge between a claimed attempt and proof from real state.
-
-**Data flow**: It receives the tool context and a step view. For each condition attached to the step, it calls `_verdict`, gathers the verdicts, and returns them as an ordered tuple. It does not itself change stored objective state.
-
-**Call relations**: `record_step` uses this when someone says a step was done, and `read_objective` uses it to refresh attempted steps. It delegates the actual one-condition check to `_verdict`.
-
-*Call graph*: calls 1 internal fn (_verdict); called by 2 (read_objective, record_step).
-
-
-##### `_verdict`  (lines 138–162)
-
-```
-async def _verdict(ctx: ToolContext, condition: Condition, phase: str) -> ConditionVerdict
-```
-
-**Purpose**: This tests one acceptance condition against the sandbox and says whether it currently holds. It also records a metric so the system can later see how often checks passed or failed.
-
-**Data flow**: It receives a tool context, one condition, and a phase name such as planning or recording. It converts the condition into a shell command: for example, checking whether a path exists, whether a file contains exact text, or whether a supplied command exits successfully. It runs that command in the sandbox with a timeout, turns the exit code into true or false, emits a measurement, and returns a `ConditionVerdict` with the condition, the result, and a short explanation.
-
-**Call relations**: `evaluate` calls this for normal step checks. `plan_objective` also calls it during planning to reject file-based conditions that are already true before the work starts. It uses `condition_summary` to make messages understandable, and `shlex.quote` to safely place paths and text into shell commands.
-
-*Call graph*: called by 2 (evaluate, plan_objective); 4 external calls (__init__, quote, emit_metric, condition_summary).
-
-
-##### `plan_objective`  (lines 165–220)
-
-```
-async def plan_objective(ctx: ToolContext, args: PlanObjectiveInput) -> ToolResult
-```
-
-**Purpose**: This records or revises an objective plan, while rejecting certain acceptance checks that would be meaningless. It is used when an agent wants longer-running work to survive across turns.
-
-**Data flow**: It receives the current tool context and a planning request containing a name, directive, steps, and timeline description. It first loads any existing objective with that name. For each new or unattempted step, it checks file-based conditions that claim the work will produce a file or text. If such a condition is already true, it returns an error explaining why the plan is weak. Otherwise, it stores the plan through the objectives store and returns a rendered view of the saved objective.
-
-**Call relations**: This is the handler behind the `plan_objective` tool definition. It calls `_require_ext` to get extension services, `_verdict` to test proposed conditions during planning, and `render` to show the final saved plan. It works with the `Objectives` store to read and write the persistent objective record.
-
-*Call graph*: calls 3 internal fn (_require_ext, _verdict, render); 5 external calls (__init__, __init__, __init__, agent_current, condition_summary).
-
-
-##### `record_step`  (lines 223–271)
-
-```
-async def record_step(ctx: ToolContext, args: RecordStepInput) -> ToolResult
-```
-
-**Purpose**: This records that a step was attempted or is blocked. If the step was attempted, it checks the step’s acceptance conditions before treating it as complete.
-
-**Data flow**: It receives the tool context and a record request naming the objective, step, kind of record, and evidence. It loads the objective, verifies that the named step exists, and writes the event. If the kind is `blocked`, it records the block and returns a message, including a special message if the same block was already recorded. If the kind is `did`, it evaluates the step’s conditions, stores the check results, refreshes the objective, adds the latest verdicts to the displayed view, emits a metric, and returns the rendered objective.
-
-**Call relations**: This is the handler behind the `record_step` tool definition. It relies on `_require_ext` for extension access, the `Objectives` store for persistence, `evaluate` for proof checks, `_with_verdicts` to prepare the response view, and `render` to show the result. It is the key place where a claim of progress is tested against reality.
-
-*Call graph*: calls 4 internal fn (_require_ext, _with_verdicts, evaluate, render); 5 external calls (__init__, __init__, __init__, agent_current, emit_metric).
-
-
-##### `run_independent_steps`  (lines 274–320)
-
-```
-async def run_independent_steps(ctx: ToolContext, args: RunIndependentStepsInput) -> ToolResult
-```
-
-**Purpose**: This launches every ready independent step of an objective in separate background subagents. It helps parallel work happen without the current turn manually spawning each task one by one.
-
-**Data flow**: It receives the tool context and a request naming the objective and subagent profile. It loads the objective, finds steps marked runnable, and returns an error if the objective does not exist. If no independent step is ready, it explains that there is nothing to dispatch. Otherwise, for each runnable step it starts a background subagent with the objective directive and that step title, records the dispatched turn id, emits a metric, and returns instructions saying that results will come back later.
-
-**Call relations**: This is the handler behind the `run_independent_steps` tool definition. It calls `_require_ext` and reads from the `Objectives` store, then uses `ToolContext.spawn` to create subagent work. It does not record completion itself; after subagents report back, `record_step` is expected to capture each result.
-
-*Call graph*: calls 1 internal fn (_require_ext); 6 external calls (__init__, __init__, __init__, spawn, agent_current, emit_metric).
-
-
-##### `read_objective`  (lines 323–342)
-
-```
-async def read_objective(ctx: ToolContext, args: ReadObjectiveInput) -> ToolResult
-```
-
-**Purpose**: This shows the current state of an objective and refreshes checks for steps that have already been attempted. It lets an agent see what is done, what is blocked, and what still fails.
-
-**Data flow**: It receives the tool context and a request naming the objective. It loads the objective from storage and returns an error if it cannot be found. For every attempted step that has acceptance conditions, it re-evaluates those conditions, stores the latest verdicts, updates the displayed view, and finally returns a rendered text summary.
-
-**Call relations**: This is the handler behind the `read_objective` tool definition. It uses `_require_ext` and the `Objectives` store to access persisted state, `evaluate` to refresh real-world checks, `_with_verdicts` to attach the fresh results to the response view, and `render` to make the status readable.
-
-*Call graph*: calls 4 internal fn (_require_ext, _with_verdicts, evaluate, render); 4 external calls (__init__, __init__, __init__, agent_current).
-
-
-##### `_with_verdicts`  (lines 345–355)
-
-```
-def _with_verdicts(view: ObjectiveView, title: str, verdicts: tuple[ConditionVerdict, ...]) -> ObjectiveView
-```
-
-**Purpose**: This creates a copy of an objective view with fresh verdicts attached to one named step. It is used for display, so the response can show the latest check results immediately.
-
-**Data flow**: It receives an objective view, a step title, and a tuple of verdicts. It builds a new objective view where the matching step has those verdicts, while all other steps stay the same. It returns the new view and does not mutate the original object.
-
-**Call relations**: `record_step` uses this after checking a just-attempted step, and `read_objective` uses it while refreshing attempted steps. It relies on `dataclasses.replace` to make updated copies rather than editing the existing view in place.
-
-*Call graph*: called by 2 (read_objective, record_step); 1 external calls (replace).
-
-
-### `extensions/objectives/ufo_ext_objectives/store.py`
-
-`domain_logic` · `active during objective planning, turn startup, progress recording, and condition checking`
-
-An objective is a goal broken into steps. This file stores those goals, their steps, and the history of what happened to each step in database tables. The important idea is that events are appended, not edited. Like a lab notebook, each attempt, block, and check result is kept as evidence, so later turns can see what really happened instead of trusting a summary that may have changed.
-
-The file defines the allowed completion conditions for a step: a file exists, a file contains text, or a command succeeds. These conditions are written into the plan. Once a step has been attempted, its conditions are frozen, so a worker cannot make the test easier after discovering the work is hard.
-
-It also builds read-only views of objectives and steps. These views calculate useful states such as pending, attempted, done, blocked, or unmet from the stored events and latest check results. The `Objectives` store is the main interface: it can find an objective, create or revise a plan, record an attempt or block, record condition-check results, and rebuild a complete view from the database. Without this file, the system would lose the reliable audit trail that lets objectives continue safely across turns, heartbeats, and subagent hand-backs.
-
-#### Function details
-
-##### `StepView.attempted`  (lines 157–158)
-
-```
-def attempted(self) -> bool
-```
-
-**Purpose**: Tells whether anyone has recorded actually doing work on this step. This matters because a step with completion conditions should not be treated as failed or done before it has even been tried.
-
-**Data flow**: It reads the step’s stored events. If any event is a `did` event, meaning an attempt was recorded, it returns true; otherwise it returns false. It does not change anything.
-
-**Call relations**: Other step decisions use this as a basic fact. `StepView.state` uses it to separate untouched steps from attempted ones, and `ObjectiveView.runnable` uses it to avoid dispatching independent work that has already been tried.
-
-
-##### `StepView.open_block`  (lines 161–166)
-
-```
-def open_block(self) -> StepEvent | None
-```
-
-**Purpose**: Finds the currently active block, if the step’s latest event says the step is blocked. A block is like an unanswered question: it should not be asked again and again just because the system wakes up repeatedly.
-
-**Data flow**: It looks at the step’s event history and checks only the newest event. If that newest event is a `blocked` event, it returns that event; otherwise it returns nothing. It does not write to storage.
-
-**Call relations**: The step state calculation uses this idea indirectly by checking the latest event. `ObjectiveView.runnable` uses it to avoid launching a blocked step, and `Objectives.record` uses it to avoid recording the same open block repeatedly.
-
-
-##### `StepView.state`  (lines 169–184)
-
-```
-def state(self) -> str
-```
-
-**Purpose**: Turns a step’s event history and check results into a plain status such as pending, attempted, done, blocked, or unmet. This is the central rule that decides what progress means.
-
-**Data flow**: It reads the step’s events, declared conditions, and latest verdicts. A latest block makes the step blocked; no attempt makes it pending; an attempted step with no conditions is done; an attempted step with unchecked or incomplete conditions is still attempted; checked conditions make it done only if every verdict passes, otherwise unmet.
-
-**Call relations**: Objective-level views depend on this property. `ObjectiveView.confirmed` counts steps whose state is done, and `ObjectiveView.frontier` uses it to find all unfinished steps.
-
-
-##### `ObjectiveView.attempts`  (lines 199–200)
-
-```
-def attempts(self) -> int
-```
-
-**Purpose**: Counts how many recorded work attempts exist across all steps in the objective. It gives a simple sign of effort spent.
-
-**Data flow**: It scans every step and every event inside those steps. Each `did` event adds one to the count. The result is a number, and nothing is changed.
-
-**Call relations**: This is a reporting view on top of the stored event history. It helps callers notice patterns such as many attempts without more confirmed completed steps.
-
-
-##### `ObjectiveView.confirmed`  (lines 203–204)
-
-```
-def confirmed(self) -> int
-```
-
-**Purpose**: Counts how many steps are currently confirmed as done. This is the counterpart to attempts: it shows verified progress, not just activity.
-
-**Data flow**: It asks each step for its computed state. Every step whose state is `done` adds one to the count. The result is a number, with no database writes.
-
-**Call relations**: It relies on `StepView.state`, which applies the rules about attempts, blocks, and condition verdicts. Callers can compare this with `ObjectiveView.attempts` to understand whether work is closing steps or just repeating.
-
-
-##### `ObjectiveView.runnable`  (lines 207–215)
-
-```
-def runnable(self) -> tuple[StepView, ...]
-```
-
-**Purpose**: Identifies unfinished steps that can be started in parallel right now. It only includes steps that the plan marked as independent, that have not yet been attempted, and that are not currently blocked.
-
-**Data flow**: It starts from the objective’s unfinished `frontier`. From there it keeps only steps marked independent, not attempted, and without an open block. It returns those steps as a tuple and changes nothing.
-
-**Call relations**: This uses `ObjectiveView.frontier`, `StepView.attempted`, and `StepView.open_block` to decide what a dispatcher may safely fan out. It is meant for the part of the system that chooses which steps to run next.
-
-
-##### `ObjectiveView.frontier`  (lines 218–219)
-
-```
-def frontier(self) -> tuple[StepView, ...]
-```
-
-**Purpose**: Returns all steps that are not yet done. This is the objective’s current work queue in plain form.
-
-**Data flow**: It reads every step and asks for its state. Any step whose state is not `done` is included in the returned tuple. No storage is changed.
-
-**Call relations**: This property sits above `StepView.state`. `ObjectiveView.runnable` narrows this frontier further to find unfinished independent steps that can be dispatched immediately.
-
-
-##### `condition_summary`  (lines 222–229)
-
-```
-def condition_summary(condition: Condition) -> str
-```
-
-**Purpose**: Turns a completion condition into a short human-readable sentence. This is useful when showing people or agents what must be true for a step to count as complete.
-
-**Data flow**: It receives one condition object. Depending on whether the condition is file existence, file content, or command success, it formats the relevant path, text, or command into a readable string. It returns that string and changes nothing.
-
-**Call relations**: This is a small helper for presenting condition data. It does not write to the store; it translates the same condition types that planning and checking use.
-
-
-##### `Objectives.named`  (lines 239–253)
-
-```
-async def named(self, conversation_id: UUID, name: str) -> ObjectiveView | None
-```
-
-**Purpose**: Finds one objective by conversation and name within the current workspace. Scoping by conversation prevents a subagent or another conversation from accidentally picking up someone else’s objective with the same name.
-
-**Data flow**: It receives a conversation identifier and an objective name, then queries the objective table for a matching row in this workspace. If none is found, it returns nothing. If one is found, it passes the row to `_view` to build a full objective view with steps, events, and checks.
-
-**Call relations**: This is called directly by `Objectives.plan` before creating or revising a plan. It hands database results to `Objectives._view`, which performs the fuller reconstruction of the objective.
-
-*Call graph*: calls 1 internal fn (_view); called by 1 (plan); 1 external calls (select).
-
-
-##### `Objectives.on_conversation`  (lines 255–267)
-
-```
-async def on_conversation(self, conversation_id: UUID) -> ObjectiveView | None
-```
-
-**Purpose**: Finds the most recently created objective for a conversation in the current workspace. This gives callers a simple way to resume the current objective without already knowing its name.
-
-**Data flow**: It receives a conversation identifier and queries the database for objectives in that conversation, newest first, taking only one. If there is no objective, it returns nothing. If there is one, it asks `_view` to expand the row into a complete readable objective.
-
-**Call relations**: Like `Objectives.named`, this is a lookup entry into the store. It relies on `Objectives._view` to gather the related steps, events, and latest checks after the initial objective row is found.
-
-*Call graph*: calls 1 internal fn (_view); 1 external calls (select).
-
-
-##### `Objectives.plan`  (lines 269–332)
-
-```
-async def plan(self, conversation_id: UUID, name: str, directive: str, steps: tuple[StepPlan, ...]) -> ObjectiveView
-```
-
-**Purpose**: Creates a new objective plan or revises an existing one. It preserves the integrity of already-attempted steps by keeping their original completion conditions.
-
-**Data flow**: It receives the conversation, objective name, directive, and planned steps. First it looks for an existing objective with `Objectives.named`. If none exists, it inserts a new objective row. If one exists, it updates the directive, keeps steps that already have event history, removes unstarted steps that are no longer in the plan, and freezes conditions for attempted steps. Then it updates or inserts each planned step and finally reloads the objective view to return the current stored version.
-
-**Call relations**: This is the main write path for planning. It calls `Objectives.named` before and after the database changes, and uses database insert, update, and delete operations to make the durable record match the new plan without erasing important history.
-
-*Call graph*: calls 1 internal fn (named); 5 external calls (delete, insert, true, update, uuid4).
-
-
-##### `Objectives.record`  (lines 334–354)
-
-```
-async def record(self, step: StepView, kind: str, actor_turn_id: UUID, evidence: str) -> bool
-```
-
-**Purpose**: Adds an event to a step, such as an attempt or a block. It refuses to duplicate the same still-open block, so repeated wake-ups do not spam the history with the same unanswered issue.
-
-**Data flow**: It receives a step view, event kind, actor turn identifier, and evidence text. It trims the evidence to the maximum stored length. If the event is a block identical to the current open block, it writes nothing and returns false. Otherwise it inserts a new event row and returns true.
-
-**Call relations**: This is how work outcomes become durable facts. It uses the step’s `open_block` property before writing, then appends to the event table so later calls to `Objectives._view` can reconstruct the step’s history.
-
-*Call graph*: 2 external calls (insert, uuid4).
-
-
-##### `Objectives.checked`  (lines 356–383)
-
-```
-async def checked(self, step: StepView, verdicts: tuple[ConditionVerdict, ...], actor_turn_id: UUID) -> None
-```
-
-**Purpose**: Stores the extension’s own verdicts after it evaluates a step’s completion conditions. These are observations by the system, not claims made by the worker.
-
-**Data flow**: It receives a step, a tuple of condition verdicts, and the actor turn identifier. It converts each verdict into JSON-friendly data containing the condition, whether it held, and the detail message. Then it inserts a new check row. It does not replace older checks; the history remains visible, while the latest check is used when reading.
-
-**Call relations**: Condition-checking code calls this after evaluating whether files exist, text appears, or commands succeed. `Objectives._view` later reads these stored checks and uses the latest one for each step.
-
-*Call graph*: 2 external calls (insert, uuid4).
-
-
-##### `Objectives._view`  (lines 385–436)
-
-```
-async def _view(self, row: sa.Row[tuple[object, ...]]) -> ObjectiveView
-```
-
-**Purpose**: Rebuilds a complete in-memory picture of an objective from database rows. It turns scattered stored records into the `ObjectiveView` and `StepView` objects that the rest of the extension can reason about.
-
-**Data flow**: It receives an objective database row. It loads that objective’s steps, then all events for those steps, then all condition checks for those steps. It groups events by step, keeps the latest check per step, parses stored condition JSON into condition objects, parses stored verdict JSON into verdict objects, and returns a full `ObjectiveView` containing ordered `StepView` entries.
-
-**Call relations**: `Objectives.named` and `Objectives.on_conversation` both call this after finding an objective row. It calls `_conditions` and `_verdicts` to turn raw JSON from the database back into typed Python objects.
-
-*Call graph*: calls 2 internal fn (_conditions, _verdicts); called by 2 (named, on_conversation); 4 external calls (__init__, __init__, __init__, select).
-
-
-##### `_conditions`  (lines 439–453)
-
-```
-def _conditions(payload: object) -> tuple[Condition, ...]
-```
-
-**Purpose**: Parses stored condition data back into the correct condition objects. This protects the rest of the code from dealing with raw JSON dictionaries.
-
-**Data flow**: It receives an unknown payload, usually read from the database. If the payload is not a list, it returns an empty tuple. For each list item, it looks at the `kind` field and validates it as a file-exists, file-contains, or command-succeeds condition. Unknown kinds raise an error instead of being silently ignored.
-
-**Call relations**: `Objectives._view` uses this when rebuilding steps from stored plans. `_verdicts` also uses it when rebuilding the condition attached to each stored verdict.
-
-*Call graph*: called by 2 (_view, _verdicts).
-
-
-##### `_verdicts`  (lines 456–467)
-
-```
-def _verdicts(payload: object) -> tuple[ConditionVerdict, ...]
-```
-
-**Purpose**: Parses stored condition-check results back into `ConditionVerdict` objects. This lets step state calculations use the latest saved check as structured data.
-
-**Data flow**: It receives an unknown payload, usually a JSON list from the check table. If the payload is not a list, it returns an empty tuple. For each dictionary item, it parses the embedded condition with `_conditions`, converts the held flag to a boolean, converts the detail to text, and returns the resulting verdict objects.
-
-**Call relations**: `Objectives._view` calls this when attaching the latest stored check to each step. It depends on `_conditions` so verdicts and planned conditions are interpreted by the same rules.
-
-*Call graph*: calls 1 internal fn (_conditions); called by 1 (_view); 1 external calls (__init__).
-
-
-### Daily sweep briefs
-This file orchestrates private daily briefs by gathering member context, delegating scout investigations, and scheduling the drafting turn.
-
-### `extensions/sweep/ufo_ext_sweep/manifest.py`
-
-`orchestration` · `scheduled daily job and agent tool use`
-
-This file is the control center for the daily-brief feature. Its job is to make sure each member gets at most one useful brief per local day, based on what has changed since the last successful brief. Without it, the system would not know when to start a brief, what information to collect, how to avoid repeating old items, or how to keep the scheduled agent from making real changes without approval.
-
-It keeps a small database ledger called `sweep_edition`. Think of it like a delivery log for a newspaper route: for each member and date, it records whether today’s edition is pending, completed, or failed, which conversation turn produced it, and which source items and findings were already used.
-
-When the scheduled job runs, `_tick` checks every seated member. If it is at least 8 AM in that member’s timezone, it creates or retries that day’s edition and invokes the `daily-brief` agent. That agent can call the `sweep_newspaper` tool, implemented by `_sweep`. `_sweep` collects changed private context, optionally fetches public pages mentioned in that context, splits the material into four scout categories, and runs bounded subagents so no scout receives too much input. It then removes repeated findings, records what was safely processed, and returns structured findings for the final brief.
-
-A safety hook, `_draft_only`, blocks scheduled briefs from directly updating tasks or memory. They may propose drafts, but a member must approve changes.
-
-#### Function details
-
-##### `local_edition_date`  (lines 125–127)
-
-```
-def local_edition_date(now: datetime, timezone: str) -> date | None
-```
-
-**Purpose**: Decides whether a member is ready to receive today’s daily brief. A brief is only eligible once it is at least 8 AM in that member’s own timezone.
-
-**Data flow**: It receives the current time and a timezone name. It converts the current time into that timezone, checks the local clock, and returns the local date if the time is 8 AM or later. If it is still before 8 AM, it returns nothing.
-
-**Call relations**: The scheduled job `_tick` calls this for each member before creating or retrying an edition. This keeps briefs from being sent too early for people in different parts of the world.
-
-*Call graph*: called by 1 (_tick); 3 external calls (astimezone, time, ZoneInfo).
-
-
-##### `_profile`  (lines 130–141)
-
-```
-def _profile(name: str) -> SubagentProfile
-```
-
-**Purpose**: Builds the definition for one scout subagent. Each scout is a small, focused helper that reads a slice of context and returns possible findings for the daily brief.
-
-**Data flow**: It receives a scout name, such as `work` or `public-context`. It turns that name into a subagent profile with a prompt, input and output shapes, model choice, and safety settings. The result is a ready-to-register scout description.
-
-**Call relations**: The `manifest` function calls `_profile` once for each scout name when registering the extension. Later, `_sweep` refers to those registered scout profiles when it spawns scout runs.
-
-*Call graph*: called by 1 (manifest); 1 external calls (__init__).
-
-
-##### `_bounded`  (lines 144–163)
-
-```
-def _bounded(records: tuple[MemberContextRecord, ...]) -> tuple[ContextRecord, ...]
-```
-
-**Purpose**: Shrinks a list of member context records so a scout receives only a safe, limited amount of text. This prevents overloading the model with too much input.
-
-**Data flow**: It receives member context records. For each record, it trims the text, counts roughly how much space the title, text, and reference use, and stops once the shared size limit would be exceeded. It returns simplified `ContextRecord` objects that fit inside the limit.
-
-**Call relations**: `_sweep` calls this after dividing records into scout groups. The bounded records are what the inner `_sweep.scout` helper sends to each scout subagent.
-
-*Call graph*: called by 1 (_sweep); 1 external calls (__init__).
-
-
-##### `_digest`  (lines 166–167)
-
-```
-def _digest(value: str) -> str
-```
-
-**Purpose**: Creates a stable fingerprint for a piece of text. This is used to make a repeatable key for fetched public material.
-
-**Data flow**: It receives a string, encodes it, runs it through SHA-256 hashing, and returns the hash as text. The output is a compact identifier that changes if the input text changes.
-
-**Call relations**: `_public_records` calls this when it turns fetched public web pages into context records. The digest helps create `stable_subject_key` values so the ledger can tell whether public content is new or repeated.
-
-*Call graph*: called by 1 (_public_records); 1 external calls (sha256).
-
-
-##### `_prior_ledgers`  (lines 170–204)
-
-```
-async def _prior_ledgers(ext: ExtensionContext, member_id: UUID, now: datetime) -> tuple[dict[str, datetime], dict[str, datetime]]
-```
-
-**Purpose**: Reads recent completed editions from the database so the brief does not repeat the same source material or findings too often.
-
-**Data flow**: It receives the extension context, a member ID, and the current time. It queries completed editions from the recent retention window, then builds two lookup tables: one for source input keys and one for finding keys, each pointing to when that key was last completed. It returns both lookup tables.
-
-**Call relations**: `_sweep` calls this before choosing changed records and before deciding which scout findings to emit. The information from `_prior_ledgers` is the memory that keeps daily briefs from sounding like yesterday’s brief.
-
-*Call graph*: calls 1 internal fn (transaction); called by 1 (_sweep); 1 external calls (select).
-
-
-##### `_changed_records`  (lines 207–217)
-
-```
-def _changed_records(records: tuple[MemberContextRecord, ...], prior: dict[str, datetime], now: datetime) -> tuple[MemberContextRecord, ...]
-```
-
-**Purpose**: Chooses which member context records are worth showing to the scouts today. It filters out items that were already covered recently, while allowing open tasks and objectives to reappear after a shorter waiting period.
-
-**Data flow**: It receives context records, a lookup of previously used input keys, and the current time. It keeps only one record per stable subject key, checks when that subject was last seen, applies the correct waiting period, and returns the remaining records sorted newest first.
-
-**Call relations**: `_sweep` calls this after loading recent member context and prior ledger data. Its output becomes the private material that is divided among the scouts.
-
-*Call graph*: called by 1 (_sweep).
-
-
-##### `_public_records`  (lines 220–259)
-
-```
-async def _public_records(ctx: ToolContext, records: tuple[MemberContextRecord, ...], now: datetime) -> tuple[MemberContextRecord, ...]
-```
-
-**Purpose**: Finds public web links mentioned in the member’s changed context and fetches short summaries for them when a search provider is available. This gives the brief limited outside context without letting private data leak into broad search.
-
-**Data flow**: It receives the tool context, changed member records, and the current time. It scans references and text for web URLs, rejects unsafe or private-looking hosts, normalizes each URL to the public site root, and fetches a small amount of content for a limited number of sources. It returns those fetched pages as public `MemberContextRecord` objects.
-
-**Call relations**: `_sweep` calls this after finding changed private records. The returned public records feed only the `public-context` scout, separate from the private work, conversation, page, and artifact groups.
-
-*Call graph*: calls 1 internal fn (_digest); called by 1 (_sweep); 6 external calls (__init__, __init__, gather, ip_address, urlsplit, urlunsplit).
-
-
-##### `_sweep`  (lines 262–420)
-
 ```
-async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult
+def target_host(self) -> str | HostChoice
 ```
 
-**Purpose**: Implements the `sweep_newspaper` tool that the scheduled daily-brief agent calls. It gathers the day’s candidate material, runs scouts, filters repeated findings, updates the edition ledger, and returns structured brief ingredients.
+**Purpose**: This turns a provider’s host information into the form used by the credential system. It returns either one fixed hostname or a controlled host choice that the workspace member must pick from.
 
-**Data flow**: It starts with a tool call from a scheduled member. It verifies that the call belongs to a registered scheduled edition, finds the last completed cursor, loads recent member context, removes already-covered records, fetches safe public context, and splits everything into scout groups. It runs the scouts in parallel, accepts the edition if enough scouts return, removes duplicate or too-recent findings, writes candidate input and finding keys back to the database, and returns JSON containing findings, coverage notes, and any missing scouts.
+**Data flow**: It reads the provider’s fixed `host` or its `sites` list. If there is no site list, it outputs the fixed host string. If there is a site list, it creates a `HostChoice` containing the slot name, explanation, allowed hosts, default host, and environment variable that will carry the chosen host into the sandbox.
 
-**Call relations**: The `manifest` function registers `_sweep` as the handler for the `sweep_newspaper` tool. During an agent run started by `_tick`, the daily-brief agent calls this tool once to obtain the raw ingredients for the final private brief. `_sweep` relies on `_prior_ledgers`, `_changed_records`, `_public_records`, `_bounded`, and its inner scout helper to do the work in stages.
+**Call relations**: This is used by `KeyedProvider.slots` when building secure credential injection rules, and by `KeyedProvider.usage` when writing the human-facing example command. It is the shared decision point for “where is this provider allowed to be called?”
 
-*Call graph*: calls 4 internal fn (_bounded, _changed_records, _prior_ledgers, _public_records); 7 external calls (__init__, __init__, gather, now, dumps, select, update).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `_sweep.scout`  (lines 306–338)
+##### `KeyedProvider.slots`  (lines 92–110)
 
 ```
-async def scout(name: str) -> tuple[ScoutOutput, bool]
+def slots(self) -> tuple[CredentialSlot, ...]
 ```
 
-**Purpose**: Runs one named scout subagent and cleans up its answer. It makes sure a scout only cites references that were actually included in that scout’s input.
+**Purpose**: This converts one provider declaration into the credential slots the rest of UFO understands. Each slot says what secret is needed, where it may be injected, and what placeholder the sandbox will use.
 
-**Data flow**: It receives a scout name from the surrounding `_sweep` process. It looks up that scout’s bounded records, sends them to the matching subagent profile, validates the returned findings and coverage text, removes any references that were not in the supplied records, and returns the cleaned scout output plus a flag saying whether the result is safe to use for ledger progress.
+**Data flow**: It starts with the provider’s secrets and resolved target host. For each secret, it creates a credential slot with a name, a member-facing description, and an injection rule saying: only for this host, put the stored secret into this HTTP header when the sandbox sends this sentinel value from this environment variable. If the provider also needs a host choice, it adds an extra credential slot for that choice. The result is a tuple of credential slot objects.
 
-**Call relations**: `_sweep` launches this helper in parallel for each scout category. Its cleaned outputs are later combined by `_sweep` into one set of candidate findings for the final brief.
+**Call relations**: The top-level `manifest` function gathers the slots from every provider by calling this method. These slots are what let the standard credential request flow ask an admin for missing values and let the egress proxy safely swap placeholders for real secrets during outbound requests.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-##### `_finalize`  (lines 423–459)
+##### `KeyedProvider.usage`  (lines 112–122)
 
 ```
-async def _finalize(ctx: ExtensionContext, now: datetime) -> None
+def usage(self) -> str
 ```
 
-**Purpose**: Closes out pending editions whose agent turns have already ended. It marks them completed only if the turn finished successfully and the sweep tool advanced its cursor.
+**Purpose**: This writes a short instruction line showing an agent how to call the provider’s API from the sandbox. It names the slots and shows the environment variables that should be used in a `curl` command.
 
-**Data flow**: It receives the extension context and the current time. It reads pending edition rows joined to their conversation turns, checks whether each turn is done, failed, or cancelled, and updates the edition status to either completed or failed. Completed editions also receive a completion timestamp.
+**Data flow**: It reads the provider name, label, secrets, headers, environment variable names, and host information. It builds a plain text sentence listing the required slots and a sample HTTPS request. For providers with selectable hosts, the sample uses the host environment variable instead of a hard-coded hostname.
 
-**Call relations**: `_tick` calls `_finalize` at the start of each scheduled run. This cleanup step makes sure old pending rows do not block future daily briefs or retries.
-
-*Call graph*: calls 1 internal fn (transaction); called by 1 (_tick); 2 external calls (select, update).
+**Call relations**: The file uses this when building the prompt text shown to agents. It connects the low-level credential declarations to practical guidance: after credentials are filled, this is how the agent should make the API request without asking for secrets in chat.
 
 
-##### `_draft_only`  (lines 462–476)
-
-```
-async def _draft_only(ctx: HookContext) -> HookOutcome
-```
-
-**Purpose**: Protects members from automatic changes during a scheduled daily brief. It blocks the scheduled brief turn from directly using tools that update tasks or memory.
-
-**Data flow**: It receives a hook context before a tool is used. It checks whether there is an active turn, whether the payload is a pre-tool-use event, and whether that turn belongs to a scheduled sweep edition. If so, it returns a denial explaining that the brief can only propose drafts for approval. Otherwise it returns nothing and lets the tool call proceed.
-
-**Call relations**: The `manifest` function registers `_draft_only` as a pre-tool-use hook for the todo-list and memory update tools. It is consulted whenever the scheduled daily-brief agent tries to use those tools.
-
-*Call graph*: 2 external calls (__init__, select).
-
-
-##### `_tick`  (lines 479–576)
-
-```
-async def _tick(ctx: ExtensionContext, now: datetime | None=None) -> None
-```
-
-**Purpose**: Runs the daily scheduling loop for Sweep. It decides which members need today’s brief, records an edition row, and starts the daily-brief agent for each eligible member.
-
-**Data flow**: It receives the extension context and optionally a current time. It first finalizes older pending editions, then pages through seated members. For each member, it checks the member’s local date and time, skips members who are too early or already completed, creates or resets the edition database row, and invokes the daily-brief agent with an idempotency key so repeated scheduler runs do not create duplicate work. If agent invocation fails because it is not allowed or invalid, it marks the edition failed.
-
-**Call relations**: The `manifest` function registers `_tick` as the scheduled job handler. `_tick` calls `_finalize` for cleanup, `local_edition_date` for timezone-aware eligibility, database operations for edition state, and the extension context’s agent invocation method to start the actual brief-making conversation.
-
-*Call graph*: calls 5 internal fn (invoke_agent_for_member, seated_members, transaction, _finalize, local_edition_date); 4 external calls (now, insert, select, update).
-
-
-##### `manifest`  (lines 579–627)
+##### `manifest`  (lines 188–194)
 
 ```
 def manifest() -> Manifest
 ```
 
-**Purpose**: Declares the Sweep extension to the host system. It tells the platform what agent, tool, scheduled job, hook, scouts, skill files, and permissions this extension needs.
+**Purpose**: This is the extension’s public package of information for UFO. It returns the manifest that says which credentials exist and what instructions should be added to the agent prompt.
 
-**Data flow**: It takes no input. It constructs a `Manifest` object containing the daily-brief agent specification, the `sweep_newspaper` tool, the scheduled daily job, the safety hook, four scout subagent profiles, the daily-brief skill path, and required capabilities such as member-context reading and search providers. It returns that manifest for the platform to load.
+**Data flow**: It reads the global provider table and asks each provider for its credential slots. It also uses the prepared prompt section text. It then creates and returns a `Manifest` containing the extension name, version, all credential slots, and the keyed-provider help section.
 
-**Call relations**: This is the file’s registration point. The platform calls `manifest` when loading the extension, and the returned object wires `_tick`, `_sweep`, `_draft_only`, and `_profile`-built scouts into the larger system.
+**Call relations**: This is the handoff point from this file to the wider system. When UFO loads the extension, it calls `manifest`, and the returned manifest lets the rest of the platform expose credential status, request missing secrets privately, and teach agents how to use keyed providers safely.
 
-*Call graph*: calls 1 internal fn (_profile); 8 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, seated_member_workspaces).
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### `extensions/mcp/ufo_ext_mcp.py`
+
+`io_transport` · `request handling`
+
+This extension is a bridge between the agent and external MCP servers chosen by a workspace. Instead of baking in a fixed list of tools, it asks a named server what tools it offers, then calls one of those tools when needed. Think of it like visiting a marketplace: first you ask what stalls exist, then you go back to the specific stall with the right order form. The workspace supplies MCP server names, URLs, and optional bearer tokens through a credential slot called `mcp_servers`; this file validates that those URLs are ordinary HTTP or HTTPS addresses and keeps the credential use inside the core process. The file exposes two agent-facing tools. `list_mcp_tools` first returns a compact catalog with names, summaries, and parameter names, because full schemas can be huge. If the agent asks for specific tool names, it returns their full input schemas so the agent can call them correctly. `call_mcp_tool` sends arguments to one server tool and returns structured JSON when available, or joined text otherwise. It treats all server output as untrusted because the external server controls it. It also enforces size limits on requests and responses, failing loudly rather than silently cutting data off.
+
+#### Function details
+
+##### `McpServer._http_url`  (lines 77–80)
+
+```
+def _http_url(cls, value: str) -> str
+```
+
+**Purpose**: This validator makes sure a configured MCP server URL starts with `http://` or `https://`. It prevents the extension from accepting unsupported or surprising address formats.
+
+**Data flow**: A URL string comes in while server configuration is being parsed. The function checks it against the allowed pattern; if it matches, the same URL comes out, and if not, validation stops with an error.
+
+**Call relations**: This runs automatically when an `McpServer` object is built from the workspace credential data. That means bad server addresses are rejected before `_server`, `mcp_client`, or any tool call can use them.
+
+
+##### `mcp_client`  (lines 115–121)
+
+```
+def mcp_client(server: McpServer) -> Client
+```
+
+**Purpose**: This builds a network client for one MCP server. If the workspace provided an auth token, it prepares an `Authorization: Bearer ...` header so the server can recognize the request.
+
+**Data flow**: An `McpServer` object goes in, containing a URL and maybe an auth token. The function turns that into a FastMCP streamable HTTP client with a timeout, ready to list tools or call a tool.
+
+**Call relations**: After `_server` has found the named server, `_list_mcp_tools` and `_call_mcp_tool` ask this function for the actual client connection. It hands off the protocol details, such as initialization and streaming HTTP framing, to FastMCP.
+
+*Call graph*: called by 2 (_call_mcp_tool, _list_mcp_tools); 2 external calls (Client, StreamableHttpTransport).
+
+
+##### `_server`  (lines 124–136)
+
+```
+async def _server(ctx: ToolContext, name: str) -> McpServer
+```
+
+**Purpose**: This looks up one named MCP server from the workspace's `mcp_servers` credential. It makes sure tool calls cannot silently go to an undeclared or misspelled server.
+
+**Data flow**: A tool context and a server name go in. The function reads the extension credentials, parses the JSON configuration into validated server objects, finds the requested name, and returns that server; if anything is missing or unknown, it raises an error.
+
+**Call relations**: Both `_list_mcp_tools` and `_call_mcp_tool` start here before doing any network work. It is the gatekeeper between the agent's requested server name and the concrete URL and token used by `mcp_client`.
+
+*Call graph*: called by 2 (_call_mcp_tool, _list_mcp_tools).
+
+
+##### `_list_mcp_tools`  (lines 139–160)
+
+```
+async def _list_mcp_tools(ctx: ToolContext, args: ListMcpToolsInput) -> ToolResult
+```
+
+**Purpose**: This is the agent-facing operation for discovering what a configured MCP server can do. It either returns a compact catalog of all tools or full schemas for a small chosen set of tools.
+
+**Data flow**: The tool context and listing request go in, including the server name and optionally exact tool names. The function resolves the server, asks it for its tool list, then returns either short catalog entries or detailed schema entries wrapped as a tool result; unknown tool names become an error.
+
+**Call relations**: The manifest registers this as the handler for `list_mcp_tools`. Inside the flow, it uses `_server` to find the target, `mcp_client` to speak to it, `_catalog_entry` for browseable summaries, `_schema_entry` for exact call instructions, and `_json_result` or `_bounded_schemas` to package the answer safely.
+
+*Call graph*: calls 6 internal fn (_bounded_schemas, _catalog_entry, _json_result, _schema_entry, _server, mcp_client).
+
+
+##### `_idempotent`  (lines 163–165)
+
+```
+def _idempotent(tool: McpTool) -> bool
+```
+
+**Purpose**: This reads whether an MCP tool claims it is idempotent, meaning repeated identical calls should not cause extra side effects. That hint helps the caller understand how safe a tool is to retry.
+
+**Data flow**: An MCP tool object goes in. The function checks its optional annotations and returns `true` only when the tool explicitly marks itself as idempotent; otherwise it returns `false`.
+
+**Call relations**: _catalog_entry` and `_schema_entry` both include this safety hint in their output. It is a small shared translator from MCP metadata into the JSON shown to the agent.
+
+*Call graph*: called by 2 (_catalog_entry, _schema_entry).
+
+
+##### `_catalog_entry`  (lines 168–184)
+
+```
+def _catalog_entry(tool: McpTool) -> JsonValue
+```
+
+**Purpose**: This turns one full MCP tool definition into a short catalog item. The goal is to show enough information to choose a tool without flooding the agent with a large JSON schema.
+
+**Data flow**: A full MCP tool object goes in. The function extracts the name, a short summary, parameter names, required parameter names, and the idempotent hint, then returns a compact JSON-friendly dictionary.
+
+**Call relations**: _list_mcp_tools` calls this when the agent is browsing a server without asking for full schemas. It relies on `_summary` to shorten descriptions and `_idempotent` to include the retry-safety hint.
+
+*Call graph*: calls 2 internal fn (_idempotent, _summary); called by 1 (_list_mcp_tools).
+
+
+##### `_summary`  (lines 187–193)
+
+```
+def _summary(description: str) -> str
+```
+
+**Purpose**: This creates a short human-readable summary from a longer tool description. It avoids dragging in later documentation sections, such as argument lists, that would make the catalog noisy.
+
+**Data flow**: A description string goes in. The function takes the first line, keeps only the first sentence-like part, trims it to the maximum summary length, and returns that shorter text.
+
+**Call relations**: _catalog_entry` uses this while building the browseable tool catalog. It keeps the first listing small so the agent can later ask for full schemas only for tools it may actually use.
+
+*Call graph*: called by 1 (_catalog_entry).
+
+
+##### `_schema_entry`  (lines 196–202)
+
+```
+def _schema_entry(tool: McpTool) -> JsonValue
+```
+
+**Purpose**: This prepares the detailed view of one MCP tool. It includes the full input schema, which tells the agent the exact parameter names, types, and structure needed for a valid call.
+
+**Data flow**: A full MCP tool object goes in. The function copies out the tool name, description, input schema, and idempotent hint into a JSON-friendly dictionary.
+
+**Call relations**: _list_mcp_tools` calls this only after the agent has named specific tools. It uses `_idempotent` for the safety hint and then hands the larger payload toward `_bounded_schemas` so oversized multi-schema requests can be refused.
+
+*Call graph*: calls 1 internal fn (_idempotent); called by 1 (_list_mcp_tools).
+
+
+##### `_call_mcp_tool`  (lines 205–217)
+
+```
+async def _call_mcp_tool(ctx: ToolContext, args: CallMcpToolInput) -> ToolResult
+```
+
+**Purpose**: This is the agent-facing operation that invokes one exact tool on one configured MCP server. It protects the system by checking request size before the call and response size before returning data.
+
+**Data flow**: The tool context and call request go in, including server name, tool name, and JSON arguments. The function resolves the server, rejects arguments over the byte limit, sends the call, then returns structured JSON when present or text content otherwise; if the MCP server reports an error, it returns an error tool result.
+
+**Call relations**: The manifest registers this as the handler for `call_mcp_tool`. Its path runs through `_server` and `mcp_client`, uses `_joined_text` when a server answers with text blocks, and uses `_json_result` or `_bounded` to package output without exceeding the response limit.
+
+*Call graph*: calls 5 internal fn (_bounded, _joined_text, _json_result, _server, mcp_client); 4 external calls (__init__, __init__, __init__, dumps).
+
+
+##### `_joined_text`  (lines 220–221)
+
+```
+def _joined_text(content: list[object]) -> str
+```
+
+**Purpose**: This collects plain text blocks from an MCP response into one string. It ignores non-text blocks because this extension only returns text or structured JSON to the agent.
+
+**Data flow**: A list of response content blocks goes in. The function keeps the blocks that are MCP text content, joins their text with newlines, and returns the combined string.
+
+**Call relations**: _call_mcp_tool` uses this when a tool call fails or when the server does not provide structured JSON. It turns MCP's block-style response format into the simpler text form used in tool results.
+
+*Call graph*: called by 1 (_call_mcp_tool).
+
+
+##### `_bounded`  (lines 224–227)
+
+```
+def _bounded(text: str) -> str
+```
+
+**Purpose**: This enforces the maximum allowed MCP response size. It fails loudly if text is too large, instead of returning a silently truncated and possibly misleading result.
+
+**Data flow**: A text string goes in. The function measures its encoded byte size; if it fits, the same text comes out, and if it is too large, it raises an MCP-specific error.
+
+**Call relations**: _json_result` uses this for all JSON payloads returned to the agent, and `_call_mcp_tool` uses it for error text from a failed MCP call. It is the shared guardrail around outbound tool-result size.
+
+*Call graph*: called by 2 (_call_mcp_tool, _json_result); 1 external calls (__init__).
+
+
+##### `_bounded_schemas`  (lines 230–247)
+
+```
+def _bounded_schemas(payload: dict[str, JsonValue], tools: int) -> ToolResult
+```
+
+**Purpose**: This decides whether a request for several full tool schemas is small enough to return usefully. If too many schemas would produce an oversized partial preview, it asks the caller to request fewer.
+
+**Data flow**: A JSON payload containing schema entries and the number of requested tools go in. The function estimates the result size; if multiple schemas are too large, it raises a clear error, otherwise it passes the payload on to be returned as JSON.
+
+**Call relations**: _list_mcp_tools` uses this only for full-schema responses. It then hands acceptable payloads to `_json_result`, while refusing oversized multi-tool schema requests so the agent can narrow its request instead of guessing from an incomplete answer.
+
+*Call graph*: calls 1 internal fn (_json_result); called by 1 (_list_mcp_tools); 1 external calls (dumps).
+
+
+##### `_json_result`  (lines 250–251)
+
+```
+def _json_result(payload: dict[str, JsonValue]) -> ToolResult
+```
+
+**Purpose**: This wraps a JSON-friendly dictionary as a standard tool result. It is the common exit path for successful listing and calling responses.
+
+**Data flow**: A dictionary goes in. The function serializes it to JSON text, checks that the text is within the size limit through `_bounded`, wraps it in `TextContent`, and returns a `ToolResult`.
+
+**Call relations**: _list_mcp_tools`, `_bounded_schemas`, and `_call_mcp_tool` all use this when they need to send structured data back to the agent. It centralizes the final formatting and size check.
+
+*Call graph*: calls 1 internal fn (_bounded); called by 3 (_bounded_schemas, _call_mcp_tool, _list_mcp_tools); 3 external calls (__init__, __init__, dumps).
+
+
+##### `manifest`  (lines 254–285)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This declares the extension to the host system: its name, version, tools, input models, handlers, and required credential slot. Without it, the host would not know that `list_mcp_tools` and `call_mcp_tool` exist.
+
+**Data flow**: No runtime request data goes in. The function builds and returns a manifest object that describes two untrusted tools and one credential slot named `mcp_servers`.
+
+**Call relations**: The extension loader calls this during setup to learn what this file offers. The manifest connects the public tool names to `_list_mcp_tools` and `_call_mcp_tool`, and tells the host where the workspace's MCP server configuration must be supplied.
+
+*Call graph*: 3 external calls (__init__, __init__, __init__).
+
+
+### Evaluation connectors
+Deterministic fake mailbox, calendar, and code-search connectors provide test-only backends through the same connector path as production tools.
+
+### `extensions/eval_env/ufo_ext_eval_env/manifest.py`
+
+`domain_logic` · `extension registration and eval tool calls`
+
+This file gives evaluations a controlled little world to work in. Instead of calling a real email service, calendar, or code search system, the agent talks to eval-only providers that behave like real connectors from the agent’s point of view. That matters because it tests the production connector path, not a shortcut mock.
+
+The email and calendar tools store their data in workspace-scoped database tables. “Workspace-scoped” means each test workspace sees only its own messages and events, like separate notebooks for separate experiments. Sending an email inserts a sent-message row. Creating, updating, or cancelling an event changes calendar rows. Listing tools read those same rows back, so a grader can check exactly what the agent changed.
+
+The code-search tool is different. It is read-only. Tests seed a complete response under a search query, and the broker returns those exact bytes. This lets evaluations control large or carefully shaped search responses without expecting an agent to pass huge JSON as tool arguments.
+
+The file also declares the tool catalog, argument schemas, a small fake OAuth provider, and the `manifest()` function that registers the three eval connectors. Without this file, evaluations would lose their realistic but repeatable email, calendar, and code-search environment.
+
+#### Function details
+
+##### `_transaction`  (lines 171–175)
+
+```
+def _transaction()
+```
+
+**Purpose**: Opens a database transaction for this eval extension’s private storage. Other functions use it when they need to read or change the fake mailbox or calendar safely.
+
+**Data flow**: It takes no direct input. It builds an extension context using the eval environment name and no declared credentials, then returns a transaction object. Callers enter that transaction, run database statements, and leave with the changes committed or rolled back by the surrounding context.
+
+**Call relations**: The email and calendar helpers call this whenever they touch stored rows. It is the shared doorway into the durable test data used by `_send_email`, `_list_emails`, `_create_event`, `_list_events`, and `_change_event`.
+
+*Call graph*: called by 5 (_change_event, _create_event, _list_emails, _list_events, _send_email); 3 external calls (__init__, __init__, __init__).
+
+
+##### `_moment`  (lines 178–182)
+
+```
+def _moment(value: str) -> datetime
+```
+
+**Purpose**: Turns an ISO 8601 time string into a Python datetime value. If the string has no time zone, it treats it as UTC so stored calendar times are consistent.
+
+**Data flow**: It receives a text timestamp. It parses the text into a datetime object, adds the UTC time zone when none was provided, and returns the normalized datetime.
+
+**Call relations**: Calendar creation and event updates call this before saving start or end times. It keeps `_create_event` and `_update_event` from storing ambiguous time values.
+
+*Call graph*: called by 2 (_create_event, _update_event); 1 external calls (fromisoformat).
+
+
+##### `EvalEnvBroker.tools`  (lines 190–198)
+
+```
+async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]
+```
+
+**Purpose**: Returns the tools available for one eval provider, optionally filtered by a search phrase. This is how the connector can answer, “What can this provider do?”
+
+**Data flow**: It receives a workspace id, provider name, and query string. It looks up the provider’s catalog, compares the query to tool slugs and descriptions, and returns either matching tools or the full catalog when nothing specific matches.
+
+**Call relations**: `EvalEnvBroker.search` calls this when a tool search is requested. It sits near the start of the connector flow, before any specific tool is described or executed.
+
+*Call graph*: called by 1 (search).
+
+
+##### `EvalEnvBroker.schema`  (lines 200–204)
+
+```
+async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool
+```
+
+**Purpose**: Finds the definition for one named tool, including its input shape. This lets the connector tell the agent exactly what arguments a tool accepts.
+
+**Data flow**: It receives a workspace id, provider name, and tool slug. It scans that provider’s catalog and returns the matching `BrokerTool`; if none exists, it raises an unknown-tool error.
+
+**Call relations**: This supports the describe-tool part of the connector path. If an agent or caller asks for a tool that is not in the eval catalog, it stops the request with `UnknownBrokerTool`.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `EvalEnvBroker.execute`  (lines 206–245)
+
+```
+async def execute(self, workspace_id: UUID, provider: str, slug: str, arguments: Mapping[str, object], account_id: str, idempotency_key: str | None) -> dict[str, object]
+```
+
+**Purpose**: Dispatches an actual tool call to the right fake email, calendar, or code-search operation. It is the main switchboard for eval connector calls.
+
+**Data flow**: It receives the workspace id, provider name, tool slug, raw arguments, account id, and optional idempotency key. It validates the raw arguments using the right argument model, calls the matching helper, and returns that helper’s result. If the provider or slug is not recognized, it raises an unknown-tool error.
+
+**Call relations**: This is called when the connector system asks the broker to run a tool. It hands off to `_send_email`, `_list_emails`, `_create_event`, `_list_events`, `_update_event`, `_cancel_event`, or `_search_code` depending on the requested provider and slug.
+
+*Call graph*: calls 7 internal fn (_cancel_event, _create_event, _list_emails, _list_events, _search_code, _send_email, _update_event); 1 external calls (__init__).
+
+
+##### `EvalEnvBroker._search_code`  (lines 247–255)
+
+```
+async def _search_code(self, args: SearchCodeArgs) -> dict[str, object]
+```
+
+**Purpose**: Returns a pre-seeded code-search response for an exact query. It deliberately fails if the fixture is missing, so a broken test setup is caught loudly.
+
+**Data flow**: It receives validated search arguments containing a query. It reads the scoped store entry named with the code-search prefix plus that query. If the stored value is a dictionary, it returns a copy of it; otherwise it raises an error.
+
+**Call relations**: `execute` calls this for the `search_code` tool. Unlike email and calendar helpers, it does not change database tables; it reads the response that the evaluation author seeded earlier.
+
+*Call graph*: called by 1 (execute); 1 external calls (__init__).
+
+
+##### `EvalEnvBroker._send_email`  (lines 257–272)
+
+```
+async def _send_email(self, workspace_id: UUID, args: SendEmailArgs) -> dict[str, object]
+```
+
+**Purpose**: Adds a sent email to the fake mailbox. This lets an agent’s “send email” action leave a durable record that the evaluation can later grade.
+
+**Data flow**: It receives a workspace id and validated email arguments. It creates a new email id, opens a transaction, inserts a row in the sent folder with the fixed assistant sender address, recipients, subject, body, and current UTC time, then returns the new id and sent status.
+
+**Call relations**: `execute` calls this when the requested email tool is `send_email`. It uses `_transaction` to write to the eval email table that `_list_emails` and graders can later read.
+
+*Call graph*: calls 1 internal fn (_transaction); called by 1 (execute); 3 external calls (now, insert, uuid4).
+
+
+##### `EvalEnvBroker._list_emails`  (lines 274–309)
+
+```
+async def _list_emails(self, workspace_id: UUID, args: ListEmailsArgs) -> dict[str, object]
+```
+
+**Purpose**: Reads messages from the fake mailbox, newest first, with optional text filtering. This lets the agent inspect seeded or previously sent email.
+
+**Data flow**: It receives a workspace id and validated list arguments. It builds database conditions for the workspace and folder, adds a sender/subject/body substring filter when a query is provided, reads up to the requested limit, and returns email dictionaries with ids, addresses, subject, body, and send time.
+
+**Call relations**: `execute` calls this for the `list_emails` tool. It uses `_transaction` for the database read and returns rows created by seeding or by `_send_email`.
+
+*Call graph*: calls 1 internal fn (_transaction); called by 1 (execute); 2 external calls (or_, select).
+
+
+##### `EvalEnvBroker._create_event`  (lines 311–325)
+
+```
+async def _create_event(self, workspace_id: UUID, args: CreateEventArgs) -> dict[str, object]
+```
+
+**Purpose**: Creates a confirmed event in the fake calendar. This gives evaluations a durable record of calendar actions taken by the agent.
+
+**Data flow**: It receives a workspace id and validated event arguments. It creates a new event id, parses the start and end strings into datetimes, inserts a confirmed event row with attendees, and returns the new id and confirmed status.
+
+**Call relations**: `execute` calls this when the calendar tool is `create_event`. It relies on `_moment` to normalize time strings and `_transaction` to save the row used later by list, update, cancel, or grading code.
+
+*Call graph*: calls 2 internal fn (_moment, _transaction); called by 1 (execute); 2 external calls (insert, uuid4).
+
+
+##### `EvalEnvBroker._list_events`  (lines 327–340)
+
+```
+async def _list_events(self, workspace_id: UUID, args: ListEventsArgs) -> dict[str, object]
+```
+
+**Purpose**: Reads calendar events for a workspace in start-time order, optionally filtered by title. Cancelled events are still listed with their status.
+
+**Data flow**: It receives a workspace id and validated list arguments. It builds a workspace condition, adds a title substring filter if requested, selects matching rows up to the limit, converts each row to a plain response dictionary, and returns them under `events`.
+
+**Call relations**: `execute` calls this for the `list_events` tool. It uses `_transaction` to read stored events and `_event_json` to shape each database row into the API response.
+
+*Call graph*: calls 2 internal fn (_event_json, _transaction); called by 1 (execute); 1 external calls (select).
+
+
+##### `EvalEnvBroker._update_event`  (lines 342–354)
+
+```
+async def _update_event(self, workspace_id: UUID, args: UpdateEventArgs) -> dict[str, object]
+```
+
+**Purpose**: Prepares requested changes for an existing calendar event. It only changes fields that the caller actually supplied.
+
+**Data flow**: It receives a workspace id and validated update arguments. It builds a changes dictionary from non-empty title, start, end, and attendees fields, parsing any new times. If there is nothing to change, it raises an error; otherwise it passes the changes onward and returns the updated event.
+
+**Call relations**: `execute` calls this for the `update_event` tool. It is the careful front end to `_change_event`, translating user-facing arguments into database column changes.
+
+*Call graph*: calls 2 internal fn (_change_event, _moment); called by 1 (execute).
+
+
+##### `EvalEnvBroker._cancel_event`  (lines 356–357)
+
+```
+async def _cancel_event(self, workspace_id: UUID, args: CancelEventArgs) -> dict[str, object]
+```
+
+**Purpose**: Marks an existing calendar event as cancelled. It does not delete the event, so the final state can show that the event was cancelled.
+
+**Data flow**: It receives a workspace id and validated cancel arguments. It builds a one-field change setting the status to cancelled, sends that to the shared event-changing helper, and returns the updated event response.
+
+**Call relations**: `execute` calls this for the `cancel_event` tool. It reuses `_change_event`, the same shared path used by event updates.
+
+*Call graph*: calls 1 internal fn (_change_event); called by 1 (execute).
+
+
+##### `EvalEnvBroker._change_event`  (lines 359–378)
+
+```
+async def _change_event(self, workspace_id: UUID, event_id: str, changes: dict[str, object]) -> dict[str, object]
+```
+
+**Purpose**: Applies a set of changes to one calendar event and returns the updated event. It also protects workspace boundaries by only changing an event in the caller’s workspace.
+
+**Data flow**: It receives a workspace id, event id string, and a dictionary of database changes. It opens a transaction, updates the matching event row, checks that exactly one row changed, fetches the updated row, converts it to response form, and returns it. If no event matches, it raises an error.
+
+**Call relations**: `_update_event` and `_cancel_event` both call this after deciding what should change. It uses `_transaction` for the database work and `_event_json` to produce the final response.
+
+*Call graph*: calls 2 internal fn (_event_json, _transaction); called by 2 (_cancel_event, _update_event); 3 external calls (select, update, UUID).
+
+
+##### `EvalEnvBroker._event_json`  (lines 380–388)
+
+```
+def _event_json(self, row: sa.Row) -> dict[str, object]
+```
+
+**Purpose**: Converts a calendar database row into the plain dictionary returned by calendar tools. It keeps event responses consistent across listing, updating, and cancelling.
+
+**Data flow**: It receives a database row. It extracts the id, title, start and end times, attendees, and status, converts ids and times to strings, and returns a JSON-friendly dictionary.
+
+**Call relations**: `_list_events` uses this for each listed event, and `_change_event` uses it after an update or cancellation. It is the final formatting step for calendar responses.
+
+*Call graph*: called by 2 (_change_event, _list_events).
+
+
+##### `EvalEnvBroker.file_outputs`  (lines 390–391)
+
+```
+def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]
+```
+
+**Purpose**: Declares that eval environment tools do not produce downloadable files. This satisfies the broker interface while making the behavior explicit.
+
+**Data flow**: It receives a tool response but does not inspect it. It always returns an empty tuple, meaning there are no file attachments or file outputs to collect.
+
+**Call relations**: The connector framework may ask brokers for files after a tool call. For these eval providers, this method ends that path immediately because email, calendar, and code search responses are plain data.
+
+
+##### `EvalEnvBroker.stage_upload`  (lines 393–402)
+
+```
+async def stage_upload(self, workspace_id: UUID, provider: str, slug: str, filename: str, mimetype: str, md5: str) -> StagedUpload
+```
+
+**Purpose**: Rejects file uploads for eval environment providers. These fake tools only accept structured arguments, not uploaded files.
+
+**Data flow**: It receives upload details such as workspace, provider, tool slug, filename, MIME type, and checksum. It ignores them and raises an error saying uploads are not accepted.
+
+**Call relations**: If the connector framework ever tries to prepare a file upload for these providers, this method stops it. No other helper receives the upload because uploads are outside this eval environment’s design.
+
+
+##### `EvalEnvBroker.search`  (lines 404–405)
+
+```
+async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch
+```
+
+**Purpose**: Wraps tool lookup results in the connector’s search response format. It supports the flow where a caller searches for relevant external tools.
+
+**Data flow**: It receives a workspace id, provider name, and search query. It asks `tools` for matching tools, puts them into a `BrokerSearch` object, and returns that object.
+
+**Call relations**: This is the search-facing entry into the broker’s tool catalog. It delegates the actual matching to `tools` and packages the answer in the shape expected by the connector system.
+
+*Call graph*: calls 1 internal fn (tools); 1 external calls (__init__).
+
+
+##### `EvalEnvBroker.credential`  (lines 407–408)
+
+```
+async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
+```
+
+**Purpose**: Returns a simple fake bearer credential for the eval provider account. It lets the connector path proceed without needing a real external login token.
+
+**Data flow**: It receives a workspace id, provider name, and account id. It creates and returns a credential whose bearer token is a predictable eval-only string containing the account id.
+
+**Call relations**: The connector framework can call this when it needs credentials for a provider. Since these providers are local eval fakes, the returned token is only a placeholder for the normal authentication step.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `_EvalEnvOAuth.authorize_url`  (lines 419–420)
+
+```
+def authorize_url(self, state: str, redirect_uri: str) -> str
+```
+
+**Purpose**: Builds a fake OAuth authorization URL. OAuth is the common web sign-in flow where a user grants an app access, but evals normally seed grants directly instead.
+
+**Data flow**: It receives a state value and redirect URI. It formats them into an HTTPS URL using the provider’s fake host and returns that string.
+
+**Call relations**: This exists because connector providers need an OAuth descriptor. It would be used if someone started the connect flow, but normal evaluations do not rely on it.
+
+
+##### `_EvalEnvOAuth.exchange`  (lines 422–425)
+
+```
+async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID, state: str) -> OAuthAccount
+```
+
+**Purpose**: Completes the fake OAuth exchange by returning the fixed eval account id. It keeps the provider honest enough to satisfy the connector interface without contacting a real service.
+
+**Data flow**: It receives an authorization code, redirect URI, workspace id, and state. It does not validate them against an external service; it returns an `OAuthAccount` with the eval account id.
+
+**Call relations**: This is the second half of the fake connect flow after `authorize_url`. If driven, it hands the connector system the account identity expected by the eval environment.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `manifest`  (lines 428–450)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Registers the eval email, calendar, and code-search providers with the extension system. This is the file’s public entry point for discovering the eval connectors.
+
+**Data flow**: It creates one shared `EvalEnvBroker`, then builds a `Manifest` containing three connector providers. Each provider has a fake OAuth descriptor, a human-readable label, and the shared broker that knows how to run its tools.
+
+**Call relations**: The extension loader calls this to learn what the extension offers. It wires `_EvalEnvOAuth` and `EvalEnvBroker` into `ConnectorProvider` objects so later connector discovery, description, and execution can reach the broker methods above.
+
+*Call graph*: 4 external calls (__init__, __init__, __init__, __init__).

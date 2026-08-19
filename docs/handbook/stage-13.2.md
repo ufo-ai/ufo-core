@@ -1,787 +1,881 @@
-# Creation workflows for sites, documents, code, and research  `stage-13.2`
+# Native communication and code-service integrations  `stage-13.2`
 
-This stage is part of the system’s main work loop, where the assistant stops just talking and starts making things. It covers several creation paths: building websites, publishing them, delegating web work to a specialist, and running broad research jobs.
+This stage is the system’s set of adapters for outside services that people already use: Slack, iMessage through Spectrum, and GitHub. It is shared behind-the-scenes support, used whenever the project needs to talk in a native chat app or access code on GitHub.
 
-The site surface is the front door for a hosted website. When someone opens a link, it checks whether they are allowed in, shows the site safely inside a protected frame, and lets the creator adjust viewing permissions. The site tools are the workshop controls: they build site files, start a local web server, publish it as a stable hosted link, and record that link. They also add guardrails, such as keeping file paths inside the workspace and checking that servers are actually running. The site store is the address book behind this, remembering which conversation owns each site and who can access it. The delegation file lets the main assistant hand website work to a child agent. The research tool similarly splits a list of research targets into parallel jobs and saves the combined answers as JSON.
+The Slack pieces work like a careful translator and installer. The mentions code changes Slack’s special hidden mention format into readable names, and safely turns approved names back into real Slack mentions when replying. The attribution and hooks code add a small footer to connector-sent Slack messages so people can see the bot was responsible, while making sure the bot does not mistake that footer for a new user message. The tools code guides an administrator through connecting a Slack workspace, setting up the Slack app, and searching Slack conversations.
+
+The iMessage cloud bridge signs in to Spectrum, opens secure connections, sends messages, receives events, and turns Spectrum responses into objects the extension can use. The GitHub App code checks a workspace’s installation and creates short-lived credentials for coding tasks, falling back to a user’s stored GitHub token when needed.
 
 ## Files in this stage
 
-### Website creation and hosting
-Site-facing tools and pages delegate website builds, serve and publish local work, enforce access rules, and persist hosted-site ownership and visibility records.
+### GitHub coding credentials
+Validates workspace GitHub App installations and mints the credentials needed for coding workflows.
 
-### `extensions/sites/ufo_ext_sites/surface.py`
+### `extensions/coding/ufo_ext_coding/github_app.py`
 
-`domain_logic` · `request handling`
+`domain_logic` · `credential lookup and token minting`
 
-A hosted site link is meant to be shareable, but the link itself is not treated as proof that someone may view the site. This file is the gatekeeper for those links. It reads the token in the URL, finds which workspace and site the token points to, checks the viewer's session cookie, and then applies the site's visibility rule: public, workspace-only, or private to the creator.
+This file solves a trust problem around GitHub access. A workspace may have installed this product’s GitHub App, which lets the system ask GitHub for a temporary installation token. That token is safer than storing a long-lived secret, and it is limited to the permissions the organization approved when it installed the App.
 
-If the token is bad, the site is missing, or the viewer is not allowed, the response is deliberately bland: usually the same “no such site” message. That matters because the page should not become a guessing tool that reveals whether private sites exist. If a viewer is not signed in and the site is not public, it shows a simple sign-in page instead.
+The important detail is that the workspace does not store a plain GitHub installation id. It stores a sealed value, meaning an encrypted and authenticated binding that only the install callback could have created. This prevents someone from typing another organization’s installation id into a credential slot and tricking the system into minting tokens for the wrong organization.
 
-The actual site files are not served here. This file returns a wrapper page with an iframe, which is like a window inside the page, pointing at the site's separate serving origin. That separation helps keep the embedded site's scripts away from the app's own cookies and controls. When the creator is viewing the page, the wrapper also shows a visibility selector. Changing that setting requires a CSRF token, which is a signed proof tied to the viewer's own session so another website cannot silently submit the form.
+The main class, GitHubAppTokens, reads that sealed installation binding, opens it, and asks GitHub for a one-hour token. It caches the token until shortly before it expires, so repeated work in the same conversation does not keep calling GitHub. It also avoids launching duplicate minting requests when several tasks need the same token at once.
+
+GitHubAPIAuth wraps this for GitHub API use. It prefers the App token when an installation exists, but uses a stored personal token when there is no installation. If a sealed installation value is present but invalid, it fails instead of falling back, because using a different identity than the organization approved would be unsafe.
 
 #### Function details
 
-##### `site_token`  (lines 96–105)
+##### `_segment`  (lines 58–59)
 
 ```
-def site_token(workspace_id: UUID, conversation_id: UUID, name: str) -> str
+def _segment(payload: dict[str, object]) -> bytes
 ```
 
-**Purpose**: Creates the permanent signed token used in a hosted site URL. The token names a workspace, a conversation, and a site name, so the system can later find the right site from the link alone.
+**Purpose**: Turns one part of a JSON Web Token, or JWT, into the compact text form GitHub expects. A JWT is a signed short message used here to prove that this server really owns the GitHub App.
 
-**Data flow**: It takes a workspace ID, conversation ID, and site name → puts them into signed token claims for the sites surface → returns the token string that can be placed in a URL.
+**Data flow**: It receives a small dictionary, converts it to compact JSON, encodes that text in URL-safe base64, and removes trailing padding characters. The result is a bytes value ready to be joined into a JWT.
 
-**Call relations**: When a full link is being built, site_url calls this helper first. It hands the real signing work to mint_surface_token, which produces the tamper-resistant token.
+**Call relations**: GitHubAppTokens._jwt uses this helper twice: once for the token header and once for the token body. It is a small formatting step before the private key signs the JWT.
 
-*Call graph*: called by 1 (site_url); 1 external calls (mint_surface_token).
-
-
-##### `site_url`  (lines 108–118)
-
-```
-def site_url(public_base_url: str | None, workspace_id: UUID, conversation_id: UUID, name: str) -> str
-```
-
-**Purpose**: Builds the shareable web address for a hosted site. It refuses to guess if the deployment has no public base URL, because a site link would not actually be openable.
-
-**Data flow**: It receives the deployment's public base URL plus the workspace, conversation, and site name → checks that the base URL exists → creates a site token → returns a URL made from the base path, the sites frame path, and the token. If no base URL is configured, it raises SiteHostingUnconfigured instead.
-
-**Call relations**: This is the producer of hosted site links. It calls site_token to make the address token, then combines that token with the configured public URL.
-
-*Call graph*: calls 1 internal fn (site_token); 1 external calls (__init__).
+*Call graph*: called by 1 (_jwt); 2 external calls (urlsafe_b64encode, dumps).
 
 
-##### `site_address`  (lines 121–132)
+##### `GitHubAppTokens.bound`  (lines 83–95)
 
 ```
-def site_address(token: str) -> SiteAddress | None
+async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool
 ```
 
-**Purpose**: Turns a site token back into the site address it represents, if the token is valid. It protects the rest of the code from forged, damaged, or incomplete tokens.
+**Purpose**: Checks whether a workspace has a GitHub App installation bound to it. It does not mint a token; it only answers whether the sealed installation value is present and valid.
 
-**Data flow**: It receives a token string → verifies that it is a signed sites-surface token → reads the workspace ID, conversation ID, and site name claims → returns a SiteAddress object. If verification fails or the claims are missing or malformed, it returns None.
+**Data flow**: It takes a workspace id and credential store. It asks the store for the installation slot; if the slot is missing, it returns false. If a value exists, it tries to open the sealed installation binding for that workspace and slot, and returns true only if that succeeds.
 
-**Call relations**: Both resolve_workspace and _resolve use this as the first step when a request arrives. It relies on verify_surface_token for signature checking and UUID parsing to make sure IDs are real UUID values.
+**Call relations**: This is used when the system needs to know whether the GitHub App path applies before exporting credentials or choosing a fallback. It deliberately behaves like secret on invalid sealed values, so the system does not claim there is no App binding and then silently use a personal token instead.
 
-*Call graph*: called by 2 (_resolve, resolve_workspace); 3 external calls (__init__, verify_surface_token, UUID).
-
-
-##### `resolve_workspace`  (lines 135–140)
-
-```
-async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
-```
-
-**Purpose**: Finds which workspace a site-link request belongs to before the system reads any site row. This is important because public viewers may not have a session cookie that would otherwise identify a workspace.
-
-**Data flow**: It reads the token from the request path → asks site_address to decode it → returns the workspace ID if the token is valid. If the token is invalid, it returns the same not-found response used for missing sites.
-
-**Call relations**: The surface routing layer calls this while identifying the request's workspace. It uses site_address for token decoding and _not_found to hide bad tokens behind a normal 404-style response.
-
-*Call graph*: calls 2 internal fn (_not_found, site_address).
+*Call graph*: calls 1 internal fn (get); 1 external calls (open_installation).
 
 
-##### `frame`  (lines 143–167)
+##### `GitHubAppTokens.secret`  (lines 97–121)
 
 ```
-async def frame(ctx: SurfaceContext, request: Request) -> Response
+async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None
 ```
 
-**Purpose**: Renders the wrapper page for a hosted site. It verifies the link, checks whether the viewer may enter, and then embeds the actual site in an iframe.
+**Purpose**: Returns the actual GitHub installation token for a workspace, or returns nothing when the workspace has no App installation. This is the main entry point for getting a GitHub App credential.
 
-**Data flow**: It receives the surface context and web request → resolves the site from the token → identifies the viewer from the session cookie if possible → applies the site's visibility rule → asks the context for an ingress URL for the embedded site → optionally creates a CSRF token for the creator's visibility form → returns an HTML page. If anything fails or access is denied, it returns either a sign-in page or a not-found response.
+**Data flow**: It receives a workspace id and credential store. It reads the sealed installation binding, opens it, and uses the workspace plus installation as the cache key. If a still-fresh token is cached, it returns that token. Otherwise it starts or waits for a shared minting task, then returns the newly minted token.
 
-**Call relations**: This is the GET route for opening a site link or a deep link into a site. It calls _resolve to find the site, _viewer to identify the visitor, SurfaceContext.ingress_url to get the embedded-site address, _session_digest when minting a form token, _frame_page to build the final HTML, and _not_found or _page for special responses.
+**Call relations**: Callers use this when they need a GitHub token for a workspace. It hands off the real minting work to GitHubAppTokens._mint, and it uses task sharing so that simultaneous requests for the same installation wait on one GitHub call instead of making several.
 
-*Call graph*: calls 7 internal fn (ingress_url, _frame_page, _not_found, _page, _resolve, _session_digest, _viewer); 2 external calls (HTMLResponse, mint_surface_token).
-
-
-##### `set_visibility`  (lines 170–188)
-
-```
-async def set_visibility(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Lets the creator change a hosted site's visibility between private, workspace, and public. It only accepts the change from the creator and only when the form includes a valid session-bound CSRF token.
-
-**Data flow**: It receives a POST request → resolves the site → identifies the viewer → rejects anyone who is not the creator → reads the submitted form → checks the CSRF token → validates the requested visibility value → writes the new value to the site store → redirects back to the site's frame page. Bad CSRF returns 403, and an invalid visibility value returns 400.
-
-**Call relations**: This is the POST route behind the visibility selector shown by _frame_page. It calls _resolve and _viewer for authorization, _csrf_holds for form safety, _sites to get the storage helper, and then redirects the browser back to the normal frame route.
-
-*Call graph*: calls 5 internal fn (_csrf_holds, _not_found, _resolve, _sites, _viewer); 4 external calls (PlainTextResponse, RedirectResponse, form, visibility_level).
+*Call graph*: calls 2 internal fn (get, _mint); 4 external calls (create_task, shield, time, open_installation).
 
 
-##### `_resolve`  (lines 191–195)
+##### `GitHubAppTokens._mint`  (lines 123–131)
 
 ```
-async def _resolve(ctx: SurfaceContext, request: Request) -> HostedSite | None
+async def _mint(self, key: tuple[UUID, str], installation: str) -> tuple[str, float]
 ```
 
-**Purpose**: Looks up the hosted site named by the URL token. It is the shared helper for both viewing a site and changing its visibility.
+**Purpose**: Performs one token mint for a specific workspace and installation, then records the result in the cache. It also cleans up the in-progress task marker when the mint finishes.
 
-**Data flow**: It reads the token from the request path → decodes it with site_address → if valid, opens the hosted-sites store for the current workspace → reads the site by conversation ID and name → returns the HostedSite object or None.
+**Data flow**: It receives the cache key and installation id. It asks GitHubAppTokens._installation_token to get a token and expiry time from GitHub, stores that pair in the cache, and returns it. Whether the mint succeeds or fails, it removes its own pending-task entry if it is still the active one.
 
-**Call relations**: frame and set_visibility both call this before doing anything else with a site. It delegates token parsing to site_address and storage access to _sites.
+**Call relations**: GitHubAppTokens.secret creates this as an asynchronous task when no usable cached token exists. This function is the bridge between the public secret lookup and the lower-level GitHub API exchange.
 
-*Call graph*: calls 2 internal fn (_sites, site_address); called by 2 (frame, set_visibility).
-
-
-##### `_sites`  (lines 198–199)
-
-```
-def _sites(ctx: SurfaceContext) -> HostedSites
-```
-
-**Purpose**: Creates the storage helper used to read or update hosted-site records for the current workspace. It keeps the rest of the file from repeating how to connect the workspace and transaction to the store.
-
-**Data flow**: It receives the surface context → takes the workspace ID and active transaction from it → returns a HostedSites store object tied to that workspace and transaction.
-
-**Call relations**: _resolve uses this to read a site, and set_visibility uses it to save a new visibility level.
-
-*Call graph*: called by 2 (_resolve, set_visibility); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_installation_token); called by 1 (secret); 1 external calls (current_task).
 
 
-##### `_viewer`  (lines 202–212)
+##### `GitHubAppTokens._installation_token`  (lines 133–188)
 
 ```
-async def _viewer(ctx: SurfaceContext, request: Request) -> UUID | None
+async def _installation_token(self, installation: str) -> tuple[str, float]
 ```
 
-**Purpose**: Identifies the workspace member behind the request's session cookie, if there is one. If the session names a valid email that is not linked yet, it links that email to a member record.
+**Purpose**: Talks to GitHub to exchange this App’s signed proof for an installation access token. It also checks that GitHub’s response is usable and records a warning if requested permissions are missing.
 
-**Data flow**: It reads the ufo_session cookie from the request → verifies the bearer token for the current workspace → gets an email if the token is valid → finds the linked member for that email or creates the link → returns the member ID. If there is no cookie or the token is invalid, it returns None.
+**Data flow**: It receives a GitHub installation id. It builds an authenticated request using GitHubAppTokens._jwt, optionally asks for specific permissions, and posts to GitHub’s installation-token endpoint. If GitHub cannot be reached, refuses the request, or returns a malformed response, it raises a credential-minting error. On success, it returns the token text and its expiry time.
 
-**Call relations**: frame calls this to decide whether the visitor may view the site and whether to show creator controls. set_visibility calls it to prove the requester is the creator. It relies on verify_token for cookie verification and the SurfaceContext member-linking methods to map an email to a workspace member.
+**Call relations**: GitHubAppTokens._mint calls this when a fresh token is needed. This function is the only place in the file that directly talks to GitHub’s API, and it hands back the token information that higher-level code caches and returns.
 
-*Call graph*: calls 2 internal fn (link_member, linked_member); called by 2 (frame, set_visibility); 1 external calls (verify_token).
-
-
-##### `_csrf_holds`  (lines 215–217)
-
-```
-def _csrf_holds(request: Request, submitted: str) -> bool
-```
-
-**Purpose**: Checks whether a submitted visibility form token belongs to this browser session. This helps stop another website from tricking the creator's browser into changing a site's visibility.
-
-**Data flow**: It receives the request and the submitted token → verifies the token as a sites-surface token → compares the token's stored session digest with a fresh digest of the current session cookie → returns true only if they match.
-
-**Call relations**: set_visibility calls this before accepting a visibility change. It uses verify_surface_token to check the signed token and _session_digest to calculate what this request's session should look like.
-
-*Call graph*: calls 1 internal fn (_session_digest); called by 1 (set_visibility); 1 external calls (verify_surface_token).
+*Call graph*: calls 1 internal fn (_jwt); called by 1 (_mint); 4 external calls (__init__, fromisoformat, AsyncClient, warn).
 
 
-##### `_session_digest`  (lines 220–224)
+##### `GitHubAppTokens._jwt`  (lines 190–197)
 
 ```
-def _session_digest(request: Request) -> str
+def _jwt(self) -> str
 ```
 
-**Purpose**: Creates a safe fingerprint of the current session cookie for CSRF protection. It uses a hash so the CSRF token can be tied to the session without storing the raw cookie value in the token.
+**Purpose**: Creates a short-lived signed JWT proving that this server controls the GitHub App private key. GitHub requires this proof before it will issue installation tokens.
 
-**Data flow**: It reads the ufo_session cookie from the request, or an empty string if missing → hashes it with SHA-256 → returns the hexadecimal hash text.
+**Data flow**: It reads the current time, builds a JWT header and body with the App id and expiration time, signs them with the App’s RSA private key, and combines the pieces into a single text token. The output is used as a bearer credential for the GitHub App itself.
 
-**Call relations**: frame uses this when creating the creator's CSRF token, and _csrf_holds uses it when checking a submitted token. Both sides must produce the same digest for the form to be accepted.
+**Call relations**: GitHubAppTokens._installation_token calls this just before asking GitHub for an installation token. It relies on _segment to format the header and body before signing them.
 
-*Call graph*: called by 2 (_csrf_holds, frame); 1 external calls (sha256).
-
-
-##### `_not_found`  (lines 227–228)
-
-```
-def _not_found() -> Response
-```
-
-**Purpose**: Builds the standard not-found response for unknown or inaccessible sites. Using one shared response helps avoid revealing whether a site exists but is private.
-
-**Data flow**: It takes no input → creates a plain-text response with the body “no such site” and status code 404 → returns that response.
-
-**Call relations**: resolve_workspace, frame, and set_visibility call this whenever a bad token, missing site, or unauthorized access should look the same to the viewer.
-
-*Call graph*: called by 3 (frame, resolve_workspace, set_visibility); 1 external calls (PlainTextResponse).
+*Call graph*: calls 1 internal fn (_segment); called by 1 (_installation_token); 4 external calls (urlsafe_b64encode, PKCS1v15, SHA256, time).
 
 
-##### `_page`  (lines 231–236)
+##### `GitHubAPIAuth.bound`  (lines 207–214)
 
 ```
-def _page(title: str, style: str, body: str) -> str
+async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool
 ```
 
-**Purpose**: Wraps a title, CSS style text, and body HTML into a complete basic HTML document. It provides the common shell for the sign-in notice and the hosted-site frame page.
+**Purpose**: Checks whether the workspace has any usable GitHub API authentication available. It accepts either a GitHub App installation or a stored fallback token.
 
-**Data flow**: It receives a title, style text, and body HTML → combines them with document metadata such as character set and viewport → returns the full HTML string.
+**Data flow**: It receives a workspace id and credential store. If App tokens are configured and the workspace has a bound installation, it returns true. Otherwise it checks the fallback slot in the credential store and returns true if a stored token exists, false if not.
 
-**Call relations**: frame uses this for the not-signed-in page. _frame_page uses it to wrap the full hosted-site page after building the header and iframe.
+**Call relations**: This method is used by code that needs to know whether GitHub API credentials can be supplied. It consults GitHubAppTokens.bound first so an App installation takes priority, then checks the fallback personal-token path.
 
-*Call graph*: called by 2 (_frame_page, frame).
-
-
-##### `_frame_page`  (lines 239–269)
-
-```
-def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: str) -> str
-```
-
-**Purpose**: Builds the actual HTML for the hosted-site wrapper page. It shows the site name, either a creator visibility form or a viewer badge, and the iframe that points to the site's own serving origin.
-
-**Data flow**: It receives the site record, the embedded-site URL if one is available, the frame path, and an optional CSRF token → chooses a visibility selector for the creator or a badge for other viewers → creates either an iframe or an unconfigured-hosting message → escapes user-controlled text for safety → returns a complete HTML page.
-
-**Call relations**: frame calls this after access has been approved and an embedded ingress URL has been minted. It calls _selector when creator controls should be shown, _page for the document shell, and html.escape to keep names and URLs from being interpreted as unsafe HTML.
-
-*Call graph*: calls 2 internal fn (_page, _selector); called by 1 (frame); 1 external calls (escape).
+*Call graph*: calls 1 internal fn (get).
 
 
-##### `_selector`  (lines 272–282)
+##### `GitHubAPIAuth.secret`  (lines 216–223)
 
 ```
-def _selector(current: Visibility, frame_path: str, csrf: str) -> str
+async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None
 ```
 
-**Purpose**: Creates the small form that lets a site creator choose who can see the site. The form includes the current visibility choice and a hidden CSRF token.
+**Purpose**: Builds the Authorization header value used for GitHub API requests. It prefers a GitHub App installation token and falls back to a stored personal token only when there is no App token.
 
-**Data flow**: It receives the current visibility level, the frame path to post back to, and the CSRF token → builds one option for each allowed visibility level → marks the current level as selected → escapes the form action and token → returns the HTML form string.
+**Data flow**: It receives a workspace id and credential store. It first asks GitHubAppTokens.secret for an installation token if App support is configured. If that returns nothing, it tries to read the fallback token from the store. If it finds a token, it prefixes it with Bearer and returns the header value; if no token exists, it returns nothing.
 
-**Call relations**: _frame_page calls this only when the current viewer is the creator and a CSRF token was minted. The submitted form is later received by set_visibility.
+**Call relations**: This is the practical API-auth companion to GitHubAppTokens.secret. Higher-level request code can ask it for one ready-to-use bearer string instead of caring whether the token came from the GitHub App or from the fallback credential slot.
 
-*Call graph*: called by 1 (_frame_page); 1 external calls (escape).
+*Call graph*: calls 1 internal fn (get).
 
 
-### `extensions/sites/ufo_ext_sites/tools.py`
+##### `app_tokens`  (lines 226–245)
 
-`orchestration` · `tool execution during build, serve, deploy, publish, and homepage binding`
+```
+def app_tokens(installation_slot: str, permissions: tuple[tuple[str, str], ...] | None=GIT_INSTALLATION_PERMISSIONS) -> GitHubAppTokens
+```
 
-This file is the bridge between an agent saying “build and show this website” and the system actually doing it safely. It defines the input shapes for several tools, then implements the steps behind them: run a build command, start a server inside the sandbox, wait until the server answers, and optionally register that port as a permanent hosted site link.
+**Purpose**: Constructs a GitHubAppTokens object from deployment environment variables. It makes startup fail loudly if the GitHub App private key is missing or not the expected RSA key type.
 
-The sandbox is the controlled environment where commands run, like a workshop with walls around it. Every path supplied to these tools is passed through `workspace_path`, so a path named by the model is treated as a workspace path rather than an arbitrary host-machine path. Server logs are written under the tool output directory, not mixed into the user’s project files.
+**Data flow**: It receives the credential-slot name that stores the sealed installation binding, plus the permissions to request. It reads the GitHub App id and PEM-formatted private key from environment variables, parses the key, verifies its type, and returns a configured GitHubAppTokens instance.
 
-A key job here is avoiding broken or unsafe servers. Before starting a server, `_serve` frees the chosen port, clears the log name safely, launches the command in the background, and probes the port until it is reachable. That means callers get back a URL only after the server is actually listening.
+**Call relations**: Configuration code calls this when wiring GitHub App support into the system. The returned GitHubAppTokens object is then used by GitHubAPIAuth and other credential flows to check bindings and mint tokens.
 
-For deploy and publish, the file also checks whether hosting is allowed before disturbing an existing site, then registers the live port under a stable site name. Re-deploying the same name can update the site behind the same link. Finally, `set_homepage` points an agent’s homepage at one already-hosted site without changing who is allowed to view it.
+*Call graph*: 2 external calls (__init__, load_pem_private_key).
+
+
+### iMessage cloud provider
+Connects the iMessage extension to Spectrum’s cloud service for authentication, messaging, event intake, and response translation.
+
+### `extensions/imessage/ufo_ext_imessage/cloud.py`
+
+`io_transport` · `startup, request handling, and live event streaming`
+
+This file lets the project talk to Spectrum Cloud as if it were a local iMessage provider. Without it, the extension would know what it wants to do, such as register a phone number or send a message, but it would have no practical way to ask Spectrum’s servers to do it.
+
+It uses two kinds of network calls. Simple account-style actions, such as listing or creating users and getting a shared line token, go through HTTP requests. Live iMessage actions, such as creating chats, sending messages, streaming events, and moving attachments, go through gRPC, which is a fast remote-call system where code calls a server method almost like calling a local function.
+
+The central object is `SpectrumProject`. It stores the project id and secret, keeps a reusable HTTP client, and caches a short-lived shared line token so every operation does not need to log in again. The token cache is protected by an async lock, which is a small “one-at-a-time” gate that prevents two tasks from refreshing the same token at once.
+
+The file also translates incoming Spectrum message events into plain provider messages, filtering out messages that should not be surfaced, such as spam, system messages, messages from the current user, hidden attachments, and empty events. In short, it is both the network adapter and the safety filter for cloud-backed iMessage work.
 
 #### Function details
 
-##### `StartServerInput.validate_port`  (lines 131–134)
+##### `SpectrumProject.installation_id`  (lines 96–97)
 
 ```
-def validate_port(self) -> 'StartServerInput'
+def installation_id(self) -> str
 ```
 
-**Purpose**: This checks that a requested server port is a real TCP port number. It prevents impossible values, such as zero or numbers above 65535, from reaching the server-starting code.
+**Purpose**: This property gives the project a stable installation name in the form `project:<id>`. Other parts of the provider can use it as a clear label for which Spectrum project is being used.
 
-**Data flow**: It receives a `StartServerInput` object after the input fields have been filled in. If no port was supplied, it leaves the input alone. If a port was supplied, it checks the number and either returns the unchanged input or raises an error explaining that the port must be between 1 and 65535.
+**Data flow**: It reads the stored project id from the `SpectrumProject` object and turns it into a single string. Nothing outside the object is changed.
 
-**Call relations**: This is part of the input model for the `start_server` tool. It runs as validation before the tool handler uses the port, so `start_server` can assume any explicit port is in the valid range.
-
-
-##### `_json_result`  (lines 173–174)
-
-```
-def _json_result(payload: dict[str, object]) -> ToolResult
-```
-
-**Purpose**: This wraps a plain Python dictionary into the standard tool response format. Tool handlers use it so their results come back as JSON text that the rest of the system can read consistently.
-
-**Data flow**: It takes a dictionary, converts it to a JSON string, places that string in a text content object, and then places the content object inside a tool result. The output is a `ToolResult` ready to return to the caller.
-
-**Call relations**: The public tool handlers call this at the end of successful work. `website`, `start_server`, `deploy_website`, `publish_website`, and `set_homepage` each gather their result details first, then hand them to `_json_result` to package the final answer.
-
-*Call graph*: called by 5 (deploy_website, publish_website, set_homepage, start_server, website); 3 external calls (__init__, __init__, dumps).
+**Call relations**: This is a lightweight identity helper on `SpectrumProject`. It does not call out to Spectrum; it simply gives callers a consistent name when they need to refer to this configured installation.
 
 
-##### `_free_log`  (lines 177–193)
+##### `SpectrumProject.line`  (lines 99–120)
 
 ```
-async def _free_log(ctx: ToolContext, log: str) -> None
+async def line(self) -> SpectrumLine
 ```
 
-**Purpose**: This safely clears the chosen server log filename before a background server writes to it. It exists to avoid a dangerous case where a log path could be replaced by a link to some other file and then overwritten by shell redirection.
+**Purpose**: This gets the shared Spectrum iMessage line that all cloud iMessage operations need. It reuses a cached token when it is still fresh, and asks Spectrum for a new one when the old token is missing or close to expiring.
 
-**Data flow**: It receives the tool context and a log path. It runs a small Python program inside the sandbox that checks containment, creates parent directories if needed, and removes the existing log file name. If that cleanup fails, it raises an error; otherwise it changes only the log path by making sure the name is free for a new file.
+**Data flow**: It starts with the current event-loop state, including a token cache and a lock. If the cache contains a valid `SpectrumLine`, it returns that. Otherwise it sends an authenticated HTTP request to Spectrum, checks that the response has the expected shape, stores the new token and its expiry time, and returns the new line.
 
-**Call relations**: `_serve` calls this immediately before launching a server. That puts the log path into a safe state so the later shell redirect can create a fresh file instead of truncating an unexpected target.
+**Call relations**: Most cloud actions call this first because they need a bearer token before opening a gRPC request. It is used by phone registration, catch-up, subscription, text sending, attachment sending, and attachment downloading. Internally it asks `_loop` for safe per-loop state and `_request` for the HTTP call.
 
-*Call graph*: called by 1 (_serve).
-
-
-##### `_serve`  (lines 196–246)
-
-```
-async def _serve(ctx: ToolContext, command: str, project: str, port: int, log: str) -> dict[str, object]
-```
-
-**Purpose**: This starts a server command in the sandbox and waits until the chosen port is actually reachable. It turns a fragile background command into a reliable “the server is up” operation.
-
-**Data flow**: It receives a command, project directory, port, and log path. It first clears the log safely, then kills any old process using the same port, starts the new command with its output going to the log, and repeatedly tries to connect to the port. If the server answers in time, it returns the sandbox-local URL, port, and log path. If not, it reads the end of the log when possible and raises a useful error.
-
-**Call relations**: `start_server`, `deploy_website`, and `publish_website` all rely on `_serve` when they need a running server. `_serve` delegates log safety to `_free_log`, then gives its callers proof that the port is listening before they return or host the site.
-
-*Call graph*: calls 1 internal fn (_free_log); called by 3 (deploy_website, publish_website, start_server); 1 external calls (quote).
+*Call graph*: calls 2 internal fn (_loop, _request); called by 6 (catch_up, download_attachment, register_phone, send_attachment, send_text, subscribe); 4 external calls (__init__, __init__, TypeAdapter, monotonic).
 
 
-##### `_refuse_before_serving`  (lines 249–288)
+##### `SpectrumProject._loop`  (lines 122–138)
 
 ```
-async def _refuse_before_serving(ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None) -> str
+def _loop(self) -> SpectrumLoop
 ```
 
-**Purpose**: This checks whether a site is allowed to be hosted before the code kills or replaces anything on the serving port. It protects existing live sites from being disrupted by a deploy that would later be refused.
+**Purpose**: This gives the current async event loop its own safe working state: an HTTP client, a lock, and a token cache. It exists because async objects such as locks and clients are tied to the event loop that uses them.
 
-**Data flow**: It receives the requested site name, target port, and optional visibility setting. It checks that the tool has extension state, that an acting member owns the site, and that visibility changes have a live speaker. It normalizes the site name, verifies that a URL can be formed, asks the hosted-site store whether registration would be refused, and returns the normalized name if everything is allowed.
+**Data flow**: It reads the currently running asyncio event loop. If this project already has state for that loop, it returns it. If not, it creates state for that loop, either reusing the original client and token cache for the first loop or making a fresh client, lock, and cache for later loops.
 
-**Call relations**: `deploy_website` and `publish_website` call this before starting their server. If the check passes, they continue to `_serve`; if it fails, the existing site remains untouched because serving has not yet begun.
+**Call relations**: `line`, `_request`, and `invalidate` use this whenever they need loop-local state. It is the quiet plumbing that keeps token caching and HTTP access safe when the same project object is touched from more than one async loop.
 
-*Call graph*: called by 2 (deploy_website, publish_website); 3 external calls (__init__, site_name, site_url).
-
-
-##### `_host`  (lines 291–328)
-
-```
-async def _host(ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None) -> dict[str, object]
-```
-
-**Purpose**: This records a running sandbox port as a hosted website and returns the public-facing details for it. It is the step that turns “a server is listening on this port” into “there is a stable site link people can open.”
-
-**Data flow**: It receives the raw site name, port, and optional visibility. It verifies the needed context and ownership, normalizes the name, builds the hosted URL, and writes the registration through the hosted-site store. It returns the stored site name, visibility, object name, and public site URL.
-
-**Call relations**: `deploy_website` and `publish_website` call `_host` only after `_serve` has proved the server is running. `_host` repeats the permission checks at write time, because another deploy could have changed the situation since `_refuse_before_serving` ran.
-
-*Call graph*: called by 2 (deploy_website, publish_website); 4 external calls (__init__, site_object_name, site_name, site_url).
+*Call graph*: called by 3 (_request, invalidate, line); 4 external calls (__init__, Lock, get_running_loop, AsyncClient).
 
 
-##### `website`  (lines 331–340)
+##### `SpectrumProject.register_phone`  (lines 140–189)
 
 ```
-async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult
+async def register_phone(self, phone_number: str, idempotency_key: str) -> RegisteredPhone
 ```
 
-**Purpose**: This is the simple build tool for websites. It runs a build command in a project directory and reports what files are present afterward.
+**Purpose**: This registers or finds a Spectrum user for a phone number, then creates a direct iMessage chat for that phone number. It returns the assigned Spectrum phone number and the conversation id needed for later sends.
 
-**Data flow**: It receives tool context and build input, including a command and optional project path. It turns the project path into a safe workspace path, runs the build command in the sandbox with a long timeout, and raises an error if the command fails. On success, it lists the project directory and returns the project path plus the file names as JSON.
+**Data flow**: It takes a target phone number and an idempotency key, which is a repeat-safe label that helps the server avoid doing the same operation twice. It first asks Spectrum for existing users, creates the user if needed, gets a shared line token, then calls the chat service to create a direct iMessage chat. It returns a `RegisteredPhone` with the assigned sender number and conversation id, or raises a clear error if Spectrum rejects the operation or the target has not opted in.
 
-**Call relations**: This tool does not start or host a server. It uses `workspace_path` before running shell commands, quotes the directory for the shell, and finishes by passing its result through `_json_result`.
+**Call relations**: This is called when the provider needs to prepare a phone number for messaging. It relies on `_request` for HTTP user lookup and creation, `line` for authentication, `channel` for the secure gRPC connection, and `rpc_metadata` to attach the token and idempotency key to the remote call.
 
-*Call graph*: calls 1 internal fn (_json_result); 2 external calls (quote, workspace_path).
-
-
-##### `start_server`  (lines 343–348)
-
-```
-async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult
-```
-
-**Purpose**: This starts a scratch server inside the sandbox and returns the local URL once it is ready. It is for testing or previewing a site without creating a permanent hosted link.
-
-**Data flow**: It receives a server command, project path, optional port, and optional log file. It chooses a default port and log path when needed, converts paths into workspace-safe paths, and asks `_serve` to start the command and wait for readiness. It returns the serving details plus the project path as JSON.
-
-**Call relations**: `start_server` is the public tool handler for temporary servers. It hands the hard work of cleanup, launch, logging, and readiness probing to `_serve`, then packages the result with `_json_result`.
-
-*Call graph*: calls 2 internal fn (_json_result, _serve); 1 external calls (workspace_path).
+*Call graph*: calls 5 internal fn (_request, channel, line, rpc_metadata, __init__); 5 external calls (__init__, __init__, TypeAdapter, CreateChatRequest, ChatServiceStub).
 
 
-##### `deploy_website`  (lines 351–358)
+##### `SpectrumProject._request`  (lines 191–214)
 
 ```
-async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult
+async def _request(self, method: str, path: str, *, json: dict[str, str] | None=None, idempotency_key: str | None=None) -> object
 ```
 
-**Purpose**: This serves a built static website folder and registers it as a hosted site with a stable link. It is meant for the common case where the site is already built and can be served by a simple static file server.
+**Purpose**: This is the shared helper for Spectrum Cloud HTTP requests. It adds project authentication, optional repeat-safety headers, checks for HTTP errors, and returns the decoded JSON response.
 
-**Data flow**: It receives the static output directory, site name, entry point, optional visibility, and description. It first asks `_refuse_before_serving` whether hosting is allowed, then converts the project path safely, starts Python’s built-in static web server on the app serving port, and waits for it through `_serve`. Once the server is live, it registers the site through `_host` and returns the server details, hosted-site details, and entry point as JSON.
+**Data flow**: It receives an HTTP method, a path, optional JSON data, and an optional idempotency key. It builds the full Spectrum Cloud URL, sends the request with basic authentication using the project id and secret, raises a `SpectrumCloudError` if the server returns a bad HTTP status, and otherwise returns the response body as parsed JSON.
 
-**Call relations**: `deploy_website` strings together the full deploy path: permission check, serving, hosting, and result packaging. `_refuse_before_serving` protects existing sites before the port is touched, `_serve` proves the new server is reachable, `_host` records the stable link, and `_json_result` formats the final tool response.
+**Call relations**: `line` uses this to fetch shared line tokens, and `register_phone` uses it to list or create Spectrum users. It calls `_loop` so the request uses the HTTP client belonging to the current async loop.
 
-*Call graph*: calls 4 internal fn (_host, _json_result, _refuse_before_serving, _serve); 1 external calls (workspace_path).
-
-
-##### `publish_website`  (lines 361–375)
-
-```
-async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolResult
-```
-
-**Purpose**: This publishes a fuller web app, optionally installing dependencies and optionally running a custom backend command, then hosts it at a stable site link. It covers apps that need more than just pointing a static server at a folder.
-
-**Data flow**: It receives a project directory, built output directory, app name, optional visibility, optional install command, and optional run command. It first checks hosting permission. If an install command is present, it runs it in the project directory and stops on failure. Then it chooses either the custom run command in the project directory or a default static server in the dist directory, starts it through `_serve`, registers it through `_host`, and returns the combined serving and hosting details as JSON.
-
-**Call relations**: `publish_website` uses the same protected hosting flow as `deploy_website`, but adds an optional install step and supports a custom server command. It calls `_refuse_before_serving` before touching the port, `_serve` to launch and verify the app, `_host` to create or update the hosted link, and `_json_result` to return the result.
-
-*Call graph*: calls 4 internal fn (_host, _json_result, _refuse_before_serving, _serve); 2 external calls (quote, workspace_path).
+*Call graph*: calls 1 internal fn (_loop); called by 2 (line, register_phone); 2 external calls (__init__, BasicAuth).
 
 
-##### `set_homepage`  (lines 378–402)
+##### `SpectrumProject.channel`  (lines 216–217)
 
 ```
-async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult
+def channel(self) -> grpc.aio.Channel
 ```
 
-**Purpose**: This makes one already-hosted site the homepage for the acting agent. It changes the homepage pointer, not the site’s visibility or contents.
+**Purpose**: This opens a secure gRPC channel to Spectrum’s iMessage service. A gRPC channel is the network tunnel used to call remote service methods.
 
-**Data flow**: It receives the site object name from an earlier deploy result. It loads all hosted sites, builds a lookup from object names to site records, and finds the requested one. If the name is unknown, it raises an error telling the caller to deploy first. If found, it asks the store to bind that site as the agent’s homepage, then returns the site name, URL, visibility, and homepage agent ID as JSON.
+**Data flow**: It does not take any input beyond the project object. It creates and returns a secure channel pointed at Spectrum’s iMessage address, using SSL credentials so the connection is encrypted.
 
-**Call relations**: `set_homepage` works after a site has already been deployed or published. It uses the hosted-site store to find and bind the site, uses `site_object_name` and `site_url` to match and describe it, and uses `_json_result` to package the final confirmation.
+**Call relations**: Every gRPC-based action calls this before talking to Spectrum: registering chats, catching up events, subscribing to live messages, sending text, sending attachments, and downloading attachments. The caller then creates the specific service stub it needs on top of this channel.
 
-*Call graph*: calls 1 internal fn (_json_result); 3 external calls (__init__, site_object_name, site_url).
+*Call graph*: called by 6 (catch_up, download_attachment, register_phone, send_attachment, send_text, subscribe); 1 external calls (ssl_channel_credentials).
 
 
-### `extensions/sites/ufo_ext_sites/delegation.py`
+##### `SpectrumProject.invalidate`  (lines 219–222)
+
+```
+async def invalidate(self) -> None
+```
+
+**Purpose**: This clears the cached shared line token. It is useful after an authentication problem, because the next operation will be forced to fetch a fresh token.
+
+**Data flow**: It gets the current loop’s token state, waits for the token lock, then empties the token cache. It returns nothing, but it changes the project’s in-memory authentication state.
+
+**Call relations**: This is a maintenance hook for the provider around error recovery. It uses `_loop` for the correct loop-local cache and lock, then leaves future calls to `line` to rebuild the token state.
+
+*Call graph*: calls 1 internal fn (_loop).
+
+
+##### `SpectrumProject.invalid_cursor`  (lines 224–228)
+
+```
+def invalid_cursor(self, error: Exception) -> bool
+```
+
+**Purpose**: This answers whether an error means an event cursor is invalid. A cursor is a saved position in a stream, like a bookmark in a long list of events.
+
+**Data flow**: It receives an exception and checks whether it is a gRPC error whose status code is `INVALID_ARGUMENT`. It returns `true` for that specific case and `false` otherwise.
+
+**Call relations**: This is used by higher-level event-reading code to decide whether a saved stream position can no longer be used. It does not fix the problem itself; it classifies the error so the caller can choose a recovery path.
+
+*Call graph*: 1 external calls (code).
+
+
+##### `SpectrumProject.external_error`  (lines 230–233)
+
+```
+def external_error(self, error: Exception) -> bool
+```
+
+**Purpose**: This tells the rest of the provider whether an exception came from outside systems, such as Spectrum, the network, or target opt-in rules. That helps callers separate expected service failures from bugs in local code.
+
+**Data flow**: It receives an exception and checks its type against known external failure classes: gRPC errors, Spectrum cloud errors, opt-in failures, and HTTP client errors. It returns a boolean answer.
+
+**Call relations**: Higher-level provider code can use this when logging, retrying, or reporting failures. This function does not call other helpers; it is a simple classifier for errors produced by the network methods in this file.
+
+
+##### `SpectrumProject.error_code`  (lines 235–238)
+
+```
+def error_code(self, error: Exception) -> str
+```
+
+**Purpose**: This turns an exception into a short, readable error label. It gives gRPC errors their official status name and uses the Python class name for other errors.
+
+**Data flow**: It receives an exception. If it is a gRPC error, it reads the remote status code and returns that code’s name. Otherwise it returns the exception type name, such as `SpectrumCloudError`.
+
+**Call relations**: This supports higher-level logging and reporting. It is usually paired with `external_error`, so callers can both recognize an outside failure and give it a compact label.
+
+*Call graph*: 1 external calls (code).
+
+
+##### `SpectrumProject.catch_up`  (lines 240–261)
+
+```
+async def catch_up(self, after_sequence: int | None) -> AsyncIterator[ProviderEvent]
+```
+
+**Purpose**: This reads missed iMessage events from Spectrum after a saved sequence number. It lets the provider recover messages that arrived while it was offline or disconnected.
+
+**Data flow**: It takes an optional `after_sequence` bookmark. It gets a line token, opens a secure gRPC channel, asks Spectrum for catch-up events, then yields provider events one by one. Completion frames become events with a head sequence, and message-change frames are filtered and converted into inbound messages when appropriate.
+
+**Call relations**: This is part of the event-reading path. It calls `line` for authentication, `channel` for the remote stream, `rpc_metadata` for request headers, and `_inbound_message` to turn raw Spectrum message changes into provider-friendly messages.
+
+*Call graph*: calls 4 internal fn (channel, line, _inbound_message, rpc_metadata); 3 external calls (__init__, CatchUpEventsRequest, EventServiceStub).
+
+
+##### `SpectrumProject.subscribe`  (lines 263–279)
+
+```
+async def subscribe(self, ready: asyncio.Event) -> AsyncIterator[ProviderEvent]
+```
+
+**Purpose**: This subscribes to live iMessage events from Spectrum. It is the always-on stream used to receive new messages as they happen.
+
+**Data flow**: It takes an asyncio event called `ready`. After getting a token and opening the message event stream, it sets `ready` so the caller knows the subscription is active. Then it yields provider events from the stream, including sequence numbers and filtered inbound messages when the frame contains a received message.
+
+**Call relations**: This is used during live event handling. Like `catch_up`, it depends on `line`, `channel`, `rpc_metadata`, and `_inbound_message`; unlike catch-up, it also signals readiness to the caller once the remote subscription has started.
+
+*Call graph*: calls 4 internal fn (channel, line, _inbound_message, rpc_metadata); 4 external calls (__init__, set, SubscribeMessageEventsRequest, MessageServiceStub).
+
+
+##### `SpectrumProject.send_text`  (lines 281–301)
+
+```
+async def send_text(self, conversation_id: str, text: str, idempotency_key: str) -> str
+```
+
+**Purpose**: This sends a plain text iMessage through an existing Spectrum conversation. It returns the id of the message Spectrum created.
+
+**Data flow**: It receives a conversation id, the text to send, and an idempotency key. It gets a line token, builds a send-text request, attaches authorization metadata, and calls Spectrum’s message service. If Spectrum says permission is denied, it converts that into a `TargetNotOptedIn` error; otherwise it returns the sent message guid.
+
+**Call relations**: This is the text-sending path used by provider code after a conversation has been registered. It calls `line`, `channel`, and `rpc_metadata`, then hands the request to Spectrum’s message service.
+
+*Call graph*: calls 3 internal fn (channel, line, rpc_metadata); 2 external calls (SendTextMessageRequest, MessageServiceStub).
+
+
+##### `SpectrumProject.send_attachment`  (lines 303–330)
+
+```
+async def send_attachment(self, conversation_id: str, filename: str, data: bytes, idempotency_key: str) -> str
+```
+
+**Purpose**: This sends a file attachment in an existing Spectrum conversation. It first uploads the file, then sends a message that points to the uploaded attachment.
+
+**Data flow**: It receives a conversation id, filename, raw file bytes, and an idempotency key. It gets a token and opens a secure channel, uploads the attachment bytes to Spectrum, then sends an attachment message using the uploaded attachment’s id. It returns the guid of the message that was sent.
+
+**Call relations**: This is the attachment-sending path. It calls `line`, `channel`, and `rpc_metadata`, then uses Spectrum’s attachment service for the upload and Spectrum’s message service for the actual iMessage send.
+
+*Call graph*: calls 3 internal fn (channel, line, rpc_metadata); 4 external calls (UploadAttachmentRequest, AttachmentServiceStub, SendAttachmentMessageRequest, MessageServiceStub).
+
+
+##### `SpectrumProject.download_attachment`  (lines 332–342)
+
+```
+async def download_attachment(self, attachment_id: str) -> AsyncGenerator[bytes, None]
+```
+
+**Purpose**: This downloads an attachment from Spectrum in chunks. It returns an async stream of bytes so large files do not need to be loaded all at once.
+
+**Data flow**: It receives an attachment id. It gets a line token, opens a secure gRPC channel, asks Spectrum to download that attachment, then yields each primary byte chunk as it arrives from the server.
+
+**Call relations**: This is used when provider code needs the contents of an attachment from an inbound message. It relies on `line`, `channel`, and `rpc_metadata`, then reads from Spectrum’s attachment service stream.
+
+*Call graph*: calls 3 internal fn (channel, line, rpc_metadata); 2 external calls (DownloadAttachmentRequest, AttachmentServiceStub).
+
+
+##### `spectrum_project`  (lines 346–359)
+
+```
+def spectrum_project() -> SpectrumProject
+```
+
+**Purpose**: This creates the configured `SpectrumProject` singleton for the process. It reads the required project id and secret from environment variables and fails clearly if they are missing.
+
+**Data flow**: It reads `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` from the environment. If either is absent, it raises `ProviderNotConfigured` with setup instructions. If both are present, it builds a `SpectrumProject` with an HTTP client, an async lock, and an empty token cache, and returns the cached project object on later calls.
+
+**Call relations**: This is the setup doorway into the cloud provider. Other code calls it when it needs a ready-to-use Spectrum project, and the cache means the expensive shared client and token state are reused instead of recreated each time.
+
+*Call graph*: 4 external calls (__init__, __init__, Lock, AsyncClient).
+
+
+##### `rpc_metadata`  (lines 362–366)
+
+```
+def rpc_metadata(token: str, idempotency_key: str | None=None) -> tuple[tuple[str, str], ...]
+```
+
+**Purpose**: This builds the small set of headers sent with Spectrum gRPC calls. The headers carry the bearer token, and sometimes an idempotency key for safe retries.
+
+**Data flow**: It receives a token and optionally an idempotency key. It always creates an authorization entry in the form `Bearer <token>`, adds an `x-idempotency-key` entry when provided, and returns the entries as an immutable tuple.
+
+**Call relations**: All gRPC operations in this file call this before contacting Spectrum: registration, catch-up, live subscription, text sending, attachment sending, and attachment download. It is the common place that formats authentication metadata consistently.
+
+*Call graph*: called by 6 (catch_up, download_attachment, register_phone, send_attachment, send_text, subscribe).
+
+
+##### `_inbound_message`  (lines 369–407)
+
+```
+def _inbound_message(event: object) -> InboundMessage | None
+```
+
+**Purpose**: This converts a raw Spectrum message-change event into the provider’s clean inbound message shape. It also filters out events that should not be treated as user-visible incoming messages.
+
+**Data flow**: It receives a raw event object. It first checks that the object is the expected message-change type and that it represents a received message, not a message sent by this account. It rejects system, spam, service, corrupt, empty, hidden, or sticker-only content. If a real sender and useful text or attachments remain, it returns an `InboundMessage`; otherwise it returns `None`.
+
+**Call relations**: `catch_up` and `subscribe` call this for each message-change frame they receive from Spectrum. It acts like a sieve: raw stream events go in, and only meaningful incoming provider messages come out.
+
+*Call graph*: called by 2 (catch_up, subscribe); 2 external calls (__init__, __init__).
+
+
+### Slack message attribution
+Adds safe bot attribution to outgoing Slack connector messages without letting those footers be mistaken for user input.
+
+### `extensions/slack/ufo_ext_slack/attribution.py`
+
+`domain_logic` · `Slack message sending and Slack event intake`
+
+When this system sends a Slack message through a connector, that message is not rendered by the usual Slack-facing code. So this file supplies the missing “sent by this agent” footer itself. Instead of using a plain product name, it mentions the actual Slack bot user, so a human reader can click or contact the agent from the message.
+
+The file also protects the inbound side. In Slack, a bot mention looks like text such as `<@BOTID>`. If the system adds that mention in a footer, Slack may later deliver the message as if the bot was mentioned. Without care, the agent could mistake its own attribution footer for a real user asking it something. This file avoids that by stripping known attribution text before checking whether a message truly addresses the bot.
+
+Think of it like a letterhead: outgoing mail gets a return address, but the mailroom should not treat that printed return address as a new incoming request. The main pieces are small: one function recognizes connector calls that send Slack messages, one adds the bot-mention footer, one checks for real mentions after removing attribution, and one gathers all possible text from a Slack event, including nested block text where Slack may hide the footer.
+
+#### Function details
+
+##### `is_slack_send`  (lines 36–45)
+
+```
+def is_slack_send(provider: str, slug: str) -> bool
+```
+
+**Purpose**: This function decides whether a connector call is the kind that publishes a Slack message. It keeps this Slack-specific footer logic aligned with the connector tool’s own idea of which calls should be attributed.
+
+**Data flow**: It receives a connector provider name and a connector action slug. It lowercases the slug, then checks that the provider is Slack, the slug refers to a message, and the slug contains one of the send-related words. It returns true only when all of those are true.
+
+**Call relations**: This is the gatekeeper used before applying Slack attribution. Its job is to make sure the rest of this file only changes connector calls that really send Slack messages, so attribution is not added to unrelated connector actions.
+
+
+##### `mention_attributed`  (lines 48–55)
+
+```
+def mention_attributed(arguments: dict[str, JsonValue], bot_user_id: str) -> dict[str, JsonValue]
+```
+
+**Purpose**: This function adds the attribution footer that mentions the bot user to outgoing Slack send arguments. It also avoids adding a second footer if the message is already marked.
+
+**Data flow**: It receives the outgoing connector arguments and the Slack bot user ID. It builds the footer subject by placing that bot ID into the shared attribution mention template, then passes the arguments and subject to the connector attribution helper. The result is a new set of arguments with the footer appended where appropriate, or the original shape left effectively unchanged if attribution is already present.
+
+**Call relations**: After a call has been recognized as a Slack send, this function prepares the actual outgoing payload. It relies on the connector package’s shared attribution builder so the footer format stays consistent with the rest of the connector system, while changing only the subject to be the Slack bot mention.
+
+*Call graph*: 2 external calls (format, attributed_arguments).
+
+
+##### `addressing_mention`  (lines 58–68)
+
+```
+def addressing_mention(text: str, bot_user_id: str) -> bool
+```
+
+**Purpose**: This function tells whether a piece of Slack text truly mentions the bot, ignoring mentions that appear only inside this system’s own attribution footer. It prevents the agent from treating its own “sent by” line as a user addressing it.
+
+**Data flow**: It receives some text and the bot user ID. First it removes any known attribution footer text from the input. Then it looks for Slack’s bot mention form, `<@bot_user_id>`, in what remains. It returns true if that mention is still present, and false otherwise.
+
+**Call relations**: Inbound Slack processing can use this when deciding whether a message is meant for the agent. It hands the text to the connector attribution stripper first, because the important question is not “does the bot ID appear anywhere?” but “does it appear outside our own footer?”
+
+*Call graph*: 1 external calls (attribution_stripped).
+
+
+##### `message_bodies`  (lines 71–77)
+
+```
+def message_bodies(event: Mapping[str, object]) -> tuple[str, ...]
+```
+
+**Purpose**: This function gathers every text string in a Slack message event where a bot mention might appear. It looks beyond the top-level message text because Slack messages can store visible text inside nested blocks and rich-text elements.
+
+**Data flow**: It receives a Slack event represented like a dictionary. It reads the top-level `text` field, using an empty string if it is missing, then walks through the event’s `blocks` field to collect every nested string inside it. It returns all of those strings as a tuple.
+
+**Call relations**: This function prepares inbound Slack message content for mention checks such as `addressing_mention`. To find text inside Slack’s nested block structure, it delegates the recursive walking to `_nested_strings`.
+
+*Call graph*: calls 1 internal fn (_nested_strings).
+
+
+##### `_nested_strings`  (lines 80–89)
+
+```
+def _nested_strings(value: object) -> Iterator[str]
+```
+
+**Purpose**: This helper walks through nested Slack message data and yields every string it can find. It is needed because Slack block data can be a mix of dictionaries, lists, and strings nested several levels deep.
+
+**Data flow**: It receives any value. If the value is a string, it yields that string. If it is a mapping, it looks through all its values and repeats the same process. If it is a list, it repeats the process for each item. Other kinds of values are ignored.
+
+**Call relations**: This is the low-level scanner used by `message_bodies`. `message_bodies` asks it to search the Slack `blocks` data so later mention-detection code can see text that is not present in the event’s simple top-level `text` field.
+
+*Call graph*: called by 1 (message_bodies).
+
+
+### `extensions/slack/ufo_ext_slack/hooks.py`
 
 `orchestration` · `request handling`
 
-This file is a delegation bridge. When the main agent needs a website, web app, dashboard, or small web game built, it can call `build_website` instead of trying to do the whole job directly. Think of it like handing a clear work order to a specialist contractor: the main agent writes down the full objective, and the website-building subagent carries out the build in the same workspace.
+This file is a small hook that runs just before an external tool is used. Its job is to notice one specific situation: the system is about to send a Slack message through the generic connector tool. The generic connector does not know the Slack bot user's ID, so it can only add a generic attribution footer. This Slack extension does know that ID, because the Slack surface stored it earlier after proving the workspace install. So this hook rewrites the message arguments before the connector sends them, adding a footer that mentions the actual bot user.
 
-The file defines the shape of that work order with `BuildWebsiteInput`. The most important field is `objective`, which must include all needed context because the child agent does not inherit the parent conversation history. Other fields let the caller give the task a friendly name, preload useful skills, request a larger work budget for bigger builds, and describe the activity in plain language for the user-facing timeline.
+The important safety rule is that this hook must never become a reason a Slack message fails to send. A pre-tool hook is a gate: if it errors or takes too long, the tool call can be denied. Since the footer is only cosmetic, this file puts its store read inside a short timeout and treats every failure as harmless. If the bot ID cannot be read, is missing, or looks invalid, the hook returns no change. Then the connector continues normally and adds its own generic attribution.
 
-The actual tool handler, `_build_website`, calls `ctx.spawn` to start the specialized `website_building` profile. The child agent works in the same filesystem sandbox, so any files it creates remain available after it finishes. The tool is marked as side-effecting because it changes the workspace and may deploy or register a site. It also uses an idempotency key, which helps reconnect to the same spawned build if a crash recovery or retry repeats the call.
-
-#### Function details
-
-##### `_build_website`  (lines 57–64)
-
-```
-async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResult
-```
-
-**Purpose**: This is the worker function behind the `build_website` tool. It starts the website-building child agent, gives it the build instructions, and returns the child agent’s summary as tool output.
-
-**Data flow**: It receives a tool context and a validated `BuildWebsiteInput` object. It turns the input into plain data, leaving out empty values and the user-facing `user_description`, then passes that data to `ctx.spawn` to start the `website_building` profile. When the child finishes or reconnects, it takes the child result, converts the result output to JSON text if present, wraps that text in `TextContent`, and returns it inside a `ToolResult`.
-
-**Call relations**: This function is registered as the handler for the `build_website` tool, so it runs when the agent chooses that tool. Its main handoff is to `ToolContext.spawn`, which creates or reconnects to the specialized website-building child using the current call’s idempotency key. After the child returns, `_build_website` packages the child’s output into the normal tool-result format for the calling agent to read.
-
-*Call graph*: 4 external calls (__init__, __init__, spawn, model_dump).
-
-
-### `extensions/sites/ufo_ext_sites/store.py`
-
-`domain_logic` · `request handling`
-
-A hosted site here is like a signpost: a stable name such as “dashboard” points to a live sandbox port where the site’s files are being served. This file defines the signpost table and the rules for changing it. Sites are scoped by workspace and conversation, so two conversations can both have a site called “dashboard” without colliding.
-
-The important job is not just saving rows. It also protects ownership and privacy. A site has a creator, a visibility level, and a generation ID that changes when visibility changes so viewers can notice the update. Re-deploying an existing site updates the port, but normally keeps the existing visibility so a teammate’s deploy does not silently reset who can open the site.
-
-The file also handles port conflicts. Since one port can only serve one live origin, registering a new name on a port may remove the old name. That counts as unhosting, so the code checks that the acting member owns the displaced site and is allowed to unhost it. The HostedSites class is the main access point. Callers give it a workspace and a database transaction maker, and it performs all reads and writes with that workspace filter so records from other workspaces are never mixed in.
+In everyday terms, this file is like a mailroom clerk who tries to stamp an envelope with the right sender name. If the name lookup is slow or unavailable, the clerk does not hold the mail hostage; they just let it go with the default stamp.
 
 #### Function details
 
-##### `site_name`  (lines 90–98)
+##### `attribute_connector_send`  (lines 30–44)
 
 ```
-def site_name(raw: str) -> str
+async def attribute_connector_send(ctx: HookContext) -> HookOutcome
 ```
 
-**Purpose**: Turns a user-supplied site name into a safe, short, link-friendly name. It lowercases the text, replaces runs of non-letter-or-number characters with hyphens, trims it, and refuses names that contain no usable letters or digits.
+**Purpose**: This function runs before a tool call and checks whether the call is a Slack send through the connector. If so, and if the workspace's Slack bot user ID is available, it rewrites the tool input so the message text includes a footer mentioning that bot user.
 
-**Data flow**: It receives raw text from a member → normalizes it into a compact slug that can be used in links and object names → returns that slug, or raises InvalidSiteName if nothing usable remains.
+**Data flow**: It receives a hook context containing the pending tool call. It checks whether the payload is a pre-tool-use event for the generic external connector and whether that connector call is specifically a Slack send. If not, it returns no change. If it is a Slack send, it asks for the mirrored Slack bot user ID, uses that ID to add or update the attribution footer in the call arguments, and returns a modified version of the tool input.
 
-**Call relations**: This is used before storing a site name so later database operations can assume the name is already safe. If the name cannot become a real slug, it stops the deploy early by creating an InvalidSiteName error.
+**Call relations**: This is the hook entry point for this file. When the pre-tool-use lifecycle reaches a connector call, it calls on _mirrored_self_user_id to safely fetch the Slack bot identity. If an identity is found, it hands the message arguments to the attribution helper that adds the mention, then returns ModifyInput so the connector tool receives the rewritten arguments instead of the original ones.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `default_visibility`  (lines 101–109)
-
-```
-def default_visibility(audience: Audience) -> Visibility
-```
-
-**Purpose**: Chooses the starting visibility for a newly registered site based on the audience of the conversation that created it. Private direct messages and external rooms default to private, while internal shared conversations default to workspace visibility.
-
-**Data flow**: It receives an Audience value → parses it and checks whether it represents a single member or an outside audience → returns either "private" or "workspace" as the default visibility.
-
-**Call relations**: HostedSites.register calls this only when inserting a brand-new site and the caller did not explicitly choose a visibility. It relies on audience parsing helpers to avoid accidentally exposing externally shared work.
-
-*Call graph*: called by 1 (register); 2 external calls (audience_member, parse_audience).
+*Call graph*: calls 1 internal fn (_mirrored_self_user_id); 3 external calls (__init__, is_slack_send, mention_attributed).
 
 
-##### `visibility_level`  (lines 112–120)
+##### `_mirrored_self_user_id`  (lines 47–61)
 
 ```
-def visibility_level(value: str) -> Visibility
+async def _mirrored_self_user_id(ctx: HookContext) -> str | None
 ```
 
-**Purpose**: Checks that a visibility string is one of the three supported choices: private, workspace, or public. It protects the rest of the code from bad or unexpected values coming from storage or input.
+**Purpose**: This helper tries to read the Slack bot user ID that was previously stored for the current workspace. It is deliberately cautious: if the read fails, takes too long, or returns something that does not look like a Slack bot user ID, it returns nothing.
 
-**Data flow**: It receives a string → compares it against the allowed visibility names → returns the same value as a valid Visibility, or raises ValueError if it is not allowed.
+**Data flow**: It receives the hook context, which gives access to the extension's scoped store. It tries, within a one-second timeout, to read the stored value under the known self-user-ID key. If the read succeeds and the value is a string matching the expected Slack bot user ID pattern, it returns that string. If anything goes wrong, it logs the kind of failure and returns None, leaving the caller to proceed without a Slack-specific footer.
 
-**Call relations**: _site calls this while converting database rows into HostedSite objects. That means every loaded site gets validated before the rest of the app uses it.
+**Call relations**: attribute_connector_send calls this helper only after it has identified a connector call as a Slack send. This helper does not contact Slack directly; it only reads the local extension store. Its result decides whether the higher-level hook can add the precise bot mention or must leave the message unchanged so the generic connector behavior can continue.
 
-*Call graph*: called by 1 (_site).
+*Call graph*: called by 1 (attribute_connector_send); 3 external calls (timeout, match, log).
 
 
-##### `HostedSites.register`  (lines 146–210)
+### Slack markup and tooling
+Handles Slack mention conversion and provides guided administrator tools for connecting and searching Slack workspaces.
 
-```
-async def register(self, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, audience: Audience, may_unhost: bool) -> HostedSite
-```
+### `extensions/slack/ufo_ext_slack/mentions.py`
 
-**Purpose**: Creates or updates the registry record for a site after a deploy. It enforces the rules around ownership, visibility changes, and port takeovers before writing the final site record.
+`domain_logic` · `message ingest and reply sending`
 
-**Data flow**: It receives the conversation, site name, sandbox port, creator member, optional requested visibility, conversation audience, and whether this action may unhost another site → checks whether the operation is allowed, deletes any same-port site that must be displaced, updates an existing same-name site or inserts a new one → returns the registered HostedSite row.
+Slack does not send messages exactly as people see them. A person mention may arrive as `<@U123>`, a channel as `<#C456|team-room>`, a broadcast as `<!here>`, and a labeled link as `<https://example.com|docs>`. If the system stored those raw forms, humans and language models would see IDs instead of names. This file is the translator at that border.
 
-**Call relations**: This is the main write path for deployments. It first asks _refuse to catch forbidden changes, may use _read to compare existing visibility, uses default_visibility for new sites without an explicit setting, then reads the finished row back with _read before returning it.
+On the way in, `render_markup` rewrites known Slack entities into readable text such as `@Alex` or `#ufo-eng`. If a name cannot be safely found, it leaves the original Slack form alone rather than guessing. Links keep both the visible label and the URL when those differ, because a person sees the label but the agent may need the address.
 
-*Call graph*: calls 3 internal fn (_read, _refuse, default_visibility); 4 external calls (delete, insert, update, uuid4).
-
-
-##### `HostedSites.read`  (lines 212–214)
-
-```
-async def read(self, conversation_id: UUID, name: str) -> HostedSite | None
-```
-
-**Purpose**: Looks up one hosted site by conversation and name. It is the simple public read method for resolving a known site link or checking whether a site exists.
-
-**Data flow**: It receives a conversation ID and site name → opens a transaction and searches the current workspace’s registry → returns the HostedSite if found, otherwise None.
-
-**Call relations**: This wraps the private _read helper so callers do not need to provide a database connection. _read does the actual query and row conversion.
-
-*Call graph*: calls 1 internal fn (_read).
-
-
-##### `HostedSites.all`  (lines 216–226)
-
-```
-async def all(self) -> tuple[HostedSite, ...]
-```
-
-**Purpose**: Returns every hosted site in the current workspace, ordered from oldest to newest. This is useful when another layer will apply its own viewing rules or build a workspace-wide list.
-
-**Data flow**: It reads the workspace ID from the HostedSites object → queries all matching registry rows ordered by creation time and name → converts each row into a HostedSite and returns them as a tuple.
-
-**Call relations**: It builds its select list with _columns and converts rows with _site. Unlike visible_conversation, it does not filter by member visibility; that gate is expected elsewhere.
-
-*Call graph*: calls 2 internal fn (_columns, _site).
-
-
-##### `HostedSites.conversation`  (lines 228–245)
-
-```
-async def conversation(self, conversation_id: UUID, names: tuple[str, ...], limit: int) -> tuple[HostedSite, ...]
-```
-
-**Purpose**: Returns selected hosted sites for one conversation, limited to specific names and a maximum count. It gives callers a focused way to load known site records from a conversation.
-
-**Data flow**: It receives a conversation ID, a tuple of site names, and a limit → queries matching rows in the current workspace and conversation → returns matching HostedSite objects in oldest-first order.
-
-**Call relations**: It uses _columns to build the database query and _site to turn each row into the project’s HostedSite data object. It is a narrower list operation than all.
-
-*Call graph*: calls 2 internal fn (_columns, _site).
-
-
-##### `HostedSites.visible_conversation`  (lines 247–266)
-
-```
-async def visible_conversation(self, conversation_id: UUID, member_id: UUID, limit: int) -> tuple[HostedSite, ...]
-```
-
-**Purpose**: Returns the sites in one conversation that a particular member is allowed to see in a basic list. Private sites are included only for their creator; non-private sites are included for others.
-
-**Data flow**: It receives a conversation ID, member ID, and limit → queries current-workspace rows where the member created the site or the site is not private → returns the visible HostedSite objects in oldest-first order.
-
-**Call relations**: It uses _columns for the shared list of selected fields and _site for row conversion. It adds a database OR condition so the visibility filtering happens inside the query.
-
-*Call graph*: calls 2 internal fn (_columns, _site); 1 external calls (or_).
-
-
-##### `HostedSites.set_visibility`  (lines 268–283)
-
-```
-async def set_visibility(self, conversation_id: UUID, name: str, visibility: Visibility) -> HostedSite | None
-```
-
-**Purpose**: Changes the visibility of an existing site and marks it as a new generation. The generation change gives other parts of the system a clear signal that access rules changed.
-
-**Data flow**: It receives a conversation ID, site name, and new visibility → updates the matching row in the current workspace with the new visibility, a fresh generation ID, and a new update time → returns the updated HostedSite, or None if the site no longer exists.
-
-**Call relations**: After issuing the update, it calls _read to fetch the result in the same transaction. Ownership checks are not done here, so callers are expected to enforce who may request the change before calling it.
-
-*Call graph*: calls 1 internal fn (_read); 2 external calls (update, uuid4).
-
-
-##### `HostedSites.set_homepage`  (lines 285–309)
-
-```
-async def set_homepage(self, agent_id: UUID, conversation_id: UUID, name: str) -> HostedSite | None
-```
-
-**Purpose**: Marks one hosted site as an agent’s homepage and clears any previous homepage for that same agent. This keeps the rule that an agent can have at most one homepage site.
-
-**Data flow**: It receives an agent ID plus the conversation and name of the chosen site → first removes that agent ID from any existing homepage row in the workspace, then writes it onto the chosen site → returns the chosen HostedSite, or None if it was gone.
-
-**Call relations**: It performs both updates in one transaction so the database never keeps two homepage bindings for the same agent. It then calls _read to return the final bound row.
-
-*Call graph*: calls 1 internal fn (_read); 1 external calls (update).
-
-
-##### `HostedSites.unregister`  (lines 311–322)
-
-```
-async def unregister(self, conversation_id: UUID, name: str) -> None
-```
-
-**Purpose**: Removes a site from the registry so its permanent link no longer resolves. It does not stop the sandbox process itself; it only removes the public signpost.
-
-**Data flow**: It receives a conversation ID and site name → deletes the matching row for the current workspace → returns nothing after the registration is gone.
-
-**Call relations**: This is the direct unhost operation. Other paths, such as register, may also delete a row when a same-port site is displaced, but this method is for explicitly dropping a named site.
-
-*Call graph*: 1 external calls (delete).
-
-
-##### `HostedSites.refuse_or_pass`  (lines 324–342)
-
-```
-async def refuse_or_pass(self, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, may_unhost: bool) -> None
-```
-
-**Purpose**: Checks whether a future registration would be refused, without changing the database. Callers use it before serving a new deploy so they can avoid taking over a port if the registry rules would reject the action.
-
-**Data flow**: It receives the same key facts as registration: conversation, name, port, creator, optional visibility, and whether unhosting is allowed → runs the refusal checks inside a transaction → returns nothing if allowed, or raises the same error register would raise.
-
-**Call relations**: This is a dry run for HostedSites.register. Both methods use _refuse, so the pre-check and the actual write enforce the same rules.
-
-*Call graph*: calls 1 internal fn (_refuse).
-
-
-##### `HostedSites._refuse`  (lines 344–373)
-
-```
-async def _refuse(self, connection: AsyncConnection, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, may_unhost: bool) -> HostedSite | None
-```
-
-**Purpose**: Centralizes the rules that can block a site registration. It decides whether the caller is trying to change another creator’s visibility choice or displace a site they are not allowed to unhost.
-
-**Data flow**: It receives a database connection and proposed registration details → reads the existing same-name site, checks creator ownership for visibility changes, looks for another site already using the port, and checks unhosting permission → returns the displaced HostedSite if one would be removed, or None if no site is displaced; it raises an error when the action is not allowed.
-
-**Call relations**: HostedSites.register calls this before writing, and HostedSites.refuse_or_pass calls it for a no-write check. It uses _read to inspect the target name and _on_port to find a same-port conflict.
-
-*Call graph*: calls 2 internal fn (_on_port, _read); called by 2 (refuse_or_pass, register); 2 external calls (__init__, __init__).
-
-
-##### `HostedSites._on_port`  (lines 375–390)
-
-```
-async def _on_port(self, connection: AsyncConnection, conversation_id: UUID, port: int, name: str) -> HostedSite | None
-```
-
-**Purpose**: Finds whether another site in the same conversation is already registered on the proposed sandbox port. This matters because a port can only represent one live origin, so a new registration may need to retire the old name.
-
-**Data flow**: It receives a database connection, conversation ID, port, and the name being registered → searches the current workspace and conversation for a different site on that port → returns that HostedSite if found, otherwise None.
-
-**Call relations**: _refuse calls this while deciding whether registration would displace another site. It builds the query with _columns and turns the row into a HostedSite with _site.
-
-*Call graph*: calls 2 internal fn (_columns, _site); called by 1 (_refuse); 1 external calls (execute).
-
-
-##### `HostedSites._read`  (lines 392–404)
-
-```
-async def _read(self, connection: AsyncConnection, conversation_id: UUID, name: str) -> HostedSite | None
-```
-
-**Purpose**: Performs the actual database lookup for one site record. It is the shared helper behind public reads and post-update fetches.
-
-**Data flow**: It receives a database connection, conversation ID, and site name → queries the current workspace for that exact site → returns a HostedSite object if a row exists, otherwise None.
-
-**Call relations**: HostedSites.read, register, set_visibility, set_homepage, and _refuse all rely on this helper. It uses _columns for a consistent selected shape and _site for conversion.
-
-*Call graph*: calls 2 internal fn (_columns, _site); called by 5 (_refuse, read, register, set_homepage, set_visibility); 1 external calls (execute).
-
-
-##### `HostedSites._columns`  (lines 406–417)
-
-```
-def _columns(self) -> sa.Select
-```
-
-**Purpose**: Builds the common database select statement for hosted-site rows. It keeps all read queries asking for the same fields in the same order.
-
-**Data flow**: It reads no outside input beyond the table definition → creates a SQLAlchemy select object containing the columns needed to build a HostedSite → returns that select object so callers can add their own filters and ordering.
-
-**Call relations**: All list and lookup helpers use this as their starting query: _read, _on_port, all, conversation, and visible_conversation. This avoids each method hand-writing the column list.
-
-*Call graph*: called by 5 (_on_port, _read, all, conversation, visible_conversation); 1 external calls (select).
-
-
-##### `_site`  (lines 420–431)
-
-```
-def _site(row: sa.Row) -> HostedSite
-```
-
-**Purpose**: Converts a raw database row into a HostedSite data object. This gives the rest of the code a clear Python object instead of a database-specific row.
-
-**Data flow**: It receives a SQL row with hosted-site fields → validates the stored visibility string and copies each field into a HostedSite → returns the finished HostedSite object.
-
-**Call relations**: Every read path that returns site records calls this after the database query. It calls visibility_level so bad stored visibility values are caught during conversion.
-
-*Call graph*: calls 1 internal fn (visibility_level); called by 5 (_on_port, _read, all, conversation, visible_conversation); 1 external calls (__init__).
-
-
-### Coding extension package
-The coding extension package marker enables the rest of the system to import coding-related extension modules.
-
-### `extensions/coding/ufo_ext_coding/__init__.py`
-
-`other` · `import/package discovery`
-
-In Python, a folder often needs an `__init__.py` file to be treated as a package: a named bundle of code that can be imported elsewhere. This file is empty, so it is like a label on a drawer rather than a tool inside the drawer. Its presence tells Python and project tooling that `extensions/coding/ufo_ext_coding` is an importable module namespace. Without it, some import styles or older Python tooling might not recognize this directory as part of the package structure. There are no functions, classes, settings, or startup actions here. The useful code for this extension lives in other files under the same package.
-
-
-### Batch research delegation
-Research delegation lets the main agent fan out many entity investigations to a specialist subagent and save the combined results as an artifact.
-
-### `extensions/research/ufo_ext_research/delegation.py`
-
-`orchestration` · `request handling`
-
-This file exists to turn one research request into many smaller research jobs. A user gives it a file containing entities, companies, or topics, one per line, plus a prompt template such as “Research {entity}.” The tool reads the file, removes blank lines and duplicates, and then launches a separate research subagent for each entity. Think of it like giving a classroom one worksheet template, then assigning each student a different company to investigate.
-
-To avoid overwhelming the system, it only lets a fixed number of child research jobs run at the same time. It also refuses very large batches, with a limit of 128 entities. If the user provides an output schema file, the schema text is added to each child’s research objective so the returned information is shaped consistently.
-
-A key detail is crash recovery. The tool is marked as side-effecting, meaning it creates lasting work and files. Each child research job gets a stable deduplication key based on the parent call and the entity name. If the parent is restarted after a crash, already-started or completed child jobs can be reconnected to instead of being duplicated.
-
-When all child jobs finish, their results are collected into `wide_research.json` in the workspace, and the tool also returns a compact summary telling the caller where that file is.
+On the way out, the problem is reversed. The agent writes readable text like `@Alex`, but Slack only sends a notification if it receives `<@U123>`. `mention_markup` changes only approved names into Slack mention codes. It avoids code blocks, URLs, existing angle-bracketed forms, email-like text, ambiguous names, broadcast words such as `here`, and too many mentions in one reply. This is like a careful receptionist: it will connect a call only when the name is clear and authorized, and otherwise leaves the message untouched.
 
 #### Function details
 
-##### `_read_lines`  (lines 42–55)
+##### `mentioned_users`  (lines 67–70)
 
 ```
-async def _read_lines(ctx: ToolContext, path: str) -> list[str]
+def mentioned_users(text: str) -> frozenset[str]
 ```
 
-**Purpose**: This helper reads an entities file from the sandbox and turns it into a clean list of unique, non-empty lines. It is used so the rest of the tool can work with a simple list of entity names instead of raw file text.
+**Purpose**: Finds the Slack user IDs that are explicitly mentioned in a raw Slack message. A caller can use those IDs to look up readable user names before rendering the message.
 
-**Data flow**: It receives the tool context and a file path. It safely quotes the path for a shell command, asks the sandbox to run `cat` on that file, and checks whether the read succeeded. It then splits the file into lines, trims extra spaces, skips empty lines, removes duplicates while keeping the original order, and returns the cleaned list.
+**Data flow**: It receives message text as Slack sent it. It asks the shared `_mentioned` helper to look only for user mention forms, then returns a frozen set of the user IDs it found. It does not change the text.
 
-**Call relations**: The main `_wide_research` function calls this first, before launching any child research jobs. It uses `shlex.quote` so the file path is treated as a literal path by the shell, rather than accidentally running special shell characters as commands.
+**Call relations**: This is the user-specific front door for mention scanning. When other code needs to know which people a Slack message refers to, it calls this function, which delegates the actual pattern search to `_mentioned` with the user marker.
 
-*Call graph*: called by 1 (_wide_research); 1 external calls (quote).
-
-
-##### `_wide_research`  (lines 58–85)
-
-```
-async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResult
-```
-
-**Purpose**: This is the main body of the `wide_research` tool. It reads the requested entities, launches bounded parallel research jobs for them, writes the combined results to a JSON file, and returns a tool response pointing to that output.
-
-**Data flow**: It receives the tool context and validated user input: the entities file, prompt template, schema file path, and description. First it asks `_read_lines` for the cleaned entity list. It rejects the request if there are too many entities. It then reads the optional schema file, creates a semaphore, which is a gate that limits how many jobs can run at once, and starts one `visit` task per entity. After all visits finish, it writes the collected rows to `wide_research.json` and returns a `ToolResult` containing JSON with the rows and output filename.
-
-**Call relations**: This function is registered as the handler for `WIDE_RESEARCH_TOOL`, so it runs when someone invokes the tool. It delegates file cleanup to `_read_lines`, uses `asyncio.gather` to wait for all per-entity research tasks, uses `visit` for the actual per-entity child spawn, and wraps the final answer in `TextContent` and `ToolResult` so the tool system can return it to the caller.
-
-*Call graph*: calls 1 internal fn (_read_lines); 6 external calls (__init__, __init__, Semaphore, gather, dumps, quote).
+*Call graph*: calls 1 internal fn (_mentioned).
 
 
-##### `_wide_research.visit`  (lines 66–79)
+##### `mentioned_channels`  (lines 73–75)
 
 ```
-async def visit(entity: str) -> dict[str, object]
+def mentioned_channels(text: str) -> frozenset[str]
 ```
 
-**Purpose**: This inner helper performs the research work for one entity. It builds that entity’s specific research objective, launches the research subagent, and packages the subagent’s answer into one result row.
+**Purpose**: Finds the Slack channel IDs that are explicitly mentioned in a raw Slack message. A caller can use those IDs to look up channel names before showing or storing the message.
 
-**Data flow**: It receives one entity name from the outer `_wide_research` loop. It waits for permission from the semaphore so only a limited number of entities are researched at the same time. It replaces `{entity}` in the prompt template with the actual entity, appends the output schema if one was read, and calls `ctx.spawn` to run the research profile. The result is converted into a dictionary containing the entity name and the child agent’s output as JSON text, or an empty string if there was no output.
+**Data flow**: It receives message text as Slack sent it. It asks `_mentioned` to look only for channel mention forms, then returns a frozen set of the channel IDs it found. The original text is left untouched.
 
-**Call relations**: `_wide_research` creates one `visit` task for each entity and waits for all of them together. Each `visit` hands work off to the research subagent through `ctx.spawn`, using a deterministic deduplication key so repeated recovery runs can reconnect to the same child work instead of starting duplicate research.
+**Call relations**: This is the channel-specific front door for mention scanning. When other code needs channel references from a Slack message, it calls this function, which reuses `_mentioned` with the channel marker.
+
+*Call graph*: calls 1 internal fn (_mentioned).
+
+
+##### `_mentioned`  (lines 78–83)
+
+```
+def _mentioned(text: str, kind: str) -> frozenset[str]
+```
+
+**Purpose**: Does the shared work of scanning Slack markup for mentioned IDs of one requested kind, such as users or channels. It exists so user and channel scanning follow the same rules.
+
+**Data flow**: It receives raw Slack text and a kind marker, for example `@` for users or `#` for channels. It searches for Slack entity markup, keeps only entities of that kind with a non-empty ID, and returns those IDs as a frozen set.
+
+**Call relations**: Both `mentioned_users` and `mentioned_channels` call this helper. They decide what kind of mention they want, and `_mentioned` performs the common search and filtering.
+
+*Call graph*: called by 2 (mentioned_channels, mentioned_users).
+
+
+##### `render_markup`  (lines 86–96)
+
+```
+def render_markup(text: str, names: Mapping[str, str]) -> str
+```
+
+**Purpose**: Turns Slack’s encoded message entities into the words a reader would expect to see. This is used when admitting incoming Slack text so stored conversations are readable by people and by the model.
+
+**Data flow**: It receives raw Slack message text plus a mapping from Slack IDs to readable names. It walks through each Slack entity it recognizes and replaces it with a readable form, using the mapping, Slack’s label, or the original markup when no safe name exists. It returns the rewritten text and does not modify the mapping.
+
+**Call relations**: This function sits on the inbound path. Other code gives it a Slack message and known names; it uses the file’s entity-rendering rules to produce the version that downstream readers, transcripts, titles, and model prompts should all see.
+
+
+##### `unescape`  (lines 99–108)
+
+```
+def unescape(text: str) -> str
+```
+
+**Purpose**: Changes Slack’s escaped character strings, such as `&lt;`, back into the characters the original member typed. It is intentionally separate from mention rendering because unescaping someone else’s quoted words can be unsafe.
+
+**Data flow**: It receives text containing Slack escape sequences. It replaces `&lt;`, `&gt;`, and `&amp;` with `<`, `>`, and `&`, then returns the changed text. It has no side effects.
+
+**Call relations**: This helper is used only when the caller knows it is safe to restore the original member’s own characters. It is not part of `render_markup`, because inbound entity rendering may also be applied to text from bystanders whose escaped characters should remain protected.
+
+
+##### `mention_key`  (lines 111–115)
+
+```
+def mention_key(name: str) -> str
+```
+
+**Purpose**: Creates a standard lookup form for a person’s name. It makes name matching forgiving about capitalization and extra spaces.
+
+**Data flow**: It receives a name string. It collapses runs of whitespace into single spaces, changes the result to a case-insensitive form, and returns that normalized key.
+
+**Call relations**: This is the shared name-normalizing rule for outbound mentions. `mention_index` uses it when building the approved name-to-ID table, and `_mention_at` uses it when checking whether text after an `@` matches one of those approved names.
+
+*Call graph*: called by 2 (_mention_at, mention_index).
+
+
+##### `mention_index`  (lines 118–132)
+
+```
+def mention_index(names: Mapping[str, str]) -> dict[str, str]
+```
+
+**Purpose**: Builds the safe lookup table used to turn readable `@Name` text into Slack notification markup. It deliberately refuses names that are ambiguous or look like Slack broadcast words.
+
+**Data flow**: It receives a mapping from Slack user IDs to readable names. For each name, it builds a normalized key with `mention_key`, groups all IDs that claim the same key, drops empty names and broadcast words, and returns only keys that point to exactly one ID.
+
+**Call relations**: This function prepares data for `mention_markup`. Before an outgoing reply can safely convert `@Alex` into `<@U123>`, callers build this index so only unique, vouched-for names are eligible.
+
+*Call graph*: calls 1 internal fn (mention_key).
+
+
+##### `mention_markup`  (lines 135–166)
+
+```
+def mention_markup(text: str, ids: Mapping[str, str], limit: int=MENTION_MARKUP_MAX) -> str
+```
+
+**Purpose**: Converts approved readable mentions in outgoing text, such as `@Alex`, into Slack’s `<@ID>` form so Slack will notify the person. It is careful to leave unrelated `@` signs alone, such as those in URLs, email addresses, code, or unapproved names.
+
+**Data flow**: It receives outgoing text, a safe name-to-ID mapping, and a maximum number of mentions to convert. It first finds spans that must be skipped, then scans each `@`. For each possible mention, it checks that it is not inside a skipped span, not part of another word or address, not past the conversion limit, and that `_mention_at` can match an approved name. It returns a new string with only those safe mentions replaced by Slack mention codes.
+
+**Call relations**: This is the main outbound rewrite step. Reply-sending code calls it after the agent has written human-readable text. During its scan it calls `_mention_at` to decide whether the words after a particular `@` name exactly one approved person.
+
+*Call graph*: calls 1 internal fn (_mention_at); 1 external calls (finditer).
+
+
+##### `_mention_at`  (lines 169–182)
+
+```
+def _mention_at(text: str, start: int, ids: Mapping[str, str]) -> tuple[int, str] | None
+```
+
+**Purpose**: Checks whether the text immediately after an `@` spells an approved person’s name, and if so where that name ends. It chooses the longest matching name so fuller names win over shorter partial matches.
+
+**Data flow**: It receives the full text, the position just after an `@`, and the approved name-to-ID map. It looks only a limited distance and only on the same line, rejects names that start with whitespace, tries up to a few words, trims sentence-ending punctuation, normalizes each candidate with `mention_key`, and returns the end position plus the matching ID. If nothing matches, it returns nothing.
+
+**Call relations**: `mention_markup` calls this helper each time it finds an `@` that might be a mention. `_mention_at` performs the focused name-matching work and hands back enough information for `mention_markup` to replace exactly the right slice of text.
+
+*Call graph*: calls 1 internal fn (mention_key); called by 1 (mention_markup); 2 external calls (islice, finditer).
+
+
+##### `_entity`  (lines 185–201)
+
+```
+def _entity(match: re.Match[str], names: Mapping[str, str]) -> str
+```
+
+**Purpose**: Converts one recognized Slack entity into readable text. It knows the different display rules for people, channels, broadcasts, and links.
+
+**Data flow**: It receives one regular-expression match from Slack markup plus the known ID-to-name mapping. For a user or channel, it uses the known name or Slack-provided label when available; for a broadcast, it returns forms like `@here` only for known broadcast names; for a link, it returns either the URL alone or `label (URL)`. If it cannot safely name an entity, it preserves the original or closest honest form.
+
+**Call relations**: This is the per-entity worker used by the inbound rendering flow. `render_markup` applies it to each matched Slack entity so the whole message becomes readable without inventing names.
+
+
+### `extensions/slack/ufo_ext_slack/tools.py`
+
+`orchestration` · `Slack setup and Slack tool request handling`
+
+Slack needs several things before UFO can work inside it: a bot token, a signing secret, the Slack team identity, and proof that Slack can reach this UFO deployment over the public internet. This file provides tools that walk a user through that process safely.
+
+There are two ways to connect Slack. The OAuth path is the simpler “Add to Slack” route, used when this UFO deployment already has its own Slack app configured. The manifest path is the “bring your own Slack app” route: UFO prints a ready-made Slack app manifest, the user creates the app in Slack, and the secrets are collected privately through credential slots instead of being typed into chat.
+
+The main setup tool, `slack_connect`, works like a status checker and installer in one. It reports whether Slack is not configured, not installed, pending, or connected. “Pending” means UFO knows the Slack workspace identity, but Slack has not yet sent a verified request to this deployment. “Connected” means Slack has reached UFO and the request signature matched the saved signing secret.
+
+The file also exposes `slack_app_manifest`, which prints the exact Slack app YAML to paste into Slack, and `slack_channels`, which searches channels and direct messages using the bot token. Search results are marked as untrusted because they come from Slack workspace content written by users.
+
+#### Function details
+
+##### `_events_url`  (lines 139–140)
+
+```
+def _events_url(public_base_url: str) -> str
+```
+
+**Purpose**: Builds the public web address Slack should call when it sends events to UFO. It takes the deployment’s public base URL and adds the Slack surface path.
+
+**Data flow**: It receives a public base URL, removes any trailing slash, appends `/surface/slack`, and returns the finished URL as text. It does not read or change any stored state.
+
+**Call relations**: The setup flow calls this when it needs to tell Slack where to send events. `slack_connect_handler` uses it for status responses, and `slack_manifest_handler` uses it when filling in the Slack app manifest.
+
+*Call graph*: called by 2 (slack_connect_handler, slack_manifest_handler).
+
+
+##### `_state`  (lines 143–145)
+
+```
+def _state(state: str, hint: str, events_url: str | None, **extra: object) -> ToolResult
+```
+
+**Purpose**: Packages a Slack setup status into the standard tool response format. It gives the agent and user a simple JSON message such as `not_configured`, `pending`, or `connected`, plus a human-readable hint.
+
+**Data flow**: It receives a state name, a hint, an optional events URL, and any extra details. It turns those into a JSON string, wraps that string as text content, and returns it as a tool result.
+
+**Call relations**: This is the shared response helper for the install flow. `slack_connect_handler`, `_oauth_link`, and `_derive_manifest_identity` use it whenever they need to report where setup stands or what the user should do next.
+
+*Call graph*: called by 3 (_derive_manifest_identity, _oauth_link, slack_connect_handler); 3 external calls (__init__, __init__, dumps).
+
+
+##### `slack_connect_handler`  (lines 148–189)
+
+```
+async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> ToolResult
+```
+
+**Purpose**: Runs the main Slack connection workflow. A user can call it repeatedly before, during, and after setup, and it will either continue installation or report the current connection state.
+
+**Data flow**: It reads the requested install method, the deployment’s public URL, saved Slack credentials, saved Slack identity data, and the verification marker in blob storage. If no identity exists, it either creates an OAuth install link or tries to prove identity from manifest-provided credentials. Once identity exists, it binds the Slack team to this UFO workspace, checks whether Slack has sent a verified request, and returns a JSON status result.
+
+**Call relations**: This is the top-level handler behind the `slack_connect` tool. It delegates URL building to `_events_url`, OAuth setup to `_oauth_link`, manifest setup to `_derive_manifest_identity`, status formatting to `_state`, identity reading to the Slack surface helper, and final reachability checking to `_verified`.
+
+*Call graph*: calls 5 internal fn (_derive_manifest_identity, _events_url, _oauth_link, _state, _verified); 2 external calls (read_identity, slack_installation_id).
+
+
+##### `_oauth_link`  (lines 192–222)
+
+```
+async def _oauth_link(ctx: ToolContext, events_url: str | None) -> ToolResult
+```
+
+**Purpose**: Creates an “Add to Slack” link for the easy install path. It is used when this UFO deployment already has Slack app credentials configured.
+
+**Data flow**: It checks environment variables to see whether the deployment has a Slack client ID and client secret. It checks that the speaker is an administrator, confirms there is a public base URL, asks the tool context to seal a short-lived credential authorization handoff, builds Slack’s authorization URL, and returns it inside a status response.
+
+**Call relations**: `slack_connect_handler` calls this when no Slack identity has been saved yet and the user chose the OAuth path. It hands off to the tool context for credential authorization and to Slack surface helpers for the client ID, redirect URI, and final Slack authorization URL.
+
+*Call graph*: calls 3 internal fn (begin_credential_authorization, speaker_is_admin, _state); called by 1 (slack_connect_handler); 3 external calls (slack_authorize_url, slack_client_id, slack_oauth_redirect_uri).
+
+
+##### `_derive_manifest_identity`  (lines 225–259)
+
+```
+async def _derive_manifest_identity(ctx: ToolContext, events_url: str | None) -> SlackIdentity | ToolResult
+```
+
+**Purpose**: Completes the bring-your-own-Slack-app path after the user has privately supplied the bot token and signing secret. It proves which Slack workspace and bot those credentials belong to.
+
+**Data flow**: It checks whether the required credential slots are filled. If any are missing, it returns a setup status explaining what to collect. If both are present, it reads the bot token, verifies that the speaker is an administrator, calls Slack identity resolution, and returns either a Slack identity object or a clear error status if Slack rejects the token or returns unusable identity data.
+
+**Call relations**: `slack_connect_handler` calls this when the manifest install method is being used and no saved identity is available yet. It uses `_state` for user-facing setup messages and `_token_diagnosis` to turn Slack token errors into understandable advice.
+
+*Call graph*: calls 3 internal fn (speaker_is_admin, _state, _token_diagnosis); called by 1 (slack_connect_handler); 1 external calls (__init__).
+
+
+##### `_verified`  (lines 262–281)
+
+```
+async def _verified(ctx: ToolContext) -> bool
+```
+
+**Purpose**: Checks whether Slack has successfully contacted this UFO deployment using the current signing secret. This separates “we have credentials” from “Slack can actually reach and trust this server.”
+
+**Data flow**: It looks for a saved URL-verification marker in blob storage. If the marker is missing, broken, or does not match the fingerprint of the current signing secret, it returns `false`. If the marker is valid and matches the current secret, it returns `true`.
+
+**Call relations**: `slack_connect_handler` calls this near the end of setup. Its answer decides whether the user sees `pending` or `connected` after Slack identity has been proven.
+
+*Call graph*: called by 1 (slack_connect_handler); 2 external calls (loads, signing_secret_fingerprint).
+
+
+##### `slack_manifest_handler`  (lines 284–299)
+
+```
+async def slack_manifest_handler(ctx: ToolContext, args: SlackManifestInput) -> ToolResult
+```
+
+**Purpose**: Produces the ready-to-paste Slack app manifest for the manual setup path. This saves the user from hand-copying scopes, event names, and callback URLs.
+
+**Data flow**: It receives the desired bot display name, checks that the name is short and plain enough for Slack, reads the deployment’s public base URL, builds the Slack events and interactivity URLs, fills them into the manifest template, and returns the manifest as text.
+
+**Call relations**: This is the handler behind the `slack_app_manifest` tool. It uses `_events_url` to make the Slack request URL and returns a tool result directly to the conversation so the user can paste it into Slack’s app creation page.
+
+*Call graph*: calls 1 internal fn (_events_url); 3 external calls (__init__, __init__, match).
+
+
+##### `slack_channels_handler`  (lines 302–325)
+
+```
+async def slack_channels_handler(ctx: ToolContext, args: SlackChannelsInput) -> ToolResult
+```
+
+**Purpose**: Searches the connected Slack workspace for conversations the agent may need to use. It can find channels, group direct messages, and one-to-one direct messages by names, topics, purposes, or people.
+
+**Data flow**: It reads the saved Slack bot token and saved Slack identity. If either is missing, it stops with an error telling the user to finish connection first. Then it runs a Slack conversation search with the bot token, bot user ID, and query text, turns the found conversations into JSON, and returns them as untrusted text because the content comes from Slack users.
+
+**Call relations**: This is the handler behind the `slack_channels` runtime tool. After setup is complete, the agent calls it when it has a channel name or person rather than a Slack conversation ID. It relies on Slack surface identity reading and the `SlackConversationSearch` helper to do the actual Slack API paging and matching.
+
+*Call graph*: 5 external calls (__init__, __init__, __init__, dumps, read_identity).
+
+
+##### `_token_diagnosis`  (lines 328–334)
+
+```
+def _token_diagnosis(error: str) -> str
+```
+
+**Purpose**: Turns Slack authentication error codes into plain advice. It helps users understand whether they likely copied the wrong bot token or hit another Slack `auth.test` failure.
+
+**Data flow**: It receives a Slack error string. If the error is one of the known token rejection cases, it returns a message telling the user to re-copy the Bot User OAuth Token. Otherwise, it returns a more general Slack authentication failure message including the error text.
+
+**Call relations**: `_derive_manifest_identity` calls this when Slack rejects the bot token during the manifest setup path. The returned message is placed into the setup status response shown to the user.
+
+*Call graph*: called by 1 (_derive_manifest_identity).

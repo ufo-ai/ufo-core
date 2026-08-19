@@ -1,859 +1,596 @@
-# Agent skills, subagents, and workflow profiles  `stage-4.2`
+# Operator, site, and file-serving surfaces  `stage-4.2`
 
-This stage is the system’s “capability shelf.” It is mostly behind-the-scenes setup used before and during the main work loop, so an agent knows what special skills it can use and what child agents it can call for focused jobs. The skill runtime defines what a skill is, reads skill folders, works out dependencies, and copies needed files into the safe workspace where the agent runs. The model catalog skill is built from the live model registry, so users can ask which AI models are really available. The skills package file simply makes these modules importable.
+This stage is the system’s set of web “front doors” for people and browsers. It is not startup or shutdown code. It runs during normal use, when an operator opens a tool, a visitor views a hosted site, or someone follows a file link. Each door checks access before showing anything.
 
-Several files describe subagent profiles, which are recipes for smaller helper agents. There is a fallback general-purpose subagent, plus specialized helpers for browser use, writing, research, and website building. Each profile sets the helper’s instructions, allowed tools, input, output, model, and limits. Extension manifests announce extra bundles, such as the brief pipeline and research tools. The skill creation extension adds user-made skills, while its store safely saves, loads, updates, and deletes them without overwriting built-ins or exceeding limits.
+The artifacts route serves shared file downloads. It uses signed, time-limited links, like a ticket with an expiry date. If the ticket has expired, a signed-in member of the right workspace can refresh access; others cannot reach the file bytes.
+
+The debugger surface gives operators a read-only window into one workspace’s sessions. It serves the debugger page, plus data and live update streams for conversations, turns, transcripts, files, and current activity.
+
+The memory surface is another operator page. It shows stored workspace memory records and provides the small data endpoint the page uses to list them.
+
+The sites surface serves public hosted-site frames. It checks whether the viewer may see the site, then safely embeds the real site from its separate hosting location.
 
 ## Files in this stage
 
-### Skill runtime foundations
-Core skill packaging and runtime logic establish how built-in skills are exposed and materialized for agents.
+### Signed file access
+Core routes serve protected shared-file downloads through signed, time-limited links with workspace-member refresh rules.
 
-### `core/src/ufo/models/catalog_skill.py`
+### `core/src/ufo/surfaces/artifacts.py`
 
-`domain_logic` · `startup`
+`io_transport` · `request handling`
 
-This file solves a simple but important problem: users need to know what models are available, what they cost, and what their limits are. If that information were written by hand, it could easily become stale. A model might be added, renamed, repriced, or given a different context window, while the help text still says the old thing.
+This file is the guarded doorway for artifact downloads. An artifact is a shared file, and the system does not expose the file directly. Instead, it gives out a signed URL: a link containing proof that the server created it, plus an expiry time. Think of it like a temporary ticket to a storage room. Without this file, shared file links would either fail to work through the web server, or worse, risk serving private bytes without checking the ticket.
 
-Instead, this file turns the live model registry into a readable skill. The model registry is the system’s source of truth for model facts: model id, provider, knowledge cutoff, context window, price, reasoning support, and API surface. At startup, `model_catalog_skill` reads those records, sorts them by model id, and renders them into a Markdown table. Markdown is plain text with simple formatting, often used for documentation.
+The main route checks the link’s signature, expiry, workspace, file name, and optional preview request. If the link is valid, it looks up the file in the workspace’s blob store, which is the place where file bytes are kept. Normal downloads are streamed in chunks, so large files do not have to be loaded fully into memory. Image previews are treated more carefully: the file must prove it is the expected image type and size before it is shown inline in the browser.
 
-The result is wrapped in a `RuntimeSkill`, which is a skill the system can load and show to users or agents. Think of it like printing a menu from the restaurant’s actual kitchen inventory instead of from an old paper copy. The key behavior is that the catalog is not separate documentation; it is generated from the same records the runtime uses to make real decisions.
-
-#### Function details
-
-##### `_per_mtok`  (lines 18–19)
-
-```
-def _per_mtok(micro_usd_per_mtok: int) -> str
-```
-
-**Purpose**: This helper turns an internal price value into a user-friendly dollar string. It is used so model prices can be displayed clearly as dollars per million tokens.
-
-**Data flow**: It receives a price stored as micro-dollars, which are millionths of a dollar. It divides that number by the constant that represents one dollar in micro-dollars, formats the result with two decimal places, and returns text like `$1.25`.
-
-**Call relations**: `model_catalog_skill` calls this helper while building each row of the model table. The helper does only the price formatting, so the larger catalog-building function can stay focused on assembling the full skill text.
-
-*Call graph*: called by 1 (model_catalog_skill).
-
-
-##### `model_catalog_skill`  (lines 22–50)
-
-```
-def model_catalog_skill(registry: ModelRegistry) -> RuntimeSkill
-```
-
-**Purpose**: This function creates the model catalog skill from the current model registry. Someone would use it during boot so the system can offer a trustworthy list of available models and their facts.
-
-**Data flow**: It receives a `ModelRegistry`, which contains the registered model specifications. It reads each model’s facts, sorts the models by id, formats them into a Markdown table, adds a short explanation and skill metadata, then returns a `RuntimeSkill` containing the finished catalog text.
-
-**Call relations**: At startup, this function is called with the live registry. As it builds the price columns, it hands each input and output price to `_per_mtok` for readable formatting. When the body and metadata are ready, it creates a `RuntimeSkill`, which is the object the rest of the skill runtime can load and present.
-
-*Call graph*: calls 1 internal fn (_per_mtok); 1 external calls (__init__).
-
-
-### `core/src/ufo/skills/__init__.py`
-
-`other` · `import time`
-
-This file is intentionally empty, but it still has a useful job. In Python, an `__init__.py` file tells the language, “treat this folder as a package,” meaning its contents can be imported using a dotted name like `ufo.skills.something`. Think of it like a label on a drawer: the drawer may contain many tools, and the label lets the rest of the system find them in an organized way. Without this file, depending on the Python version and project setup, imports from the `ufo.skills` folder could become less predictable or fail in environments that expect traditional packages. Because it contains no code, it does not define behavior, load data, or run setup work. Its value is structural: it gives the codebase a clear place for modules related to “skills,” while keeping the package entry point simple and side-effect free.
-
-
-### `core/src/ufo/skills/runtime.py`
-
-`domain_logic` · `startup and skill loading`
-
-A skill is a folder that teaches the agent a reusable workflow. The folder must contain a SKILL.md file with a small YAML frontmatter section, which is structured metadata, followed by the instructions the agent should read. It may also contain extra files, such as examples or scripts. This file turns those folders into RuntimeSkill objects, builds a registry of all available skills, and decides what happens when the agent asks to load one. The important idea is that loading a skill has two parts: the instruction text is shown to the model, and the skill’s files are copied into a safe area of the sandbox under .skills/<name>/. Dependencies are resolved through an explicit depends list, not by folder nesting. Nested child skills get names like parent/child, but they are only pulled in if something depends on them. The file also avoids repeating instructions already present in the conversation. If a skill is loaded again, its files are still re-mounted, but its workflow text is replaced with a short “already loaded” note. Without this file, the system would not have a safe, consistent way to discover skills, prevent name confusion, load dependencies, or give the agent access to the right files.
+If a link has expired, the file does not immediately become public again. Instead, the code checks whether the browser has a valid session cookie for a member of the same workspace that owns the shared artifact. If so, it creates a fresh signed URL and redirects there. If not, a browser is sent to sign in, while non-browser clients get a clear forbidden response.
 
 #### Function details
 
-##### `skill_mount_root`  (lines 44–47)
+##### `download`  (lines 47–101)
 
 ```
-def skill_mount_root(name: str) -> str
+async def download(request: Request, artifact_id: str, filename: str, exp: str='', sig: str='', preview: str='', workspace: Annotated[str, Query(alias='ws')]='') -> Response
 ```
 
-**Purpose**: Builds the workspace path where one skill’s files should live. It gives every skill its own home under the shared .skills area.
+**Purpose**: This is the HTTP endpoint that serves a shared file or a safe image preview. It checks that the URL is genuinely signed, still valid, and tied to a workspace before any file bytes are returned.
 
-**Data flow**: It takes a skill name as text, joins it with the fixed skills mount directory, and returns a path string like the destination shelf for that skill’s files.
+**Data flow**: It receives the web request, path parts such as the artifact id and filename, and query values such as expiry time, signature, preview details, and workspace id. It reads the blob store and signing secret from the application state, verifies the URL claims, then checks whether the requested blob exists in the claimed workspace. If the request is for a preview, it validates and returns bounded image data; otherwise it returns a streaming download response with safe headers that tell browsers not to guess the file type or cache the private result.
 
-**Call relations**: RuntimeSkill.mount_root calls this when code needs the mount location for a particular skill, keeping the path rule in one small place.
+**Call relations**: This is called by FastAPI when a request matches the artifact download route. If the signature is expired but otherwise meaningful, it asks _refreshed_for_member to see whether a logged-in workspace member may receive a fresh link. For valid links, it hands preview streams to validated_image_preview when needed, or hands the blob stream to StreamingResponse for normal downloads.
 
-*Call graph*: called by 1 (mount_root).
-
-
-##### `RuntimeSkill.mounted_files`  (lines 66–67)
-
-```
-def mounted_files(self) -> dict[str, bytes]
-```
-
-**Purpose**: Collects all files that should be written into the sandbox for this skill. It includes the original SKILL.md plus any bundled asset files.
-
-**Data flow**: It reads the skill’s stored raw SKILL.md text and asset file bytes, turns SKILL.md back into bytes, and returns a dictionary from relative file path to file contents.
-
-**Call relations**: mount_skill calls this before writing files into the sandbox, so the mounting step gets one complete package of everything the skill should expose.
-
-*Call graph*: called by 1 (mount_skill).
+*Call graph*: calls 1 internal fn (_refreshed_for_member); 9 external calls (now, HTTPException, Response, StreamingResponse, artifact_media_type, verify_artifact_url, validated_image_preview, ws, quote).
 
 
-##### `RuntimeSkill.mount_root`  (lines 69–70)
+##### `_refreshed_for_member`  (lines 104–154)
 
 ```
-def mount_root(self) -> str
+async def _refreshed_for_member(request: Request, claims: ArtifactClaims, secret: str) -> RedirectResponse
 ```
 
-**Purpose**: Returns the sandbox folder where this specific skill should be mounted. It is the per-skill version of the general mount-root rule.
+**Purpose**: This helper gives expired artifact links a controlled second chance for real workspace members. It lets a teammate open an old shared link and be redirected to a new signed URL, while outsiders still get nothing.
 
-**Data flow**: It reads the RuntimeSkill name, passes that name to skill_mount_root, and returns the resulting workspace path.
+**Data flow**: It receives the current request, the expired-but-authentic artifact claims, and the signing secret. It reads the session cookie, verifies the logged-in user, turns the workspace id from the session into a real UUID, and queries the database to confirm two things: the user is a member of that workspace, and the artifact belongs to that workspace. If both checks pass, it creates a new expiry time, mints a fresh artifact URL, and returns a redirect to that URL. If any check fails, it raises the refusal response instead.
 
-**Call relations**: mount_skill calls this to decide where to write the skill’s files. It hands off the actual path-building to skill_mount_root so all mount paths stay consistent.
+**Call relations**: download calls this only after verify_artifact_url reports that the link has expired. This helper uses _refusal whenever the browser or client cannot prove workspace membership. When membership is proven, it hands off to mint_artifact_url to create the replacement link and returns a RedirectResponse so the client retries through the normal download path.
 
-*Call graph*: calls 1 internal fn (skill_mount_root); called by 1 (mount_skill).
-
-
-##### `LoadedSkill.prompt_body`  (lines 82–92)
-
-```
-def prompt_body(self) -> str
-```
-
-**Purpose**: Builds the text block that is shown to the model for one loaded skill. The block names the skill and then includes only its workflow instructions.
-
-**Data flow**: It reads the loaded skill, checks whether it was loaded directly or pulled in as a dependency, adds the right header, and returns a single text block containing the header and instructions.
-
-**Call relations**: This method is the per-skill text builder used when a load result is turned into model-visible context. It does not include bundled file contents; those are reached through the mounted file paths instead.
+*Call graph*: calls 1 internal fn (_refusal); called by 1 (download); 9 external calls (now, RedirectResponse, or_, select, mint_artifact_url, verified_claims, workspace_tx, ws, UUID).
 
 
-##### `LoadedSkills.reseed`  (lines 108–125)
+##### `_refusal`  (lines 157–162)
 
 ```
-def reseed(self, loads: Iterable[tuple[LoadedSkill, ...]], preloaded: tuple[LoadedSkill, ...]=()) -> None
+def _refusal(request: Request) -> HTTPException
 ```
 
-**Purpose**: Rebuilds the tracker that remembers which skill instructions are already in the model’s context. This prevents paying the cost of repeating the same workflow text.
+**Purpose**: This helper creates the right rejection response when an expired link cannot be refreshed. Browsers are guided toward sign-in, while other clients get a plain forbidden error.
 
-**Data flow**: It receives previous loaded skill groups and optional preloaded skills, clears the old sets, records every skill currently in context, and separately records which skills the agent directly asked for.
+**Data flow**: It receives the request and looks at the Accept header to see whether the client wants HTML, which usually means a browser. For a browser, it builds a login URL that includes the original artifact link as the target to come back to after sign-in, then returns an HTTP exception that acts like a redirect. For non-browser clients, it returns an HTTP exception saying the expired download is forbidden.
 
-**Call relations**: It calls LoadedSkills.reset first so the tracker matches the current conversation window instead of stale history. This is used around conversation-window changes, where the system must know what instructions are still visible.
+**Call relations**: _refreshed_for_member calls this whenever there is no valid session, the session workspace is malformed, the user is not a member, or the artifact is not owned by that workspace. It is the final gatekeeper for the expired-link path, deciding whether the next step is sign-in or a hard denial.
 
-*Call graph*: calls 1 internal fn (reset).
+*Call graph*: called by 1 (_refreshed_for_member); 2 external calls (HTTPException, quote).
 
 
-##### `LoadedSkills.drain`  (lines 127–132)
+### Operator inspection pages
+Operator-facing extension surfaces expose read-only debugger and memory-browsing views for a workspace.
 
-```
-def drain(self) -> tuple[str, ...]
-```
+### `extensions/debugger/ufo_ext_debugger/surface.py`
 
-**Purpose**: Returns the skills the agent explicitly asked for, then clears the tracker. This is useful at a boundary where old workflow text may be dropped but the system still wants to remember what to reload later.
+`io_transport` · `request handling`
 
-**Data flow**: It reads the asked_for set, sorts it into a stable tuple, clears both tracking sets, and returns the saved names.
+This file is the bridge between the debugger web app and the stored session data for a workspace. Think of it like a viewing window into a workshop: operators can look at what happened and watch a live turn unfold, but this surface is not meant to change the underlying conversation.
 
-**Call relations**: It calls LoadedSkills.reset after taking the names. In the bigger flow, it acts like emptying a mailbox: it hands over the important requested skill names and leaves the tracker clean.
+The file first loads the built React app from static/index.html. If that file exists, the root page returns it as HTML. The rest of the routes under api/ return plain JSON snapshots from SurfaceContext, which is the object already scoped to the authorized workspace. That matters because the authorization and workspace binding happen before these functions run; each handler can ask for conversations, transcripts, files, or turns without choosing a workspace itself.
 
-*Call graph*: calls 1 internal fn (reset).
-
-
-##### `LoadedSkills.reset`  (lines 134–136)
-
-```
-def reset(self) -> None
-```
-
-**Purpose**: Clears all remembered loaded-skill state. It is the simple reset button for the in-context and asked-for sets.
-
-**Data flow**: It takes the current LoadedSkills object, empties its in_context set and its asked_for set, and returns nothing.
-
-**Call relations**: LoadedSkills.reseed calls it before rebuilding from known loads, and LoadedSkills.drain calls it after handing off remembered requested skill names.
-
-*Call graph*: called by 2 (drain, reseed).
-
-
-##### `_split_frontmatter`  (lines 139–145)
-
-```
-def _split_frontmatter(text: str) -> tuple[str, str]
-```
-
-**Purpose**: Separates the metadata at the top of SKILL.md from the instruction body below it. It also rejects files that do not use the expected frontmatter format.
-
-**Data flow**: It takes the full SKILL.md text, checks that it starts with the frontmatter fence, finds the closing fence, and returns two strings: metadata and body. If the fences are missing, it raises a clear error.
-
-**Call relations**: parse_skill_content calls this as the first parsing step, before turning the metadata into fields such as name, description, and dependencies.
-
-*Call graph*: called by 1 (parse_skill_content).
-
-
-##### `_child_skill_dirs`  (lines 148–153)
-
-```
-def _child_skill_dirs(skill_dir: Path) -> list[Path]
-```
-
-**Purpose**: Finds immediate subfolders that are themselves skills. A subfolder counts as a child skill only if it contains its own SKILL.md file.
-
-**Data flow**: It reads the entries inside one skill directory, filters for directories with a SKILL.md file, sorts them, and returns the matching paths.
-
-**Call relations**: parse_skill calls it so parent skills do not accidentally absorb child skill files, and discover_skills calls it to recursively register those child skills.
-
-*Call graph*: called by 2 (discover_skills, parse_skill); 1 external calls (iterdir).
-
-
-##### `parse_skill_content`  (lines 156–189)
-
-```
-def parse_skill_content(dir_name: str, files: Mapping[str, bytes], registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Turns an in-memory collection of skill files into a RuntimeSkill object. This lets skills be validated the same way whether they came from disk or from saved sandbox data.
-
-**Data flow**: It receives a claimed directory name, a mapping of file paths to bytes, and optional registry naming information. It reads SKILL.md, splits and parses the YAML frontmatter, checks that the frontmatter name matches the folder name, gathers non-SKILL.md assets, and returns a RuntimeSkill.
-
-**Call relations**: parse_skill calls this after reading files from disk. It relies on _split_frontmatter for the SKILL.md structure and yaml.safe_load for the frontmatter metadata.
-
-*Call graph*: calls 1 internal fn (_split_frontmatter); called by 1 (parse_skill); 3 external calls (__init__, PurePosixPath, safe_load).
-
-
-##### `parse_skill`  (lines 192–201)
-
-```
-def parse_skill(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Reads one skill folder from disk and parses it into a RuntimeSkill. It treats nested child skill folders as separate skills, not as ordinary assets of the parent.
-
-**Data flow**: It receives a filesystem path, finds child skill directories, reads all regular files except those inside child skill folders, and passes the resulting file map to parse_skill_content.
-
-**Call relations**: discover_skills calls this for each skill directory it visits. This function bridges the real filesystem and the in-memory parser.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill_content); called by 1 (discover_skills); 1 external calls (rglob).
-
-
-##### `discover_skills`  (lines 204–222)
-
-```
-def discover_skills(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Discovers a skill and all of its nested child skills, returning them in one flat lookup map. This turns a folder tree into registry entries with names such as parent/child.
-
-**Data flow**: It receives a skill directory plus optional registry and parent names, parses the current skill, then walks each immediate child skill directory and merges the child results into one dictionary.
-
-**Call relations**: _load_core_skills calls this while collecting built-in skills. It uses parse_skill for the current folder and _child_skill_dirs to find children to recurse into.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill); called by 1 (_load_core_skills).
-
-
-##### `_load_core_skills`  (lines 225–232)
-
-```
-def _load_core_skills(root: Path) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Loads the project’s built-in skills from the core skills directory. This creates the base skill set available before any packs or user skills are added.
-
-**Data flow**: It receives a root directory, lists visible child directories, discovers skills in each one, and returns a dictionary keyed by skill name.
-
-**Call relations**: This runs when the module builds CORE_SKILLS_BY_NAME. It calls discover_skills for each core skill folder so nested built-in skills are included too.
-
-*Call graph*: calls 1 internal fn (discover_skills); 1 external calls (iterdir).
-
-
-##### `SkillRegistry.named`  (lines 249–254)
-
-```
-def named(self, name: str) -> RuntimeSkill
-```
-
-**Purpose**: Looks up one skill by name and gives a helpful error if it is missing. This keeps unknown skill requests from failing silently.
-
-**Data flow**: It receives a skill name, checks the registry dictionary, and returns the matching RuntimeSkill. If the name is not present, it raises an error that also lists available names.
-
-**Call relations**: SkillRegistry.closure and its nested add function call this whenever they need to resolve a requested skill or a dependency name into the actual skill object.
-
-*Call graph*: called by 2 (closure, add).
-
-
-##### `SkillRegistry.closure`  (lines 256–279)
-
-```
-def closure(self, *names: str) -> tuple[LoadedSkill, ...]
-```
-
-**Purpose**: Figures out the full set of skills needed for a load request, including dependencies. A “closure” means the requested skills plus everything they depend on, with each skill included once.
-
-**Data flow**: It receives one or more requested skill names, creates direct LoadedSkill entries for those names, then walks each depends list and adds dependency LoadedSkill entries without duplicating names or looping forever on cycles. It returns the ordered tuple of loaded entries.
-
-**Call relations**: core/src/ufo/loop/engine._loaded_skill_closures calls this when the runtime needs to expand requested skill loads. It calls SkillRegistry.named to resolve names and uses LoadedSkill objects to remember whether a skill was direct or pulled by another skill.
-
-*Call graph*: calls 1 internal fn (named); called by 1 (_loaded_skill_closures); 1 external calls (__init__).
-
-
-##### `SkillRegistry.closure.add`  (lines 269–274)
-
-```
-def add(skill: RuntimeSkill, dependency_of: str | None) -> None
-```
-
-**Purpose**: Adds one dependency skill and then adds that dependency’s own dependencies. It is the recursive helper inside SkillRegistry.closure.
-
-**Data flow**: It receives a RuntimeSkill and the name of the skill that pulled it in. If the skill is already loaded, it stops; otherwise it records the skill as a dependency and walks its depends list.
-
-**Call relations**: SkillRegistry.closure uses this helper while expanding dependency chains. The helper calls SkillRegistry.named to resolve each dependency name before continuing the walk.
-
-*Call graph*: calls 1 internal fn (named); 1 external calls (__init__).
-
-
-##### `SkillRegistry.index`  (lines 281–289)
-
-```
-def index(self) -> tuple[tuple[str, str], ...]
-```
-
-**Purpose**: Builds the public list of loadable top-level skills and their descriptions. This is what can be shown to the agent as the available skill catalog.
-
-**Data flow**: It reads the registry in its stored order, keeps only skills that have no parent, and returns name-description pairs.
-
-**Call relations**: core/src/ufo/serve._mount_shared_surfaces calls this when preparing shared surfaces such as the system prompt area that needs the skill index. Child skills are intentionally left out because they are reached through parent instructions.
-
-*Call graph*: called by 1 (_mount_shared_surfaces).
-
-
-##### `SkillRegistry.merged_with`  (lines 291–303)
-
-```
-def merged_with(self, user_skills: tuple[RuntimeSkill, ...]) -> 'SkillRegistry'
-```
-
-**Purpose**: Creates a new registry that adds saved user skills after the base core and pack skills. It refuses user skills that try to reuse an existing name.
-
-**Data flow**: It copies the current registry dictionary, checks each user skill, logs and skips any name collision, adds non-colliding user skills, and returns a new SkillRegistry.
-
-**Call relations**: This function protects the registry before user-controlled skills are included. It calls the logging system when a user skill is refused and constructs a fresh SkillRegistry for the merged result.
-
-*Call graph*: 2 external calls (__init__, log).
-
-
-##### `_mounted_tree`  (lines 309–327)
-
-```
-def _mounted_tree(loaded: tuple[LoadedSkill, ...]) -> str
-```
-
-**Purpose**: Creates a compact tree-shaped text listing of all files mounted by a skill load. This shows the agent where files are without repeating long path prefixes over and over.
-
-**Data flow**: It receives loaded skills, collects every mounted file path under each skill name, sorts them, breaks paths into parts, and returns an indented text tree rooted at the .skills directory.
-
-**Call relations**: loaded_context calls this at the end of building the model-visible load result, so the workflows and the file map are presented together.
-
-*Call graph*: called by 1 (loaded_context); 1 external calls (PurePosixPath).
-
-
-##### `loaded_context`  (lines 330–344)
-
-```
-def loaded_context(loaded: tuple[LoadedSkill, ...], in_context: Container[str]=frozenset()) -> str
-```
-
-**Purpose**: Builds the full text that a skill load contributes to the model’s context. It includes new workflow instructions, a note for already-seen workflows, and a tree of mounted files.
-
-**Data flow**: It receives the loaded skill entries and a collection of skill names already in context. It renders instruction blocks only for new skills, adds one note for repeated skills, appends the mounted-file tree, and returns the combined text.
-
-**Call relations**: This is the final text-rendering step shared by normal skill loading and preloaded subagent skills. It calls _mounted_tree so the file locations are always shown even when instruction text is not repeated.
-
-*Call graph*: calls 1 internal fn (_mounted_tree).
-
-
-##### `mount_skill`  (lines 347–355)
-
-```
-async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None
-```
-
-**Purpose**: Writes one skill’s files into the sandbox workspace under that skill’s safe mount folder. This makes the skill’s assets available to the agent as files.
-
-**Data flow**: It receives a SandboxSession and a RuntimeSkill, asks the skill for its mount root and file contents, checks each file path is contained inside the skill’s own mount area, and writes each file into the sandbox.
-
-**Call relations**: This is the file-writing side of skill loading. It calls RuntimeSkill.mount_root and RuntimeSkill.mounted_files to know where and what to write, uses contained_relative to prevent path escape, and then hands each safe write to SandboxSession.write_file.
-
-*Call graph*: calls 3 internal fn (write_file, mount_root, mounted_files); 1 external calls (contained_relative).
-
-
-### User-created skill lifecycle
-The skill creation extension declares and implements persistent member-authored skill management.
-
-### `extensions/skill_create/ufo_ext_skill_create/manifest.py`
-
-`domain_logic` · `extension load, object operations, and skill loading during turns`
-
-This file is the bridge between “a user wrote a skill” and “the agent can use that skill later.” A skill here is a small bundle of text files, including a required SKILL.md file, saved under the currently bound agent. That agent ownership matters: the saved skills are not private to one member; they are available to anyone acting through that agent.
-
-The file defines the shape of a saved skill request. File contents can be provided directly, read from a workspace file, or kept unchanged by referring to a stored file’s SHA-256 digest, which is a stable fingerprint of its bytes. It deliberately avoids returning saved file bodies in normal object reads, so large or sensitive skill text is not casually copied into conversation context.
-
-Before saving, it checks several safety rules. File paths must stay inside the skill’s own mounted folder, like making sure a delivery driver only drops boxes inside the assigned room. Files must be UTF-8 text, not binary data. The total number and size of files are capped. Workspace file references are read inside the sandbox, which is the controlled execution area.
-
-At the bottom, the file registers the object kind, the built-in “create-skill” helper skill, and the runtime loader that makes saved skills available on later turns.
+Most handlers follow the same pattern: read an ID from the URL, check that it is a valid UUID, ask SurfaceContext for the requested data, and return either JSON or a 404-style error. One route streams a live turn using Server-Sent Events, a simple web streaming format where the server sends named text events over one long HTTP response. The helper _sse turns each internal live frame into one of those browser-readable events. At the bottom, ROUTES connects URL paths to these functions.
 
 #### Function details
 
-##### `_require_ext`  (lines 99–102)
+##### `app_page`  (lines 52–57)
 
 ```
-def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
+async def app_page(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This function makes sure an ExtensionContext is present before any skill object operation continues. The ExtensionContext is the system’s handle for the current extension run, including which agent is being used.
+**Purpose**: This returns the debugger’s main web page. It exists so a browser can load the built React app before asking the API routes for data.
 
-**Data flow**: It receives either an ExtensionContext or nothing. If it receives one, it returns it unchanged; if it receives nothing, it stops the operation with a clear runtime error.
+**Data flow**: It receives the workspace-aware context and the incoming web request. It checks whether the prebuilt HTML file was available when the module loaded; if not, it raises a clear setup error telling the developer to build the frontend. If the file is present, it wraps the HTML text in an HTML response and sends it back to the browser.
 
-**Call relations**: Most public SkillObjects operations call this at the start, because they cannot safely read or write agent-owned skills without knowing the current extension context.
+**Call relations**: This function is used by the root GET route for the debugger surface. Once it returns the page, the browser-side app continues by calling the JSON and stream routes defined later in this file.
 
-*Call graph*: called by 8 (_resolve, apply, delete, get, list, member_detail, member_page, status).
-
-
-##### `_contained_keys`  (lines 105–115)
-
-```
-def _contained_keys(name: str, spec: UserSkillSpec) -> None
-```
-
-**Purpose**: This function checks that every file path in a skill stays inside that skill’s own folder. It prevents a saved skill from later writing files somewhere outside its allowed area.
-
-**Data flow**: It receives the skill name and the proposed skill spec. It computes the mount folder for that skill, checks each file path against it, and either returns silently or raises a ValueError if a path tries to escape.
-
-**Call relations**: SkillObjects.apply calls this before saving. It relies on skill_mount_root to know the allowed folder and contained_relative to enforce that the path does not climb out of it.
-
-*Call graph*: called by 1 (apply); 2 external calls (contained_relative, skill_mount_root).
+*Call graph*: 1 external calls (HTMLResponse).
 
 
-##### `_text`  (lines 118–124)
+##### `workspace_meta`  (lines 60–67)
 
 ```
-def _text(path: str, content: bytes) -> str
+async def workspace_meta(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This function verifies that a skill file is plain UTF-8 text. Skills in this system are text bundles, so binary files are rejected.
+**Purpose**: This gives the frontend basic information about the current workspace. It includes the workspace ID and, when available, the connected Slack team ID.
 
-**Data flow**: It receives a path and raw bytes. It tries to decode the bytes as text; success returns the decoded string, while failure raises a ValueError naming the problem file.
+**Data flow**: It receives the current SurfaceContext, asks it for the Slack installation value, and strips the stored team prefix when the value is in the expected Slack team format. It returns a JSON object containing the workspace ID as text and either a Slack team identifier or null.
 
-**Call relations**: SkillObjects._resolve calls this after it has gathered each file’s bytes, so bad file contents are caught before the skill is saved.
+**Call relations**: The workspace API route calls this when the debugger page needs to label or orient itself. It relies on SurfaceContext.installation for the stored Slack connection and then hands the result to JSONResponse for delivery to the browser.
 
-*Call graph*: called by 1 (_resolve).
-
-
-##### `SkillObjects.list`  (lines 131–132)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: This returns a paged list of saved skills for the current agent during a tool or object call. It is used when the caller wants the skill names and short summaries, not full file details.
-
-**Data flow**: It receives the tool context and a list query such as paging options. It checks the extension context, gathers rows for saved skills, passes them through the object paging helper, and returns an ObjectPage.
-
-**Call relations**: This is one of the object-store entry points used by the platform. It hands the real row-building work to SkillObjects._rows and then formats the result with object_page.
-
-*Call graph*: calls 2 internal fn (_rows, _require_ext); 1 external calls (object_page).
+*Call graph*: calls 1 internal fn (installation); 1 external calls (JSONResponse).
 
 
-##### `SkillObjects.member_page`  (lines 134–146)
+##### `conversations`  (lines 70–72)
 
 ```
-async def member_page(self, ext: ExtensionContext | None, *, member_id: UUID, admin: bool, query: ObjectListQuery) -> ObjectPage
+async def conversations(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This returns the same kind of saved-skill list for portal-style member access outside a live turn. The member information is accepted, but the skills are still scoped to the bound agent, not to that individual member.
+**Purpose**: This returns the list of conversations visible in the current workspace. It is the debugger’s overview endpoint.
 
-**Data flow**: It receives an optional extension context, member details, admin flag, and a list query. It requires the extension context, loads the agent’s skill rows, paginates them, and returns the page.
+**Data flow**: It asks SurfaceContext for the workspace’s conversations. Each returned entry is converted into JSON-friendly data, and the full list is sent back as a JSON response.
 
-**Call relations**: The portal calls this when a signed-in member browses skills. Like SkillObjects.list, it depends on SkillObjects._rows and object_page, with _require_ext guarding that an agent context exists.
+**Call relations**: The conversations API route uses this when the frontend needs to populate a conversation list. It delegates the actual lookup to SurfaceContext.list_conversations and only formats the result for HTTP.
 
-*Call graph*: calls 2 internal fn (_rows, _require_ext); 1 external calls (object_page).
-
-
-##### `SkillObjects.get`  (lines 148–149)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[UserSkillSpec] | None
-```
-
-**Purpose**: This fetches the detail view for one saved skill during a tool or object call. The detail describes the files by digest and size rather than returning their full contents.
-
-**Data flow**: It receives the tool context and a skill name. It checks the extension context, asks SkillObjects._skill for the stored detail, and returns that detail or None if the skill is not found.
-
-**Call relations**: The platform calls this when someone asks for one skill object. It delegates all stored-file inspection and detail construction to SkillObjects._skill.
-
-*Call graph*: calls 2 internal fn (_skill, _require_ext).
+*Call graph*: calls 1 internal fn (list_conversations); 1 external calls (JSONResponse).
 
 
-##### `SkillObjects.member_detail`  (lines 151–170)
+##### `conversation_turns`  (lines 75–80)
 
 ```
-async def member_detail(self, ext: ExtensionContext | None, name: str, *, member_id: UUID, admin: bool) -> MemberObject[UserSkillSpec] | None
+async def conversation_turns(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This returns one saved skill for portal-style member access, including both its list row and its detail record. It only returns a detail if the skill also appears in the normal row listing.
+**Purpose**: This returns the turns inside one conversation. A turn is one unit of interaction or work within a conversation.
 
-**Data flow**: It receives an extension context, skill name, member details, and admin flag. It loads the agent’s rows, looks for the named skill, then loads its detail; if either part is missing, it returns None. Otherwise it returns a MemberObject containing both row and detail.
+**Data flow**: It reads conversation_id from the URL and passes it through _uuid_param, which accepts only a valid UUID. If the ID is invalid, it returns a not-found JSON error. Otherwise it asks SurfaceContext for that conversation’s turns, converts each turn to JSON-friendly form, and returns the list.
 
-**Call relations**: The portal uses this when a member opens a specific skill. It calls SkillObjects._rows first to decide whether the skill should be visible, then SkillObjects._skill to build the digest-based detail.
+**Call relations**: The conversation turns route calls this after the frontend selects a conversation. It uses _uuid_param for safe URL parsing, asks SurfaceContext.list_turns for the data, and wraps the answer in JSONResponse.
 
-*Call graph*: calls 3 internal fn (_rows, _skill, _require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects._rows`  (lines 172–176)
-
-```
-async def _rows(self, ext: ExtensionContext) -> tuple[ObjectRow, ...]
-```
-
-**Purpose**: This builds the lightweight list entries for all saved skills owned by the current agent. Each row contains the skill name and a shortened description.
-
-**Data flow**: It receives an ExtensionContext. It loads all saved runtime skills from UserSkillStore, turns each one into an ObjectRow, trims descriptions to the configured summary length, and returns the rows as a tuple.
-
-**Call relations**: SkillObjects.list, SkillObjects.member_page, and SkillObjects.member_detail use this as their shared way to decide what saved skills are visible in list form.
-
-*Call graph*: called by 3 (list, member_detail, member_page); 2 external calls (__init__, __init__).
+*Call graph*: calls 2 internal fn (list_turns, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `SkillObjects._skill`  (lines 178–201)
+##### `conversation_transcript`  (lines 83–90)
 
 ```
-async def _skill(self, ext: ExtensionContext, name: str) -> ObjectDetail[UserSkillSpec] | None
+async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This builds the detailed object record for one saved skill without exposing the actual file bodies. It gives callers stable file fingerprints so unchanged files can be kept on a later update.
+**Purpose**: This returns the saved transcript for a conversation. The transcript is the readable record of what was said or exchanged.
 
-**Data flow**: It receives an ExtensionContext and a skill name. It loads the skill’s stored files and timestamps; if either is missing, it returns None. Otherwise it creates a UserSkillSpec where each file is represented by a FileRef containing a SHA-256 digest and byte size, adds creation and update times, and links the skill to the owning agent.
+**Data flow**: It pulls conversation_id from the request path and validates it as a UUID. If the ID is invalid, it returns a not-found error. If the ID is valid, it asks SurfaceContext for the transcript; a missing transcript also becomes a not-found error. A found transcript is converted into JSON and returned.
 
-**Call relations**: SkillObjects.get and SkillObjects.member_detail call this when they need the detail view. It talks to UserSkillStore for saved data and asks the ExtensionContext for the agent name used in the scoped_to link.
+**Call relations**: The transcript route uses this when the debugger page needs the full conversation record. It shares _uuid_param with the other conversation endpoints and relies on SurfaceContext.read_transcript for the actual stored data.
 
-*Call graph*: calls 1 internal fn (agent_name); called by 2 (get, member_detail); 7 external calls (__init__, __init__, __init__, __init__, __init__, __init__, sha256).
-
-
-##### `SkillObjects.status`  (lines 203–217)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This returns a compact health/status summary for one saved skill. It answers what the skill says it is, how many files it has, and how many bytes those files use.
-
-**Data flow**: It receives the tool context, skill name, and an expected generation value. It loads the skill files for the current agent; if none exist, it returns None. Otherwise it parses the skill content to get the description, counts files and bytes, and returns those values in a dictionary.
-
-**Call relations**: The object system can call this to report the current state of a skill. It uses UserSkillStore to fetch files and parse_skill_content to understand the SKILL.md metadata.
-
-*Call graph*: calls 1 internal fn (_require_ext); 2 external calls (__init__, parse_skill_content).
+*Call graph*: calls 2 internal fn (read_transcript, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `SkillObjects.apply`  (lines 219–236)
+##### `conversation_compactions`  (lines 93–97)
 
 ```
-async def apply(self, ctx: ToolContext, name: str, spec: UserSkillSpec, old: UserSkillSpec | None, *, expected_generation: UUID | None) -> None
+async def conversation_compactions(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This creates or updates a saved skill for the current agent. It enforces limits and safety checks before writing anything to storage.
+**Purpose**: This lists the compaction records for a conversation. A compaction is where earlier conversation messages were summarized or condensed to keep context manageable.
 
-**Data flow**: It receives the tool context, skill name, new spec, optional old spec, and an expected generation value. It checks that there are not too many files, confirms all paths stay inside the skill folder, resolves file bodies from inline text, workspace references, or stored digests, checks the total byte limit, and saves the final bytes to UserSkillStore.
+**Data flow**: It validates conversation_id from the URL. If the value is not a UUID, it returns a not-found JSON error. Otherwise it asks SurfaceContext for the compaction indexes or records available for that conversation, converts the async result to a list, and returns it as JSON.
 
-**Call relations**: The platform calls this when a manifest is applied to save a skill. It uses _require_ext for context, _contained_keys for path safety, SkillObjects._resolve for turning the spec into real bytes, and UserSkillStore.save for persistence.
+**Call relations**: The compactions list route calls this when the frontend wants to show where a conversation was summarized. It depends on _uuid_param for safe parsing and SurfaceContext.list_compactions for the workspace-scoped read.
 
-*Call graph*: calls 3 internal fn (_resolve, _contained_keys, _require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects.delete`  (lines 238–246)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This removes a saved skill for the current agent. It is the delete operation for the skill object kind.
-
-**Data flow**: It receives the tool context, skill name, and an expected generation value. It checks the extension context, then asks UserSkillStore to delete the named skill.
-
-**Call relations**: The platform calls this when a skill object is deleted. It only needs _require_ext to identify the current agent scope, then hands the deletion to UserSkillStore.
-
-*Call graph*: calls 1 internal fn (_require_ext); 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (list_compactions, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `SkillObjects._resolve`  (lines 248–296)
+##### `compaction_record`  (lines 100–115)
 
 ```
-async def _resolve(self, ctx: ToolContext, name: str, spec: UserSkillSpec) -> dict[str, bytes]
+async def compaction_record(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This turns a user’s skill spec into the exact bytes that should be saved. It supports three ways to provide each file: new inline text, a workspace file reference, or a digest saying to keep an already stored file unchanged.
+**Purpose**: This returns the details of one compaction event. It lets an operator compare what messages existed before compaction, what remained after, and what summary was produced.
 
-**Data flow**: It receives the tool context, skill name, and spec. It loads any existing stored files, verifies FileRef digests against those stored bytes, reads any FileFrom workspace files inside the sandbox, decodes the sandbox’s base64 results back into bytes, converts inline strings to bytes, verifies each file is UTF-8 text, and returns a path-to-bytes dictionary ready to save.
+**Data flow**: It reads conversation_id and an index from the URL. The conversation ID must be a valid UUID, and the index must contain only digits; otherwise it returns a not-found error. It then asks SurfaceContext for that specific compaction. If found, it builds a JSON object with the index, before messages, after messages, and summary.
 
-**Call relations**: SkillObjects.apply calls this during create or update. This function coordinates with UserSkillStore for old files, the sandbox for workspace reads, hashlib for digest checks, JSON and base64 for safe data transfer, and _text for final text validation.
+**Call relations**: The individual compaction route calls this after a user chooses a compaction from the list. It uses _uuid_param to reject bad conversation IDs, calls SurfaceContext.read_compaction for the record, and formats nested message objects before returning JSON.
 
-*Call graph*: calls 2 internal fn (_require_ext, _text); called by 1 (apply); 7 external calls (__init__, b64decode, sha256, dumps, loads, quote, workspace_path).
-
-
-##### `_runtime_skills`  (lines 324–326)
-
-```
-async def _runtime_skills(ctx: ExtensionContext) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: This loads the current agent’s saved skills so they can be added to the runtime skill registry. In plain terms, it makes previously saved user skills available for use in a turn.
-
-**Data flow**: It receives an ExtensionContext. It asks UserSkillStore to load all saved skills for that context and returns them as RuntimeSkill objects.
-
-**Call relations**: The manifest registers this as the runtime skill loader. When the host prepares skills for an agent, it calls this function to pull saved skills into the active set.
-
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (read_compaction, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `manifest`  (lines 329–336)
+##### `workspace_files`  (lines 118–123)
 
 ```
-def manifest() -> Manifest
+async def workspace_files(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This is the extension’s declaration to the host system. It says the extension’s name and version, what object kind it adds, what built-in helper skill it ships, and how to load saved runtime skills.
+**Purpose**: This lists files associated with a conversation’s workspace area. It lets the debugger show what files were available or created during that conversation.
 
-**Data flow**: It takes no input. It creates and returns a Manifest containing the skill_create extension metadata, the skill object definition, the bundled create-skill SkillSpec, and the runtime skill loader.
+**Data flow**: It validates conversation_id from the path. If the value is not a valid UUID, it returns a not-found error. Otherwise it asks SurfaceContext for the files tied to that conversation, converts each file entry to JSON-friendly data, and returns the list.
 
-**Call relations**: The host calls this when discovering or loading the extension. The returned Manifest is the top-level wiring that connects SKILL_OBJECT, the bundled authoring skill directory, and _runtime_skills to the rest of the system.
+**Call relations**: The files listing route calls this when the frontend opens the file view for a conversation. It uses _uuid_param for URL safety and SurfaceContext.list_workspace_files for the actual file metadata.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 2 internal fn (list_workspace_files, _uuid_param); 1 external calls (JSONResponse).
 
 
-### `extensions/skill_create/ufo_ext_skill_create/store.py`
+##### `workspace_file`  (lines 126–136)
 
-`domain_logic` · `request handling and cross-cutting skill persistence`
+```
+async def workspace_file(ctx: SurfaceContext, request: Request) -> Response
+```
 
-A “skill” here is a small bundle of files that an agent can use later, such as a SKILL.md file plus any supporting assets. This file is the agent’s long-term notebook for those skills: it turns the files into database records, and later turns those records back into runnable skills.
+**Purpose**: This downloads the contents of one workspace file for a conversation. It is used when the debugger needs the actual bytes of a file, not just its name or metadata.
 
-The store always works inside the current workspace and agent, taken from the surrounding execution context. That means one agent cannot accidentally read or change another agent’s saved skills. Before saving, it checks that the skill name is a safe lowercase slug, like `summarize-email`, not a path or strange filename. This matters because the name is both a registry key and a stored identifier. It also refuses to save a new user skill with the same name as a core or packaged skill, unless this agent already owns that user skill. This prevents user-created skills from secretly replacing trusted built-in ones.
+**Data flow**: It validates the conversation_id from the URL and reads the requested file path from the route. If the ID is bad, the path is rejected, or no file stream exists, it returns a not-found JSON error. If the file is available, it returns a streaming response with generic binary data so the file can be downloaded or inspected.
 
-For storage, the file contents are converted to base64 text, which is a safe way to put arbitrary bytes into a text database column. A hash digest is stored too, like a fingerprint of the saved content. When loading, the store decodes the files and asks the skill parser to rebuild runtime-ready skills. If one saved skill is corrupt, it logs a warning and skips that one instead of breaking all skill loading.
+**Call relations**: The file content route calls this when the frontend requests a specific file. It uses _uuid_param before asking SurfaceContext.read_workspace_file for a stream, and it uses StreamingResponse so large files do not have to be loaded all at once before sending.
+
+*Call graph*: calls 2 internal fn (read_workspace_file, _uuid_param); 2 external calls (JSONResponse, StreamingResponse).
+
+
+##### `turn`  (lines 139–146)
+
+```
+async def turn(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: This returns detailed information about one turn. It lets the debugger inspect a single unit of activity directly.
+
+**Data flow**: It reads turn_id from the URL and validates it as a UUID. If the ID is invalid, or if SurfaceContext cannot find that turn, it returns a not-found JSON error. Otherwise it converts the turn detail into JSON-friendly data and returns it.
+
+**Call relations**: The turn detail route calls this when the frontend opens a specific turn. It shares _uuid_param with the other ID-based routes and relies on SurfaceContext.turn_detail to fetch the scoped record.
+
+*Call graph*: calls 2 internal fn (turn_detail, _uuid_param); 1 external calls (JSONResponse).
+
+
+##### `stream`  (lines 149–154)
+
+```
+async def stream(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: This opens a live event stream for one turn. It lets the debugger watch raw turn activity as it happens or resume after a dropped connection.
+
+**Data flow**: It validates turn_id and confirms the turn exists. If not, it returns a not-found error. It then reads the Last-Event-ID header, which is the browser’s way of saying where a previous stream stopped, and returns a Server-Sent Events stream produced by _events.
+
+**Call relations**: The live stream route calls this when the frontend wants ongoing updates for a turn. It checks existence with SurfaceContext.turn_detail, then hands the long-running response to _events and wraps that async byte stream in StreamingResponse.
+
+*Call graph*: calls 3 internal fn (turn_detail, _events, _uuid_param); 2 external calls (JSONResponse, StreamingResponse).
+
+
+##### `_events`  (lines 157–160)
+
+```
+async def _events(ctx: SurfaceContext, turn_id: UUID, since: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: This turns the backend’s live turn feed into a stream of browser-sendable event bytes. It is the small adapter between the internal live-frame tail and Server-Sent Events output.
+
+**Data flow**: It receives the workspace context, a turn ID, and a cursor saying where to resume. It opens SurfaceContext.tail, which yields live frames with their cursors, then converts each frame by calling _sse. It yields each encoded event chunk to the HTTP streaming response.
+
+**Call relations**: stream calls this after it has validated the turn and created the streaming HTTP response. _events stays close to SurfaceContext.tail for the live source and delegates the formatting of each individual frame to _sse.
+
+*Call graph*: calls 2 internal fn (tail, _sse); called by 1 (stream).
+
+
+##### `_sse`  (lines 163–191)
+
+```
+def _sse(cursor: str, frame: LiveFrame) -> bytes
+```
+
+**Purpose**: This formats one internal live frame as one Server-Sent Events message. It names the event by the kind of frame, such as text, tool call, cost update, or terminal result.
+
+**Data flow**: It receives a cursor and a LiveFrame object. If the cursor is not empty, it writes it as the event ID so the browser can later resume from that point. It then matches the frame type, serializes the frame’s data to JSON text, and returns the complete event as bytes in the SSE format.
+
+**Call relations**: _events calls this once for every live frame it receives from SurfaceContext.tail. If a new frame type reaches this function without a matching case, it raises an error rather than silently sending an unknown or misleading event.
+
+*Call graph*: called by 1 (_events); 1 external calls (model_dump_json).
+
+
+##### `_uuid_param`  (lines 194–198)
+
+```
+def _uuid_param(request: Request, name: str) -> UUID | None
+```
+
+**Purpose**: This safely reads a UUID-shaped identifier from a request path. It keeps the route handlers from treating malformed URL text as a real conversation or turn ID.
+
+**Data flow**: It receives a request and the name of a path parameter. It takes the text value from request.path_params and tries to convert it into a UUID object. A valid value comes out as a UUID; an invalid value comes out as None.
+
+**Call relations**: The conversation, compaction, file, turn, and stream handlers call this before reading workspace data. That common check keeps their error behavior consistent: bad IDs become simple not-found responses instead of leaking parsing errors to the user.
+
+*Call graph*: called by 8 (compaction_record, conversation_compactions, conversation_transcript, conversation_turns, stream, turn, workspace_file, workspace_files); 1 external calls (UUID).
+
+
+### `extensions/memory/ufo_ext_memory/surface.py`
+
+`io_transport` · `request handling`
+
+This file is the “memory explorer” surface: a read-only view that lets an authorized operator inspect what the memory extension has stored for one workspace. In plain terms, it is like opening a filing cabinet and seeing every memory card inside, including old, shared, personal, indexed, and not-yet-indexed records.
+
+The file defines where the browser page comes from, how it is returned to the operator, and how the page asks for memory data. The HTML is loaded from `static/memory.html` when the Python module is loaded. If that file is missing, the page endpoint fails clearly instead of returning a broken blank page.
+
+For data, the file does not read from the core system directly. It creates an `ExtensionContext`, which is the extension’s way to open its own workspace-scoped database transaction. “Workspace-scoped” means the database read is limited to the workspace already selected and authorized by the operator session. This matters because memory data is private to a workspace, and an operator should only see the workspace they are currently bound to.
+
+The exported routes connect three web actions: show the page, bind the operator session, and return the memory list as JSON for the page to render.
 
 #### Function details
 
-##### `UserSkillStore.save`  (lines 69–126)
+##### `app_page`  (lines 27–30)
 
 ```
-async def save(self, name: str, files: Mapping[str, bytes], registry_names: frozenset[str]) -> RuntimeSkill
+async def app_page(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Saves one user-authored skill for the current agent, either creating it or replacing the existing saved copy. It also enforces the important safety rules: valid name, no stealing a built-in skill name, and no exceeding the per-agent skill limit.
+**Purpose**: This function returns the memory explorer web page to the browser. It is used when an operator opens the memory surface in the web interface.
 
-**Data flow**: It receives a skill name, a set of file paths mapped to file bytes, and the names already present in the skill registry. It reads the current workspace and agent, checks the name, parses the files to make sure they form a valid runtime skill, checks whether this agent already owns that name, and checks the saved-skill count if this would be a new skill. Then it base64-encodes the files, stores them as JSON text, computes a SHA-256 digest as a content fingerprint, and writes the record inside a database transaction. It returns the parsed RuntimeSkill, so the caller can immediately use the skill that was saved.
+**Data flow**: It receives the current surface context and the incoming web request, but it does not need to inspect either one. It checks whether the HTML file was successfully loaded earlier. If the page is available, it wraps that HTML text in an HTTP HTML response; if not, it raises a clear error saying the page file is missing.
 
-**Call relations**: This is the main write path for the store. During saving it calls UserSkillStore._owns to decide whether the name is already this agent’s saved skill, and UserSkillStore._count to enforce the limit for new skills. It hands the raw files to parse_skill_content so invalid skill bundles fail before anything is persisted, and it raises clear errors when the caller asks for an unsafe or disallowed save.
+**Call relations**: This is the handler for the main GET route of the surface. When the operator visits the memory explorer, the routing table sends the request here, and this function hands back the complete browser page using `HTMLResponse`.
 
-*Call graph*: calls 2 internal fn (_count, _owns); 10 external calls (__init__, __init__, __init__, __init__, b64encode, sha256, insert, update, agent_current, parse_skill_content).
-
-
-##### `UserSkillStore.load_all`  (lines 128–162)
-
-```
-async def load_all(self) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: Loads every saved skill owned by the current agent and turns them back into runtime-ready skills. It is used when the system needs to make the agent’s saved skills available again after they were persisted.
-
-**Data flow**: It reads the current workspace and agent, queries the database for all matching saved skill names and stored content, and processes them in name order. For each row, it validates the stored JSON shape, base64-decodes each saved file back into bytes, and parses the bundle into a RuntimeSkill. If one row is malformed or cannot be parsed, it logs a warning with the workspace, agent, skill name, and error, then continues with the remaining rows. The output is a tuple of successfully loaded RuntimeSkill objects.
-
-**Call relations**: This is the main read-all path for the store. It calls the shared skill parser after reconstructing each file bundle from database text. Unlike save, it does not stop everything when one saved skill is bad; it isolates that failure so the rest of the agent’s skills can still load.
-
-*Call graph*: 4 external calls (b64decode, select, agent_current, parse_skill_content).
+*Call graph*: 1 external calls (HTMLResponse).
 
 
-##### `UserSkillStore.files`  (lines 164–180)
+##### `memories`  (lines 33–42)
 
 ```
-async def files(self, name: str) -> dict[str, bytes] | None
+async def memories(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Fetches the original files for one saved skill owned by the current agent. This is useful when a caller needs the stored source files rather than the parsed runtime skill.
+**Purpose**: This function returns every stored memory item for the currently bound workspace as JSON. The browser page uses it to fill the memory explorer with actual records.
 
-**Data flow**: It receives a skill name, reads the current workspace and agent, and asks the database for the stored content for exactly that skill. If no row exists, it returns None. If a row is found, it validates the stored JSON and base64-decodes each file’s text back into bytes. The output is a dictionary from relative file path to file bytes.
+**Data flow**: It receives the surface context, which includes the selected workspace, and the incoming request. It builds an extension context with a scoped store for the memory extension and no declared credential access. Through that context, it opens the extension’s workspace-aware transaction and asks the memory store inventory function for the records in the current workspace. It then turns each memory item into plain JSON-friendly data and returns the list as a JSON HTTP response.
 
-**Call relations**: This is a focused read path for one skill’s raw contents. It uses the same stored format that UserSkillStore.save writes, but it does not call the skill parser because its job is to return files exactly as stored.
+**Call relations**: This is the handler for the `api/memories` GET route. After the HTML page loads in the operator’s browser, the page can call this endpoint to fetch memory data. The function delegates the actual database listing to `ufo_ext_memory.store.inventory`, then packages the result for the browser with `JSONResponse`.
 
-*Call graph*: 3 external calls (b64decode, select, agent_current).
-
-
-##### `UserSkillStore.delete`  (lines 182–191)
-
-```
-async def delete(self, name: str) -> None
-```
-
-**Purpose**: Deletes one saved user skill for the current agent. It removes the database record if it exists and does nothing visible if it does not.
-
-**Data flow**: It receives a skill name, reads the current workspace and agent, and runs a database delete limited to that workspace, that agent, and that name. It does not return a value. The changed state is that the matching saved skill row is gone, if one was present.
-
-**Call relations**: This is the removal path that complements UserSkillStore.save and the read methods. It relies on the current agent scope so deletion cannot cross into another agent’s saved skills.
-
-*Call graph*: 2 external calls (delete, agent_current).
+*Call graph*: 5 external calls (__init__, __init__, __init__, JSONResponse, inventory).
 
 
-##### `UserSkillStore.timestamps`  (lines 193–205)
+### Hosted site frames
+Public site routes resolve permanent links, enforce viewer permissions, and embed the hosted site from its separate origin.
 
-```
-async def timestamps(self, name: str) -> tuple[datetime, datetime] | None
-```
+### `extensions/sites/ufo_ext_sites/surface.py`
 
-**Purpose**: Looks up when one saved skill was first created and when it was last updated. This lets callers show history or decide whether a saved skill has changed.
+`io_transport` · `request handling`
 
-**Data flow**: It receives a skill name, reads the current workspace and agent, and queries the database for the created_at and updated_at fields for that skill. If the skill is not found, it returns None. If it is found, it returns the two datetime values as a pair.
+A hosted site link is meant to be shareable, but the link itself is not permission to view everything. This file is the gatekeeper and picture frame. When someone opens a site URL, it first checks that the token in the URL is genuine and says which workspace, conversation, and site name it belongs to. Then it looks up the site, checks whether the browser is signed in through the `ufo_session` cookie, and applies the site's visibility rules: public, workspace-only, or private. If the site is being used as an agent homepage, the agent's visibility rules take over instead.
 
-**Call relations**: This is a small metadata read path. It uses the same workspace-and-agent boundary as the rest of the store, and it reads the timestamps maintained when UserSkillStore.save inserts or updates a skill.
+The file does not serve the site's files directly. Instead, it returns a small HTML page containing an `<iframe>` that points to the site's own ingress address. An iframe is like a window cut into the page: the viewer sees the site, but the embedded site is kept apart from the main app's cookies and routes. The iframe also uses browser safety settings so model-created site code cannot easily steer the user's main tab somewhere misleading.
 
-*Call graph*: 2 external calls (select, agent_current).
-
-
-##### `UserSkillStore._count`  (lines 207–219)
-
-```
-async def _count(self) -> int
-```
-
-**Purpose**: Counts how many user-created skills the current agent has saved. It exists so saving a new skill can enforce the maximum allowed number of saved skills.
-
-**Data flow**: It reads the current workspace and agent, queries the user_skill table for rows matching that scope, and asks the database for the count. It returns that count as an integer and does not change stored data.
-
-**Call relations**: This is an internal helper used by UserSkillStore.save. Save calls it only when the requested name is not already owned by the agent, because the limit applies to adding a new skill rather than updating an existing one.
-
-*Call graph*: called by 1 (save); 2 external calls (select, agent_current).
-
-
-##### `UserSkillStore._owns`  (lines 221–233)
-
-```
-async def _owns(self, name: str) -> bool
-```
-
-**Purpose**: Checks whether the current agent already has a saved user skill with a given name. This helps distinguish updating one of the agent’s own skills from trying to create a new one or collide with a built-in skill.
-
-**Data flow**: It receives a skill name, reads the current workspace and agent, and queries the database for a matching row. If a row exists, it returns true. If not, it returns false. It only reads data and does not modify anything.
-
-**Call relations**: This is an internal helper used by UserSkillStore.save near the start of the save process. Save uses its answer to decide whether a registry-name collision is allowed and whether the per-agent skill count needs to be checked.
-
-*Call graph*: called by 1 (save); 2 external calls (select, agent_current).
-
-
-### General workflow profiles
-Fallback and multi-stage workflow profiles define reusable child-agent behavior beyond a single specialized task.
-
-### `core/src/ufo/loop/profiles.py`
-
-`config` · `subagent setup and spawn dispatch`
-
-When the main agent delegates work to a child agent, the system needs a clear job description for that child. This file provides the default one: a “general_purpose” subagent. Think of it like a standard work order for an assistant: it says what tools the assistant may use, what rules it must follow, and how it should report back.
-
-The profile is deliberately limited. The subagent can read and edit files, run shell commands, search, fetch web pages, load skills, and use some optional extension tools if they exist. But it cannot ask the user questions, create more subagents, message or cancel sibling subagents, or approve account connections. That keeps delegated work focused and prevents a child agent from taking over coordination decisions that belong to the parent.
-
-The prompt text gives practical behavior rules. The subagent should work independently, make reasonable assumptions, avoid repeating failed actions, load relevant skills first, use proper Office file formats for formal documents, and save useful artifacts in the shared workspace. The file then wraps these rules, tool names, and input/output data contracts into a SubagentProfile object. Finally, it exposes that profile as the core set of subagent profiles, which other extension-provided profiles can build on or supplement.
-
-
-### `extensions/brief_pipeline/ufo_ext_brief_pipeline/manifest.py`
-
-`config` · `startup / extension discovery`
-
-This file is the extension’s “label on the box.” When the UFO system discovers or loads the brief-pipeline extension, it needs a clear answer to: what is this extension called, what version is it, and what parts does it add?
-
-The extension adds a simple writing workflow: first an outline agent plans the brief, then a draft agent writes it, then a critic agent reviews it. The parent agent is also given a skill folder that explains how to chain those stages together. In plain terms, it is like setting up an assembly line: one worker sketches the plan, another turns it into a draft, and a reviewer points out what to improve. The parent agent remains in charge of applying the feedback.
-
-The file does not run the pipeline itself. Instead, it builds a Manifest, which is a compact declaration the host system can read. That manifest includes the extension name, its version, the three subagent profiles imported from the pipeline module, and the path to the skill instructions stored under the extension’s skills directory. Without this file, the host system would not know how to register this extension or which agents and skill instructions belong to it.
+Creators can change a normal site's visibility from this frame. That form is protected with a CSRF token, which is a signed proof tied to the current browser session, so another website cannot secretly submit the creator's form.
 
 #### Function details
 
-##### `manifest`  (lines 15–21)
+##### `site_token`  (lines 101–110)
 
 ```
-def manifest() -> Manifest
+def site_token(workspace_id: UUID, conversation_id: UUID, name: str) -> str
 ```
 
-**Purpose**: Builds and returns the extension description that the host system reads when loading this extension. It packages the extension’s name, version, three subagent profiles, and skill folder into one manifest object.
+**Purpose**: Creates the permanent signed token that names one hosted site. The token records the workspace, conversation, and site name, so the public route can later find the right site without relying on a logged-in user's context.
 
-**Data flow**: It starts with constants from this file, such as the extension name, version, and skill directory path, plus the imported outline, draft, and critic profiles. It wraps the skill directory in a SkillSpec, then places that and the three profiles into a Manifest. The result is a ready-to-read declaration of what this extension provides.
+**Data flow**: It receives a workspace ID, conversation ID, and site name. It places those values into a signed surface token for the sites surface. It returns the token string that can be put into a URL.
 
-**Call relations**: When the extension system asks this module what it contributes, this function creates the answer. It calls SkillSpec.__init__ to describe the skill folder, then calls Manifest.__init__ to bundle that skill together with the three subagent profiles so the host can register them.
+**Call relations**: When a full public site URL is needed, `site_url` asks this function to make the token part. This function hands the actual signing work to the shared surface-token helper so the token can later be checked by the same system.
 
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### Specialized subagent profiles
-Extension-provided child-agent profiles configure focused workers for browsing, writing, research, and website building.
-
-### `extensions/browser/ufo_ext_browser/subagent.py`
-
-`config` · `startup and subagent spawning`
-
-This file is like an ID badge and job description for a browser-focused helper agent. The main agent can send work to this helper when a task needs web browsing, such as opening pages, searching, saving screenshots, or gathering information from websites.
-
-The file first loads a long instruction prompt from `subagent_browser.md`. That prompt teaches the browser subagent how to work. It then builds the list of tools the subagent is allowed to use: the browser tool set, plus a few shared file tools such as reading and writing files, editing, and web search. This matters because a subagent should not automatically receive every tool in the system; it gets only the tools needed for its role.
-
-Two small data shapes are defined with Pydantic, a library that checks structured data. `BrowserTask` describes what the parent agent can send in: the task text, an optional starting URL, an optional task name, and whether the child gets extended context. `BrowserResult` describes what comes back: a freeform result string.
-
-Finally, `BROWSER_PROFILE` packages all of this into a `SubagentProfile`. That profile is what the rest of the system can register or spawn. One important detail is that `extended_context` defaults to true, because browser sessions often need enough room to complete multi-step page work without stopping halfway.
+*Call graph*: called by 1 (site_url); 1 external calls (mint_surface_token).
 
 
-### `extensions/documents/ufo_ext_documents/subagent.py`
-
-`config` · `startup or extension load, when the writing subagent profile is registered for later use`
-
-This file is like a job description and tool belt for a specialized writing assistant. The project can spawn child agents for focused tasks; this one is designed to work on prose drafts, not code, research, or file-format construction. Without this profile, the parent system would not have a clear, reusable way to start a writing-focused child with the right instructions and limits.
-
-The file first names the profile, model, default skill, and tools. The default skill is `writing-drafts`, which is preloaded so the child starts with the draft workflow already available instead of needing to fetch it during its first turn. The allowed tools are deliberately narrow: reading, writing, editing, searching files, and loading skills. It does not get shell access, a programming REPL, web tools, or file-sharing tools. In plain terms, it can work with draft files in the workspace, but it cannot run programs, browse the internet, or act like a second coding assistant.
-
-It also reads a Markdown prompt file from the nearby `prompts` folder. That prompt becomes the child agent’s standing instructions. Two small Pydantic models describe the shape of messages going in and coming out: a writing task has an `objective` and optional preloaded skills, and the result is a freeform `result`. Finally, everything is bundled into `WRITING_PROFILE`, the object other parts of the system use when they want to launch this writing subagent.
-
-
-### `extensions/research/ufo_ext_research/manifest.py`
-
-`config` · `startup/config load`
-
-This file acts like a packing list for the research add-on. When the larger system starts up and loads extensions, it needs a clear answer to questions like: “What tools does this extension add?”, “Which specialist agents can it create?”, and “What extra instructions should be included in prompts?” This file provides that answer in one place.
-
-It names the extension as “research” and gives it a version. It loads a web-research prompt section from a Markdown file, points to two on-demand skill folders, and gathers together the research tools and subagent profiles imported from other parts of the extension. It also declares a conversation slot for sources, which is a shared place where research results can record where information came from.
-
-One important detail is the requirement for “search_providers”. The research pack does not contain its own search credentials or backend. Instead, it expects the deployment to provide a search service. This is like plugging a lamp into a house’s wiring: the lamp declares that it needs electricity, but it does not generate power itself. By declaring this requirement here, the system can fail early during startup if search is missing, instead of surprising the user later when the first research request fails.
-
-#### Function details
-
-##### `manifest`  (lines 28–38)
+##### `site_url`  (lines 113–123)
 
 ```
-def manifest() -> Manifest
+def site_url(public_base_url: str | None, workspace_id: UUID, conversation_id: UUID, name: str) -> str
 ```
 
-**Purpose**: Builds and returns the research extension’s manifest, which is the structured description the host system reads to install this pack. Someone would use it when loading the extension so the system knows exactly what research capabilities to add.
+**Purpose**: Builds the public URL someone can open to view a hosted site. It refuses to invent a URL if the deployment has no public base address configured, because such a link would not work.
 
-**Data flow**: It reads constants and imported objects already prepared in this file: the extension name and version, research tools, subagent profiles, prompt text, skill folder paths, the sources conversation slot, and the required search-provider dependency. It wraps the prompt text in a PromptSection, turns each skill folder into a SkillSpec, and puts everything into a Manifest. The result is a single Manifest object that the rest of the system can consume.
+**Data flow**: It receives the deployment's public base URL plus the workspace, conversation, and site name. If the base URL is missing, it raises a clear configuration error. Otherwise it creates a site token and returns a URL made from the base path, the sites frame path, and that token.
 
-**Call relations**: During extension loading, the host asks this function for the research pack’s declaration. The function then creates the smaller pieces needed by the declaration, such as the prompt section and skill specifications, and hands them to Manifest so the host can register tools, subagents, skills, prompt content, conversation slots, and dependency requirements together.
+**Call relations**: This is the producer of shareable hosted-site links. It relies on `site_token` for the signed address portion, then wraps that token in the public frame route used later by `frame`.
 
-*Call graph*: 3 external calls (__init__, __init__, __init__).
-
-
-### `extensions/research/ufo_ext_research/subagent.py`
-
-`config` · `startup / agent profile registration`
-
-This file is like a job description and toolbox list for two specialist research helpers: `research` and `deep_research`. A main agent can delegate a research task to one of these child agents instead of doing every search and source check itself.
-
-The file names the two profiles, chooses the language model they run on, and lists the tools they are allowed to use. Those tools include web search, fetching web pages, browser tasks, external tools, file reading and writing, shell commands, memory search, and spreadsheet-style work. By keeping this list here, the project can give research agents enough power to gather and organize information while still keeping their scope clear.
-
-It also loads the instruction text for each agent from prompt files on disk. The normal `research` profile uses the standard research prompt. The `deep_research` profile uses a deeper research prompt and gets a much larger round limit, meaning it can keep working through more back-and-forth steps when the task needs many sources or careful synthesis.
-
-Two small Pydantic models describe the shape of the conversation with these agents: each research task comes in as an `objective`, and the answer comes back as a `result`. Pydantic is a validation library that helps ensure data has the expected fields. Without this file, the system would not have these named research subagents available for delegation.
+*Call graph*: calls 1 internal fn (site_token); 1 external calls (__init__).
 
 
-### `extensions/sites/ufo_ext_sites/subagent.py`
+##### `site_address`  (lines 126–137)
 
-`config` · `subagent setup`
+```
+def site_address(token: str) -> SiteAddress | None
+```
 
-This file is like a job description and tool belt for a child worker whose only job is building websites. The main system can hand a website task to this subagent, and this file makes sure the subagent starts with the right instructions, the right limits, and the right tools.
+**Purpose**: Reads and verifies a site token, turning it back into the site address it claims to name. If the token is fake, for the wrong surface, incomplete, or malformed, it returns nothing.
 
-It reads a Markdown prompt from the nearby prompts folder. That prompt contains the website-building workflow the subagent should follow. It then defines which tools the subagent can use: basic file tools for reading and editing, build and local website tools, JavaScript and spreadsheet REPL tools for testing or inspecting behavior, and optional web research tools if they are installed. A REPL is an interactive scratchpad where code can be run step by step.
+**Data flow**: It receives a token string. It verifies the signature and expected surface, then tries to parse the workspace and conversation as UUID values and read the site name. On success it returns a `SiteAddress`; on any verification or parsing failure it returns `None`.
 
-One important choice is that the subagent is not allowed to use `publish_website`. Publishing a full app is left to the parent conversation, because the child subagent works inside the parent’s sandbox and should report back rather than directly deliver the final hosted site. It also does not use `share_file`, because there is no separate member to send files to; the parent can read the shared workspace afterward.
+**Call relations**: `resolve_workspace` uses this before database lookup so even public viewers can be routed to the correct workspace. `_resolve` uses it again when loading the actual hosted-site row for viewing or visibility changes.
 
-The two small Pydantic models describe the shape of the task sent in and the result sent back. Pydantic is a library that checks data has the expected fields. Finally, all of this is bundled into a `SubagentProfile` so the wider system can launch this website-building helper consistently.
+*Call graph*: called by 2 (_resolve, resolve_workspace); 3 external calls (__init__, verify_surface_token, UUID).
+
+
+##### `resolve_workspace`  (lines 140–145)
+
+```
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
+```
+
+**Purpose**: Finds which workspace a request belongs to by reading the site token in the URL. This matters because a public visitor may not have a session cookie, so the workspace must come from the link itself.
+
+**Data flow**: It reads the token path parameter from the incoming request and passes it to `site_address`. If the token is valid, it returns the workspace ID. If not, it returns the same plain 404 response used for unknown sites.
+
+**Call relations**: The surface routing layer calls this early, before the normal handler, to decide the workspace context. It delegates token interpretation to `site_address` and uses `_not_found` to avoid revealing whether a bad link was close to a real one.
+
+*Call graph*: calls 2 internal fn (_not_found, site_address).
+
+
+##### `frame`  (lines 148–194)
+
+```
+async def frame(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Serves the actual visible frame page for a hosted site. It checks the link, checks the viewer, applies visibility rules, and returns HTML that embeds the site's own origin in an iframe.
+
+**Data flow**: It receives the surface context and web request. It resolves the site from the token, identifies the viewer from the session cookie if possible, checks whether the viewer may see the site or agent homepage, builds an ingress URL for the embedded site path, optionally mints a CSRF token for the creator's visibility form, and returns an HTML response. If anything should not be visible, it returns either a sign-in page for unauthenticated non-public access or a 404 response.
+
+**Call relations**: This is the main GET route for both the site root and deep links. It calls `_resolve` to load the site, `_viewer` to identify the browser, `_viewer_is_admin` when admin status matters, and `_frame_page` to assemble the final HTML.
+
+*Call graph*: calls 9 internal fn (ingress_url, list_agents, _frame_page, _not_found, _page, _resolve, _session_digest, _viewer, _viewer_is_admin); 2 external calls (HTMLResponse, mint_surface_token).
+
+
+##### `set_visibility`  (lines 197–218)
+
+```
+async def set_visibility(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Processes the creator's form for changing a hosted site's visibility. It only allows the site's creator to do this, and only when the submitted form proves it came from the current session.
+
+**Data flow**: It receives the surface context and web request. It resolves the site, identifies the viewer, rejects anyone who is not the creator, rejects homepage-bound sites because their visibility follows the agent, reads the submitted form, checks the CSRF token, parses the requested visibility level, writes the new value to the hosted-sites store, and redirects back to the site frame.
+
+**Call relations**: This is the POST route behind the visibility selector created by `_selector`. It uses `_resolve`, `_viewer`, `_csrf_holds`, and `_sites` before handing the changed visibility value to the stored site record.
+
+*Call graph*: calls 5 internal fn (_csrf_holds, _not_found, _resolve, _sites, _viewer); 4 external calls (PlainTextResponse, RedirectResponse, form, visibility_level).
+
+
+##### `_resolve`  (lines 221–225)
+
+```
+async def _resolve(ctx: SurfaceContext, request: Request) -> HostedSite | None
+```
+
+**Purpose**: Turns the request's site token into the hosted-site record in storage. It is the shared lookup step used before viewing a site or changing its visibility.
+
+**Data flow**: It reads the token from the request path, verifies and parses it with `site_address`, then uses the conversation ID and site name to read the hosted-site row from storage. It returns the `HostedSite` if found, or `None` if the token is bad or no site row exists.
+
+**Call relations**: `frame` calls this before rendering, and `set_visibility` calls it before updating permissions. It uses `_sites` to get the workspace-specific hosted-sites store.
+
+*Call graph*: calls 2 internal fn (_sites, site_address); called by 2 (frame, set_visibility).
+
+
+##### `_sites`  (lines 228–229)
+
+```
+def _sites(ctx: SurfaceContext) -> HostedSites
+```
+
+**Purpose**: Creates the storage helper for hosted sites in the current workspace. This keeps callers from repeating how to connect hosted-site operations to the workspace and transaction system.
+
+**Data flow**: It receives the surface context. It takes the workspace ID and transaction provider from that context and returns a `HostedSites` store object ready to read or update site records.
+
+**Call relations**: `_resolve` uses this helper to read a site, and `set_visibility` uses it to save a new visibility level. It is the small bridge between request context and the hosted-site storage layer.
+
+*Call graph*: called by 2 (_resolve, set_visibility); 1 external calls (__init__).
+
+
+##### `_viewer_is_admin`  (lines 232–237)
+
+```
+async def _viewer_is_admin(ctx: SurfaceContext, viewer: UUID | None) -> bool
+```
+
+**Purpose**: Checks whether the current viewer is an admin member of the workspace. Admins are allowed to view private sites and private agent homepages even when they are not the creator or owner.
+
+**Data flow**: It receives the surface context and a viewer member ID, which may be missing. If there is no viewer, it returns `False`. Otherwise it opens a transaction, reads the workspace seat snapshot, and returns whether that member appears as an admin.
+
+**Call relations**: `frame` calls this only when visibility rules need to know whether a signed-in member has admin privileges. It gets membership information from the shared `Seats` system.
+
+*Call graph*: calls 1 internal fn (transaction); called by 1 (frame); 1 external calls (__init__).
+
+
+##### `_viewer`  (lines 240–250)
+
+```
+async def _viewer(ctx: SurfaceContext, request: Request) -> UUID | None
+```
+
+**Purpose**: Identifies the signed-in workspace member behind the current browser request. It reads the `ufo_session` cookie, verifies it, and links the session identity to a workspace member if needed.
+
+**Data flow**: It reads the session token from the request cookies. If there is no token or verification fails for this workspace, it returns `None`. If verification yields an email, it finds the already linked member for that email or creates the link, then returns the member ID.
+
+**Call relations**: `frame` uses this to decide whether a visitor may view a non-public site. `set_visibility` uses it to prove the requester is the site's creator before accepting a visibility change.
+
+*Call graph*: calls 2 internal fn (link_member, linked_member); called by 2 (frame, set_visibility); 1 external calls (verify_token).
+
+
+##### `_csrf_holds`  (lines 253–255)
+
+```
+def _csrf_holds(request: Request, submitted: str) -> bool
+```
+
+**Purpose**: Checks whether a submitted visibility form token matches the current browser session. This protects the creator from another website tricking their browser into changing a site setting.
+
+**Data flow**: It receives the request and the submitted CSRF token. It verifies the token's signature, reads the stored session digest claim, compares it with a fresh digest of this request's session cookie, and returns `True` only if they match.
+
+**Call relations**: `set_visibility` calls this after confirming the viewer is the creator but before accepting the form data. It relies on `_session_digest` to bind the form token to the same session that loaded the page.
+
+*Call graph*: calls 1 internal fn (_session_digest); called by 1 (set_visibility); 1 external calls (verify_surface_token).
+
+
+##### `_session_digest`  (lines 258–262)
+
+```
+def _session_digest(request: Request) -> str
+```
+
+**Purpose**: Creates a safe fingerprint of the current session cookie for CSRF protection. It avoids putting the raw cookie value into the form token while still tying the token to this browser session.
+
+**Data flow**: It reads the `ufo_session` cookie from the request, uses an empty string if it is absent, hashes it with SHA-256, and returns the hexadecimal hash string.
+
+**Call relations**: `frame` uses this when minting a CSRF token for the creator's visibility form. `_csrf_holds` uses it later to check that the submitted token belongs to the same session.
+
+*Call graph*: called by 2 (_csrf_holds, frame); 1 external calls (sha256).
+
+
+##### `_not_found`  (lines 265–266)
+
+```
+def _not_found() -> Response
+```
+
+**Purpose**: Returns the standard 404 response for missing, invalid, or unauthorized site access. Using the same response in several cases helps avoid leaking which private sites exist.
+
+**Data flow**: It takes no input. It creates a plain-text response with the body `no such site` and HTTP status 404. It does not change any stored data.
+
+**Call relations**: `resolve_workspace`, `frame`, and `set_visibility` all use this when a token is invalid, a site is missing, or a viewer should not be told more. It provides one consistent outward answer for these cases.
+
+*Call graph*: called by 3 (frame, resolve_workspace, set_visibility); 1 external calls (PlainTextResponse).
+
+
+##### `_page`  (lines 269–274)
+
+```
+def _page(title: str, style: str, body: str) -> str
+```
+
+**Purpose**: Wraps a title, CSS styles, and HTML body into a complete minimal HTML document. It is the common shell used for sign-in notices and site frame pages.
+
+**Data flow**: It receives a page title, style text, and body HTML. It combines them with a document type, character encoding, viewport setting, title tag, and style tag. It returns the resulting HTML string.
+
+**Call relations**: `frame` uses this directly for the not-signed-in page. `_frame_page` uses it to wrap the iframe and optional header into the final page sent to the browser.
+
+*Call graph*: called by 2 (_frame_page, frame).
+
+
+##### `_frame_page`  (lines 277–313)
+
+```
+def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: str, *, bare: bool=False) -> str
+```
+
+**Purpose**: Builds the HTML for the hosted-site frame. It shows the site name and either a creator-only visibility selector or a read-only visibility badge, then embeds the real site in a sandboxed iframe.
+
+**Data flow**: It receives the hosted-site record, the embedded ingress URL if one exists, the frame path, a CSRF token if the selector should be shown, and a flag for bare homepage rendering. It escapes user-visible values for HTML safety, creates either an iframe or an unconfigured-hosting message, optionally creates the visibility control, and returns a full HTML page string.
+
+**Call relations**: `frame` calls this after all access checks pass and after it has minted any needed CSRF token. This function calls `_selector` when the creator should be allowed to change visibility, and `_page` to produce the complete document.
+
+*Call graph*: calls 2 internal fn (_page, _selector); called by 1 (frame); 1 external calls (escape).
+
+
+##### `_selector`  (lines 316–326)
+
+```
+def _selector(current: Visibility, frame_path: str, csrf: str) -> str
+```
+
+**Purpose**: Creates the small HTML form that lets a site's creator choose private, workspace, or public visibility. It includes the CSRF token needed for the later POST to be accepted.
+
+**Data flow**: It receives the current visibility level, the frame path to post back to, and the CSRF token. It builds option tags with the current level selected, escapes the form action and token for HTML safety, and returns the form HTML.
+
+**Call relations**: `_frame_page` calls this only when a valid CSRF token was provided, which happens for the signed-in creator of a normal site. The form it returns posts to the route served by `set_visibility`.
+
+*Call graph*: called by 1 (_frame_page); 1 external calls (escape).

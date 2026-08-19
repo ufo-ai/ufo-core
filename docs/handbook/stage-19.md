@@ -1,38 +1,34 @@
-# Cross-cutting SDK, extension ABI, protocol types, and public contracts  `stage-19` (cross-cutting infrastructure)
+# Extension SDK, object system, slots, and public contracts  `stage-19` (cross-cutting infrastructure)
 
-This stage is shared behind-the-scenes support for extension authors and outside integrations. It is not the startup path or the main work loop. Instead, it defines the public “contract” for how outside code may talk to the system without touching private internal parts.
+This stage is shared support for extensions, the add-ons that let the platform grow without letting outside code poke at private internals. It is like a set of guarded doors and standard forms. Extension authors get stable public imports, while the core system keeps control over safety, naming, permissions, and data shape.
 
-The extension ABI, manifests, and context describe what an extension can declare and what safe tools it receives while running. The model, connector, source, and search contracts define common plugs for AI models, content feeds, search indexes, and memory retrieval, so different providers can fit the same sockets. The interactive SDK APIs expose approved ways to build web views, panels, browser links, objects, terminals, and sandboxed code. The identity and safety contracts provide stable access to audiences, credentials, permissions, seats, tokens, and markers for untrusted input. The SDK package shell and utility re-exports gather everyday helpers such as jobs, schedules, logging, accounting, listings, and skills.
+The workspace object system gives the platform a common way to name, list, open, and describe things such as agents, conversations, memories, extensions, and workspace members. Internal extension contracts define what an extension can declare in its manifest, what limited services it receives while running, and what extra conversation panels it may add. Validation checks make sure those panels and slot data are well formed and safe to show.
 
-Together, these pieces form the project’s public toolbox: stable, labeled doors into selected capabilities while the engine room stays private.
+The SDK facade modules are the public front counter. Some expose platform services such as accounting, credentials, auth proxy, grants, logging, and visibility labels. Others expose extension-building tools for manifests, tools, skills, jobs, web routes, context, and scheduled triggers. Integration facades cover browsers, terminals, connectors, sources, search, indexing, memory, models, sandboxes, and user surfaces.
 
 ## Sub-stages
 
-- [Extension ABI, manifests, and execution context](stage-19.1.md) `stage-19.1` — 6 files
-- [Model, connector, source, and search provider contracts](stage-19.2.md) `stage-19.2` — 8 files
-- [Interactive surfaces, web, browser, object, and terminal SDK APIs](stage-19.3.md) `stage-19.3` — 8 files
-- [Identity, credentials, access, seats, and safety contracts](stage-19.4.md) `stage-19.4` — 8 files
-- [SDK package shell and operational utility re-exports](stage-19.5.md) `stage-19.5` — 7 files
+- [Workspace object system and built-in object kinds](stage-19.1.md) `stage-19.1` — 9 files
+- [Internal extension contracts, runtime context, and conversation slots](stage-19.2.md) `stage-19.2` — 3 files
+- [SDK cross-cutting platform service facades](stage-19.3.md) `stage-19.3` — 14 files
+- [SDK extension authoring and execution facades](stage-19.4.md) `stage-19.4` — 7 files
+- [SDK integration, data access, and surface facades](stage-19.5.md) `stage-19.5` — 11 files
 
 ## 📊 State Registers Touched
 
-- `reg-extension-catalog` — The shared list of installed extensions and the capabilities they registered for this deployment.
-- `reg-agent-definitions` — The saved assistant agents for each workspace, including their settings, tools, model choices, and provisioning source.
-- `reg-identity-context` — The current answer to who is acting, in which workspace, and on behalf of which member or agent.
-- `reg-auth-tokens` — The signed tickets and login tokens used to prove access to sessions, downloads, sandbox links, and hosted onboarding.
-- `reg-credential-vault` — The encrypted store of workspace secrets and API keys that tools and connectors can request through guarded paths.
-- `reg-connection-grants` — The saved outside-service account connections and the grants saying which agents may use them.
-- `reg-model-catalog` — The shared catalog of AI models, providers, routing rules, reasoning modes, key lookup rules, and usage shapes.
-- `reg-tool-registry` — The shared catalog of tools the model is allowed to call and the input rules for each tool.
-- `reg-connector-tool-catalog` — The discovered connector actions from systems like Gmail, Slack, GitHub, Composio, Pipedream, and MCP servers.
-- `reg-browser-sessions` — The browser or Chrome DevTools session state used when tools and hosted sandbox websites need a controlled browser.
-- `reg-object-store` — The durable named workspace objects owned by extensions, with their names, data, permissions, and owner routing.
-- `reg-blob-artifacts` — The shared file and artifact storage for large bytes, generated files, previews, and signed downloads.
-- `reg-portal-slots` — The safe display state for conversation panels such as sources, artifacts, tasks, sites, automations, and workspace changes.
-- `reg-source-feeds` — The registered external content sources, sync cursors, backoff state, ownership, grants, and wake-up triggers.
-- `reg-page-index` — The stored pages, revisions, chunks, embeddings, and search indexes used to find synced knowledge later.
-- `reg-memory-store` — The durable remembered facts and notes that agents can search, browse, update, consolidate, and show with provenance.
-- `reg-scheduled-work` — The saved jobs, scheduled tasks, pauses, monitors, due times, retry state, and duplicate-run guards.
-- `reg-visibility-policy` — The shared audience, sharing, governance, and permission rules that decide who may see or change private data.
-- `reg-extension-kv-store` — Private per-workspace JSON/key-value state owned by extensions for setup, feature bookkeeping, and small durable extension data that is not a user-visible object.
-- `reg-untrusted-content-taint` — Trust/taint markers attached to external content as it moves through retrieval, prompts, tools, and rendering so prompt-injection safety checks can be enforced.
+- `reg-extension-registry` — The loaded list of installed extensions, packs, routes, tools, skills, jobs, credentials, backends, and migrations.
+- `reg-workspace-principals` — The current workspace, members, agents, controlling users, and ownership identities used to decide who is acting.
+- `reg-visibility-boundaries` — The saved rules for who may see each conversation, agent, transcript, source, memory, artifact, or workspace object.
+- `reg-credential-vault` — The encrypted store of API keys, OAuth tokens, and other secrets that can be injected only into approved places.
+- `reg-agent-settings` — The durable settings for each agent, including model choice, reasoning mode, internet access, sandbox size, tools, setup needs, icon, and visibility.
+- `reg-model-catalog` — The shared directory of available AI models, their providers, limits, prices, key requirements, and routing behavior.
+- `reg-model-usage-accounting` — The recorded token, image, video, embedding, sandbox, egress, and cost usage used for billing and audit trails.
+- `reg-spend-controls` — The workspace spending caps, prepaid balances, top-up settings, BYOK flags, and billing export state.
+- `reg-tool-catalog` — The shared catalog of tools the model can call, including built-in tools, extension tools, connector tools, and their safety labels.
+- `reg-source-sync-catalog` — The saved catalog of external sources, pages, sync cursors, deletion marks, retry backoff, and indexing needs.
+- `reg-search-index` — The shared keyword and embedding indexes that let conversations, tools, and background jobs find relevant stored documents.
+- `reg-memory-store` — The durable store of remembered facts and memory-search results that can be written, deduplicated, recalled, and shown later.
+- `reg-scheduled-jobs` — The durable background job and scheduled task state used for recurring work, wakeups, retries, monitors, billing, and offline evaluation.
+- `reg-extension-object-slots` — The extension-owned object and conversation-panel data, such as artifacts, sources, tasks, sites, automations, and custom workspace objects.
+- `reg-extension-workflow-state` — Extension-owned durable workflow records that are not just UI slots, such as code-review inboxes, evaluation runs, objectives, pauses, briefs, notes, monitors, triggers, and web-chat state.
+- `reg-extension-kv-store` — Per-workspace extension key/value JSON and setup marker state saved outside core schemas, used by extension setup, runtime behavior, jobs, and cleanup migrations.

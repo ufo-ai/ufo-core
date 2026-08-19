@@ -1,104 +1,110 @@
-# Identity, credentials, access, seats, and safety contracts  `stage-19.4`
+# SDK extension authoring and execution facades  `stage-19.4`
 
-This stage is shared behind-the-scenes support for extensions and outside code. It creates safe public “front doors” into identity, access, and safety tools, so callers do not need to depend on private internal modules that may move.
+This stage is shared behind-the-scenes support for people who write UFO extensions. It is not the main work loop itself. Instead, it provides stable “front doors” into the system, so extension code can use approved names without depending on private internal files that may move or change.
 
-The audience and subjects SDK files describe who can see a conversation or row. Audience gives public access to conversation-audience names and helpers. Subjects exposes helpers for shared-workspace visibility and member-specific visibility. Bearer provides a safe way to verify bearer tokens, which are login/session tokens carried with a request, without exposing the secret used to make them. Credentials exposes approved credential tools. Grants re-publishes connection and permission-audit tools, so extensions can inspect access in a stable way.
-
-Operator exposes helpers for operator-only web sessions. Seats re-exports seat types and helpers, used to track or reason about allowed user places. Untrusted shares the common marker for text that should be treated carefully, like input from outside users. Together these files form a controlled SDK layer around access and safety.
+The manifest module is where an extension describes itself: its declared features, constants, and helper rules. The tools and skills modules expose the building blocks an extension can offer to the system, such as callable actions and higher-level abilities. The jobs module lets an extension declare background work and choose which workspaces it should run in. The http module supports extension web routes by providing request and response types, plus a safe helper for setting session cookies. The context module gives running extension code access to its execution context, meaning the useful information and services available while it runs. The scheduled_fire module exposes helpers for scheduled triggers. Together, these files act like a clean control panel over deeper machinery.
 
 ## Files in this stage
 
-### Audience doorway
-Public audience helpers are exposed first as the SDK entry point for conversation-audience visibility.
+### Runtime Access Facades
+Stable public imports for extension runtime context and HTTP route handling.
 
-### `core/src/ufo/sdk/audience.py`
+### `core/src/ufo/sdk/context.py`
 
-`other` · `cross-cutting`
+`other` · `cross-cutting import-time API surface`
 
-This file does not define new behavior. Instead, it republishes audience-related values and helpers from the internal `ufo.audience` module. An “audience” here means the intended visibility or recipient group for a conversation item, such as a shared audience, a room audience, or a foreign-room audience. Think of it like labels on envelopes: the real label-making rules live elsewhere, but this file puts the label tools on the public counter where SDK users can find them.
+This file is like a front desk for the SDK's context API. Extensions often need to know things such as who the current agent is, what conversation facts are available, what pages or members are involved, how to read sources, or how to access declared credentials. Those pieces are defined in several internal modules, but this file gathers them under one stable public path: `ufo.sdk.context`.
 
-Its main job is to create a stable boundary between the public SDK and the project’s internal layout. Code outside the project can import names like `Audience`, `parse_audience`, or `conversation_audience` from this SDK module. If the internal module structure changes later, this file can continue to present the same public names, which helps avoid breaking users.
+There is no new logic here. It does not calculate, store, or transform anything. Instead, it re-exports names from lower-level modules. A re-export means “make this imported thing available from here too.” That matters because extension code can rely on a clean, documented SDK surface instead of reaching into internal package paths such as `ufo.ext.context` or `ufo.credentials` directly.
 
-Without this file, SDK users would likely need to import from `ufo.audience` directly. That would expose internal organization details and make the public interface more fragile. Because it only re-exports existing constants, types, and functions, there are no local functions to document here.
-
-
-### Access and credential doorways
-Bearer verification, credentials, grants, and operator session helpers provide stable public imports for authentication and authorization workflows.
-
-### `core/src/ufo/sdk/bearer.py`
-
-`util` · `request handling`
-
-This file is a small public wrapper around the project’s bearer-token checking tools. A bearer token is like a stamped wristband: if it is real and unexpired, the holder can prove they were admitted by the gateway. The gateway or control plane creates these tokens, but extensions only need to verify them. This file helps keep that boundary clear.
-
-Rather than defining new behavior, it re-exports a few names from `ufo.bearer`: the login path, the session cookie name, and helper functions for checking a token and reading its claims. A claim is a piece of trusted information inside the token, such as which workspace the user belongs to.
-
-The important safety idea is that extensions do not receive or store the signing secret. The verification functions resolve `UFO_TOKEN_SECRET` themselves inside the core code. That means an extension can ask, “Is this token valid?” without being handed the private key that could create tokens. Without this file, extension authors would either need to import deeper internal code directly or risk copying token-checking logic, which would make the system harder to keep consistent and safe.
+Without this file, extension handlers would have to import context types from many different places, and any internal reorganization could break them. With it, the project can move internal code around later while keeping the public import path steady. In short, this file protects users from the project’s internal layout and makes extension code easier to read.
 
 
-### `core/src/ufo/sdk/credentials.py`
+### `core/src/ufo/sdk/http.py`
 
-`other` · `cross-cutting`
+`io_transport` · `request handling`
 
-This file does not create new credential behavior itself. Instead, it re-exports a carefully chosen set of names from the internal `ufo.credentials` module. In plain terms, it is like a reception desk: outsiders do not walk through every office in the building, but they can ask for the approved services at the front desk.
+This file is like a small front desk for HTTP code. Instead of making extensions reach directly into Starlette, the web framework underneath, it re-exports the request, response, file-upload, and form-data classes that route handlers are expected to use. That keeps the public interface simple: a route receives a Request and returns a Response, such as HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, or StreamingResponse.
 
-The problem it solves is API clarity and safety. Extensions need to work with credentials, but the project likely does not want them depending directly on every internal detail of the credential implementation. By putting approved credential classes, errors, and helper functions here, the SDK gives extension authors a stable place to import from.
+The file also defines one important safety rule for session cookies. Cookies can be risky because a poorly scoped cookie may leak across subdomains or environments. The helper set_session_cookie deliberately does not accept a domain setting. That means cookies set through it are “host-only”: the browser sends them only back to the exact host that set them, not to a wider parent domain. It also always turns on HttpOnly, which prevents browser JavaScript from reading the cookie, and Secure, which tells the browser to send it only over HTTPS.
 
-The exported items include credential storage, functions for opening an installation, functions for naming or authorizing credential slots, and specific error types for invalid requests, invalid values, or failed credential creation. If this file were missing, extension code might have to import from internal modules directly, making extensions more fragile when the project changes its internal layout.
+Only the SameSite setting is left for the caller to choose. SameSite is a browser rule that controls when cookies are sent during cross-site navigation. In short, this file both defines the HTTP vocabulary extensions should use and enforces a project-wide safer way to attach session cookies.
 
+#### Function details
 
-### `core/src/ufo/sdk/grants.py`
+##### `set_session_cookie`  (lines 23–34)
 
-`other` · `import time / extension API use`
+```
+def set_session_cookie(response: Response, name: str, token: str, *, samesite: Literal['lax', 'strict', 'none']) -> None
+```
 
-This module is a small doorway into the project’s grant and connection auditing features. In this codebase, `ufo.sdk` is meant to be the public software development kit: the part outside extensions should import from. Because the project does not allow code inside `__init__.py` files, the SDK is split into named modules like this one.
+**Purpose**: Sets a session cookie on an HTTP response using the project’s required safety defaults. It is meant to be the only normal way UFO code creates its own session cookies, so cookies stay host-only, HTTPS-only, and hidden from browser JavaScript.
 
-The real work lives in `ufo.grants`. That lower-level module defines things such as connection records, summaries of granted permissions, and helper functions for listing main-agent connections. This file imports those selected names and exposes them again under `ufo.sdk.grants`.
+**Data flow**: It receives a response object, a cookie name, a token value, and a SameSite choice. It passes those to the underlying response’s cookie-setting method, while always adding HttpOnly and Secure and never adding a domain. The response is changed in place so that, when sent to the browser, it includes the correct Set-Cookie header; the function itself returns nothing.
 
-The practical value is stability and clarity. An extension can write imports against the SDK path instead of reaching into internal project modules directly. That is like using a building’s front desk instead of wandering through staff-only corridors: the same information may be available, but the public route is safer and more intentional. If this file were missing, extension code would either break or need to depend on internal paths that may change more easily.
+**Call relations**: Route or session-related code calls this when it needs to attach a session token to a response. The function then hands the actual low-level cookie writing to Starlette’s Response.set_cookie, but wraps it with UFO’s stricter rules so callers do not accidentally create a broader or less secure cookie.
 
-
-### `core/src/ufo/sdk/operator.py`
-
-`other` · `cross-cutting, during operator-only request handling`
-
-This file is like a signpost at the front of a building: it points callers to the right operator-session tools without making them know where those tools live internally. The project has web pages or debug tools that are meant only for operators, and those tools need the same checks every time: decide which workspace an operator is trying to use, and bind the shared operator session cookie after a POST request. Rather than making every caller import from the deeper `ufo.ext.operator` module, this file exposes those pieces through `ufo.sdk.operator`, which is a more public-facing import path. That matters because internal module layouts can change over time. By re-exporting here, the project can keep a stable doorway for SDK users or other project code while still keeping the real implementation elsewhere. If this file disappeared, code that imports these operator helpers from the SDK path would break, even though the underlying logic still exists.
+*Call graph*: 1 external calls (set_cookie).
 
 
-### Participation scopes
-Seat helpers and subject visibility names define who participates in workspaces and who can see rows or conversations.
+### Extension Declaration Facades
+Public SDK doorways for declaring extension manifests, jobs, skills, and tools without depending on internal modules.
 
-### `core/src/ufo/sdk/seats.py`
+### `core/src/ufo/sdk/jobs.py`
 
-`other` · `cross-cutting`
+`util` · `extension import and job registration`
 
-This file is like a clearly labeled front desk for seat-reporting features. The real seat logic lives deeper in `ufo.seats`, but outside code should not have to know that internal path. Instead, extensions can import from `ufo.sdk.seats`, which is part of the public software development kit, or SDK: the supported interface meant for other code to use.
+This module is intentionally small: it does not create new behavior of its own. Instead, it re-exports a few job-related tools from internal parts of the system under the stable public name `ufo.sdk.jobs`. Think of it like a clearly marked service counter: extension authors come here for the approved tools, rather than wandering into the warehouse behind it.
 
-It exposes four things: `SeatEntry`, `Seats`, `SeatSnapshot`, and `member_workspaces`. These represent the seat state, safe ways to write or inspect it, and a helper for building workspace membership information. The important point is that this file keeps the rules in the core system while letting extensions decide when to apply them.
+The most important idea here is workspace selection. A background job should not blindly run everywhere. It needs to say, “these are the workspaces where I currently have work to do.” The exported `owner_candidates` helper and `WorkspaceCandidates` type support that pattern. An extension can build a database query that finds distinct workspace IDs from its own tables, and the core system can use that to decide where to dispatch the job.
 
-Without this file, extension code would need to import directly from internal modules. That would make the project harder to reorganize later, because changing the internal location of seat logic could break outside users. By re-exporting these names here, the project creates a stable public doorway while preserving freedom to change the rooms behind it.
-
-
-### `core/src/ufo/sdk/subjects.py`
-
-`data_model` · `cross-cutting`
-
-This file is a small public doorway into the project’s subject system. A “subject” here means an audience label: for example, something visible to the whole shared workspace, or something visible to one specific member. Other parts of the system can attach these labels to rows of data or conversation audiences to decide who is allowed to see them.
-
-The file does not create new rules itself. Instead, it re-exports a few names from the internal `ufo.subjects` module: the shared subject value, the member subject prefix, and helper functions for making or recognizing these subject labels. This is like putting commonly used tools on a front desk so callers do not need to walk into the back room and depend on the internal layout.
-
-Why this matters: code outside the core implementation can import from `ufo.sdk.subjects` and stay insulated from where the subject logic actually lives. If the internal module moves or changes shape later, this SDK-facing file can preserve the public import path. Without it, outside users would have to rely directly on internal project structure, making their code more fragile.
+The file also re-exports workspace helper functions from the extension context, such as workspaces connected to a connection, seated members, unseeded agents, or untitled conversations. Finally, it exposes `JobSpec`, the public description of a job. Without this file, extension code would have to import from core internals directly, making extensions more fragile when the project is reorganized.
 
 
-### Safety marking
-The shared untrusted-content marker gives SDK users and internal code the same safety contract for tainted text.
+### `core/src/ufo/sdk/manifest.py`
 
-### `core/src/ufo/sdk/untrusted.py`
+`data_model` · `extension import and manifest definition`
+
+This file exists to keep the project’s public extension interface clean and stable. A manifest is the structured description of what an extension provides: agents, hooks, tools, credentials, conversation slots, image previews, workspace changes, and other capabilities. The real definitions live in several internal modules, but extension code should not depend on those internal paths because they may change.
+
+Think of this file like a reception desk in a large building. Visitors do not need to know which back office contains each form; they ask at the desk and receive the official version. Here, the “forms” are imported names such as `Manifest`, `HookSpec`, `CredentialSlot`, `ConversationTask`, and `WorkspaceChange`.
+
+There is no new logic here. The file simply re-exports selected names from other parts of the system under one supported location. This matters because it gives extension developers one reliable place to import from, while allowing the core project to reorganize its internal code later without breaking those extensions. The comment at the top also explains a project rule: package `__init__.py` files are kept empty, so public API surfaces are provided through named modules like this one.
+
+
+### `core/src/ufo/sdk/skills.py`
+
+`util` · `cross-cutting import-time SDK surface`
+
+This module is like a signposted doorway into the skill system. The real skill logic lives deeper in the project, under `ufo.skills.runtime`, but outside code should not have to know that internal layout. Instead, it can import from `ufo.sdk.skills`, which is a cleaner and more stable public address.
+
+It exposes three things: `RuntimeSkill`, the value object that represents a skill available at runtime; `parse_skill_content`, a helper that reads in-memory skill text and turns it into the project’s skill representation; and `skill_mount_root`, a helper related to where contributed skills are mounted or rooted.
+
+The comment at the top explains an important design choice: the SDK package keeps its `__init__.py` files empty because project rules forbid code there. So instead of putting public imports at the package root, the SDK uses small named modules like this one. If this file disappeared, extension code would either lose this convenient public import path or be forced to depend directly on internal modules, making future refactors harder and more likely to break users.
+
+
+### `core/src/ufo/sdk/tools.py`
+
+`other` · `cross-cutting; used when extensions import SDK tool APIs`
+
+This module is like a front desk for extension authors. Instead of asking outside code to know where every tool type, task helper, or content class lives inside the core package, it gathers those names in one safe public place: `ufo.sdk.tools`.
+
+The file does not define new behavior. It re-exports selected objects from deeper modules. That matters because internal code can move around later, while extensions can keep importing the same public names. Without this layer, plugin and extension code would depend on internal paths, making the system harder to change without breaking users.
+
+The exports cover the main pieces needed to declare and run tools: tool definitions, tool contexts, text and image result content, file-change limits, task-running helpers, and timeout/task-handle support. A notable part is `run_task`, which gives tools a shared way to start longer-running detached work. For example, the built-in bash tool can keep a command running after the immediate caller’s time budget is exceeded, while still reporting it through consistent task handles.
+
+The file also reflects a project rule: package `__init__.py` files stay empty, so named modules like this one provide the public SDK surface.
+
+
+### Scheduled Fire Helpers
+Stable public access to helpers that trigger scheduled extension work.
+
+### `core/src/ufo/sdk/scheduled_fire.py`
 
 `util` · `cross-cutting`
 
-Some text that enters the system should not be treated as trusted instructions. Examples include a tool's printed output, a response from an outside provider, or content returned by a third-party extension. This file exists to make the boundary around that kind of text consistent.
+This file is a small public doorway. The real scheduled-fire logic lives in `ufo.ext.scheduled_fire`, but this SDK file re-exports the two pieces that callers are meant to use: one helper that builds the key used to identify a scheduled run, and one helper that reads such a key back into the task it belongs to.
 
-It does one small but important thing: it imports `wall` from `ufo.untrusted` and exposes it through the SDK path as `ufo.sdk.untrusted.wall`. In plain terms, `wall` is a shared marker or wrapper that says, “the content inside here came from outside; do not treat it as the system’s own instructions.” The analogy is a quarantine label on a package: the package can still be opened and read, but everyone knows it should not be blindly trusted.
+A “scheduled fire” is a run that is triggered by a schedule, like a cron job. Cron is a common way to say “run this task at this time or interval.” Each scheduled run needs a dependable admission key, much like a ticket at a door: the system can use the ticket to recognize what scheduled task is trying to enter and later trace the run back to its source task.
 
-Without this file, SDK extensions might invent their own way to fence off risky output, or import from deeper internal modules. That would make safety behavior harder to keep consistent. By re-exporting the core definition here, the SDK gives outside code a stable, official doorway to the same untrusted-content boundary used inside the main system.
+Without this file, users would need to import these helpers from the deeper `ufo.ext` package. That would make the internal layout part of the public contract and make future refactoring harder. By re-exporting the names here, the project gives users a stable SDK import path while keeping the implementation elsewhere.

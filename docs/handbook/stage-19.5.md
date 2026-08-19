@@ -1,90 +1,153 @@
-# SDK package shell and operational utility re-exports  `stage-19.5`
+# SDK integration, data access, and surface facades  `stage-19.5`
 
-This stage is shared behind-the-scenes support for people writing code against the SDK. An SDK is the public “toolbox” the project offers to extensions and outside code. These files mostly do not create new behavior. Instead, they act like labeled doors in a building: stable import paths that lead to the real machinery elsewhere, even if the internal layout changes later.
+This stage is shared behind-the-scenes support for people building on top of the system. It does not run the main work itself. Instead, it provides stable public “front doors” into features that live deeper inside the codebase. That matters because extension authors can import from the SDK without depending on private file paths that may change.
 
-The package marker, __init__.py, simply tells Python that ufo.sdk is a package that can contain importable modules. accounting.py opens a public door to spending and usage records, such as reports and totals. listings.py exposes tools for paged lists, where large result sets are delivered in manageable chunks. o11y.py gives extensions approved logging and metrics tools, so they can report what happened and how much work was done. scheduled_fire.py re-exports helpers for cron-like scheduled runs. jobs.py exposes supported names for declaring background jobs. skills.py provides the public path to skill-related tools. Together, these files keep extension code simple, stable, and separated from private internals.
+Each file is one of these front doors. browser.py exposes the approved way to connect browser extensions to browser transport code. terminal.py does the same for terminal transports, terminal backends, and blob storage. hub.py gathers hub protocol messages, live frames, and activity types used for shared communication. connectors.py exposes connector and OAuth building blocks, while sources.py collects tools for adding content sources, such as REST APIs, pagination, and sync results.
+
+The data-facing doors are index.py for indexing and embeddings, search.py for search interfaces, memory.py for memory search, and models.py for approved model clients and helpers. sandbox.py exposes safe execution tools. surfaces.py gathers the types and helpers for building user-facing surfaces. Together, these files act like a clean reception desk for the larger system.
 
 ## Files in this stage
 
-### SDK package entrypoint
-The package marker establishes the public SDK namespace before any stable re-export modules are used.
+### Transport and hub facades
+Stable SDK entry points for browser transport, hub protocol frames, and terminal transport integrations.
 
-### `core/src/ufo/sdk/__init__.py`
+### `core/src/ufo/sdk/browser.py`
 
-`other` · `import/package discovery`
+`other` · `cross-cutting`
 
-This is an empty package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means other parts of the project can write imports that start with `ufo.sdk` and then reach the real modules inside this directory. Think of it like a label on a drawer: the label does not contain the tools, but it tells Python that the drawer belongs in the organized set of project code. Because this file is empty, it does not run setup code, expose shortcut names, or change how the SDK works. Its value is structural: without it, depending on the Python version and packaging setup, imports for this part of the project could fail or behave differently.
+This file is a small but important “front desk” for browser integration. The actual browser connection machinery lives in `ufo.browser`, but this file re-exports the pieces that are meant to be part of the public SDK. That keeps extensions pointed at a stable place, even if the internal code moves later.
 
+The concepts it exposes describe how UFO connects to Chrome through CDP, the Chrome DevTools Protocol, which is a way for software to inspect and control a browser. A `CdpProvider` creates a temporary browser connection for a turn of work. That connection is represented by a `CdpLease`, which gives access to a `CdpEndpoint`: the browser URL plus any needed connection headers. When the turn ends, the lease can be released. If work is recovered later, the saved lease token can be used to reattach, unless the browser session has disappeared, in which case `SessionGone` is raised.
 
-### Operational utility re-exports
-These modules expose stable SDK import paths for cross-cutting runtime concerns such as accounting, listings, observability, and scheduled execution.
-
-### `core/src/ufo/sdk/accounting.py`
-
-`io_transport` · `cross-cutting`
-
-This file is a small public doorway into the accounting part of the system. The real accounting definitions live in `ufo.accounting`, but users of the SDK are meant to import them from `ufo.sdk.accounting`. That keeps the public interface tidy and stable, like a shop counter where customers pick up approved items instead of walking into the storeroom.
-
-The objects re-exported here describe spending and usage information: reports for members and agents, totals by subject or dimension, a usage export shape, and a constant for converting dollars into micro-dollars. The file also exposes `metered_workspaces`, which is likely used to identify or work with workspaces whose usage is measured for billing or reporting.
-
-Nothing new is calculated here. There are no functions or classes defined in this file. Its job is to clearly say, “these accounting names are part of the supported SDK surface.” Without this file, code using the SDK would either fail to import these names from `ufo.sdk.accounting`, or would have to depend directly on internal modules, making future refactors more likely to break users.
+It also exposes `FileBytes`, used when a remote browser needs file contents, and `FindCompleter`, a hook that lets host code help rank or complete browser element searches. Without this file, extension authors would have to depend directly on internal browser code, making integrations more fragile.
 
 
-### `core/src/ufo/sdk/listings.py`
+### `core/src/ufo/sdk/hub.py`
 
-`util` · `cross-cutting`
+`other` · `cross-cutting import-time public API`
 
-Portal listings can be too large to return all at once, so the system uses keyset paging: a way to return one page of results plus a cursor that says where the next page should start. This file is a small public-facing doorway for that feature. Instead of asking extension code to import directly from the internal `ufo.listings` location, it exposes the important pieces through `ufo.sdk.listings`.
+This module does not create new behavior. Instead, it collects important hub-facing names from deeper inside the project and re-exports them under `ufo.sdk.hub`. That matters because SDK users should not need to know the project’s internal folder layout just to work with hubs. It is like a front desk: the real people and tools are elsewhere, but this is the place visitors are told to go.
 
-That matters because SDK users need a clear and stable import path. If the internal code is later moved or reorganized, this file can keep the public API looking the same. It is like a front desk: visitors do not need to know which office a tool really lives in; they can ask at the public desk and get the right thing.
+The hub is the part of the system that connects live activity, tool calls, replies, terminal output, subagent activity, cost updates, and pause/resume-style events. This file exposes the main `Hub` protocol, the in-process implementation `InProcessHub`, and the message or frame types that hub extensions are expected to understand.
 
-The names it makes available are `ListingCursor`, which represents a position in a paged result set; `ListingPage`, which represents one returned page; `MalformedCursor`, an error for an invalid cursor; and the helpers `page_of` and `page_query`, which support building paged listing responses. There are no local functions or classes here, only re-exports.
-
-
-### `core/src/ufo/sdk/o11y.py`
-
-`io_transport` · `cross-cutting`
-
-This file is a small but important boundary between extension code and the core observability system. “Observability” means the signals a system gives off so people can understand what it is doing, such as logs, warnings, timing profiles, and metrics counters.
-
-Instead of implementing logging or metrics itself, this file re-exports a few approved tools from `ufo.o11y`: `log`, `warn`, `emit_metric`, and `turn_profile`. That makes them available through the SDK, which is the public surface intended for extensions.
-
-The key idea is control. Extensions can emit metrics, but only by using names that the core system already knows about. This prevents every extension from creating its own surprise metric names. Without that rule, dashboards and alerts could become messy and unreliable, like a warehouse where everyone invents their own labels for the same boxes.
-
-So this file acts like a clearly marked service counter. Extensions come here to record what happened, while the core system keeps ownership of the official logging and metric machinery.
+The comment at the top explains an important project rule: `ufo.sdk` keeps its `__init__.py` empty, so public SDK symbols live in named modules like this one. Without this file, users would either import from internal modules directly, which makes their code more fragile, or lose a clean public import path for building hub integrations.
 
 
-### `core/src/ufo/sdk/scheduled_fire.py`
+### `core/src/ufo/sdk/terminal.py`
 
-`io_transport` · `cross-cutting`
+`other` · `import time / SDK use`
 
-This file is a small public doorway. The real scheduled-fire logic lives in `ufo.ext.scheduled_fire`, but outside users should not have to know that internal location. Instead, they can import from `ufo.sdk.scheduled_fire`, which is a cleaner and more stable SDK-facing path.
+This module does not define new behavior. Instead, it gathers important terminal-related names from deeper inside the project and re-exports them under `ufo.sdk.terminal`, which is the public-facing SDK path.
 
-A “scheduled fire” is a run triggered by a schedule, similar to how a cron job starts work at a set time. These runs need an admission key: a predictable identifier that ties the scheduled run back to the task it belongs to. This file exposes two pieces of that process. `scheduled_fire_key` builds the key used for a scheduled run, and `scheduled_fire_task_id` reads such a key back to find the task identifier.
+That matters because outside code should not need to know the project’s internal folder layout. A terminal transport extension, for example, can import `TerminalTransport`, `TerminalOp`, `TerminalWorkspace`, and `Terminals` from this file without reaching directly into `ufo.sandbox.terminal`. The file also exposes `BlobStore` and `BlobNotFound`, because terminal work may need to read or write larger pieces of data through the system’s shared blob store.
 
-The important point is separation. The extension module can contain the real implementation, while this SDK file acts like a signposted front desk. If internal code moves later, callers using the SDK path can keep working as long as this re-export is updated. Without this file, users would need to import from a deeper internal module, making their code more fragile and harder to understand.
+Think of this file like a labeled service counter in a large building. The real offices are elsewhere, but newcomers can go to this counter and get the right forms without learning the whole building map.
 
-
-### Extension capability re-exports
-These modules provide supported public doorways for extension authors to declare jobs and use skill-related SDK tools.
-
-### `core/src/ufo/sdk/jobs.py`
-
-`other` · `extension definition`
-
-This module is like a small, clearly labeled shelf in a workshop: extension authors come here to pick up the official tools for background jobs, instead of rummaging through private core code. It does not define new behavior itself. Its job is to make the public API stable and easy to find.
-
-The most important idea here is workspace discovery. A background job may only need to run for certain workspaces. The exported `owner_candidates` helper lets an extension describe how to find those workspaces from its own database tables. Core can then run that query in the special place where it is allowed to look across workspaces, and use the result to decide where to dispatch the job.
-
-The file also re-exports several ready-made workspace candidate helpers, such as workspaces connected to an integration, workspaces with seated members, workspaces with unseeded agents, and workspaces with untitled conversations. Finally, it exposes `JobSpec`, the public shape used to describe a job. Without this file, extension code would either depend on internal module paths, which are more likely to change, or duplicate knowledge that should stay centralized.
+The comments explain why this pattern exists: `ufo.sdk` keeps its package `__init__.py` empty, so public SDK names live in small named modules like this one. If this file were missing, external terminal extensions would either break or depend on private internal paths that may change more easily.
 
 
-### `core/src/ufo/sdk/skills.py`
+### Connector and source facades
+Public import paths for extension connectors, OAuth pieces, content sources, REST helpers, pagination, and sync results.
 
-`io_transport` · `cross-cutting`
+### `core/src/ufo/sdk/connectors.py`
 
-This module is like a clearly labeled front desk for the SDK’s skill features. The actual work lives in `ufo.skills.runtime`, but outside code should not need to know that internal location. Instead, it can import `RuntimeSkill`, `parse_skill_content`, and `skill_mount_root` from this public SDK module.
+`other` · `cross-cutting import-time SDK surface`
 
-That matters because internal code can move around over time. If every extension imported directly from the deeper runtime package, a refactor could break them. By re-exporting these names here, the project offers a stable doorway: extension code can say, in effect, “give me the public skill API,” without depending on the project’s internal folder layout.
+This file does not define new behavior. Instead, it gathers connector and authorization names from deeper modules and re-exports them as part of the public SDK. In plain terms, it is like a reception desk: extensions come here to ask for the standard forms and interfaces they need, while the real offices stay behind the scenes.
 
-The file is deliberately tiny. It imports the skill value object, the parser that reads skill definitions from in-memory content, and the helper that identifies where skills are mounted. The comment also explains a project rule: `ufo.sdk` keeps its package initializer empty, so public SDK features are exposed through named modules like this one rather than through `__init__.py`.
+The problem it solves is stability. A connector extension needs to describe a brokered provider: how a user authorizes access, what tools or catalog entries the broker offers, how server-side requests are forwarded, and how feed-sync credentials are passed along. Those concrete pieces live in internal modules such as `ufo.connectors` and `ufo.grants`. If extensions imported those internals directly, any internal reorganization could break them. By importing through `ufo.sdk.connectors`, extension authors get a clearer contract: these are the connector-facing building blocks the core project means to expose.
+
+The long module docstring also explains the bigger flow. An extension supplies an OAuth provider, which knows how to start and finish user authorization, plus a connector broker, which knows about available tools, catalog entries, execution, and credentials. Core code can then drive the `/connect` handoff and expose dynamic connector tools without knowing each broker’s private mechanics.
+
+
+### `core/src/ufo/sdk/sources.py`
+
+`other` · `cross-cutting; used when extensions import the SDK and when source backends are defined`
+
+This file does not implement source syncing itself. Instead, it acts like a clearly labeled toolbox shelf for extension developers. Rather than making an extension import many internal modules from different places, it re-exports the pieces needed to build a source backend.
+
+A source backend is the part of an extension that fetches records from an outside provider and turns them into `Page` documents that the core system can store and later search or embed. The file exposes the main contract, `SourceBackend`, plus supporting types for authentication, pages, sync results, and special outcomes such as an expired cursor or a skipped stream.
+
+It also exposes a REST connector framework. This is for common provider APIs that return records over HTTP. Extension authors can describe streams, pagination, partitioned fetching, and record extraction using shared helper classes and functions instead of rewriting that plumbing every time.
+
+The long module docstring is important because it explains the expected behavior: full snapshots can cause old pages to be tombstoned, incremental syncs only delete explicitly named records, skipped streams are not treated as failures, and malformed provider responses can be reported with a clear backend-authored reason. Without this file, extension authors would need to know the internal package layout and would be more likely to depend on unstable implementation details.
+
+
+### Data and model facades
+Stable SDK doorways for indexing, memory search, model access, and general search interfaces.
+
+### `core/src/ufo/sdk/index.py`
+
+`data_model` · `cross-cutting extension integration`
+
+This file does not define new behavior. Its job is to act like a clean front counter for the indexing system. The real implementations and type definitions live in `ufo.indexing`, but outside extensions should not need to know that internal location. Instead, they import from `ufo.sdk.index`.
+
+The problem it solves is stability. If extension authors imported directly from the internal indexing module, any internal refactor could break them. By re-exporting the important pieces here, the project creates a clear boundary: “these are the indexing tools and contracts extensions may use.”
+
+The exported pieces describe how an extension can plug in a backend for search. An `IndexBackend` is the contract for storing and finding text chunks, including vector search, which means search based on meaning rather than only exact words. `Chunk` represents a piece of text to index, and `Hit` represents a search result. `IndexScope` says what area of the index should be affected when deleting or filtering. `EmbedClient` is the contract for turning text into embeddings, which are numeric representations used for meaning-based search. Constants like `OWNER_KIND_PAGE` and `OWNER_KIND_MEMORY_ITEM` label what kind of thing a chunk came from.
+
+In short, this file is a small but important compatibility layer. It tells extension developers, “use these names from here,” while letting the core project keep its internal organization flexible.
+
+
+### `core/src/ufo/sdk/memory.py`
+
+`data_model` · `cross-cutting import-time SDK access`
+
+This file does not create new behavior of its own. Instead, it re-exports a few memory-search names from the internal `ufo.memory` module so that outside provider extensions can import them from `ufo.sdk.memory`. In plain terms, it is like a labeled shelf at the front of a store: the actual items are stored elsewhere, but this shelf tells customers where to pick them up safely.
+
+The names it exposes are `DEFAULT_MEMORY_SEARCH_PROVIDER`, `MemoryMatch`, and `MemorySearchProvider`. These are likely used by extensions that want to participate in searching memory: `MemorySearchProvider` describes the provider interface, `MemoryMatch` represents a found result, and `DEFAULT_MEMORY_SEARCH_PROVIDER` points to the standard provider choice.
+
+The main reason this file matters is stability. Internal module paths can change over time, but SDK users need reliable import paths. Without this file, extension authors might import directly from internal modules, making their code more likely to break if the project is reorganized.
+
+
+### `core/src/ufo/sdk/models.py`
+
+`data_model` · `cross-cutting import time`
+
+This file acts like a front desk for the project’s model API. The real code for talking to model providers, describing messages, representing tool calls, tracking usage, and naming model capabilities lives in deeper internal modules. This file re-exports those pieces under `ufo.sdk.models`, which is the path outside code is meant to use.
+
+That matters because extensions need a safe contract. If an extension imports directly from internal files, small reorganizations inside the project could break it. By importing through this file instead, extensions depend on a public seam: the project can move internal code around while keeping this outward-facing doorway the same.
+
+The exports cover several groups: clients for Anthropic and OpenAI models, shared message and content block types, streaming event types, tool-use structures, pricing and model specification types, usage records, and helpers such as image trimming or OpenAI message conversion. There is no new behavior here. The file simply gathers and renames existing objects so they appear as part of the SDK’s official model surface.
+
+An everyday analogy is a restaurant menu: the kitchen may be complex and change over time, but the menu gives customers one clear, reliable way to ask for what they need.
+
+
+### `core/src/ufo/sdk/search.py`
+
+`data_model` · `cross-cutting`
+
+This file is like a signposted front desk for search features. The actual search definitions live in `ufo.search`, but outside code is expected to come through `ufo.sdk.search` instead. That matters because extensions need a dependable public path for the pieces they implement or use, even if the project later rearranges its internal files.
+
+The search system has two sides. A search backend implements `SearchProvider`, which answers a `SearchQuery` with `SearchResults`. Each result can contain `SearchHit` items, which are the individual matches. Some providers can also fetch the full page behind a result; for that, they use `FetchRequest` and return a `FetchedPage`.
+
+This file does not add new logic or change the imported objects. It simply re-exports them under the SDK namespace. In plain terms, it says: “If you are building against UFO’s public search interface, import these names from here.” Without this file, extension authors might import from internal locations directly, making their code more fragile when the project changes.
+
+
+### Execution and surface facades
+Public SDK imports for sandbox execution helpers and user-facing surface extension types.
+
+### `core/src/ufo/sdk/sandbox.py`
+
+`other` · `cross-cutting import-time API surface`
+
+This module does not define new behavior. Instead, it gathers important sandbox-related names from deeper inside the project and re-exports them under `ufo.sdk.sandbox`, which is the public-facing path meant for outside code.
+
+The problem it solves is stability. Internally, the project may organize sandbox code across modules such as `ufo.sandbox.session`, `ufo.sandbox.containment`, and `ufo.ext.manifest`. But an extension author should not have to chase those internal locations. They can import things like `SandboxSession`, `Carrier`, `SandboxSpec`, `ExecResult`, and containment helpers from this single module.
+
+In plain terms, this file is like a front desk. The useful tools live in different rooms, but visitors only need to come to one counter to ask for them. That matters because the sandbox is a seam where different execution backends can be plugged in. An extension registers a `CarrierSpec` and implements the `Carrier` protocol, meaning it provides the agreed set of operations needed to run and communicate with a sandbox.
+
+The comments also explain a design rule: `ufo.sdk` keeps its package initializer empty, so public API names live in explicit modules like this one. That makes the public surface clearer and avoids hidden startup code in `__init__.py` files.
+
+
+### `core/src/ufo/sdk/surfaces.py`
+
+`other` · `cross-cutting; active when extension code imports the public SDK surface API`
+
+A “surface” is an outside place where UFO can meet users or systems, such as a chat interface, inbox, or other integration point. Extension authors need a stable set of building blocks: ways to describe routes, receive context, send writeback results, ask for credentials, work with transcripts, and report errors. This file does not create new behavior itself. Instead, it re-exports those building blocks from their internal homes so extension code does not need to know the project’s private folder layout.
+
+Think of it like a front desk in a large building. The tools are stored in many rooms, but visitors are told to come to one desk to pick up what they need. That keeps the public interface clear even if the internal rooms move around later.
+
+The long list of imports includes surface specifications, route and context types, writeback support, transcript records, credential and connection request types, terminal-related records, workspace file limits, and helper functions for message text and transcript access. The repeated `as SameName` style makes the re-export explicit: these names are intentionally part of this module’s public API.
+
+The comment at the top also explains a project rule: `ufo.sdk` keeps its package initializer empty, so public SDK names live in named modules like this one rather than in `__init__.py`.

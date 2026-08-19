@@ -1,36 +1,716 @@
-# Tool dispatch, sandboxed execution, and workspace side effects  `stage-10`
+# Tool dispatch, sandboxed execution, artifacts, and files  `stage-10`
 
-This stage is where the agent’s requested actions become real work. During the main conversation loop, the model may ask to use a tool, such as reading a file, running a command, searching the web, or opening a browser. The tool registry is the catalog: it defines each tool, its allowed inputs, and how to find it by name. The tool context is the safety wrapper: it tells the tool what workspace, credentials, accounts, cleanup steps, and helper agents it may use.
+This stage is the system’s supervised “workshop” during the main conversation loop. When the model asks to do something, the tool registry acts like a catalog: it defines which tools exist, how they are shown to the model, and how the right one is found. The tool context is the rulebook handed to that tool. It says who the tool is acting for, which files and accounts it may use, how it can call subagents, and how it must report back.
 
-The built-in tools connect model requests to the project’s safe workspace, file store, database, user prompts, secrets, account connections, and subagents. Research tools add web search and page fetching through configured search services.
+The sandbox backends provide the safe workbench. They create a private workspace, run commands in local, terminal, Docker, or cloud containers, expose previews and ports, and block unsafe file paths that try to escape the workspace. The built-in tools are the everyday instruments: run shell commands, read and edit files, ask the user questions, collect credentials, manage checklists, and keep REPL sessions alive. Task journals remember long-running commands.
 
-Around these tools are larger workshops. The sandbox stage runs commands, limits file access, tracks changes, and controls network access. The document stage repairs, reads, annotates, and rebuilds office files and PDFs. The browser stage drives real or hosted browsers, reads pages, and performs clicks, typing, downloads, and screenshots safely. Together, these parts turn tool calls into controlled side effects and return results to the conversation.
+Artifacts are shared files the agent has deliberately produced for the user, with access checks. Activity messages turn raw tool calls into clear, short updates people can understand.
 
 ## Sub-stages
 
-- [Sandbox workspace, command execution, file access, and egress proxying](stage-10.1.md) `stage-10.1` — 14 files
-- [Document, office, PDF, and skill helper execution](stage-10.2.md) `stage-10.2` — 19 files
-- [Browser automation and remote browser sessions](stage-10.3.md) `stage-10.3` — 26 files
+- [Sandbox backends and file safety](stage-10.1.md) `stage-10.1` — 11 files
+- [Built-in interactive and stateful tools](stage-10.2.md) `stage-10.2` — 4 files
 
 ## Files in this stage
 
-### Tool framework
-Package-level orientation, tool definition lookup, and the safe execution context establish how tool calls are exposed and constrained.
+### Tool runtime surface
+These files describe how tool actions are presented, how shared artifacts are managed, and how tools are contextualized and registered for safe execution.
 
-### `core/src/ufo/tools/__init__.py`
+### `core/src/ufo/activity.py`
 
-`other` · `cross-cutting`
+`domain_logic` · `during tool-call reporting`
 
-This is the package entry file for the `ufo.tools` area of the project. A package entry file is like a label on a folder: it tells Python that the folder is a usable module, and it gives readers a quick clue about what they will find inside. Here, the docstring says this package contains the pieces related to “tools”: a registry, which is likely the catalog of available tools; a handler context, which is likely the information passed around while a tool is being used; and the built-in tool set, which are the tools that come with the project by default. There is no executable code in this file, so it does not perform work at runtime beyond allowing imports through this package. Its main value is organization. Without it, nearby modules could still exist, but this folder would not have this clear package identity and simple documentation point.
+When the system decides to use a tool, it has an internal record of that tool call. That record may contain technical details and structured input data. This file converts that internal record into the simpler activity frame shown to a member, like a receipt that says, “I am loading this skill” or “I am calling this tool with these inputs.”
+
+There are two cases. If the tool call is the special skill-loading tool, the file creates a SkillLoad activity using the requested skill name. This lets the user interface show skill loading as its own kind of event, rather than as an ordinary tool call.
+
+For every other tool, it creates a ToolCall activity. It includes the tool name, an optional human-written description from the input, and a compact preview of the full input. That preview is turned into JSON, which is a common text format for structured data, and then shortened if it is too long. This matters because activity streams should be readable; without the limit, one tool call with large input could flood the screen.
+
+In short, this file is a small translator between the system’s private tool-call shape and the public activity shape that people can comfortably read.
+
+#### Function details
+
+##### `tool_activity`  (lines 12–25)
+
+```
+def tool_activity(call: ToolUseBlock) -> ToolCall | SkillLoad
+```
+
+**Purpose**: Turns one internal tool-use record into the activity object that can be shown to a member. It treats skill loading as a special event, and summarizes all other tool calls with the tool name, a short input preview, and an optional description.
+
+**Data flow**: It receives a ToolUseBlock, which contains the tool name and its input data. If the name is the special load-skill tool, it reads the requested skill name from the input and returns a SkillLoad object, using an empty string if the name is missing or not text. Otherwise, it reads an optional user-facing description, converts the whole input into compact JSON text, cuts that preview down to 200 characters if needed, and returns a ToolCall object containing the tool name, preview, and description.
+
+**Call relations**: This function is the bridge from a bound tool call to the activity stream. When called, it creates either a SkillLoad or ToolCall activity object for the rest of the system to display or publish. To build the ordinary tool preview, it relies on json.dumps to turn the input dictionary into readable structured text.
+
+*Call graph*: 3 external calls (__init__, __init__, dumps).
+
+
+### `core/src/ufo/artifacts.py`
+
+`domain_logic` · `request handling`
+
+An artifact is a file produced during a conversation and shared with the outside world through `share_file`. This file is the read-and-delete side of that feature. It treats all shares with the same conversation and filename as versions of one object, so if a turn shares `report.txt` twice in the same conversation, users see one artifact whose latest version is current. The same filename from a different conversation is a different artifact.
+
+The file gives each artifact a stable, readable name made from a short conversation id prefix plus a cleaned-up filename, like `3f2a9c1b-report-txt`. If two names would still collide, it adds a short fingerprint. This is like labeling boxes by both the room they came from and what is inside.
+
+The `ArtifactObjects` class is the main object-store surface. It can list visible artifacts, return details for one artifact, report its status, and delete it. Status is especially important: it may copy the latest stored bytes back into the workspace under `artifacts/<name>/<filename>`, so a later turn can reuse a file made earlier. It can also create a temporary download link. Creating or updating artifacts is refused, because artifacts must come from sharing a real workspace file, not from direct object edits.
+
+#### Function details
+
+##### `artifact_object_names`  (lines 67–87)
+
+```
+def artifact_object_names(shares: Iterable[tuple[UUID, str]]) -> dict[tuple[UUID, str], str]
+```
+
+**Purpose**: Builds the public object name for each artifact identity, where an identity is a conversation plus a filename. It keeps artifacts from different conversations separate, even when the filenames match.
+
+**Data flow**: It receives pairs of conversation id and filename. It turns each filename into a safe short slug, prefixes it with part of the conversation id, checks whether any generated names collide, and adds a short digest only for collisions. It returns a dictionary from each original identity to its final object name.
+
+**Call relations**: ArtifactObjects._groups calls this after reading artifact rows from the database. This naming step lets later listing and lookup code talk about artifacts by one stable name instead of raw database fields.
+
+*Call graph*: calls 2 internal fn (_identity_digest, _slug); called by 1 (_groups); 1 external calls (Counter).
+
+
+##### `_slug`  (lines 90–92)
+
+```
+def _slug(filename: str) -> str
+```
+
+**Purpose**: Turns a filename into a short, safe name fragment suitable for an object name. It removes awkward punctuation and normalizes the text so names are easier to read and compare.
+
+**Data flow**: It takes a filename string, lowercases it, replaces runs of non-letter-or-number characters with dashes, trims extra dashes, and limits the length. If nothing usable remains, it returns the fallback word `artifact`.
+
+**Call relations**: artifact_object_names uses this when creating the readable part of an artifact object name. It is the small cleaning step before collision checking happens.
+
+*Call graph*: called by 1 (artifact_object_names).
+
+
+##### `_identity_digest`  (lines 95–97)
+
+```
+def _identity_digest(identity: tuple[UUID, str]) -> str
+```
+
+**Purpose**: Creates a shortable fingerprint for an artifact identity. This is used only when two different artifacts would otherwise receive the same visible name.
+
+**Data flow**: It takes a conversation id and filename, combines them into one string, and hashes that string with SHA-256, a standard one-way fingerprinting method. It returns the full hexadecimal hash, and callers take the needed prefix.
+
+**Call relations**: artifact_object_names calls this when duplicate generated names are found. The digest lets the system keep names unique without making every normal name long and noisy.
+
+*Call graph*: called by 1 (artifact_object_names); 1 external calls (sha256).
+
+
+##### `ArtifactObjects.list`  (lines 115–117)
+
+```
+async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
+```
+
+**Purpose**: Lists artifact objects visible to the current tool turn. It is what the object system uses when an agent asks what shared files are available.
+
+**Data flow**: It reads the current context's allowed subjects, fetches matching artifact groups, turns each group into a display row, and passes those rows through paging and filtering. It returns an ObjectPage containing the visible artifact summaries.
+
+**Call relations**: This is the turn-time listing entry for artifacts. It relies on _groups to collect versioned artifacts and on _row to make each one readable before handing the result to the shared object_page helper.
+
+*Call graph*: calls 2 internal fn (_groups, _row); 1 external calls (object_page).
+
+
+##### `ArtifactObjects.member_page`  (lines 119–133)
+
+```
+async def member_page(self, ext: ExtensionContext | None, *, member_id: UUID, admin: bool, query: ObjectListQuery) -> ObjectPage
+```
+
+**Purpose**: Lists artifact objects for a signed-in member viewing them outside an active tool turn, such as in a portal. It uses the member's own audience scope rather than the tool context's read scope.
+
+**Data flow**: It receives member information and a list query. It derives the audiences that member may read, fetches artifact groups for those audiences, converts them into rows, and returns a paged ObjectPage.
+
+**Call relations**: This mirrors ArtifactObjects.list for portal-style reads. It calls the audience helpers to decide what the member can see, then uses the same _groups and _row path as normal artifact listing.
+
+*Call graph*: calls 2 internal fn (_groups, _row); 3 external calls (audience_subjects, conversation_audience, object_page).
+
+
+##### `ArtifactObjects.get`  (lines 135–137)
+
+```
+async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ArtifactSpec] | None
+```
+
+**Purpose**: Returns the saved description of one artifact visible to the current tool turn. It does not copy file bytes into the workspace; that happens through status.
+
+**Data flow**: It takes the current context and an artifact object name. It searches visible artifact groups for that name, returns None if not found, or converts the matching versions into an ObjectDetail with the latest filename, media type, caption, timestamps, and conversation link.
+
+**Call relations**: The object system calls this when a turn asks for one artifact's details. It delegates name lookup to _find and formatting to _detail.
+
+*Call graph*: calls 2 internal fn (_find, _detail).
+
+
+##### `ArtifactObjects.member_detail`  (lines 139–153)
+
+```
+async def member_detail(self, ext: ExtensionContext | None, name: str, *, member_id: UUID, admin: bool) -> MemberObject[ArtifactSpec] | None
+```
+
+**Purpose**: Returns both the list-row view and detail view for one artifact as seen by a signed-in member outside a turn. It deliberately does not copy bytes to a workspace or create a download link.
+
+**Data flow**: It takes an artifact name and member information, derives the member's readable audiences, and searches for that artifact. If missing, it returns None. If found, it packages a row summary and detailed spec into a MemberObject.
+
+**Call relations**: This is the portal-style counterpart to get. It uses the same _find, _row, and _detail helpers as the tool-facing methods, but starts from the member's audience rather than a ToolContext.
+
+*Call graph*: calls 3 internal fn (_find, _detail, _row); 3 external calls (__init__, audience_subjects, conversation_audience).
+
+
+##### `ArtifactObjects.status`  (lines 155–199)
+
+```
+async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
+```
+
+**Purpose**: Reports practical runtime information for an artifact and, when safe, copies the latest file bytes back into the workspace so a later turn can reuse them. It can also mint a temporary download URL.
+
+**Data flow**: It receives a context, artifact name, and optional expected generation. It finds the visible artifact, fetches its bytes from blob storage if the file is small enough, checks in the database that the conversation is still visible and unchanged, writes the bytes into the sandbox workspace if available, optionally creates a time-limited download link, and returns size, share time, turn id, version count, URL, and workspace path.
+
+**Call relations**: This is called during object status/get flows when the system needs the artifact to become usable again in the workspace. It uses _find for lookup, _unchanged_visible for a safety check, the blob store for bytes, the sandbox for writing files, and mint_artifact_url for member downloads.
+
+*Call graph*: calls 2 internal fn (_find, _unchanged_visible); 5 external calls (__init__, now, mint_artifact_url, workspace_tx, ws_current).
+
+
+##### `ArtifactObjects.apply`  (lines 201–210)
+
+```
+async def apply(self, ctx: ToolContext, name: str, spec: ArtifactSpec, old: ArtifactSpec | None, *, expected_generation: UUID | None) -> None
+```
+
+**Purpose**: Refuses create or update attempts for artifacts. Artifacts can only be made by writing a file in the workspace and sharing it with `share_file`.
+
+**Data flow**: It receives the proposed artifact spec and related context, but does not store or change anything. It immediately raises VerbNotSupported with guidance explaining that artifacts are shared, not directly edited.
+
+**Call relations**: The object system would call this for create or update verbs. This artifact store stops that path and points users back to the proper producer, `share_file`.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ArtifactObjects.delete`  (lines 212–238)
+
+```
+async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
+```
+
+**Purpose**: Deletes an artifact and every stored version of it. This removes both the database records and the blob-store bytes, so old download links stop working.
+
+**Data flow**: It takes a context and artifact name, finds all visible versions of that artifact, and fails if none exist. Inside a database transaction, it locks and checks the latest visible conversation state, deletes all matching shared_artifact rows, and verifies the expected number were removed. After the database rows are gone, it deletes each version's blob data and any preview blob data from storage.
+
+**Call relations**: The object system calls this for artifact deletion. It relies on _find to collect the versions and _unchanged_visible to guard against deleting an artifact that changed or became invisible during the operation.
+
+*Call graph*: calls 2 internal fn (_find, _unchanged_visible); 3 external calls (delete, workspace_tx, ws_current).
+
+
+##### `ArtifactObjects._unchanged_visible`  (lines 240–247)
+
+```
+def _unchanged_visible(self, ctx: ToolContext, latest: sa.Row) -> sa.Select
+```
+
+**Purpose**: Builds a database check that confirms the latest artifact version still belongs to the current workspace, selected agent, and readable audience. This protects status and delete from acting on stale or no-longer-visible data.
+
+**Data flow**: It receives the current tool context and the latest artifact row. It produces a SQL select statement that looks for the owning conversation under the current workspace, current agent, same audience, and allowed read subjects. The function returns the query; callers execute it.
+
+**Call relations**: ArtifactObjects.status uses this before copying bytes, and ArtifactObjects.delete uses it before removing rows. It is the safety gate between an earlier name lookup and a later side effect.
+
+*Call graph*: called by 2 (delete, status); 3 external calls (select, object_agent_id, ws_current).
+
+
+##### `ArtifactObjects._find`  (lines 249–253)
+
+```
+async def _find(self, subjects: frozenset[str], name: str) -> tuple[sa.Row, ...] | None
+```
+
+**Purpose**: Looks up one artifact by its generated object name within a set of readable subjects. It returns all versions of that artifact, newest first, or says it was not found.
+
+**Data flow**: It receives a set of audience subjects and a name. It asks _groups for all visible artifact groups, scans for the matching generated name, and returns that group's shares if present. If no group has that name, it returns None.
+
+**Call relations**: get, member_detail, status, and delete all call this when they need to move from a user-facing artifact name to the underlying share rows. It is the common lookup step for single-artifact operations.
+
+*Call graph*: calls 1 internal fn (_groups); called by 4 (delete, get, member_detail, status).
+
+
+##### `ArtifactObjects._groups`  (lines 255–297)
+
+```
+async def _groups(self, subjects: frozenset[str]) -> Sequence[tuple[str, tuple[sa.Row, ...]]]
+```
+
+**Purpose**: Collects raw shared artifact rows from the database and groups them into versioned artifact objects. This is where database records become the object model used by listing, lookup, status, and delete.
+
+**Data flow**: It receives the readable audience subjects. It queries the current workspace for shared_artifact rows joined to their turns and conversations, limited to the selected agent and allowed audiences. It groups rows by conversation id and filename, assigns each group a generated object name, sorts each group's versions newest first, then returns all groups sorted by name.
+
+**Call relations**: list and member_page call this to build pages, and _find calls it to locate one named artifact. It calls artifact_object_names so each grouped identity receives the same naming rules.
+
+*Call graph*: calls 1 internal fn (artifact_object_names); called by 3 (_find, list, member_page); 4 external calls (select, workspace_tx, object_agent_id, ws_current).
+
+
+##### `_row`  (lines 300–311)
+
+```
+def _row(name: str, shares: tuple[sa.Row, ...]) -> ObjectRow
+```
+
+**Purpose**: Turns a versioned artifact group into a compact row for lists. The row shows the latest version's key facts and a short summary.
+
+**Data flow**: It receives an artifact name and its shares, with the newest share first. It reads the latest filename, caption, conversation id, and share time, creates a short summary from all versions, and returns an ObjectRow.
+
+**Call relations**: ArtifactObjects.list and ArtifactObjects.member_page use this for list pages, and member_detail uses it when returning a portal detail that also includes the row view. It depends on _summary for the human-readable sentence.
+
+*Call graph*: calls 1 internal fn (_summary); called by 3 (list, member_detail, member_page); 1 external calls (__init__).
+
+
+##### `_detail`  (lines 314–330)
+
+```
+def _detail(shares: tuple[sa.Row, ...]) -> ObjectDetail[ArtifactSpec]
+```
+
+**Purpose**: Builds the detailed object view for an artifact. It describes the latest version and links the artifact back to the conversation where it was created.
+
+**Data flow**: It receives all shares for one artifact, newest first. It creates an ArtifactSpec from the latest share's filename, media type, and caption; sets created time from the oldest version and updated time from the newest; and adds a `created_in` link to the conversation.
+
+**Call relations**: ArtifactObjects.get and ArtifactObjects.member_detail call this after finding an artifact. It is the formatting step that turns share rows into the object detail shape expected by the rest of the object system.
+
+*Call graph*: called by 2 (get, member_detail); 4 external calls (__init__, __init__, __init__, __init__).
+
+
+##### `_summary`  (lines 333–339)
+
+```
+def _summary(shares: tuple[sa.Row, ...]) -> str
+```
+
+**Purpose**: Creates a short human-readable summary for an artifact list row. It includes what the file is, how large it is, when it was shared, and whether it has multiple versions.
+
+**Data flow**: It receives all shares for one artifact, newest first. It reads the latest filename, media type, size, and date, adds a version count when there is more than one share, and trims the result to the maximum summary length.
+
+**Call relations**: _row calls this while building list rows. It keeps the list display concise so callers do not have to assemble their own artifact descriptions.
+
+*Call graph*: called by 1 (_row).
+
+
+### `core/src/ufo/tools/context.py`
+
+`domain_logic` · `active during each tool call and throughout a turn`
+
+A tool in this system is not allowed to freely reach into the whole application. Instead, it receives a ToolContext, which is like a guest badge: it says where the tool may go, what it may read, and whose authority it is using. This file defines that badge and the small result types that tools return.
+
+The context includes access to the sandbox for files and shell commands, a blob store for artifacts, the current turn and agent, the current audience, connected account grants, credential-request helpers, subagent controls, browser and search providers, loaded skills, and cleanup hooks. These pieces keep tool work tied to the right workspace, user, agent, and conversation.
+
+The file also defines how tools safely delegate work to subagents, how background subagents can be checked or cancelled, and how per-turn resources are closed at the end. Permission-related helpers answer questions such as “who is this tool acting as?”, “what audience should this write belong to?”, “is the speaker an admin?”, and “which external account can this turn use?”
+
+Without this file, tools would either need direct access to too much of the system, which risks leaks and privilege mistakes, or every tool would have to reimplement the same permission and cleanup rules.
+
+#### Function details
+
+##### `UnknownSubagentProfile.__init__`  (lines 91–96)
+
+```
+def __init__(self, requested: str, registered: tuple[str, ...]) -> None
+```
+
+**Purpose**: Builds a clear error when code asks for a subagent profile name that is not registered. The error includes both the bad name and the valid choices, so the caller or model has enough information to try again.
+
+**Data flow**: It receives the requested profile name and the tuple of registered names. It formats those into a human-readable error message and stores both pieces of information on the exception object. The result is an exception ready to be raised and inspected.
+
+**Call relations**: The subagent registry calls this when a lookup fails. Instead of letting a plain missing-key error escape, the registry hands back a specific explanation of which profile was unknown and what profiles exist.
+
+*Call graph*: called by 1 (get).
+
+
+##### `UnknownSpawnTarget.__init__`  (lines 103–110)
+
+```
+def __init__(self, requested: str, profiles: tuple[str, ...], agents: tuple[str, ...]) -> None
+```
+
+**Purpose**: Builds a clear error when a spawn request names something that is neither a known subagent profile nor a workspace agent. It tells the caller what names are actually spawnable.
+
+**Data flow**: It receives the requested target name, the available profile names, and the available agent names. It combines them into an error message and stores them as fields. The output is an exception that carries enough context to diagnose the failed spawn.
+
+**Call relations**: The subagent spawning resolver calls this when it cannot match a target. This helps a tool surface a retryable error instead of failing with an unclear lookup problem.
+
+*Call graph*: called by 1 (_resolve).
+
+
+##### `AmbiguousSpawnTarget.__init__`  (lines 117–122)
+
+```
+def __init__(self, requested: str) -> None
+```
+
+**Purpose**: Builds an error for the case where one bare spawn name could mean either a profile or an agent. It tells the caller to use an explicit prefix so the system does not guess wrong.
+
+**Data flow**: It receives the ambiguous name. It creates an error message that suggests the two qualified forms, such as profile:name or agent:name, and stores the requested name. The result is an exception that explains how to fix the ambiguity.
+
+**Call relations**: The subagent spawning resolver calls this when a target name exists in both namespaces. This keeps delegation safe by forcing the caller to say which kind of child it wants.
+
+*Call graph*: called by 1 (_resolve).
+
+
+##### `Spawn.__call__`  (lines 188–197)
+
+```
+async def __call__(self, target: str, payload: dict[str, Any], background: bool=False, dedup_key: str | None=None, delivers_result: bool=False, name: str='', detach_on_arrival: bool=False) -> SpawnRes
+```
+
+**Purpose**: Describes the callable interface used to delegate a task to a child turn, either a subagent profile or another workspace agent. A tool uses this when it wants another specialized worker to do part of the job.
+
+**Data flow**: It takes a target name, an input payload, and options such as whether to run in the background, how to deduplicate retries, and whether the child should deliver its own result. An implementation validates the payload, starts or reconnects to the child turn, waits if appropriate, and returns a SpawnResult describing the child and any finished output.
+
+**Call relations**: This is a protocol, meaning it states the shape of the function that the runtime provides on ToolContext. Tool code calls ctx.spawn, while the actual subagent workflow supplies the implementation behind this interface.
+
+
+##### `SubagentControl.result`  (lines 207–207)
+
+```
+async def result(self, turn_id: UUID) -> SpawnResult
+```
+
+**Purpose**: Describes how a tool can retrieve the final result of an already-spawned background subagent. It is used when the child was started earlier and the caller now wants its completed output.
+
+**Data flow**: It takes a child turn id. An implementation looks up that child, checks its terminal state and validated output, and returns a SpawnResult. It does not create a new child; it reads the state of an existing one.
+
+**Call relations**: This is part of the SubagentControl protocol placed on ToolContext. Tools use it through ctx.subagents, and the subagent lifecycle system provides the real behavior.
+
+
+##### `SubagentControl.wait`  (lines 209–209)
+
+```
+async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]
+```
+
+**Purpose**: Describes how a tool can wait for one or more background subagents and get their current terminal statuses. This is useful when several child tasks were started and the parent wants to pause until they finish or report progress.
+
+**Data flow**: It receives a tuple of child turn ids. An implementation waits according to the runtime’s rules, gathers each child’s status and final text if available, and returns a tuple of SubagentStatus objects.
+
+**Call relations**: This protocol method is offered through ToolContext by the subagent workflow. Tool handlers call it when coordinating background child turns.
+
+
+##### `SubagentControl.cancel`  (lines 211–211)
+
+```
+async def cancel(self, turn_id: UUID) -> SubagentStatus
+```
+
+**Purpose**: Describes how a tool can stop a running background subagent. It gives the parent a way to end child work that is no longer needed.
+
+**Data flow**: It takes a child turn id. An implementation finds that child, requests cancellation, and returns a SubagentStatus describing the child’s resulting state and message.
+
+**Call relations**: This is another operation supplied by the subagent lifecycle system through ctx.subagents. Tools call it when they decide a background child should not continue.
+
+
+##### `SubagentControl.message`  (lines 213–215)
+
+```
+async def message(self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool=False) -> SubagentStatus
+```
+
+**Purpose**: Describes how a tool can send a follow-up message to an already-spawned subagent. The deduplication key helps avoid sending the same follow-up twice after a retry.
+
+**Data flow**: It receives a child turn id, message text, a deduplication key, and whether the child should deliver the result itself. An implementation admits that message to the child turn once and returns a SubagentStatus showing what happened.
+
+**Call relations**: This protocol method is exposed on ToolContext when subagent control is available. It connects parent-tool decisions to a running child’s conversation.
+
+
+##### `TurnCleanup.register`  (lines 229–230)
+
+```
+def register(self, aclose: Callable[[], Awaitable[None]]) -> None
+```
+
+**Purpose**: Adds an asynchronous cleanup action to be run when the turn ends. Tools use this after opening something that must be closed, such as a browser connection or hosted session.
+
+**Data flow**: It receives an async close function and appends it to the cleanup list. Nothing is closed immediately. The change is stored in the TurnCleanup object for later.
+
+**Call relations**: Tools that create per-turn resources call this during first use. Later, the turn loop drains the cleanup registry so resources do not leak after the turn finishes or fails.
+
+
+##### `TurnCleanup.drain`  (lines 232–238)
+
+```
+async def drain(self) -> None
+```
+
+**Purpose**: Runs all registered cleanup actions, closing resources at the end of a turn. It keeps one failed cleanup from stopping the rest.
+
+**Data flow**: It reads the stored close functions, removes them one by one in reverse order, and awaits each one. If a closer raises an error, it logs the failure and continues. Afterward, the cleanup list is empty.
+
+**Call relations**: The turn loop calls this at turn end. It hands failures to the observability logger, so cleanup problems are visible without leaving later resources unclosed.
+
+*Call graph*: 1 external calls (log).
+
+
+##### `ToolContext.acting_member_id`  (lines 281–289)
+
+```
+def acting_member_id(self) -> UUID | None
+```
+
+**Purpose**: Figures out which workspace member’s authority this tool call is using. It prefers the live speaker, and falls back to the member the turn is acting on behalf of.
+
+**Data flow**: It reads speaker_member_id and on_behalf_of_member_id from the context. If there is a current speaker, it returns that id; otherwise it returns the carried behalf-of id, which may also be absent.
+
+**Call relations**: Other ToolContext helpers use this as the common answer to “who is this call for?” It feeds audience calculation and connector account selection.
+
+
+##### `ToolContext.effective_audience`  (lines 292–302)
+
+```
+def effective_audience(self) -> Audience
+```
+
+**Purpose**: Decides what audience should own a write made by this tool. This prevents private or cross-organization conversation facts from being stamped into the wrong memory space.
+
+**Data flow**: It reads the current audience and the acting member. If there is no acting member, or the conversation is not the workspace-shared audience, it returns the existing audience. If a member is acting in a shared workspace conversation, it returns that member’s conversation audience.
+
+**Call relations**: When tools write information, this property supplies the safe audience label. It calls the audience helper that builds a member-specific conversation audience when that special shared-room rule applies.
+
+*Call graph*: 1 external calls (conversation_audience).
+
+
+##### `ToolContext.read_subjects`  (lines 305–314)
+
+```
+def read_subjects(self) -> frozenset[str]
+```
+
+**Purpose**: Computes the set of subjects this tool may read from: the conversation’s subjects plus the requester’s own private subject. This is a privacy boundary for memory and source lookups.
+
+**Data flow**: It starts with the subjects implied by the current audience. If there is an acting member, it adds only that member’s private subject. It returns the combined set as an immutable frozenset.
+
+**Call relations**: Source and memory readers use this to decide which stored pages or facts are visible. It relies on audience and member-subject helpers to translate people and audiences into readable subject labels.
+
+*Call graph*: 2 external calls (audience_subjects, member_subject).
+
+
+##### `ToolContext.source_reader`  (lines 316–326)
+
+```
+def source_reader(self) -> SourceReader
+```
+
+**Purpose**: Creates a SourceReader that says who is asking to read synced source pages. This packages the current agent, live speaker, and readable subjects into one object for source-related extensions.
+
+**Data flow**: It reads the turn’s agent id, the current speaking member id, and the computed read_subjects. It builds and returns a SourceReader with those values. The context itself is not changed.
+
+**Call relations**: Memory and source extensions call this when searching, listing, or fetching source-backed content. It hands them a consistent permission view rather than making each extension rebuild the same rules.
+
+*Call graph*: called by 5 (memory_search_handler, get, list, _pages, get); 1 external calls (__init__).
+
+
+##### `ToolContext.meter_images`  (lines 328–337)
+
+```
+async def meter_images(self, model: str, images: int, micro_usd: int) -> None
+```
+
+**Purpose**: Records the cost of generated images against this turn’s accounting ledger. Image providers may know their own price, but core records the spend in the workspace’s official usage records.
+
+**Data flow**: It receives the model name, image count, and cost in micro-dollars. It opens a workspace database transaction and writes an image-usage record tied to the workspace and turn. It returns nothing, but the ledger is updated.
+
+**Call relations**: The OpenRouter image extension calls this after generating images. This function hands the actual database write to the accounting layer inside a workspace transaction.
+
+*Call graph*: called by 1 (generate); 2 external calls (record_image_usage, workspace_tx).
+
+
+##### `ToolContext.meter_videos`  (lines 339–347)
+
+```
+async def meter_videos(self, model: str, videos: int, micro_usd: int) -> None
+```
+
+**Purpose**: Records the cost of generated videos against this turn’s accounting ledger. This keeps video generation charges attached to the same workspace and turn as other model spending.
+
+**Data flow**: It receives the model name, video count, and cost in micro-dollars. It opens a workspace database transaction and writes a video-usage record for this workspace and turn. It returns nothing, but accounting state changes.
+
+**Call relations**: The OpenRouter video extension calls this after generating videos. The function delegates the ledger write to the accounting helper inside a workspace transaction.
+
+*Call graph*: called by 1 (generate); 2 external calls (record_video_usage, workspace_tx).
+
+
+##### `ToolContext.speaker_is_admin`  (lines 349–359)
+
+```
+async def speaker_is_admin(self) -> bool
+```
+
+**Purpose**: Checks whether the live requesting speaker is a workspace administrator. It intentionally returns false when there is no live speaker, so background work cannot silently use admin power.
+
+**Data flow**: It reads speaker_member_id. If no one is speaking, it returns false. Otherwise it opens a workspace transaction, asks the seats subsystem whether that member is an admin in this workspace, and returns the boolean answer.
+
+**Call relations**: Many object and credential operations call this before allowing workspace-wide or sensitive actions. It centralizes the admin check so callers do not each interpret background authority differently.
+
+*Call graph*: called by 20 (apply, delete, apply, delete, get, list, status, request_credentials_handler, _credential_authorization, connect_github (+10 more)); 2 external calls (workspace_tx, member_is_admin).
+
+
+##### `ToolContext.agent_is_main`  (lines 361–372)
+
+```
+async def agent_is_main(self) -> bool
+```
+
+**Purpose**: Checks whether the current agent is the workspace’s main agent. Some features expose different powers or visibility depending on whether the agent is the main one.
+
+**Data flow**: It opens a workspace transaction and queries the agent table for the current turn’s agent id and workspace id. It reads the stored is_main value and returns it as a boolean, returning false if no matching row is found.
+
+**Call relations**: Member, workspace, and web audience operations call this when deciding what the current agent is allowed to see or change. It uses SQLAlchemy to build the database query.
+
+*Call graph*: called by 6 (add, _visible_rows, apply, status, _grant, _revoke); 2 external calls (select, workspace_tx).
+
+
+##### `ToolContext.agent_visibility`  (lines 374–386)
+
+```
+async def agent_visibility(self) -> AgentVisibility
+```
+
+**Purpose**: Reads whether the current agent is private or workspace-visible. It also guards against unexpected stored values.
+
+**Data flow**: It opens a workspace transaction, queries the agent table for the current agent’s visibility, and reads the stored string. If the value is private or workspace, it returns it; otherwise it raises a runtime error because the database contains a value this code does not understand.
+
+**Call relations**: The sites extension calls this when setting a homepage. This helper gives that extension the agent visibility without making it query the agent table itself.
+
+*Call graph*: called by 1 (set_homepage); 2 external calls (select, workspace_tx).
+
+
+##### `ToolContext.begin_credential_authorization`  (lines 388–390)
+
+```
+async def begin_credential_authorization(self, slot: str, payload: str) -> str
+```
+
+**Purpose**: Starts an authorization flow for an extension credential slot, such as asking an admin to approve storing a secret. It returns a sealed authorization token that can be shown or passed through safely.
+
+**Data flow**: It receives a credential slot name and a payload. It first runs the shared credential-authorization checks, getting the credential request service and member id. Then it asks that service to create an authorization for this workspace, member, slot, and payload, and returns the sealed string.
+
+**Call relations**: Coding and Slack extension connection flows call this when they need a member to authorize a credential. It relies on _credential_authorization to enforce the common safety checks before creating anything.
+
+*Call graph*: calls 1 internal fn (_credential_authorization); called by 2 (connect_github, _oauth_link).
+
+
+##### `ToolContext.open_credential_authorization`  (lines 392–394)
+
+```
+async def open_credential_authorization(self, slot: str, sealed: str) -> str
+```
+
+**Purpose**: Opens and validates a sealed credential authorization for a given slot. This lets a tool recover the authorized payload only if it matches the same workspace, member, and credential slot.
+
+**Data flow**: It receives a slot name and sealed authorization string. It runs the shared authorization checks, then asks the credential request service to open the sealed value for this workspace, member, and slot. It returns the opened payload string.
+
+**Call relations**: This is the read side of the credential authorization flow. It uses the same _credential_authorization gate as beginning and fulfilling authorization, so all three steps follow the same rules.
+
+*Call graph*: calls 1 internal fn (_credential_authorization).
+
+
+##### `ToolContext.fulfill_credential_authorization`  (lines 396–401)
+
+```
+async def fulfill_credential_authorization(self, slot: str, sealed: str, plaintext: str) -> None
+```
+
+**Purpose**: Completes a credential authorization by validating the sealed approval and storing the plaintext secret in the workspace. This is the point where the approved credential is actually saved.
+
+**Data flow**: It receives a slot name, sealed authorization, and plaintext secret. It runs the shared checks, opens the sealed authorization to prove it is valid, then writes the plaintext into the current workspace’s credential store. It returns nothing, but the credential store changes.
+
+**Call relations**: Credential setup flows call this after authorization has been granted. It uses _credential_authorization for safety and then uses the current workspace object to store the secret.
+
+*Call graph*: calls 1 internal fn (_credential_authorization); 1 external calls (ws_current).
+
+
+##### `ToolContext._credential_authorization`  (lines 403–412)
+
+```
+async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]
+```
+
+**Purpose**: Performs the common safety checks needed before any credential authorization action. It makes sure there is a live speaker, the extension declared the credential slot, credential storage is configured, and the speaker is an admin.
+
+**Data flow**: It receives the slot name and reads speaker_member_id, extension metadata, configured credential request support, and admin status. If any requirement is missing, it raises a ValueError. If everything is valid, it returns the credential request service and the speaker’s member id.
+
+**Call relations**: The begin, open, and fulfill credential authorization methods all call this first. It in turn calls speaker_is_admin, so admin-only credential storage has one shared gate.
+
+*Call graph*: calls 1 internal fn (speaker_is_admin); called by 3 (begin_credential_authorization, fulfill_credential_authorization, open_credential_authorization).
+
+
+##### `ToolContext.connector_account`  (lines 414–423)
+
+```
+async def connector_account(self, provider: str, account_id: str | None=None) -> str
+```
+
+**Purpose**: Returns the external connector account id that a connector tool is allowed to use. It is a convenience wrapper for callers that only need the broker’s account id, not the full connection details.
+
+**Data flow**: It receives a provider name and optionally a desired account id. It asks connector_connection to resolve the exact permitted connection, then returns only that connection’s account_id. The context is not changed.
+
+**Call relations**: Connector execution tools and sample connector code call this before making broker-side external tool calls. It delegates the permission and ambiguity checks to connector_connection.
+
+*Call graph*: calls 1 internal fn (connector_connection); called by 2 (call_external_tool, _connector_execute).
+
+
+##### `ToolContext.connector_connection`  (lines 425–462)
+
+```
+async def connector_connection(self, provider: str, account_id: str | None=None) -> ConnectorConnection
+```
+
+**Purpose**: Selects the exact connected account this turn may use for a provider. It enforces private-by-default account access and reports clear errors when no account, the wrong account, or too many accounts are available.
+
+**Data flow**: It receives a provider name and optionally a requested account id. It gets private and shared grant tiers, then either finds the requested account among them or chooses one account from the preferred tier. It returns a ConnectorConnection containing the connection id, external account id, and owning member id, or raises a ValueError if selection is impossible.
+
+**Call relations**: connector_account calls this when only the account id is needed, and source registration code calls it when it needs the full connection identity. It depends on _connector_account_tiers to separate private grants from shared grants before making a choice.
+
+*Call graph*: calls 1 internal fn (_connector_account_tiers); called by 2 (connector_account, _resolved_account); 1 external calls (__init__).
+
+
+##### `ToolContext.connector_accounts`  (lines 464–472)
+
+```
+async def connector_accounts(self, provider: str) -> tuple[str, ...]
+```
+
+**Purpose**: Lists all connected account ids this turn may use for one provider. This lets tools show or validate the available choices without selecting one yet.
+
+**Data flow**: It receives a provider name. It gets the private and shared grant tiers, combines their account ids, removes duplicates, sorts them, and returns them as a tuple. It does not modify grants or connections.
+
+**Call relations**: Source registration code calls this when resolving which account should back a source. It uses _connector_account_tiers so the list follows the same access rules as connector_connection.
+
+*Call graph*: calls 1 internal fn (_connector_account_tiers); called by 1 (_resolved_account).
+
+
+##### `ToolContext._connector_account_tiers`  (lines 474–493)
+
+```
+async def _connector_account_tiers(self, provider: str) -> tuple[list[Grant], list[Grant]]
+```
+
+**Purpose**: Divides active connector grants into two groups: private grants owned by the acting member, and shared grants available to the agent. This is the core permission filter for connector account access.
+
+**Data flow**: It receives a provider name and reads the configured grant store and acting member id. If grants are unavailable, it raises ConnectUnavailable. Otherwise it loads active grants, filters them by provider and sharing rules, sorts each group by account id, and returns the private and shared lists.
+
+**Call relations**: connector_connection and connector_accounts both call this before selecting or listing accounts. By putting the filtering here, both higher-level methods use the same private-versus-shared access rule.
+
+*Call graph*: called by 2 (connector_accounts, connector_connection); 1 external calls (__init__).
 
 
 ### `core/src/ufo/tools/registry.py`
 
-`data_model` · `startup and request handling`
+`data_model` · `startup and tool dispatch`
 
-A “tool” here is an action the model can ask the system to run, such as reading a page, searching, writing somewhere, or calling an outside service. This file gives each tool a clear definition: its name, a human-readable description, the expected input data, and the async function that actually runs it. It also records important safety labels. For example, an “untrusted” tool may return text controlled by someone else, so the engine must treat that result as data, not as instructions. A “side_effecting” tool changes something outside the model, such as sending a message or making a write, so it may need an idempotency key, which is a repeat-safe tracking key that helps avoid doing the same external action twice.
+The project lets a model call named tools, such as reading a page, searching, writing a file, or asking another service to do something. This file gives each tool a clear record: its name, its plain description, the shape of input it expects, and the function that actually runs it. It also stores important safety flags. For example, a tool marked untrusted may return text from the outside world, so the engine must not treat that text as instructions. A tool marked side_effecting can change something outside the model, like posting to an API or writing durable data, so the engine can attach an idempotency key, which is a repeat-safe label that helps avoid doing the same external action twice after a retry.
 
-The file has two main parts. `ToolDef` is one tool’s entry in the catalog. Its `schema()` method turns the tool’s input model into the wire format sent to the model client, and it automatically adds a shared `requested_by` field used to tie a call to the message that authorized it. `ToolRegistry` is the frozen catalog of all tools. When it is created, it checks for duplicate tool names and prevents tools from defining their own `requested_by` field, because that name is reserved. Later, the engine can ask the registry for all schemas or look up one tool by name during dispatch.
+The file also builds the schema sent to the model client. A schema is a machine-readable description of what arguments a tool accepts. Every tool schema is extended with a reserved requested_by field, used to say which message explicitly authorized a member-specific action.
+
+ToolRegistry is the fixed catalog the engine uses at runtime. When created, it refuses duplicate tool names and refuses tools that already define the reserved requested_by input. Later, the engine can ask for all schemas or look up one tool by name. Without this file, tool calls would be harder to validate, dispatch safely, and explain to the model.
 
 #### Function details
 
@@ -40,11 +720,11 @@ The file has two main parts. `ToolDef` is one tool’s entry in the catalog. Its
 def schema(self) -> ToolSchema
 ```
 
-**Purpose**: Builds the public description of one tool that can be sent to the model client. It includes the tool name, description, and the expected input fields, plus a standard `requested_by` field used for authority tracking.
+**Purpose**: Builds the public description of one tool that can be sent to the model client. It combines the tool’s name and description with the input shape expected by its Pydantic model, then adds the standard requested_by field used for authorization context.
 
-**Data flow**: It starts with the Pydantic input model attached to the tool, asks that model for its JSON schema, then adds a `requested_by` property to the schema. It returns a `ToolSchema` object containing the tool’s name, description, and completed input schema.
+**Data flow**: It starts with a ToolDef, reads its input model, and asks that model for a JSON-style input schema. It makes sure the schema has a properties section, adds the reserved requested_by property with its type and explanation, and returns a ToolSchema object containing the tool name, description, and completed input schema.
 
-**Call relations**: When the system needs to advertise available tools, this method is the per-tool translator from internal Python definition to the wire schema. It creates a `ToolSchema`, which is the object other parts of the model interface can pass along.
+**Call relations**: This is the bridge from the internal tool definition to the wire format the model sees. It creates a ToolSchema object, and ToolRegistry.schemas uses it when the system needs to publish the whole catalog of callable tools.
 
 *Call graph*: 1 external calls (__init__).
 
@@ -55,11 +735,11 @@ def schema(self) -> ToolSchema
 def __post_init__(self) -> None
 ```
 
-**Purpose**: Checks that the tool catalog is valid as soon as it is created. It prevents two tools from having the same name and prevents any tool input model from using the reserved `requested_by` field.
+**Purpose**: Checks that a newly created registry is safe and unambiguous. It prevents two tools from having the same name, and it protects the reserved requested_by field from being reused by a tool’s own input model.
 
-**Data flow**: It reads the tuple of tools stored in the registry, collects their names, and looks for repeats. It also checks each tool’s input fields for the reserved name. If everything is clean, nothing changes; if there is a problem, it raises a clear error before the registry can be used.
+**Data flow**: It receives the registry after construction, reads all tool names, and looks for repeated names. It also inspects each tool’s input fields to see whether any tool has already claimed requested_by. If either problem is found, it raises an error immediately; otherwise, the registry remains usable and unchanged.
 
-**Call relations**: This runs automatically after a `ToolRegistry` is constructed. It acts like an entry inspection at the door: bad tool catalogs fail early, before the engine later tries to dispatch calls by name.
+**Call relations**: This runs automatically when a ToolRegistry is created. It acts like a gatekeeper at setup time, so later dispatch code can trust that a tool name points to exactly one tool and that the authorization field can be added consistently.
 
 
 ##### `ToolRegistry.schemas`  (lines 83–84)
@@ -68,11 +748,11 @@ def __post_init__(self) -> None
 def schemas(self) -> tuple[ToolSchema, ...]
 ```
 
-**Purpose**: Returns the model-facing schemas for every registered tool. This is how the catalog becomes a list of tool descriptions the model client can understand.
+**Purpose**: Returns the model-facing schemas for every registered tool. This is used when the system needs to tell the model which tools exist and what arguments each one accepts.
 
-**Data flow**: It reads the registry’s tuple of `ToolDef` objects, asks each one to produce its schema, and returns the results as a tuple. It does not change the registry.
+**Data flow**: It reads the registry’s tuple of ToolDef objects, asks each one to produce its ToolSchema, and returns those schemas as a tuple. It does not change the registry.
 
-**Call relations**: This is the registry-wide version of `ToolDef.schema`. Instead of translating one tool, it walks the whole catalog so the rest of the system can present all available tools together.
+**Call relations**: This function gathers the individual schemas produced by ToolDef.schema into one catalog. It is part of the setup or prompting path where the engine exposes available tools to the model.
 
 
 ##### `ToolRegistry.get`  (lines 86–90)
@@ -81,867 +761,45 @@ def schemas(self) -> tuple[ToolSchema, ...]
 def get(self, name: str) -> ToolDef[Any]
 ```
 
-**Purpose**: Finds the registered tool with a given name. The engine uses this when the model asks to call a tool and the system needs the matching definition and handler.
+**Purpose**: Finds the registered tool definition with a given name. The engine uses this when the model asks to call a tool and the system must locate the matching handler function and safety settings.
 
-**Data flow**: It receives a tool name, scans the registry’s tools one by one, and returns the first `ToolDef` whose name matches. If no tool has that name, it raises a `KeyError` so the unknown call fails loudly instead of silently doing the wrong thing.
+**Data flow**: It takes a tool name as input, scans the registry’s tools one by one, and returns the ToolDef whose name matches. If no registered tool has that name, it raises a KeyError so the mistake is caught loudly instead of silently calling the wrong thing.
 
-**Call relations**: During tool dispatch, `core/src/ufo/loop/engine._dispatch_segments` calls this lookup to turn a model-requested tool name into the actual tool definition. Once found, that definition tells the engine which handler to run and what safety flags apply.
+**Call relations**: During tool execution, core/src/ufo/loop/engine._dispatch_segments calls this lookup after seeing a requested tool name. The returned ToolDef gives the engine the handler to run and the flags, such as untrusted or side_effecting, that shape how the result or action is treated.
 
 *Call graph*: called by 1 (_dispatch_segments).
 
-
-### `core/src/ufo/tools/context.py`
-
-`domain_logic` · `tool execution during a turn, plus turn-end cleanup`
-
-A tool in this system should not be able to reach everything directly. This file is the controlled doorway. `ToolContext` is the bundle of permissions and services a tool receives: the sandbox for files and commands, the blob store for artifacts, the current turn and agent, the audience that controls what may be shared, and helpers for credentials, connectors, skills, browser access, search, and spawned subagents. Think of it like a visitor badge: it does not just identify the visitor, it also says which rooms they may enter.
-
-The file also defines the shape of tool output. A tool can return text or an image, and can mark output as an error or as untrusted data. Untrusted data matters because web pages or third-party systems might contain text that looks like instructions; the engine must treat that as data, not as orders.
-
-Several small exception classes turn confusing setup failures into clear messages, especially when a tool asks for a subagent profile or agent name that does not exist. `TurnCleanup` is a per-turn cleanup list for things like browser connections, so resources are closed even if the turn fails. The rest of `ToolContext` enforces important rules: which member is acting, what audience can read or write information, whether the speaker is an admin, which connector account may be used, and how extension credentials are authorized.
-
-#### Function details
-
-##### `UnknownSubagentProfile.__init__`  (lines 89–94)
-
-```
-def __init__(self, requested: str, registered: tuple[str, ...]) -> None
-```
-
-**Purpose**: Builds a clear error when code asks for a subagent profile that is not registered. It includes both the bad name and the valid names so the caller can recover or show a useful message.
-
-**Data flow**: It receives the requested profile name and the list of registered profile names. It turns those into a human-readable exception message and stores both pieces of information on the exception object for later logging or reporting.
-
-**Call relations**: The subagent registry calls this when a profile lookup fails. Instead of letting a plain missing-key error escape, this function gives the spawning flow enough detail to tell the model or operator what names are actually valid.
-
-*Call graph*: called by 1 (get).
-
-
-##### `UnknownSpawnTarget.__init__`  (lines 101–108)
-
-```
-def __init__(self, requested: str, profiles: tuple[str, ...], agents: tuple[str, ...]) -> None
-```
-
-**Purpose**: Builds a clear error when a spawn request names neither a known subagent profile nor a known workspace agent. This helps a caller retry with a real target instead of failing mysteriously.
-
-**Data flow**: It receives the requested target name, the known profile names, and the known agent names. It formats those into an exception message and keeps the three values on the exception object.
-
-**Call relations**: The subagent spawning resolver calls this when it cannot match a requested target. The error travels back through the spawn path with enough context to explain what can be spawned.
-
-*Call graph*: called by 1 (_resolve).
-
-
-##### `AmbiguousSpawnTarget.__init__`  (lines 115–120)
-
-```
-def __init__(self, requested: str) -> None
-```
-
-**Purpose**: Builds an error when a spawn target name matches both a profile and an agent. It tells the caller to use a qualified name, such as `profile:name` or `agent:name`, to remove the confusion.
-
-**Data flow**: It receives the ambiguous name. It creates an exception message that explains the conflict and stores the name on the exception object.
-
-**Call relations**: The spawn target resolver calls this when a bare name is not specific enough. This protects the system from accidentally spawning the wrong kind of child task.
-
-*Call graph*: called by 1 (_resolve).
-
-
-##### `Spawn.__call__`  (lines 176–184)
-
-```
-async def __call__(self, target: str, payload: dict[str, Any], background: bool=False, dedup_key: str | None=None, delivers_result: bool=False, name: str='') -> SpawnResult
-```
-
-**Purpose**: Describes the callable interface used to delegate work to a child turn. A tool uses it to ask a named subagent profile or workspace agent to do a typed subtask.
-
-**Data flow**: The caller provides a target name, an input payload, and options such as whether the child should run in the background and whether a deduplication key should prevent duplicate work. An implementation validates the input, creates or reconnects to the child turn, and returns a `SpawnResult` describing the child and, when available, its result.
-
-**Call relations**: This is a protocol, meaning this file defines the shape of the operation but another part of the system supplies the actual implementation. `ToolContext` carries a `spawn` object with this shape so tool handlers can delegate work without knowing the internals of the subagent runner.
-
-
-##### `SubagentControl.result`  (lines 194–194)
-
-```
-async def result(self, turn_id: UUID) -> SpawnResult
-```
-
-**Purpose**: Describes how a tool asks for the final result of an already-spawned background subagent. It is used when the parent wants to inspect a child turn after it has been started.
-
-**Data flow**: The caller supplies a child turn id. An implementation looks up that child and returns a `SpawnResult` containing its terminal state and validated output if it is finished.
-
-**Call relations**: This is part of the `SubagentControl` protocol carried on `ToolContext`. The actual subagent workflow implements it so tools can talk to background children through a narrow, controlled interface.
-
-
-##### `SubagentControl.wait`  (lines 196–196)
-
-```
-async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]
-```
-
-**Purpose**: Describes how a tool waits for one or more background subagents for a bounded period inside a tool call. It lets a parent check which children have finished without taking over the whole run loop.
-
-**Data flow**: The caller provides child turn ids. An implementation waits according to its own rules and returns a tuple of `SubagentStatus` records showing each child’s current terminal status and text.
-
-**Call relations**: This protocol method belongs to the subagent control surface attached to `ToolContext`. It gives tools a standard way to pause for child work while the real waiting logic lives in the subagent subsystem.
-
-
-##### `SubagentControl.cancel`  (lines 198–198)
-
-```
-async def cancel(self, turn_id: UUID) -> SubagentStatus
-```
-
-**Purpose**: Describes how a tool asks the system to stop a running background subagent. It is the controlled way to end delegated work that is no longer needed.
-
-**Data flow**: The caller supplies a child turn id. An implementation cancels or marks the child as stopped and returns a `SubagentStatus` describing what happened.
-
-**Call relations**: This is another method on the subagent control protocol. Tool handlers call through the context, while the subagent workflow decides how cancellation is performed safely.
-
-
-##### `SubagentControl.message`  (lines 200–202)
-
-```
-async def message(self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool=False) -> SubagentStatus
-```
-
-**Purpose**: Describes how a tool sends a follow-up message to an already-spawned child turn. The deduplication key helps avoid sending the same follow-up twice after a retry or crash recovery.
-
-**Data flow**: The caller gives a child turn id, message text, a deduplication key, and whether the child will deliver its own result. An implementation admits the message to the child and returns a `SubagentStatus` showing the child’s response state.
-
-**Call relations**: This protocol method is supplied by the subagent workflow and exposed through `ToolContext`. It lets parent tools continue a child conversation without bypassing the turn and idempotency rules.
-
-
-##### `TurnCleanup.register`  (lines 216–217)
-
-```
-def register(self, aclose: Callable[[], Awaitable[None]]) -> None
-```
-
-**Purpose**: Adds an asynchronous cleanup action to be run when the turn ends. Tools use it for resources such as browser sessions or leases that must not outlive the turn.
-
-**Data flow**: It receives an async close function and appends it to the cleanup list. Nothing is returned, but the cleanup registry now remembers that closer for later.
-
-**Call relations**: Tool code calls this after opening a per-turn resource. Later, the turn loop drains the registry so those resources are closed even if the turn completed, failed, or was cancelled.
-
-
-##### `TurnCleanup.drain`  (lines 219–225)
-
-```
-async def drain(self) -> None
-```
-
-**Purpose**: Runs all registered cleanup actions and logs failures instead of letting one bad cleanup stop the rest. It closes resources in reverse order, like packing away the last thing opened first.
-
-**Data flow**: It reads the internal list of close functions. One by one, it removes the last closer, awaits it, and if that closer raises an error, it writes a log entry and continues with the remaining closers.
-
-**Call relations**: The turn-end flow calls this after tools have had a chance to register resources. It hands cleanup failures to the observability logger so operators can see leaks or close errors without breaking the rest of teardown.
-
-*Call graph*: 1 external calls (log).
-
-
-##### `ToolContext.acting_member_id`  (lines 266–274)
-
-```
-def acting_member_id(self) -> UUID | None
-```
-
-**Purpose**: Figures out which member’s authority this tool call may use. It prefers the live speaker, and falls back to the member the turn is acting on behalf of, such as for scheduled work.
-
-**Data flow**: It reads `speaker_member_id` and `on_behalf_of_member_id` from the context. It returns the speaker id if present; otherwise it returns the on-behalf-of id, or `None` if there is no member.
-
-**Call relations**: Other permission checks in this file use this property as their starting point. It keeps tools from guessing whose grants or private access should apply.
-
-
-##### `ToolContext.effective_audience`  (lines 277–287)
-
-```
-def effective_audience(self) -> Audience
-```
-
-**Purpose**: Decides the exact audience to stamp on a write. This prevents information from a private or shared conversation from being stored in a way that leaks into the wrong place later.
-
-**Data flow**: It reads the current audience and the acting member. If there is no acting member, or the conversation is not the workspace-shared audience, it returns the conversation audience as-is. If the shared audience is being used by a specific member, it creates and returns that member’s conversation audience.
-
-**Call relations**: When write operations need to know where information belongs, they use this property. It calls the audience helper only in the special shared-conversation case where the requester’s own audience must be derived.
-
-*Call graph*: 1 external calls (conversation_audience).
-
-
-##### `ToolContext.read_subjects`  (lines 290–299)
-
-```
-def read_subjects(self) -> frozenset[str]
-```
-
-**Purpose**: Computes the set of subjects this tool call may read. A subject is a label for a memory or information area, such as the conversation’s area or a member’s private area.
-
-**Data flow**: It starts with the subjects allowed by the current audience. If there is an acting member, it adds that member’s private subject. It returns the combined set as an immutable collection.
-
-**Call relations**: Source and memory access use this property to avoid reading beyond the conversation and requester’s allowed scope. It relies on audience and member-subject helper functions to convert identities into readable subject labels.
-
-*Call graph*: 2 external calls (audience_subjects, member_subject).
-
-
-##### `ToolContext.source_reader`  (lines 301–311)
-
-```
-def source_reader(self) -> SourceReader
-```
-
-**Purpose**: Builds the small identity object used when reading synced source pages. It says which agent is asking, which live member is requesting, and which subjects may be read.
-
-**Data flow**: It reads the current turn’s agent id, the live speaker member id, and the computed readable subjects. It packages those into a `SourceReader` object and returns it.
-
-**Call relations**: Memory and source extensions call this before fetching pages or objects. It gives those extensions a consistent permission envelope instead of making each one recalculate agent, member, and audience rules.
-
-*Call graph*: called by 5 (memory_search_handler, get, list, _pages, get); 1 external calls (__init__).
-
-
-##### `ToolContext.meter_images`  (lines 313–322)
-
-```
-async def meter_images(self, model: str, images: int, micro_usd: int) -> None
-```
-
-**Purpose**: Records the cost of generated images against this turn’s accounting ledger. This matters because some image providers charge per image rather than through the normal language-model token accounting.
-
-**Data flow**: It receives the model name, number of images, and cost in micro-dollars. It opens a workspace database transaction and writes an image-usage record tied to the workspace, turn, and model.
-
-**Call relations**: The OpenRouter image extension calls this after it knows the provider’s charge. This function hands the database write to the core accounting helper so extension spending is still billed in the same central ledger.
-
-*Call graph*: called by 1 (generate); 2 external calls (record_image_usage, workspace_tx).
-
-
-##### `ToolContext.meter_videos`  (lines 324–332)
-
-```
-async def meter_videos(self, model: str, videos: int, micro_usd: int) -> None
-```
-
-**Purpose**: Records the cost of generated videos against this turn’s accounting ledger. This covers providers that charge by generated video output instead of normal text tokens.
-
-**Data flow**: It receives the model name, number of videos, and cost in micro-dollars. It opens a workspace database transaction and writes a video-usage record tied to the workspace, turn, and model.
-
-**Call relations**: The OpenRouter video extension calls this after it prices a video generation call. This keeps provider-specific video costs connected to the core accounting system.
-
-*Call graph*: called by 1 (generate); 2 external calls (record_video_usage, workspace_tx).
-
-
-##### `ToolContext.speaker_is_admin`  (lines 334–344)
-
-```
-async def speaker_is_admin(self) -> bool
-```
-
-**Purpose**: Checks whether the live requesting speaker is a workspace administrator. If there is no live speaker, it returns false so background work cannot silently use admin power.
-
-**Data flow**: It reads `speaker_member_id`. If no speaker exists, it returns `False`; otherwise it opens a workspace database transaction and asks the seats subsystem whether that member is an admin in the current workspace.
-
-**Call relations**: Many workspace-wide operations call this before allowing changes or sensitive reads. Credential authorization also uses it so only an actual live admin can approve storing secret material.
-
-*Call graph*: called by 19 (apply, delete, apply, delete, get, list, status, request_credentials_handler, _credential_authorization, connect_github (+9 more)); 2 external calls (workspace_tx, member_is_admin).
-
-
-##### `ToolContext.agent_is_main`  (lines 346–357)
-
-```
-async def agent_is_main(self) -> bool
-```
-
-**Purpose**: Checks whether the current turn’s agent is the workspace’s main agent. Some member and workspace operations are only visible or allowed for that main agent.
-
-**Data flow**: It opens a workspace database transaction, queries the agent table for the current agent in the current workspace, reads the `is_main` flag, and returns it as a boolean.
-
-**Call relations**: Member, workspace, and web-audience code call this when deciding what the current agent may see or change. It uses a direct database query because the answer must reflect the stored workspace state.
-
-*Call graph*: called by 6 (add, _visible_rows, apply, status, _grant, _revoke); 2 external calls (select, workspace_tx).
-
-
-##### `ToolContext.begin_credential_authorization`  (lines 359–361)
-
-```
-async def begin_credential_authorization(self, slot: str, payload: str) -> str
-```
-
-**Purpose**: Starts an authorization flow for storing or using an extension credential slot. It returns a sealed authorization token that can later be opened or fulfilled.
-
-**Data flow**: It receives a credential slot name and payload. It first runs the shared credential-authorization checks, then asks the credential request service to create an authorization for this workspace, member, slot, and payload, returning the sealed string.
-
-**Call relations**: Coding and Slack extension flows call this when they need an admin-approved credential action, such as connecting GitHub or building an OAuth link. It delegates all safety checks to `_credential_authorization` before creating the request.
-
-*Call graph*: calls 1 internal fn (_credential_authorization); called by 2 (connect_github, _oauth_link).
-
-
-##### `ToolContext.open_credential_authorization`  (lines 363–365)
-
-```
-async def open_credential_authorization(self, slot: str, sealed: str) -> str
-```
-
-**Purpose**: Opens and verifies a sealed credential authorization token. This lets a later step confirm that the token really belongs to this workspace, member, and credential slot.
-
-**Data flow**: It receives a slot name and sealed token. It runs the shared authorization checks, then asks the credential request service to open the token and returns the stored payload.
-
-**Call relations**: This is the read-back side of the credential authorization flow. It uses the same `_credential_authorization` guard as the begin and fulfill steps so a token cannot be opened in the wrong context.
-
-*Call graph*: calls 1 internal fn (_credential_authorization).
-
-
-##### `ToolContext.fulfill_credential_authorization`  (lines 367–372)
-
-```
-async def fulfill_credential_authorization(self, slot: str, sealed: str, plaintext: str) -> None
-```
-
-**Purpose**: Completes a credential authorization by verifying the sealed token and storing the plaintext secret. This is the point where an approved credential becomes available to the workspace.
-
-**Data flow**: It receives the slot name, sealed token, and plaintext secret. It checks the authorization, opens the token to prove it is valid, then writes the plaintext credential into the current workspace’s secret storage.
-
-**Call relations**: This function uses `_credential_authorization` for policy checks and then uses the current workspace object to store the credential. It is deliberately strict because it handles real secrets.
-
-*Call graph*: calls 1 internal fn (_credential_authorization); 1 external calls (ws_current).
-
-
-##### `ToolContext._credential_authorization`  (lines 374–383)
-
-```
-async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]
-```
-
-**Purpose**: Performs the shared safety checks for credential authorization. It makes sure there is a live speaker, the extension declared the credential slot, secret storage is configured, and the speaker is an admin.
-
-**Data flow**: It reads the speaker id, extension metadata, configured credential request service, and admin status. If any requirement is missing, it raises a clear error; otherwise it returns the credential request service and the speaker member id.
-
-**Call relations**: The begin, open, and fulfill credential methods all call this before doing their specific work. It centralizes the rules so every credential path enforces the same admin and extension-slot checks.
-
-*Call graph*: calls 1 internal fn (speaker_is_admin); called by 3 (begin_credential_authorization, fulfill_credential_authorization, open_credential_authorization).
-
-
-##### `ToolContext.connector_account`  (lines 385–394)
-
-```
-async def connector_account(self, provider: str, account_id: str | None=None) -> str
-```
-
-**Purpose**: Returns the external broker account id that a connector tool may use. It is a convenience wrapper for callers that only need the account id, not the full connection record.
-
-**Data flow**: It receives a connector provider name and optionally a specific account id. It resolves the permitted connection through `connector_connection` and returns that connection’s account id.
-
-**Call relations**: Connector execution tools call this before asking the broker to run an external action. It relies on `connector_connection` so all account-selection and permission rules stay in one place.
-
-*Call graph*: calls 1 internal fn (connector_connection); called by 2 (call_external_tool, _connector_execute).
-
-
-##### `ToolContext.connector_connection`  (lines 396–433)
-
-```
-async def connector_connection(self, provider: str, account_id: str | None=None) -> ConnectorConnection
-```
-
-**Purpose**: Chooses the exact connector connection this turn is allowed to use. It enforces private-by-default behavior and prevents a tool from accidentally using another member’s account.
-
-**Data flow**: It receives a provider name and optionally an account id. It fetches private and shared grant tiers, then either finds the requested account or chooses a single allowed account, preferring the acting member’s private grants over shared ones. It returns a `ConnectorConnection` with the connection id, external account id, and owner member id, or raises a clear error if no safe choice exists.
-
-**Call relations**: The simpler `connector_account` method calls this, and source tools call it when they need to persist the precise connection generation. It depends on `_connector_account_tiers` to get the allowed grants before applying selection rules.
-
-*Call graph*: calls 1 internal fn (_connector_account_tiers); called by 2 (connector_account, _resolved_account); 1 external calls (__init__).
-
-
-##### `ToolContext.connector_accounts`  (lines 435–443)
-
-```
-async def connector_accounts(self, provider: str) -> tuple[str, ...]
-```
-
-**Purpose**: Lists the connector account ids this turn may use for a provider. This is useful when a caller needs to show or choose among available accounts.
-
-**Data flow**: It receives a provider name, gets the private and shared grant tiers, combines their account ids, removes duplicates, sorts them, and returns them as a tuple.
-
-**Call relations**: Source tools call this when resolving which account should be used. It shares the same `_connector_account_tiers` permission logic as `connector_connection`, so listing accounts and selecting one follow the same access rules.
-
-*Call graph*: calls 1 internal fn (_connector_account_tiers); called by 1 (_resolved_account).
-
-
-##### `ToolContext._connector_account_tiers`  (lines 445–464)
-
-```
-async def _connector_account_tiers(self, provider: str) -> tuple[list[Grant], list[Grant]]
-```
-
-**Purpose**: Splits active connector grants into two allowed groups: the acting member’s private accounts and accounts shared with the agent. This is the core permission filter for connector access.
-
-**Data flow**: It checks that the grant subsystem is available, reads the acting member id, then loads active grants. It filters them by provider, ownership, and sharing status, sorts each group by account id, and returns the private and shared lists.
-
-**Call relations**: `connector_accounts` and `connector_connection` both call this before listing or choosing accounts. If grants are not configured, it raises `ConnectUnavailable`, making connector tools fail clearly instead of pretending no accounts exist.
-
-*Call graph*: called by 2 (connector_accounts, connector_connection); 1 external calls (__init__).
-
-
-### Tool implementations
-Built-in and research extension tools translate model requests into sandboxed workspace, search, account, sharing, and subagent side effects.
-
-### `core/src/ufo/tools/builtins.py`
-
-`domain_logic` · `tool execution during an agent turn`
-
-This file is the agent's basic toolbox. Without it, the agent could talk, but it could not safely inspect files, run commands, create outputs, hand files back to a user, ask for missing information, or delegate work to child agents.
-
-A key idea in this file is containment. File and shell work goes through the sandbox, which is an isolated workspace container. Think of it like a workshop behind a glass wall: tools can operate inside it, but only controlled results come back out. Reading, editing, globbing, and grepping use an in-sandbox helper called sbxfs, so large files are not pulled into the host process just to inspect them. The file also remembers which paths were read during the turn, so edits and overwrites can be refused if the agent has not looked at the file first.
-
-Sharing files is treated as a special, safer exit door. The file is measured inside the sandbox, uploaded or streamed to the artifact store, recorded in the database, and returned as a time-limited download link. Spawning and messaging subagents use the context's subagent workflow. User-facing pauses, such as asking a question, connecting an account, or requesting secrets, return structured instructions that the chat surface can render privately or in the next user message.
-
-#### Function details
-
-##### `_bounded_file_path`  (lines 183–186)
-
-```
-def _bounded_file_path(path: str) -> str
-```
-
-**Purpose**: Checks that a file path will still fit inside the limited JSON result space used by file tools. This prevents an unusually huge path string from breaking the tool result format.
-
-**Data flow**: It receives a path string, measures how large that path becomes when encoded as JSON, and either returns the original path unchanged or raises a validation error if it is too large.
-
-**Call relations**: This is used as a validator for file path inputs on write and edit requests. It runs before the main file tool handlers, so bad paths are rejected early.
-
-*Call graph*: 1 external calls (dumps).
-
-
-##### `bash_handler`  (lines 379–405)
-
-```
-async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult
-```
-
-**Purpose**: Runs a shell command inside the sandbox and turns the result into a tool response the agent can read. It supports both normal foreground commands and detached background jobs.
-
-**Data flow**: It receives the tool context and a command request. If background mode is requested, it hands off to _bash_background. Otherwise it starts the command through the task runner, waits up to the requested budget, and returns output, timeout information, task handles, or an error message depending on what happened.
-
-**Call relations**: This is the registered handler for the built-in bash tool. It calls the task-running layer for foreground work and calls _bash_background when the caller wants the command detached immediately.
-
-*Call graph*: calls 1 internal fn (_bash_background); 5 external calls (__init__, __init__, run_task, task_handles, timeout_notice).
-
-
-##### `_bash_background`  (lines 408–420)
-
-```
-async def _bash_background(ctx: ToolContext, command: str) -> ToolResult
-```
-
-**Purpose**: Starts a shell command as a detached task and immediately returns the identifiers needed to watch it later. It is used when the agent wants work to continue without waiting for it.
-
-**Data flow**: It receives the sandbox context and command text. It creates a task id, asks the sandbox to launch the task wrapper in detached mode, and returns the task id, process id, and log information, or an error if the task did not start.
-
-**Call relations**: bash_handler calls this when the bash tool request has background set. It relies on the task helper functions to create names and human-readable handles.
-
-*Call graph*: called by 1 (bash_handler); 5 external calls (__init__, __init__, task_base, task_handles, task_id).
-
-
-##### `_require_str`  (lines 423–426)
-
-```
-def _require_str(value: object, field: str) -> str
-```
-
-**Purpose**: Makes sure a value returned by the sandbox is a real, non-empty string. It gives clearer failures when a file read result is malformed.
-
-**Data flow**: It receives an unknown value and the name of the field it should represent. If the value is a non-empty string, it returns it; otherwise it raises an error naming the missing field.
-
-**Call relations**: read_handler and _pdf_result use this while turning image and document read results into content blocks. It is a small safety check before constructing output for the model.
-
-*Call graph*: called by 2 (_pdf_result, read_handler).
-
-
-##### `_pdf_result`  (lines 429–474)
-
-```
-def _pdf_result(result: dict[str, object]) -> ToolResult
-```
-
-**Purpose**: Turns a sandbox PDF or PowerPoint read result into mixed text and image content for the agent. This lets the agent see extracted text plus rendered page or slide images.
-
-**Data flow**: It receives a dictionary returned by sbxfs. It collects extracted text, page range notes, warnings, and each rendered page image, then returns a ToolResult containing text and image blocks. If the structure is empty or malformed, it raises an error.
-
-**Call relations**: read_handler calls this when sbxfs reports that the file is a PDF or PPTX. It uses _require_str to validate image fields before creating ImageContent blocks.
-
-*Call graph*: calls 1 internal fn (_require_str); called by 1 (read_handler); 3 external calls (__init__, __init__, __init__).
-
-
-##### `read_handler`  (lines 477–514)
-
-```
-async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult
-```
-
-**Purpose**: Reads a file from the sandboxed workspace and returns a bounded, model-friendly result. It supports text files, images, PDFs, and PowerPoint decks.
-
-**Data flow**: It receives a file path and optional offset or limit. It asks sbxfs inside the sandbox to read the file, records that this path has been read this turn, and returns text, image content, document pages, or an empty-file message. For long text files, it includes line range information and how to continue reading.
-
-**Call relations**: This is the registered handler for the read tool. It calls _pdf_result for PDF and PPTX results, and _require_str when building image output.
-
-*Call graph*: calls 2 internal fn (_pdf_result, _require_str); 3 external calls (__init__, __init__, __init__).
-
-
-##### `write_handler`  (lines 517–540)
-
-```
-async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult
-```
-
-**Purpose**: Creates or overwrites a workspace file safely. It refuses overwriting an existing file unless that path has already been read in the current turn.
-
-**Data flow**: It receives the target path and text content. It writes the content to a temporary staged file in the sandbox, asks sbxfs to move it into place with overwrite rules, adds size and line count details, formats the result, and then marks the path as read for future edits in the same turn.
-
-**Call relations**: This is the registered handler for the write tool. It uses _file_tool_result to keep the response small and consistent.
-
-*Call graph*: calls 1 internal fn (_file_tool_result); 1 external calls (uuid4).
-
-
-##### `edit_handler`  (lines 543–556)
-
-```
-async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult
-```
-
-**Purpose**: Applies exact string replacements to a file that the agent has already read. This protects against blind edits where the agent might change content it has not seen.
-
-**Data flow**: It receives a path and one or more edit instructions. It first checks the path was read this turn, encodes the old and new strings safely, sends the edit request to sbxfs, adds the path to the result, and returns a compact file-tool response.
-
-**Call relations**: This is the registered handler for the edit tool. It hands the final sandbox result to _file_tool_result, and it uses base64 encoding so replacement strings can safely contain newlines or special characters.
-
-*Call graph*: calls 1 internal fn (_file_tool_result); 1 external calls (b64encode).
-
-
-##### `_file_tool_result`  (lines 559–573)
-
-```
-def _file_tool_result(result: dict[str, object]) -> ToolResult
-```
-
-**Purpose**: Formats the result of a write or edit into a bounded JSON text response. It avoids returning large snippets or diffs that could exceed the tool's output budget.
-
-**Data flow**: It receives a result dictionary, converts it to compact JSON, and returns it if it fits. If it is too large, it removes the snippet and simplifies the message, then returns the smaller JSON or raises an error if it still cannot fit.
-
-**Call relations**: write_handler and edit_handler call this after sbxfs has changed a file. It is the final shaping step before the agent sees the file operation result.
-
-*Call graph*: called by 2 (edit_handler, write_handler); 3 external calls (__init__, __init__, dumps).
-
-
-##### `glob_handler`  (lines 576–582)
-
-```
-async def glob_handler(ctx: ToolContext, args: GlobInput) -> ToolResult
-```
-
-**Purpose**: Finds files in the workspace whose paths match a glob pattern, such as '**/*.py'. It does the search inside the sandbox rather than walking files from the host process.
-
-**Data flow**: It receives a pattern and optional starting directory. It asks sbxfs to match files under that directory, then returns the matching paths as JSON text.
-
-**Call relations**: This is the registered handler for the glob tool. It delegates the actual file traversal to the sandbox helper and only formats the returned result.
-
-*Call graph*: 3 external calls (__init__, __init__, dumps).
-
-
-##### `grep_handler`  (lines 585–603)
-
-```
-async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult
-```
-
-**Purpose**: Searches workspace file contents for a regular expression, which is a text pattern language. It uses the sandbox's ripgrep-based search so only bounded results leave the container.
-
-**Data flow**: It receives the search pattern and optional filters such as file glob, context lines, case sensitivity, output mode, and result limit. It builds sbxfs search parameters, runs the search in the sandbox, and returns the result as JSON text.
-
-**Call relations**: This is the registered handler for the grep tool. It is the safe replacement for asking the shell to run grep or rg directly.
-
-*Call graph*: 3 external calls (__init__, __init__, dumps).
-
-
-##### `_store_artifact`  (lines 606–640)
-
-```
-async def _store_artifact(ctx: ToolContext, scoped: str, key: str, size_bytes: int, digest: str) -> None
-```
-
-**Purpose**: Copies a measured workspace file into the artifact store, either by uploading directly from the sandbox to S3 or by streaming through the filesystem blob store. This is the low-level step that makes a shared file durable outside the sandbox.
-
-**Data flow**: It receives the sandbox path, destination key, file size, and sha256 digest. For S3, it creates a presigned upload URL tied to that exact size and checksum, then has the sandbox upload the file with curl. For filesystem storage, it streams the file from the sandbox into the blob store.
-
-**Call relations**: share_file_handler calls this for the actual file, and _shared_preview calls it for a generated preview image. It is deliberately separated so both file and preview use the same storage path.
-
-*Call graph*: called by 2 (_shared_preview, share_file_handler); 2 external calls (b64encode, quote).
-
-
-##### `_shared_preview`  (lines 652–699)
-
-```
-async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> ArtifactPreview | None
-```
-
-**Purpose**: Attempts to create a small preview image for certain shared document types, such as PDFs and Office files. The preview helps users recognize a shared file visually, but failure to make one does not block sharing.
-
-**Data flow**: It receives the sandbox path and safe display name. If the file type is previewable, it renders the first page or slide to a PNG inside the sandbox, measures that PNG, rejects empty or oversized previews, stores it as an artifact, and returns preview metadata. If rendering or measuring fails, it logs the reason and returns nothing.
-
-**Call relations**: share_file_handler calls this after storing the main file. It calls _store_artifact to save the preview image beside the original artifact.
-
-*Call graph*: calls 1 internal fn (_store_artifact); called by 1 (share_file_handler); 6 external calls (__init__, loads, PurePosixPath, quote, log, uuid4).
-
-
-##### `share_file_handler`  (lines 702–788)
-
-```
-async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult
-```
-
-**Purpose**: Shares a workspace file with the user by storing it as an artifact, recording it in the database, and returning a time-limited download URL. This is the only intended way for a produced file to leave the sandbox.
-
-**Data flow**: It receives the requested workspace file path, optional download name, caption, and context. It checks artifact sharing is configured, measures the file inside the sandbox, chooses a safe filename, stores the file, optionally creates a preview, records the shared artifact in the database, mints an expiring URL, and returns JSON with the URL, name, size, digest, and artifact identity.
-
-**Call relations**: This is the registered handler for the share_file tool. It calls _store_artifact for the main file, _shared_preview for optional visual preview, and database/artifact helpers so chat surfaces can later present the file.
-
-*Call graph*: calls 2 internal fn (_shared_preview, _store_artifact); 16 external calls (__init__, __init__, now, dumps, loads, guess_type, PurePosixPath, quote, insert, select (+6 more)).
-
-
-##### `spawn_handler`  (lines 791–824)
-
-```
-async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult
-```
-
-**Purpose**: Delegates work to another agent or subagent profile. It lets the current agent hand off a typed subtask and either wait for the result or continue while it runs in the background.
-
-**Data flow**: It receives the target name, payload, background flag, and display name. It asks the ToolContext to spawn the target, catches unknown or ambiguous target errors, and returns either a child question, a background turn id, or the validated output from the child.
-
-**Call relations**: This is the registered handler for the spawn tool. It relies on ToolContext.spawn for the actual subagent workflow, then shapes the result into text the parent agent can use.
-
-*Call graph*: 4 external calls (__init__, __init__, spawn, dumps).
-
-
-##### `ask_user_handler`  (lines 832–842)
-
-```
-async def ask_user_handler(ctx: ToolContext, args: AskUserCall) -> ToolResult
-```
-
-**Purpose**: Packages a question the agent needs to ask the user in the normal chat flow. It tells the agent to ask in its reply and then stop, so the answer arrives as the user's next message.
-
-**Data flow**: It receives a structured question request. It builds a JSON payload containing the title and questions, prefixes it with an instruction to end the turn, and returns it as text content.
-
-**Call relations**: This is the registered handler for the ask_user tool. It does not contact the user directly; instead, it gives the surrounding chat surface and model a structured question to present.
-
-*Call graph*: 3 external calls (__init__, __init__, dumps).
-
-
-##### `load_skill_handler`  (lines 845–856)
-
-```
-async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult
-```
-
-**Purpose**: Loads a named skill and its dependencies into the workspace, then returns their instructions. A skill is a bundle of workflow guidance and files the agent can use for a specialized task.
-
-**Data flow**: It receives the skill name. It resolves the full dependency chain, mounts each skill's files into the sandbox workspace, builds the combined instruction context, and returns that text to the agent.
-
-**Call relations**: This is the registered handler for the load_skill tool. It calls the skills runtime to mount files and format the loaded context.
-
-*Call graph*: 4 external calls (__init__, __init__, loaded_context, mount_skill).
-
-
-##### `_grantee_agent_id`  (lines 865–888)
-
-```
-async def _grantee_agent_id(ctx: ToolContext, name: str) -> UUID | None
-```
-
-**Purpose**: Figures out which agent should receive access when connecting an external account. It enforces the rule that only the workspace's main agent may connect an account on behalf of another agent.
-
-**Data flow**: It receives the current context and an optional agent name. If no name is given, it returns nothing, meaning the connection is for the asking agent. If a name is given, it reads workspace agents from the database, verifies the asking agent is the main one, finds the named target, and returns that target's id unless it is the same as the asker.
-
-**Call relations**: connect_account_handler calls this before creating a connection request. It resolves authority up front so the later private OAuth handoff is bound to the correct agent.
-
-*Call graph*: called by 1 (connect_account_handler); 2 external calls (select, workspace_tx).
-
-
-##### `connect_account_handler`  (lines 891–905)
-
-```
-async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -> ToolResult
-```
-
-**Purpose**: Starts a private account-connection flow, such as OAuth for Gmail or GitHub, for the speaking member. It returns instructions for the chat surface without exposing an authorization URL in the transcript.
-
-**Data flow**: It receives the provider name, sharing choice, optional target agent, and context. It verifies there is a speaking member, resolves the grantee agent, validates that the provider is installed, builds a ConnectRequest, and returns it with a directive to tell the member to use the private connection control.
-
-**Call relations**: This is the registered handler for the connect_account tool. It calls _grantee_agent_id for agent targeting and the installed connect flow to validate the provider.
-
-*Call graph*: calls 1 internal fn (_grantee_agent_id); 4 external calls (__init__, __init__, __init__, installed_connect_flow).
-
-
-##### `request_credentials_handler`  (lines 915–938)
-
-```
-async def request_credentials_handler(ctx: ToolContext, args: RequestCredentialsInput) -> ToolResult
-```
-
-**Purpose**: Asks an admin member to provide secrets, such as API keys, through a private prompt instead of chat. This keeps secret values out of the conversation transcript.
-
-**Data flow**: It receives a reason and credential prompts. It checks there is a speaking member, credential storage is configured, and the speaker is an admin. It seals the allowed credential slots for that member, builds a CredentialRequest, and returns it with instructions to end the turn and wait.
-
-**Call relations**: This is the registered handler for the request_credentials tool. It calls the context's admin check and uses the credential sealing service attached to the context.
-
-*Call graph*: calls 1 internal fn (speaker_is_admin); 3 external calls (__init__, __init__, __init__).
-
-
-##### `cancel_spawn_handler`  (lines 941–953)
-
-```
-async def cancel_spawn_handler(ctx: ToolContext, args: CancelSpawnInput) -> ToolResult
-```
-
-**Purpose**: Cancels a running child spawn and reports its status. If the child already finished, cancellation does not undo its completed result.
-
-**Data flow**: It receives a spawn id. It checks spawn control is available, converts the id into a UUID, asks the subagent system to cancel it, and returns JSON with the spawn id and current status.
-
-**Call relations**: This is the registered handler for the cancel_spawn tool. It talks to ctx.subagents, which is the same subagent workflow used by spawn_handler.
-
-*Call graph*: 4 external calls (__init__, __init__, dumps, UUID).
-
-
-##### `message_spawn_handler`  (lines 956–974)
-
-```
-async def message_spawn_handler(ctx: ToolContext, args: MessageSpawnInput) -> ToolResult
-```
-
-**Purpose**: Sends a follow-up message to a spawned child agent. This is how the parent can answer a child question or give new instructions to a background spawn.
-
-**Data flow**: It receives a spawn id and message. It checks spawn control and an idempotency key are available, converts the id into a UUID, queues the message as the spawn's next turn, and returns JSON with the spawn id and updated status.
-
-**Call relations**: This is the registered handler for the message_spawn tool. It uses ctx.subagents to queue the follow-up, and the result is later delivered back to the current conversation.
-
-*Call graph*: 4 external calls (__init__, __init__, dumps, UUID).
-
-
-### `extensions/research/ufo_ext_research/tools.py`
-
-`domain_logic` · `tool call handling during a turn`
-
-This file is the bridge between an agent asking for outside information and the search service that can provide it. Without it, the agent might know that a search tool exists, but it would not have a safe, consistent way to ask questions, fetch pages, or receive results back.
-
-The file defines three public tools: web search, URL fetch, and vertical search. It uses Pydantic models, which are structured input checkers, to make sure each tool call has the right shape before anything is sent to the search backend. For example, web search limits how many queries and results can be requested, and URL fetching requires a public web address.
-
-A key safety idea is that the actual search provider runs on the host side, not inside the agent workspace. That means secret search API keys stay out of the sandbox. When fetching a page, the file also clearly labels the content as coming from the provider’s crawler session, not from the user’s workspace or account. Like sending a courier to read a notice on your behalf, the courier’s identity may affect what they see.
-
-The tool handlers call the selected provider, optionally record observations for the activity timeline, and return JSON text wrapped in a tool result.
-
-#### Function details
-
-##### `_provider`  (lines 145–148)
-
-```
-def _provider(ctx: ToolContext) -> SearchProvider
-```
-
-**Purpose**: This small helper retrieves the search provider chosen for the current turn. It fails loudly if no provider is configured, because the research tools cannot work without a backend to answer searches or fetch pages.
-
-**Data flow**: It receives the current tool context, looks inside it for a search provider, and returns that provider if present. If the context has none, it stops the request by raising an error instead of letting later code fail in a confusing way.
-
-**Call relations**: The web search, URL fetch, and vertical search handlers all call this first. It acts like checking that the power is plugged in before starting the machine; only after it succeeds do those handlers ask the provider to search or fetch.
-
-*Call graph*: called by 3 (_fetch_url, _search_vertical, _search_web).
-
-
-##### `_results_json`  (lines 151–165)
-
-```
-def _results_json(hits: list[SearchHit], answer: str | None) -> str
-```
-
-**Purpose**: This function turns search hits into a JSON string that the agent can read in a predictable format. It includes each result’s URL, title, snippet text, publication date, highlights, and optionally a direct answer from the provider.
-
-**Data flow**: It receives a list of search hits and an optional answer. It copies the useful fields from each hit into plain dictionaries, adds the answer if one exists, and serializes the whole package into JSON text.
-
-**Call relations**: Both regular web search and vertical search use this after they receive results from the provider. It is the final packing step before the handlers wrap the text in a tool result and return it to the agent.
-
-*Call graph*: called by 2 (_search_vertical, _search_web); 1 external calls (dumps).
-
-
-##### `_search_web`  (lines 168–186)
-
-```
-async def _search_web(ctx: ToolContext, args: SearchWebInput) -> ToolResult
-```
-
-**Purpose**: This is the handler behind the `search_web` tool. It runs one web search for each requested query, combines the results, records what was found when observation logging is available, and returns the combined result list to the agent.
-
-**Data flow**: It receives the tool context and validated search arguments, including queries, result limits, date filters, and allowed domains. It gets the configured provider, sends each query as a search request, gathers all hits into one list, keeps the first provider answer if any, optionally records the hits for the turn, and returns JSON text inside a tool result.
-
-**Call relations**: When the agent calls `search_web`, this function is the main work path. It first relies on `_provider` to get the backend, builds search requests for the provider, then hands the collected hits to `_results_json` so the final response has the standard search-results shape.
-
-*Call graph*: calls 2 internal fn (_provider, _results_json); 4 external calls (__init__, __init__, __init__, record_search_hits).
-
-
-##### `_fetch_url`  (lines 189–210)
-
-```
-async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult
-```
-
-**Purpose**: This is the handler behind the `fetch_url` tool. It asks the provider to retrieve a public web page, optionally using a prompt to extract specific information, and returns the page content with a clear warning about crawler provenance.
-
-**Data flow**: It receives the tool context and validated fetch arguments: URL, optional extraction prompt, optional length limit, and whether to bypass cache. It gets the provider, checks whether that provider supports fetching, and either returns a clear error message or sends a fetch request. When a page comes back, it optionally records the fetched page, builds a JSON reply with the URL, text, provenance warning, and optional summary, then returns it as a tool result.
-
-**Call relations**: When the agent calls `fetch_url`, this function coordinates the whole fetch. It uses `_provider` to find the backend, calls the provider’s fetch operation, records the page through the observations system when available, and directly serializes the final page reply as JSON.
-
-*Call graph*: calls 1 internal fn (_provider); 5 external calls (__init__, __init__, __init__, dumps, record_fetched_page).
-
-
-##### `_search_vertical`  (lines 213–222)
-
-```
-async def _search_vertical(ctx: ToolContext, args: SearchVerticalInput) -> ToolResult
-```
-
-**Purpose**: This is the handler behind the `search_vertical` tool. It searches a specialized category, such as images, people, academic papers, videos, or shopping results, instead of doing a general web search.
-
-**Data flow**: It receives the tool context and validated vertical-search arguments: the category and the query. It gets the configured provider, sends a search request that includes the chosen vertical, optionally records the returned hits, converts the results into the standard JSON format, and returns them in a tool result.
-
-**Call relations**: When the agent needs a specific type of content, this function follows a shorter version of the web-search path. It calls `_provider`, asks the provider for a vertical search, records the hits if observation logging is active, and uses `_results_json` so its output matches the regular search format.
-
-*Call graph*: calls 2 internal fn (_provider, _results_json); 4 external calls (__init__, __init__, __init__, record_search_hits).
-
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The merged settings that tell the whole system what is enabled, safe, and available in this run.
-- `reg-extension-catalog` — The shared list of installed extensions and the capabilities they registered for this deployment.
-- `reg-db-session` — The active database connection, transaction, and workspace-safe persistence context used while work is running.
-- `reg-agent-definitions` — The saved assistant agents for each workspace, including their settings, tools, model choices, and provisioning source.
-- `reg-identity-context` — The current answer to who is acting, in which workspace, and on behalf of which member or agent.
-- `reg-credential-vault` — The encrypted store of workspace secrets and API keys that tools and connectors can request through guarded paths.
-- `reg-connection-grants` — The saved outside-service account connections and the grants saying which agents may use them.
-- `reg-tool-registry` — The shared catalog of tools the model is allowed to call and the input rules for each tool.
-- `reg-connector-tool-catalog` — The discovered connector actions from systems like Gmail, Slack, GitHub, Composio, Pipedream, and MCP servers.
-- `reg-conversation-state` — The durable conversation records, titles, audience, surface labels, sandbox links, and visible thread metadata.
-- `reg-turn-queue` — The durable queue of conversation turns, including admitted work, claimed work, failures, retries, and completion state.
-- `reg-sandbox-state` — The per-conversation sandbox handle, size, filesystem environment, command execution state, and cleanup state.
-- `reg-network-egress-policy` — The shared network access rules and freshness counter that tell sandboxes and proxies where code may connect.
-- `reg-browser-sessions` — The browser or Chrome DevTools session state used when tools and hosted sandbox websites need a controlled browser.
-- `reg-object-store` — The durable named workspace objects owned by extensions, with their names, data, permissions, and owner routing.
-- `reg-blob-artifacts` — The shared file and artifact storage for large bytes, generated files, previews, and signed downloads.
-- `reg-portal-slots` — The safe display state for conversation panels such as sources, artifacts, tasks, sites, automations, and workspace changes.
-- `reg-source-feeds` — The registered external content sources, sync cursors, backoff state, ownership, grants, and wake-up triggers.
-- `reg-workflow-plans` — The longer-running goals, objective steps, blockers, todos, delegated work, and progress evidence that survive across turns.
-- `reg-subagent-delivery` — The parent-child turn links and pending result records used when helper agents run work and report back.
-- `reg-usage-ledger` — The shared cost and usage records for model calls, tools, sandboxes, connectors, network use, and generated media.
-- `reg-spend-controls` — The spend caps, prepaid balances, price table fingerprints, and checks that decide whether work may continue.
-- `reg-visibility-policy` — The shared audience, sharing, governance, and permission rules that decide who may see or change private data.
-- `reg-observability` — The shared logs, traces, metrics, trace links, and sanitized diagnostic records used to understand system behavior.
-- `reg-extension-kv-store` — Private per-workspace JSON/key-value state owned by extensions for setup, feature bookkeeping, and small durable extension data that is not a user-visible object.
-- `reg-workspace-change-log` — Durable records of file/Git workspace changes attached to conversations so side effects can be recovered, summarized, and rendered safely in portal panels.
-- `reg-hosted-site-state` — Durable hosted website records, publication metadata, permissions, and homepage-agent bindings used to build, serve, list, and remove sites.
-- `reg-research-observations` — Durable per-conversation web/search source observations and retrieval metadata saved by research tools for later citation and Sources-panel rendering.
-- `reg-untrusted-content-taint` — Trust/taint markers attached to external content as it moves through retrieval, prompts, tools, and rendering so prompt-injection safety checks can be enforced.
-- `reg-tool-execution-context` — The per-turn tool runtime context carrying permitted workspace handles, account/credential accessors, cleanup callbacks, sandbox/browser handles, and helper-agent hooks across tool calls.
-- `reg-sandbox-runtime-image` — The prepared sandbox runtime image, build/cache metadata, and proxy validation state used before sandboxes can be launched safely.
-- `reg-skill-workflow-catalog` — The registered agent skills, helper subagent profiles, workflow profiles, and related prompt/activity metadata injected into turns and surfaced to users.
+- `reg-effective-config` — The merged deployment settings that tell the process how to run, which services to use, and which safety options are enabled.
+- `reg-extension-registry` — The loaded list of installed extensions, packs, routes, tools, skills, jobs, credentials, backends, and migrations.
+- `reg-database-store` — The shared database connection and tables where workspaces, users, agents, turns, files, jobs, costs, and extension data are saved.
+- `reg-workspace-principals` — The current workspace, members, agents, controlling users, and ownership identities used to decide who is acting.
+- `reg-session-auth` — The login sessions, signed tokens, protected links, callback state, and request identities proving who a visitor or service is.
+- `reg-visibility-boundaries` — The saved rules for who may see each conversation, agent, transcript, source, memory, artifact, or workspace object.
+- `reg-credential-vault` — The encrypted store of API keys, OAuth tokens, and other secrets that can be injected only into approved places.
+- `reg-connection-grants` — The saved account connections and per-agent permissions that say which outside accounts an agent may use.
+- `reg-agent-settings` — The durable settings for each agent, including model choice, reasoning mode, internet access, sandbox size, tools, setup needs, icon, and visibility.
+- `reg-conversation-records` — The durable conversation rows that remember where a conversation came from, which agent owns it, its audience, title, sandbox, and current metadata.
+- `reg-turn-run-state` — The shared state of each unit of agent work, including queued, claimed, running, parked, canceled, recovered, or finished.
+- `reg-runtime-fleet` — The records of running server or worker instances, their heartbeats, listener claims, and cleanup ownership.
+- `reg-live-stream-state` — The live update stream that broadcasts turn progress, tool activity, subagent activity, cancellations, and final replies to connected clients.
+- `reg-model-usage-accounting` — The recorded token, image, video, embedding, sandbox, egress, and cost usage used for billing and audit trails.
+- `reg-tool-catalog` — The shared catalog of tools the model can call, including built-in tools, extension tools, connector tools, and their safety labels.
+- `reg-tool-execution-context` — The per-turn but shared rulebook passed through tools, saying who the tool acts for, what files, accounts, sandboxes, and subagents it may use.
+- `reg-sandbox-runtime` — The remembered sandbox handles, workspace directories, terminals, command sessions, ports, and cleanup state used for safe code execution.
+- `reg-egress-policy` — The network access rules and proxy authorization state that decide what sandboxed code may contact outside the system.
+- `reg-file-blob-store` — The shared byte storage for uploads, generated files, previews, media, and other raw data, separated by workspace or deployment scope.
+- `reg-artifact-registry` — The saved list of files deliberately shared with users, including ownership, access checks, preview metadata, and download links.
+- `reg-browser-site-runtime` — The shared browser sessions, hosted preview servers, public site links, and ownership records used to browse, test, and publish websites.
+- `reg-subagent-delegation` — The shared state for spawned helper agents, including their catalog entries, parent-child turn links, required results, names, and cancellation state.
+- `reg-extension-object-slots` — The extension-owned object and conversation-panel data, such as artifacts, sources, tasks, sites, automations, and custom workspace objects.
+- `reg-workspace-change-log` — The saved record of file changes made during a conversation, used to explain later what the agent changed in the workspace.
+- `reg-observability-traces` — The shared trace, metric, log, and traceparent information that lets operators connect startup, turns, tools, subagents, and billing events.
+- `reg-skill-assets-state` — The discovered skill packages, dependency metadata, copied helper files, and per-agent skill asset state used when building prompts and executing skill-backed work.
+- `reg-pending-human-interactions` — The durable pending questions, credential-collection prompts, setup requests, and checklist-style waits that tools create and surfaces later resolve.
+- `reg-sandbox-image-cache` — The local or remote sandbox image/build cache and validation state used to choose, compare, and launch safe execution environments.
+- `reg-connector-action-cache` — Dynamic connector/MCP action schemas, allowed-action listings, and runtime client/session caches reused when exposing and executing external-service actions.
+- `reg-active-cancellation-handles` — Process-local abort tokens and cancellation handles that bridge durable cancel requests to currently running turns, tools, sandboxes, and child turns.
+- `reg-turn-created-references` — Saved references or citations created by a turn so final replies, source panels, transcripts, and later turns can resolve cited material consistently.
+- `reg-conversation-workspace-files` — The mutable per-conversation working file tree that tools, skills, document automation, site building, artifacts, and cleanup read or modify before changes are snapshotted or shared.

@@ -1,2257 +1,984 @@
-# Web portal and panel API ingress  `stage-5.1`
+# Account-link and OAuth callback intake  `stage-5.1`
 
-This stage is the front door for the web version of the system. It is part of the live user-facing loop: loading the browser app, checking who the user is, accepting chat messages, streaming answers back, and showing workspace panels.
+This stage is shared behind-the-scenes support for connecting outside accounts to a ufo workspace. It is used when a member clicks “connect” for a service, approves access in a browser, and comes back to ufo. The key job is to prove the account really belongs to the right person or workspace before anything is saved or granted.
 
-The main web surface is the central reception desk. It serves the web app, verifies signed-in users, exposes chat routes, streams agent replies, and provides data for panels such as memory, files, usage, skills, and admin views. The audience rules act like the door policy: they decide which members may see or use which agents, and give admins tools to grant or remove access.
-
-The panels bridge turns settings forms into the same normal action path used by chat, so changes to agents, members, credentials, and access do not need separate custom endpoints. The memory surface adds a read-only memory explorer for authorized operators. The community directory reader lets the app browse public skills, while guarding against slow, oversized, broken, or rate-limited responses. Together, these pieces make the web portal usable, controlled, and safe.
+The Composio and Pipedream provider files act like front doors to hosted consent services. They send the user to the right approval page, receive the return signal, and translate that result into a connection ufo can use. The grants file is the record keeper and permission guard: it tracks who owns each connected account, which agents may use it, and how to safely finish the browser sign-in. The CLI surface provides the small “you’re done” web page after approval. The GitHub coding connector verifies that a GitHub App installation truly belongs to the current user’s organization. The iMessage tool confirms a phone number before attaching it, preventing accidental or unwanted messaging.
 
 ## Files in this stage
 
-### Portal API ingress
-The main web surface serves the browser app and exposes the authenticated routes for chat, streaming, workspace data, and portal panels.
+### Hosted consent bridges
+Browser-facing connector bridges send users through hosted Composio and Pipedream consent flows before handing successful connections back to ufo grants.
 
-### `extensions/web/ufo_ext_web/surface.py`
+### `extensions/composio/ufo_ext_composio/provider.py`
 
-`orchestration` · `request handling, streaming, and scheduled background jobs`
+`io_transport` · `connect request and OAuth callback handling`
 
-This file is the bridge between a member using the browser and the core UFO system. It treats the browser like one “surface,” meaning one place where humans can talk to agents and inspect their work. First, it verifies the signed session cookie and turns the email in that cookie into a workspace member. Then it uses a web audience check to decide which agents and workspace records that member may see.
+ufo expects an OAuth provider to give it a ready-to-open authorization URL and later exchange a returned code for an account. Composio works a little differently: creating the consent link requires an asynchronous API call. This file solves that mismatch by adding a small detour route inside the extension.
 
-The file serves the built frontend files, including a careful fallback for assets from another deployed version so rolling upgrades do not break open browser tabs. It also defines the main chat path. A first message can open a conversation, file uploads are saved into that conversation’s workspace, and the message is admitted into the shared durable queue that agents consume. Live progress comes back through server-sent events, a simple browser streaming mechanism where the server sends named events over one long response.
+The flow is like a receptionist redirecting visitors. First, `ComposioOAuthProvider.authorize_url` does not point straight to Composio. It points the browser to this extension’s `/ext/composio/oauth` route and includes the provider name, the sealed `state`, and the core callback address. The `state` is important because it ties the consent result back to the right user and conversation.
 
-Beyond chat, this file provides read-only portal panels: agents, conversations, transcripts, skills, connections, memory, artifacts, scheduled-run “radar,” usage, object lists/details, credentials, team, surfaces, and admin state. Most route functions follow the same pattern: authenticate, check audience, ask the privileged SurfaceContext for the real data, then return a small JSON shape for the frontend.
+When `oauth_route` is opened the first time, it asks Composio to create a consent link for this workspace’s Composio user, then redirects the browser there. After the user finishes, Composio sends the browser back to the same route with a `connected_account_id`. The route then redirects to ufo’s normal callback, passing that account id as the OAuth `code`.
+
+Finally, `ComposioOAuthProvider.exchange` checks with Composio that the account belongs to the expected workspace user and provider before returning an `OAuthAccount`. The actual provider token stays with Composio, so this code never stores a secret token.
 
 #### Function details
 
-##### `load_assets`  (lines 195–205)
+##### `ComposioOAuthProvider.authorize_url`  (lines 43–45)
 
 ```
-def load_assets(directory: Path) -> dict[str, tuple[bytes, str]]
+def authorize_url(self, state: str, redirect_uri: str) -> str
 ```
 
-**Purpose**: Loads the web app’s built static files from disk into memory, but only for file types this surface knows how to serve. This keeps accidental build leftovers, such as source maps, from being published unless explicitly allowed.
+**Purpose**: Builds the URL that ufo should send the user to when starting a Composio-backed connection. Instead of going directly to Composio, it sends the browser to this extension’s bridge route so the async Composio link can be created there.
 
-**Data flow**: It receives a directory path, scans the files inside it, reads allowed files as bytes, pairs each with its media type, and returns a lookup table keyed by request-friendly asset names.
+**Data flow**: It receives the saved `state` value and the core `redirect_uri` callback. It extracts the origin, meaning the scheme and host such as `https://example.com`, then adds the provider name, state, and callback as query parameters. It returns a full URL pointing at `/ext/composio/oauth` on the same origin.
 
-**Call relations**: It runs when the module is imported to build the static asset table used later by static file responses.
+**Call relations**: This is the first step in the connect flow. It calls `_origin` to make sure the callback has a usable web origin, and it uses URL encoding so the provider, state, and callback can safely travel in the browser URL. The returned URL later lands in `oauth_route`.
 
-*Call graph*: 1 external calls (glob).
+*Call graph*: calls 1 internal fn (_origin); 1 external calls (urlencode).
 
 
-##### `resolve_workspace`  (lines 218–257)
+##### `ComposioOAuthProvider.exchange`  (lines 47–57)
 
 ```
-async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
+async def exchange(self, code: str, _redirect_uri: str, workspace_id: UUID, _state: str) -> OAuthAccount
 ```
 
-**Purpose**: Figures out which workspace an incoming web request belongs to before the route handler runs. It uses the signed bearer token from the session cookie, or from the one login form post that creates that cookie.
+**Purpose**: Turns the returned Composio connected account id into ufo’s internal account record. It also verifies that the account belongs to the expected workspace user and provider, which prevents someone from injecting another account id.
 
-**Data flow**: It reads cookies, request method, content type, small form data when needed, and an optional chat target. It returns a workspace id, a redirect to sign-in, a refusal response, or None when the request cannot be scoped.
+**Data flow**: It receives `code`, which in this flow is really Composio’s connected account id, plus the workspace id. It builds the expected Composio external user id for that workspace, asks the Composio client to fetch and verify the connected account, then tries to fetch a human-friendly label. It returns an `OAuthAccount` containing the verified account id and, if available, the label.
 
-**Call relations**: The shared surface framework calls this as the early workspace gate. It uses _framed_length and _form before reading a login form, and _chat_target when preserving a conversation link through sign-in.
+**Call relations**: This runs after `oauth_route` has redirected back to ufo’s normal callback with the connected account id as `code`. It uses `composio_client` to ask Composio for the authoritative account information, then hands ufo an `OAuthAccount` so the connection can be bound without ever reading or storing the provider’s token.
 
-*Call graph*: calls 3 internal fn (_chat_target, _form, _framed_length); 2 external calls (workspace_claim, RedirectResponse).
+*Call graph*: 2 external calls (__init__, composio_client).
 
 
-##### `_chat_target`  (lines 260–264)
+##### `oauth_route`  (lines 60–97)
 
 ```
-def _chat_target(request: Request) -> UUID | None
+async def oauth_route(ctx: ExtensionContext, request: Request) -> Response
 ```
 
-**Purpose**: Safely reads a conversation id from the portal URL, if one is present. It rejects anything that is not a real UUID by returning no target.
+**Purpose**: Acts as the browser bridge for both halves of Composio consent. It starts consent by creating a Composio connect link, and it finishes consent by forwarding Composio’s returned account id to ufo’s normal callback.
 
-**Data flow**: It reads the c query parameter, tries to parse it as a UUID, and returns that UUID or None.
+**Data flow**: It reads query parameters from the incoming browser request: `state`, `callback`, provider, `connected_account_id`, and status. If required state or callback data is missing, it returns an error response. If a connected account id is present, it redirects to the callback with that id as `code`. If Composio reports a status but no account id, it returns an explicit failure message. Otherwise, it creates a return URL back to itself, asks Composio for a provider-specific connect link for the current workspace user, and redirects the browser to that link.
 
-**Call relations**: resolve_workspace uses it when redirecting an unsigned visitor to login so a valid target conversation can survive the sign-in trip.
+**Call relations**: This route is reached first from `ComposioOAuthProvider.authorize_url`. On the start leg, it calls `_origin` and `composio_client().connect_link` to produce the real Composio consent destination. On the return leg, after Composio redirects back here, it sends the browser onward to core’s callback so `ComposioOAuthProvider.exchange` can verify and bind the account.
 
-*Call graph*: called by 1 (resolve_workspace); 1 external calls (UUID).
+*Call graph*: calls 1 internal fn (_origin); 3 external calls (Response, composio_client, urlencode).
 
 
-##### `_static_response`  (lines 267–277)
+##### `_origin`  (lines 100–104)
 
 ```
-def _static_response(request: Request) -> Response | None
+def _origin(url: str) -> str
 ```
 
-**Purpose**: Returns a response for a static frontend asset that exists in this build. It also supports browser revalidation through an ETag, which is a content fingerprint.
+**Purpose**: Extracts the base web origin from a full URL, such as turning `https://site.example/path` into `https://site.example`. It also rejects callback URLs that are not normal HTTP or HTTPS web addresses.
 
-**Data flow**: It reads the requested path, looks it up in the in-memory asset table, and either returns None or passes the file bytes, type, and ETag to _asset_response.
+**Data flow**: It receives a URL string and parses it into pieces. If the URL does not have an `http` or `https` scheme or does not include a host, it raises an error. Otherwise, it returns only the scheme and host.
 
-**Call relations**: static_asset tries this first before falling back to the shared stored-asset path for mixed-version deploys.
+**Call relations**: Both `ComposioOAuthProvider.authorize_url` and `oauth_route` use this helper before building bridge URLs. It keeps those URLs anchored to the same trusted web origin as the callback, rather than blindly joining paths onto an invalid or incomplete URL.
 
-*Call graph*: calls 1 internal fn (_asset_response); called by 1 (static_asset).
+*Call graph*: called by 2 (authorize_url, oauth_route); 1 external calls (urlparse).
 
 
-##### `_asset_response`  (lines 280–284)
+### `extensions/pipedream/ufo_ext_pipedream/provider.py`
 
-```
-def _asset_response(request: Request, body: bytes, media_type: str, etag: str) -> Response
-```
-
-**Purpose**: Builds the actual HTTP response for a static asset. It sends 304 Not Modified when the browser already has the same content.
-
-**Data flow**: It receives the request, bytes, media type, and ETag. It compares the request’s if-none-match header, then returns either an empty 304 response or the asset body with cache headers.
-
-**Call relations**: _static_response and _stored_asset both use it so local and shared-store assets behave the same way.
-
-*Call graph*: called by 2 (_static_response, _stored_asset); 1 external calls (Response).
-
-
-##### `_publish_assets`  (lines 295–299)
-
-```
-async def _publish_assets(blob: BlobStore) -> None
-```
-
-**Purpose**: Copies this build’s static assets into the shared blob store if they are not already there. This lets another server instance serve assets for a page created by this one.
-
-**Data flow**: It reads the in-memory asset table, checks each key in the blob store, and writes missing asset bytes.
-
-**Call relations**: _assets_published starts this work before portal_page serves the main HTML shell.
-
-*Call graph*: calls 2 internal fn (exists, put); called by 1 (_assets_published).
-
-
-##### `_assets_published`  (lines 302–314)
-
-```
-def _assets_published(blob: BlobStore) -> 'asyncio.Task[None]'
-```
-
-**Purpose**: Ensures this process starts exactly one asset-publishing task, and retries if the previous attempt failed. It is a small guard against duplicate work and broken deploy rollouts.
-
-**Data flow**: It checks the module-level publish task, creates a new asyncio task when needed, stores it, and returns the task for callers to await.
-
-**Call relations**: portal_page calls it before serving the browser shell so any assets named by that shell are available in shared storage.
-
-*Call graph*: calls 1 internal fn (_publish_assets); called by 1 (portal_page); 1 external calls (create_task).
-
-
-##### `_stored_asset`  (lines 317–339)
-
-```
-async def _stored_asset(blob: BlobStore, request: Request) -> Response
-```
-
-**Purpose**: Serves a static asset from the shared blob store when the current server build does not have it locally. This protects users during rolling deploys where their HTML came from a different version.
-
-**Data flow**: It validates the requested asset name and type, checks an in-process cache, reads bytes from the blob store on a miss, stores a bounded cached copy, and returns a normal asset response or 404.
-
-**Call relations**: static_asset calls it after _static_response cannot find a local file, and it reuses _asset_response to format the reply.
-
-*Call graph*: calls 3 internal fn (exists, get, _asset_response); called by 1 (static_asset); 3 external calls (sha256, Path, Response).
-
-
-##### `portal_page`  (lines 342–358)
-
-```
-async def portal_page(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Serves the main web portal HTML page to a signed-in request. It also fails clearly if the frontend has not been built.
-
-**Data flow**: It checks that the built HTML exists, waits for assets to be published to shared storage, and returns the HTML with no-store caching.
-
-**Call relations**: This is the GET route for the portal root. It relies on _assets_published so the assets referenced by the page are reachable.
-
-*Call graph*: calls 1 internal fn (_assets_published); 1 external calls (HTMLResponse).
-
-
-##### `_authenticate`  (lines 361–379)
-
-```
-async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | Response
-```
-
-**Purpose**: Verifies the session cookie and resolves it to a workspace member. If the email is new but allowed, it links or creates the member record used by the rest of the portal.
-
-**Data flow**: It reads the signed cookie, verifies it against the workspace, asks the context for the linked member or links one, and returns either member id plus email or a 401 response.
-
-**Call relations**: _audience_for uses it for most portal routes, and fulfill_credential uses it directly for credential submission.
-
-*Call graph*: calls 2 internal fn (link_member, linked_member); called by 2 (_audience_for, fulfill_credential); 2 external calls (verify_token, Response).
-
-
-##### `static_asset`  (lines 382–388)
-
-```
-async def static_asset(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Serves JavaScript, CSS, fonts, and other declared static files for the portal. It only runs after the session has already been scoped.
-
-**Data flow**: It receives a request, tries to serve the asset from this build, and if missing tries the shared blob store.
-
-**Call relations**: This is the static asset route. It delegates to _static_response and _stored_asset.
-
-*Call graph*: calls 2 internal fn (_static_response, _stored_asset).
-
-
-##### `open_session`  (lines 391–416)
-
-```
-async def open_session(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Accepts the signed bearer token posted by the login flow, stores it as the browser session cookie, and redirects back into the portal. The token stays out of URLs.
-
-**Data flow**: It checks the form size, parses the form, validates the token field’s basic shape, writes the session cookie, and returns a redirect or a 400-level response.
-
-**Call relations**: This is the single POST route that opens a web session. It shares _framed_length and _form with other form-reading routes.
-
-*Call graph*: calls 2 internal fn (_form, _framed_length); 3 external calls (JSONResponse, RedirectResponse, set_session_cookie).
-
-
-##### `_agent_param`  (lines 419–423)
-
-```
-def _agent_param(request: Request) -> UUID | None
-```
-
-**Purpose**: Reads the agent id from a route path and makes sure it is a valid UUID. Invalid ids become None so callers can answer not found.
-
-**Data flow**: It reads request.path_params['agent_id'], parses it as a UUID, and returns the UUID or None.
-
-**Call relations**: chat, transcript, and _panel_gate call it before checking whether the signed-in member may access that agent.
-
-*Call graph*: called by 3 (_panel_gate, chat, transcript); 1 external calls (UUID).
-
-
-##### `_chat_row_key`  (lines 426–427)
-
-```
-def _chat_row_key(conversation_id: UUID) -> str
-```
-
-**Purpose**: Builds the private store key used for a web chat’s metadata row. That row binds a conversation to the web member and selected agent.
-
-**Data flow**: It receives a conversation id and returns a string key under the chat store prefix.
-
-**Call relations**: _open_conversation writes this key, _own_web_chat reads it, and chats_index bulk-reads these keys for rail rows.
-
-*Call graph*: called by 3 (_open_conversation, _own_web_chat, chats_index).
-
-
-##### `_chat_title`  (lines 436–454)
-
-```
-def _chat_title(text: str, paths: tuple[str, ...]) -> str
-```
-
-**Purpose**: Creates a short human label for a chat from the first message or attached filenames. It trims neatly so the rail does not show awkward half-phrases.
-
-**Data flow**: It receives message text and saved file paths, collapses whitespace, falls back to filenames when text is empty, cuts to the maximum title length, and returns the cleaned title.
-
-**Call relations**: _open_conversation uses it for brand-new chats, and summarize_chat_titles reuses it to clean model-written titles.
-
-*Call graph*: called by 2 (_open_conversation, summarize_chat_titles).
-
-
-##### `_title_excerpt`  (lines 466–484)
-
-```
-def _title_excerpt(messages: tuple[Message, ...]) -> str
-```
-
-**Purpose**: Builds the short conversation excerpt used when asking the model to write a better chat title. It uses the first user and assistant messages only.
-
-**Data flow**: It receives transcript messages, extracts rendered text, strips web/context wrapper text from the user side, limits each part, and returns joined text or an empty string.
-
-**Call relations**: summarize_chat_titles calls it before asking the model for a title. It depends on _rendered_text and member_message_text to show real user words.
-
-*Call graph*: calls 1 internal fn (_rendered_text); called by 1 (summarize_chat_titles); 1 external calls (member_message_text).
-
-
-##### `summarize_chat_titles`  (lines 487–533)
-
-```
-async def summarize_chat_titles(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: Background job that gives conversations better titles after an opening exchange exists. This makes the chat rail easier to scan than using only the first raw message.
-
-**Data flow**: It asks core for conversations awaiting titles, reads their transcripts, builds excerpts, optionally asks the model for a short title, cleans it, and records that the title attempt is done.
-
-**Call relations**: A scheduled job calls this. It uses _title_excerpt and _chat_title, then writes results through the extension context.
-
-*Call graph*: calls 4 internal fn (conversations_awaiting_title, summarized_conversation_title, _chat_title, _title_excerpt); 2 external calls (__init__, __init__).
-
-
-##### `seed_homepages`  (lines 536–594)
-
-```
-async def seed_homepages(ctx: ExtensionContext, bucket: str | None=None) -> None
-```
-
-**Purpose**: Background job that asks each agent to build its first homepage once. It marks agents as seeded so the fleet is not repeatedly asked to do the same setup work.
-
-**Data flow**: It reads workspace agents and existing markers, chooses an acting member, opens or reuses a conversation, invokes a scheduled prompt, checks cancellation, and writes a marker on accepted runs.
-
-**Call relations**: A scheduled job calls this. It uses the extension context to open conversations and admit scheduled work on behalf of an owner or admin.
-
-*Call graph*: calls 5 internal fn (earliest_seated_admin, invoke, open_conversation, turn_outcomes, workspace_agents); 1 external calls (now).
-
-
-##### `_open_conversation`  (lines 597–630)
-
-```
-async def _open_conversation(ctx: SurfaceContext, store: ScopedStore, agent_id: UUID, member_id: UUID, email: str, queue_key: str, text: str, paths: tuple[str, ...]) -> tuple[UUID, str]
-```
-
-**Purpose**: Creates a new web chat conversation and writes the web-only ownership record that later gates access. It is careful about races so duplicate opens land on the winning conversation.
-
-**Data flow**: It receives agent, member, email, queue key, text, and file paths. It writes a tentative chat row, asks core for the conversation, deletes the row if another conversation won, retitles new conversations, and returns id plus title.
-
-**Call relations**: chat calls it when the request asks for a new conversation. It uses _chat_row_key, _chat_title, _own_web_chat, and _named.
-
-*Call graph*: calls 8 internal fn (delete, put, conversation_for, retitle_conversation, _chat_row_key, _chat_title, _named, _own_web_chat); called by 1 (chat); 3 external calls (__init__, conversation_audience, uuid4).
-
-
-##### `_named`  (lines 633–640)
-
-```
-async def _named(ctx: SurfaceContext, agent_id: UUID, member_id: UUID, conversation_id: UUID) -> str
-```
-
-**Purpose**: Looks up the current display title for one conversation. It avoids inventing a separate name in the web layer.
-
-**Data flow**: It asks core for the one listed conversation matching agent, member, and conversation id, then returns its title or an empty string.
-
-**Call relations**: _open_conversation and chat use it whenever they need to return the title that core’s listing owns.
-
-*Call graph*: calls 1 internal fn (list_agent_conversations); called by 2 (_open_conversation, chat).
-
-
-##### `_own_web_chat`  (lines 643–655)
-
-```
-async def _own_web_chat(store: ScopedStore, agent_id: UUID, email: str, conversation_id: UUID) -> ChatRecord | None
-```
-
-**Purpose**: Checks whether a conversation is this exact member’s web chat with this exact agent. This prevents one member or agent from opening another member’s web chat by guessing an id.
-
-**Data flow**: It reads the chat row from the store, validates it as a ChatRecord, compares agent id and email, and returns the record or None.
-
-**Call relations**: _member_chat builds on it, and _open_conversation uses it to verify a race-winning conversation has the expected web row.
-
-*Call graph*: calls 2 internal fn (get, _chat_row_key); called by 2 (_member_chat, _open_conversation).
-
-
-##### `_member_chat`  (lines 658–679)
-
-```
-async def _member_chat(ctx: SurfaceContext, store: ScopedStore, agent_id: UUID, member_id: UUID, email: str, conversation_id: UUID) -> ListedConversation | None
-```
-
-**Purpose**: Decides whether the current member may treat a conversation as a chat with the selected agent. It allows this surface’s own web chats and certain member-private extension conversations.
-
-**Data flow**: It checks the web chat row, asks core for the listed conversation, and returns the listed conversation only when the record and audience rules match.
-
-**Call relations**: chat and transcript use it to gate conversation ids. _resolve_chat and _member_turn also use it when resolving permalinks or stream access.
-
-*Call graph*: calls 2 internal fn (list_agent_conversations, _own_web_chat); called by 4 (_member_turn, _resolve_chat, chat, transcript); 1 external calls (conversation_audience).
-
-
-##### `_turn_context`  (lines 682–693)
-
-```
-def _turn_context(email: str, request: Request, source: str) -> TurnContext
-```
-
-**Purpose**: Builds the small context object attached to a submitted turn: who sent it, where it came from, and optionally the browser’s timezone. Bad timezone names are ignored rather than blocking the message.
-
-**Data flow**: It reads the timezone header, tries to create a TurnContext with sender/source/timezone, logs and drops the timezone if validation fails, and returns the context.
-
-**Call relations**: chat calls it just before admitting a member message to the core queue.
-
-*Call graph*: called by 1 (chat); 2 external calls (__init__, log).
-
-
-##### `_chat_source`  (lines 696–704)
-
-```
-def _chat_source(public_base_url: str | None, conversation_id: UUID, email: str) -> str
-```
-
-**Purpose**: Creates the human-readable source string for a web chat message. When possible, it includes a portal link back to the conversation and the sender email.
-
-**Data flow**: It receives the public base URL, conversation id, and email. It returns either a portal conversation URL plus email or a simpler web/email label.
-
-**Call relations**: chat passes this into _turn_context so downstream work can say where the request came from.
-
-*Call graph*: called by 1 (chat).
-
-
-##### `_audience_for`  (lines 707–714)
-
-```
-async def _audience_for(ctx: SurfaceContext, request: Request) -> tuple[UUID, str, WebAudience] | Response
-```
-
-**Purpose**: Combines authentication with the web-specific permission set for this member. Most routes use it as their first step.
-
-**Data flow**: It authenticates the request, then asks the web audience module which agents and admin powers this email has, returning member id, email, and audience or an error response.
-
-**Call relations**: It is the common gate for agent lists, chat, panels, workspace pages, object reads, admin reads, and streaming ownership checks.
-
-*Call graph*: calls 1 internal fn (_authenticate); called by 18 (_member_turn, _object_gate, _panel_gate, admin_index, agents_index, chat, chats_index, connection_pool, github_coverage, transcript (+8 more)); 2 external calls (web_audience, web_extension).
-
-
-##### `agents_index`  (lines 717–757)
-
-```
-async def agents_index(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the portal’s boot data: the signed-in member, visible agents, subagent profiles, and the schema needed to create a new agent. This is usually the first API call the browser makes.
-
-**Data flow**: It authenticates and builds the web audience, optionally reads web-audience grants for admins, formats agents and subagents, adds create-agent metadata, and returns JSON.
-
-**Call relations**: This route depends on _audience_for, granted_emails, and agent_create_schema to populate the frontend’s initial agent screen.
-
-*Call graph*: calls 1 internal fn (_audience_for); 4 external calls (JSONResponse, granted_emails, web_extension, agent_create_schema).
-
-
-##### `_framed_length`  (lines 760–773)
-
-```
-def _framed_length(request: Request, limit: int) -> Response | None
-```
-
-**Purpose**: Protects routes that must parse a whole form body by requiring an honest Content-Length under a limit. Chunked bodies are refused because their size cannot be trusted up front.
-
-**Data flow**: It reads transfer-encoding and content-length headers, returns 411 or 413 when unsafe or too large, and returns None when parsing may continue.
-
-**Call relations**: resolve_workspace, open_session, _parse_inbound, and fulfill_credential call it before form parsing.
-
-*Call graph*: called by 4 (_parse_inbound, fulfill_credential, open_session, resolve_workspace); 1 external calls (Response).
-
-
-##### `_form`  (lines 776–783)
-
-```
-async def _form(request: Request) -> FormData | Response
-```
-
-**Purpose**: Parses a request form and turns parser failures into a normal bad-request response. This keeps malformed client input from surfacing as an internal error.
-
-**Data flow**: It calls request.form(), returns the parsed form, or returns a 400 response if form parsing fails.
-
-**Call relations**: It is shared by login, chat multipart parsing, credential fulfillment, and workspace resolution from a posted token.
-
-*Call graph*: called by 4 (_parse_inbound, fulfill_credential, open_session, resolve_workspace); 2 external calls (form, Response).
-
-
-##### `_bounded_body`  (lines 786–794)
-
-```
-async def _bounded_body(request: Request, limit: int) -> bytes | Response
-```
-
-**Purpose**: Reads a non-form request body under a hard byte limit. It limits what is actually received, not just what the client claimed it would send.
-
-**Data flow**: It streams chunks from the request, appends them until the cap is exceeded, and returns either the bytes or a 413 response.
-
-**Call relations**: _parse_inbound uses it for plain-text chat messages.
-
-*Call graph*: called by 1 (_parse_inbound); 2 external calls (stream, Response).
-
-
-##### `_parse_inbound`  (lines 797–833)
-
-```
-async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...]] | Response
-```
-
-**Purpose**: Reads a chat submission as either plain text or multipart form with files. It rejects unsupported or unsafe body shapes.
-
-**Data flow**: It inspects content type, reads and decodes plain text under a byte cap, or parses bounded multipart form data into message text and upload files, returning either that pair or an error response.
-
-**Call relations**: chat calls it before deciding whether the request is a message, file upload, answer, or stop request.
-
-*Call graph*: calls 3 internal fn (_bounded_body, _form, _framed_length); called by 1 (chat); 1 external calls (Response).
-
-
-##### `_inbox_paths`  (lines 836–840)
-
-```
-def _inbox_paths(uploads: tuple[UploadFile, ...]) -> tuple[str, ...]
-```
-
-**Purpose**: Assigns safe workspace paths for uploaded files under the web inbox folder. It avoids filename collisions in one message.
-
-**Data flow**: It receives upload objects, normalizes each filename through inbox_name, tracks names already used, and returns tupled workspace paths.
-
-**Call relations**: chat uses these paths before _deliver_uploads saves the files and _files_note mentions them in the admitted message.
-
-*Call graph*: called by 1 (chat); 1 external calls (inbox_name).
-
-
-##### `_deliver_uploads`  (lines 843–852)
-
-```
-async def _deliver_uploads(ctx: SurfaceContext, conversation_id: UUID, uploads: tuple[UploadFile, ...], paths: tuple[str, ...]) -> None
-```
-
-**Purpose**: Writes uploaded chat files into the conversation workspace before the agent turn starts. That way the agent can read the files from the paths named in the message.
-
-**Data flow**: It receives uploads and matching paths, streams each upload in chunks, and asks the surface context to write each workspace file.
-
-**Call relations**: chat calls it after opening or validating the conversation and before admitting the message.
-
-*Call graph*: calls 2 internal fn (write_workspace_file, _upload_chunks); called by 1 (chat).
-
-
-##### `_files_note`  (lines 855–858)
-
-```
-def _files_note(text: str, paths: tuple[str, ...]) -> str
-```
-
-**Purpose**: Adds a plain note to the admitted message listing where attached files were saved. This tells the agent exactly which workspace paths to inspect.
-
-**Data flow**: It receives the member’s text and saved paths, builds an attachment note, and returns either text plus note or just the note.
-
-**Call relations**: chat uses it when uploads are present, before enforcing the inbound character limit.
-
-*Call graph*: called by 1 (chat).
-
-
-##### `_upload_chunks`  (lines 861–863)
-
-```
-async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Streams an uploaded file in fixed-size chunks. This avoids loading large uploads all at once in this helper.
-
-**Data flow**: It repeatedly reads chunks from an UploadFile until no more bytes remain, yielding each chunk.
-
-**Call relations**: _deliver_uploads passes this async byte stream to the workspace file writer.
-
-*Call graph*: called by 1 (_deliver_uploads); 1 external calls (read).
-
-
-##### `_answer_headers`  (lines 866–878)
-
-```
-def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response
-```
-
-**Purpose**: Parses headers used when a member answers a question the agent asked. Validating early prevents malformed answer clicks from opening or changing conversations.
-
-**Data flow**: It reads answer turn and question index headers, returns None for a normal message, returns parsed turn UUID plus question index, or returns a 400 response.
-
-**Call relations**: chat calls it before admitting an answer and uses the result to build an idempotency key.
-
-*Call graph*: called by 1 (chat); 2 external calls (Response, UUID).
-
-
-##### `_stop_header`  (lines 881–890)
-
-```
-def _stop_header(request: Request) -> UUID | None | Response
-```
-
-**Purpose**: Parses the header used when the member presses stop on a running turn. It makes sure the stop names a valid turn id.
-
-**Data flow**: It reads the stop-turn header, returns None for a normal message, returns a UUID for a stop request, or returns a 400 response.
-
-**Call relations**: chat calls it before reading or acting on the message body.
-
-*Call graph*: called by 1 (chat); 2 external calls (Response, UUID).
-
-
-##### `chat`  (lines 893–990)
-
-```
-async def chat(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Receives one chat action from the browser: start a chat, continue a chat, answer a question, upload files, or stop a turn. It is the main write path for member messages in the web portal.
-
-**Data flow**: It authenticates, checks agent and conversation access, parses stop/answer/body/uploads, opens or validates the conversation, saves uploads, admits the message or stops the turn, and returns JSON naming the turn and conversation outcome.
-
-**Call relations**: This POST route coordinates many helpers: _audience_for, _agent_param, _parse_inbound, _open_conversation, _member_chat, _deliver_uploads, _turn_context, and core admission/stop calls.
-
-*Call graph*: calls 16 internal fn (admit, admitted_body, stop_turn, _agent_param, _answer_headers, _audience_for, _chat_source, _deliver_uploads, _files_note, _inbox_paths (+6 more)); 5 external calls (JSONResponse, Response, web_extension, UUID, uuid4).
-
-
-##### `_rendered_text`  (lines 993–1004)
-
-```
-def _rendered_text(message: Message) -> str
-```
-
-**Purpose**: Turns a stored model message into the plain text the portal should display. It strips hidden context wrappers from user messages.
-
-**Data flow**: It receives a Message, extracts string content or text blocks, removes web/context tags for user messages, trims whitespace, and returns the visible text.
-
-**Call relations**: _title_excerpt and _rendered_messages use it so titles and transcripts are based on the member-readable version of a message.
-
-*Call graph*: called by 2 (_rendered_messages, _title_excerpt).
-
-
-##### `_tool_event`  (lines 1007–1020)
-
-```
-def _tool_event(block: ToolUseBlock) -> dict[str, str]
-```
-
-**Purpose**: Converts a tool-use block into a small display event for the transcript. It hides internal request metadata that members should not see.
-
-**Data flow**: It receives a tool-use block, copies it without the internal requested-by field, classifies it as a skill load or tool call, and returns a display dictionary.
-
-**Call relations**: _subagent_activity and _rendered_messages call it while building visible work histories.
-
-*Call graph*: called by 2 (_rendered_messages, _subagent_activity); 2 external calls (model_copy, tool_activity).
-
-
-##### `_subagent_activity`  (lines 1042–1064)
-
-```
-def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]
-```
-
-**Purpose**: Extracts the visible work a subagent did: notes, tools, and skills, in order. It only includes tool calls that actually produced activity.
-
-**Data flow**: It receives subagent transcript messages, identifies active tool results, walks assistant blocks, converts notes and tool uses into display events, and returns a bounded list.
-
-**Call relations**: _subagent_nodes calls it after reading each subagent conversation transcript.
-
-*Call graph*: calls 1 internal fn (_tool_event); called by 1 (_subagent_nodes).
-
-
-##### `_finish_payload`  (lines 1067–1077)
-
-```
-def _finish_payload(answer: str) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Tries to decode a subagent’s final answer as a JSON object. Some subagents finish with structured data rather than plain prose.
-
-**Data flow**: It receives an answer string, returns None if empty or not a JSON object, otherwise returns the decoded dictionary.
-
-**Call relations**: _run_answer uses it before deciding how to display a run’s final output.
-
-*Call graph*: called by 1 (_run_answer); 1 external calls (loads).
-
-
-##### `_payload_prose`  (lines 1080–1103)
-
-```
-def _payload_prose(value: JsonValue) -> str
-```
-
-**Purpose**: Turns structured JSON values into readable prose for the portal. Lists, objects, booleans, and numbers all get member-friendly text.
-
-**Data flow**: It receives a JSON-like value, recursively renders strings, booleans, numbers, lists, and objects, and returns a text version.
-
-**Call relations**: _run_answer uses it when a finish payload has multiple fields or nontrivial structure.
-
-*Call graph*: called by 1 (_run_answer); 2 external calls (items, strip).
-
-
-##### `_run_answer`  (lines 1106–1122)
-
-```
-def _run_answer(answer: str) -> str
-```
-
-**Purpose**: Produces the text shown as a subagent run’s answer. It hides unhelpful JSON wrapping when the payload is really just one prose field.
-
-**Data flow**: It receives the terminal answer string, tries to decode it, returns raw text if not structured, returns the sole prose field when appropriate, or renders the whole payload as prose.
-
-**Call relations**: _subagent_nodes uses it for subagent tree nodes, and _conversation_messages uses it for conversations made of subagent-profile runs.
-
-*Call graph*: calls 2 internal fn (_finish_payload, _payload_prose); called by 2 (_conversation_messages, _subagent_nodes).
-
-
-##### `_subagent_nodes`  (lines 1125–1164)
-
-```
-async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> SubagentRuns
-```
-
-**Purpose**: Builds the nested tree of subagent runs spawned by a conversation or turn. This lets the UI show not just that a child ran, but what it did and what it answered.
-
-**Data flow**: It receives turn records, finds spawned turns, names their profiles, reads bounded transcripts concurrently for activity, attaches children under parents, and returns a mapping from parent turn id to nodes.
-
-**Call relations**: _conversation_messages uses it for settled transcripts, and _events uses it when a live turn finishes.
-
-*Call graph*: calls 4 internal fn (list_agents, read_transcript, _run_answer, _subagent_activity); called by 2 (_conversation_messages, _events); 2 external calls (__init__, gather).
-
-
-##### `_rendered_messages`  (lines 1167–1296)
-
-```
-def _rendered_messages(messages: tuple[Message, ...], subagents: SubagentRuns | None=None, turn_ids: frozenset[str]=frozenset(), agent_origin: frozenset[str]=frozenset(), speakers: Mapping[str, str] |
-```
-
-**Purpose**: Projects raw transcript messages into the chat bubbles and assistant replies the portal displays. It removes engine-only context and groups notes, tools, questions, files, and subagents under the right reply.
-
-**Data flow**: It receives messages plus optional maps for subagents, speakers, questions, answers, and files. It walks the transcript, builds user bubbles and assistant replies, flushes replies at turn boundaries, and returns display dictionaries.
-
-**Call relations**: _conversation_messages calls it as the central transcript rendering step.
-
-*Call graph*: calls 2 internal fn (_rendered_text, _tool_event); called by 1 (_conversation_messages); 1 external calls (member_message_text).
-
-
-##### `_rendered_messages.note_answer`  (lines 1222–1227)
-
-```
-def note_answer() -> None
-```
-
-**Purpose**: Moves a previously seen assistant answer into the list of work notes when later work shows it was not actually the final answer. This preserves narration in the right order.
-
-**Data flow**: It reads the surrounding function’s current answer and pending event list, inserts the answer as a note when allowed, updates the note count, and clears the answer.
-
-**Call relations**: It is an inner helper used only by _rendered_messages while grouping assistant messages.
-
-
-##### `_rendered_messages.flush_reply`  (lines 1229–1250)
-
-```
-def flush_reply(include_subagents: bool) -> None
-```
-
-**Purpose**: Finishes the current assistant reply and appends it to the rendered transcript if it has anything visible. It attaches subagents, questions, and shared files when the reply belongs to a closing turn.
-
-**Data flow**: It reads the surrounding pending answer/events and current turn id, gathers related data, appends one assistant reply dictionary if needed, and resets the buffers.
-
-**Call relations**: It is an inner helper used only by _rendered_messages at user-message and turn boundaries.
-
-
-##### `_conversation_messages`  (lines 1299–1442)
-
-```
-async def _conversation_messages(ctx: SurfaceContext, conversation_id: UUID, viewer: UUID) -> tuple[list[dict[str, object]], Turn | None]
-```
-
-**Purpose**: Builds the complete member-facing message list for one conversation, including settled transcript messages, the currently running turn, queued messages, shared files, questions, and subagent work.
-
-**Data flow**: It reads transcript, speaker labels, origin markers, latest turn details, turns, artifacts, spawned subagents, and queued arrivals. It renders committed messages, appends live or waiting messages, and returns the message list plus latest turn if any.
-
-**Call relations**: transcript and conversation_transcript call it. It relies on _rendered_messages, _subagent_nodes, _file_payload, and _run_answer.
-
-*Call graph*: calls 13 internal fn (agent_origin_refs, arrival_speakers, conversation_subagent_turns, latest_turn, list_conversation_artifacts, list_turns, queued_arrivals, read_transcript, turn_detail, _file_payload (+3 more)); called by 2 (conversation_transcript, transcript); 2 external calls (gather, member_message_text).
-
-
-##### `transcript`  (lines 1445–1475)
-
-```
-async def transcript(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the chat transcript for one of the member’s own web conversations with an agent. If a turn is still running, it tells the browser which turn to stream.
-
-**Data flow**: It authenticates, checks agent and conversation ownership, renders messages, and returns JSON with messages plus either a live turn id or pending handoffs from the latest terminal turn.
-
-**Call relations**: This GET route uses _member_chat for access, _conversation_messages for projection, and _open_handoffs for credential prompts on reload.
-
-*Call graph*: calls 5 internal fn (_agent_param, _audience_for, _conversation_messages, _member_chat, _open_handoffs); 4 external calls (JSONResponse, Response, web_extension, UUID).
-
-
-##### `_open_handoffs`  (lines 1478–1490)
-
-```
-async def _open_handoffs(ctx: SurfaceContext, turn_id: UUID, terminal: TerminalFrame) -> dict[str, object]
-```
-
-**Purpose**: Reports unfinished handoffs from a completed turn, currently credential prompts still waiting for member input. This lets reloads redraw prompts that were shown live.
-
-**Data flow**: It receives a turn id and terminal frame, checks for a credential request, filters pending prompts, and returns a small handoff dictionary.
-
-**Call relations**: transcript calls it when the latest turn has ended. It uses _pending_prompts for the per-slot pending check.
-
-*Call graph*: calls 1 internal fn (_pending_prompts); called by 1 (transcript).
-
-
-##### `chats_index`  (lines 1493–1556)
-
-```
-async def chats_index(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Builds the chat rail: the member’s own conversations and readable conversations from others across visible chat agents. It keeps private or rowless web conversations out of the rail.
-
-**Data flow**: It authenticates, optionally resolves a requested permalink, lists conversations per visible agent and participation side, reads web chat records, formats rows, sorts by latest activity, and returns JSON.
-
-**Call relations**: The browser calls this for the rail. It delegates permalink resolution to _resolve_chat and uses _chat_row_key and _iso while formatting rows.
-
-*Call graph*: calls 5 internal fn (list_agent_conversations, _audience_for, _chat_row_key, _iso, _resolve_chat); 2 external calls (JSONResponse, web_extension).
-
-
-##### `_resolve_chat`  (lines 1559–1628)
-
-```
-async def _resolve_chat(ctx: SurfaceContext, store: ScopedStore, audience: WebAudience, member_id: UUID, email: str, requested: str) -> Response
-```
-
-**Purpose**: Resolves a conversation permalink into either a chat rail row or a read-only conversation projection. It lets the frontend open #/c/<id> links safely.
-
-**Data flow**: It parses the requested id, checks whether it is one of the member’s chats, otherwise finds the owning agent and asks whether the member may see it, then returns JSON for a rail row, a conversation row, or no match.
-
-**Call relations**: chats_index calls it when a conversation query is present. It uses _member_chat for own chats and _conversation_row for non-chat conversation projections.
-
-*Call graph*: calls 7 internal fn (conversation_agent, latest_turn, list_agent_conversations, turn_detail, _conversation_row, _iso, _member_chat); called by 1 (chats_index); 2 external calls (JSONResponse, UUID).
-
-
-##### `_panel_gate`  (lines 1631–1644)
-
-```
-async def _panel_gate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str, WebAudience, UUID] | Response
-```
-
-**Purpose**: Common permission gate for routes that read or mutate data inside one agent’s panel. It makes sure the member is signed in and the path agent is in their web audience.
-
-**Data flow**: It authenticates, parses the agent id, checks the audience, and returns member id, email, audience, and agent id or a 404/401 response.
-
-**Call relations**: Skills, settings, conversations, connections, community skill pages, intents, usage, homepage, and readable-conversation checks call it first.
-
-*Call graph*: calls 2 internal fn (_agent_param, _audience_for); called by 10 (_readable_conversation, community_skill, community_skills, connections, conversations, homepage, intents, settings, skills, usage); 1 external calls (Response).
-
-
-##### `_iso`  (lines 1647–1648)
-
-```
-def _iso(moment: datetime | None) -> str | None
-```
-
-**Purpose**: Formats a datetime for JSON, while preserving None as null. It centralizes timestamp formatting.
-
-**Data flow**: It receives a datetime or None and returns ISO-8601 text or None.
-
-**Call relations**: Many response builders use it for dates in chat rows, conversations, memory, usage, artifacts, radar, and object details.
-
-*Call graph*: called by 8 (_conversation_row, _memory_rows, _radar_run, _resolve_chat, _usage_payload, chats_index, object_detail, workspace_artifacts); 1 external calls (isoformat).
-
-
-##### `_window_param`  (lines 1651–1667)
-
-```
-def _window_param(request: Request) -> int | None | Response
-```
-
-**Purpose**: Parses the usage time window requested by the browser. It accepts named ranges like 7d or a numeric number of seconds.
-
-**Data flow**: It reads query parameters, validates the range or window_seconds value, and returns seconds, None for all time, or a 400 response.
-
-**Call relations**: usage and workspace_usage use it before asking core for spending reports.
-
-*Call graph*: called by 2 (usage, workspace_usage); 1 external calls (Response).
-
-
-##### `_usage_payload`  (lines 1670–1710)
-
-```
-def _usage_payload(report: AgentSpendReport | MemberSpendReport | SpendReport) -> dict[str, object]
-```
-
-**Purpose**: Formats token and cost usage details into the JSON shape shared by agent, member, and workspace usage views.
-
-**Data flow**: It receives a spend report, extracts selected-window totals, all-time totals, first-use date, daily lines, execution breakdown, and model breakdown, and returns a dictionary.
-
-**Call relations**: usage and workspace_usage call it so all usage panels present the same nested usage data.
-
-*Call graph*: calls 1 internal fn (_iso); called by 2 (usage, workspace_usage).
-
-
-##### `skills`  (lines 1713–1733)
-
-```
-async def skills(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the skills available to the selected agent. These include the agent’s own skills and shared deployed skills.
-
-**Data flow**: It gates the agent panel, asks core for the agent’s skills, formats each skill’s name, description, origin, and instructions, and returns JSON.
-
-**Call relations**: This GET route uses _panel_gate before calling the surface context’s skill listing.
-
-*Call graph*: calls 2 internal fn (agent_skills, _panel_gate); 1 external calls (JSONResponse).
-
-
-##### `_community_refusal`  (lines 1739–1743)
-
-```
-def _community_refusal(fault: Exception) -> Response
-```
-
-**Purpose**: Turns a community directory failure into a response the member can read directly. A special header tells the frontend the body is user-facing text.
-
-**Data flow**: It receives an exception, converts it to text, and returns a 502 response with the refusal marker header.
-
-**Call relations**: community_skills and community_skill call it when the external community directory is unavailable or errors.
-
-*Call graph*: called by 2 (community_skill, community_skills); 1 external calls (Response).
-
-
-##### `community_skills`  (lines 1750–1766)
-
-```
-async def community_skills(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns a page of community skill candidates for the selected agent, either popular results or search results. Applying one still goes through the intent system, not this read route.
-
-**Data flow**: It gates the panel, validates a minimum search length, asks the community directory for listings, and returns skill JSON or a refusal response.
-
-**Call relations**: This route uses _panel_gate and _community_refusal around COMMUNITY.listing.
-
-*Call graph*: calls 2 internal fn (_community_refusal, _panel_gate); 3 external calls (JSONResponse, Response, listing).
-
-
-##### `community_skill`  (lines 1769–1790)
-
-```
-async def community_skill(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Fetches one community skill document so a member can inspect it before applying it. It validates the owner, repo, and skill name shapes before the lookup.
-
-**Data flow**: It gates the panel, validates path segments, asks the community directory for the named skill, and returns the skill document, 404, or a refusal response.
-
-**Call relations**: This route uses _panel_gate and _community_refusal around COMMUNITY.fetch.
-
-*Call graph*: calls 2 internal fn (_community_refusal, _panel_gate); 3 external calls (JSONResponse, Response, fetch).
-
-
-##### `workspace_memory`  (lines 1793–1858)
-
-```
-async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Shows memory items visible to the member across agents they can reach. It supports both recent listings and text search.
-
-**Data flow**: It authenticates, checks memory availability, computes audience subjects, then either lists recent memory with filters and cursor or searches each visible agent and deduplicates results, returning formatted rows.
-
-**Call relations**: This workspace route uses _audience_for, ListingCursor decoding, SourceReader for per-agent searches, and _memory_rows for formatting.
-
-*Call graph*: calls 5 internal fn (recent_memory, search_memory, decode, _audience_for, _memory_rows); 6 external calls (__init__, gather, audience_subjects, conversation_audience, JSONResponse, Response).
-
-
-##### `_memory_rows`  (lines 1861–1871)
-
-```
-def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]
-```
-
-**Purpose**: Formats memory search or listing matches for the frontend. It includes the text, kind, optional object reference, subject, and creation time.
-
-**Data flow**: It receives memory matches and returns a list of dictionaries with simple JSON values.
-
-**Call relations**: workspace_memory calls it for both recent memory pages and search results.
-
-*Call graph*: calls 1 internal fn (_iso); called by 1 (workspace_memory).
-
-
-##### `usage`  (lines 1874–1911)
-
-```
-async def usage(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns usage and cost information for the selected agent, including caps. It only exposes this for agents explicitly granted to the member or admin.
-
-**Data flow**: It gates the panel, checks the audience grant, parses the usage window, asks core for agent spend, formats totals, caps, dimensions, and usage detail, and returns JSON.
-
-**Call relations**: This route uses _panel_gate, _window_param, and _usage_payload.
-
-*Call graph*: calls 4 internal fn (agent_spend, _panel_gate, _usage_payload, _window_param); 2 external calls (JSONResponse, Response).
-
-
-##### `connections`  (lines 1914–1923)
-
-```
-async def connections(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns connector accounts related to the selected agent that the member may see. This can include the member’s private grants, shared grants, and more for admins.
-
-**Data flow**: It gates the panel, asks core for agent connections under member/admin rules, serializes each entry, and returns JSON.
-
-**Call relations**: This route uses _panel_gate before calling the surface context’s connection listing.
-
-*Call graph*: calls 2 internal fn (list_agent_connections, _panel_gate); 1 external calls (JSONResponse).
-
-
-##### `connection_pool`  (lines 1926–1936)
-
-```
-async def connection_pool(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the member’s broader connection pool and filters each connection’s agent list to agents visible in the web audience. This keeps hidden agents out of shared connection data.
-
-**Data flow**: It authenticates, lists connections for the member/admin view, removes agent references outside the audience, serializes the entries, and returns JSON.
-
-**Call relations**: The route uses _audience_for and core’s list_connections.
-
-*Call graph*: calls 2 internal fn (list_connections, _audience_for); 1 external calls (JSONResponse).
-
-
-##### `github_coverage`  (lines 1939–1945)
-
-```
-async def github_coverage(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns GitHub coverage information for the member or admin. This likely powers a panel showing which repositories or accounts are connected or indexed.
-
-**Data flow**: It authenticates, asks core for GitHub coverage using member and admin status, serializes the model, and returns JSON.
-
-**Call relations**: The route is a thin authenticated wrapper around the surface context’s github_coverage call.
-
-*Call graph*: calls 2 internal fn (github_coverage, _audience_for); 1 external calls (JSONResponse).
-
-
-##### `conversations`  (lines 1948–1968)
-
-```
-async def conversations(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Lists conversations for the selected agent that this member may see. Admins may see broader rows, including rows they can disclose before reading.
-
-**Data flow**: It gates the panel, reads an optional bounded search string, asks core for conversation rows, converts each row into portal JSON, and returns the list.
-
-**Call relations**: This route uses _panel_gate, _searched, and _conversation_row.
-
-*Call graph*: calls 4 internal fn (list_agent_conversations, _conversation_row, _panel_gate, _searched); 1 external calls (JSONResponse).
-
-
-##### `_searched`  (lines 1971–1975)
-
-```
-def _searched(request: Request) -> str | None
-```
-
-**Purpose**: Reads and bounds the conversation search text from the query string. Empty search becomes None.
-
-**Data flow**: It trims the q parameter, cuts it to the maximum search length, and returns the text or None.
-
-**Call relations**: conversations passes its result into core’s conversation listing.
-
-*Call graph*: called by 1 (conversations).
-
-
-##### `_conversation_row`  (lines 1978–2009)
-
-```
-def _conversation_row(entry: ListedConversation, agent: dict[str, str] | None=None) -> dict[str, object]
-```
-
-**Purpose**: Formats one listed conversation for the portal. It omits content-like fields when core says the row is not readable.
-
-**Data flow**: It receives a ListedConversation and optional owning agent info, extracts ids, surface labels, audience, speakers, counts, dates, readability, and disclosure state, and returns a dictionary.
-
-**Call relations**: conversations uses it for per-agent lists, and _resolve_chat uses it for permalink resolution to non-chat conversations.
-
-*Call graph*: calls 1 internal fn (_iso); called by 2 (_resolve_chat, conversations).
-
-
-##### `_readable_conversation`  (lines 2012–2032)
-
-```
-async def _readable_conversation(ctx: SurfaceContext, request: Request, conversation_id: UUID | None=None) -> tuple[UUID, UUID, 'SlotViewer'] | Response
-```
-
-**Purpose**: Common gate for reading conversation content. It makes unreadable, malformed, wrong-agent, or unauthorized conversations all look like not found.
-
-**Data flow**: It gates the agent panel, parses or receives a conversation id, asks core whether this member/admin may read it, and returns agent id, conversation id, and SlotViewer or an error response.
-
-**Call relations**: conversation_transcript and _slot_target use it before any transcript or slot content is read.
-
-*Call graph*: calls 2 internal fn (readable_conversation, _panel_gate); called by 2 (_slot_target, conversation_transcript); 3 external calls (__init__, Response, UUID).
-
-
-##### `conversation_transcript`  (lines 2035–2045)
-
-```
-async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns a read-only transcript for an authorized conversation. This is for panels and non-chat conversations, not continuing the chat.
-
-**Data flow**: It verifies the conversation is readable, renders the messages with _conversation_messages, and returns them as JSON.
-
-**Call relations**: This route uses _readable_conversation for access and shares the same rendering path as chat transcripts.
-
-*Call graph*: calls 2 internal fn (_conversation_messages, _readable_conversation); 1 external calls (JSONResponse).
-
-
-##### `_slot_target`  (lines 2062–2086)
-
-```
-async def _slot_target(ctx: SurfaceContext, request: Request) -> SlotTarget | Response
-```
-
-**Purpose**: Resolves which conversation a slot request should read, including subagent conversations reached through a root conversation. It prevents arbitrary child conversation reads.
-
-**Data flow**: It reads the route conversation id and optional root query parameter, checks readability of the root or conversation, verifies child lineage when needed, and returns a SlotTarget or 404 response.
-
-**Call relations**: conversation_slots and conversation_slot call it before building slot context.
-
-*Call graph*: calls 2 internal fn (conversation_subagent_turns, _readable_conversation); called by 2 (conversation_slot, conversation_slots); 3 external calls (__init__, Response, UUID).
-
-
-##### `_slot_context`  (lines 2089–2105)
-
-```
-async def _slot_context(ctx: SurfaceContext, target: SlotTarget, ext: ExtensionContext) -> ConversationSlotContext | None
-```
-
-**Purpose**: Builds the context object that a conversation slot provider needs. A slot is a typed add-on panel, such as changes or artifacts, shown beside a conversation.
-
-**Data flow**: It reads the conversation audience and transcript, combines them with extension context, ids, messages, and public base URL, and returns a ConversationSlotContext or None.
-
-**Call relations**: conversation_slots and conversation_slot call it before summarizing or reading slot content.
-
-*Call graph*: calls 2 internal fn (conversation_audience, read_transcript); called by 2 (conversation_slot, conversation_slots); 2 external calls (__init__, replace).
-
-
-##### `_project_slot_context`  (lines 2108–2193)
-
-```
-async def _project_slot_context(ctx: SurfaceContext, slot_context: ConversationSlotContext, extension: str, content: type[BaseModel], root_conversation_id: UUID | None, viewer: SlotViewer) -> Conversa
-```
-
-**Purpose**: Adds host-provided projections to slot context for built-in slot types. For example, it prepares workspace changes, artifacts, sites, or scheduled-task visibility before a slot reads.
-
-**Data flow**: It receives slot context, extension name, expected payload type, root id, and viewer. Depending on the slot kind, it reads changes, artifacts, or visible objects, enriches the context, and returns it.
-
-**Call relations**: conversation_slots and conversation_slot call it so each provider gets the extra data it needs under the same authorization rules.
-
-*Call graph*: calls 5 internal fn (artifact_link, artifact_preview_link, conversation_changes, list_conversation_artifacts, list_conversation_member_objects); called by 2 (conversation_slot, conversation_slots); 8 external calls (__init__, __init__, __init__, __init__, replace, raster_image_media_type, urlsplit, urlunsplit).
-
-
-##### `_authorized_slot_payload`  (lines 2196–2240)
-
-```
-def _authorized_slot_payload(payload: ConversationSlotPayload, context: ConversationSlotContext) -> ConversationSlotPayload
-```
-
-**Purpose**: Filters slot payloads so they only include items the viewer is authorized to see. For automations, it can keep the row while hiding private details.
-
-**Data flow**: It receives a payload and context with visible items, removes unauthorized sites or automations, redacts automation description/latest response when content is not visible, and returns the adjusted payload.
-
-**Call relations**: conversation_slot calls it after reading a provider payload and before returning JSON.
-
-*Call graph*: called by 1 (conversation_slot); 1 external calls (model_copy).
-
-
-##### `conversation_slots`  (lines 2243–2287)
-
-```
-async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the list of available conversation slots with counts for one authorized conversation. Slots with errors are logged and skipped rather than breaking the whole panel.
-
-**Data flow**: It resolves the target conversation, builds shared slot context, loops through registered slot providers, projects context for each, asks for a summary count, and returns slot metadata for non-empty slots.
-
-**Call relations**: This route uses _slot_target, _slot_context, _project_slot_context, and core’s summarize_conversation_slot.
-
-*Call graph*: calls 4 internal fn (summarize_conversation_slot, _project_slot_context, _slot_context, _slot_target); 4 external calls (replace, JSONResponse, Response, log).
-
-
-##### `conversation_slot`  (lines 2290–2317)
-
-```
-async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the full payload for one named conversation slot. It verifies both conversation access and slot id.
-
-**Data flow**: It resolves the target, finds the provider, builds and projects slot context, reads the payload, checks it is the expected type, filters authorization-sensitive content, and returns JSON.
-
-**Call relations**: This route uses _slot_target, _slot_context, _project_slot_context, and _authorized_slot_payload.
-
-*Call graph*: calls 5 internal fn (read_conversation_slot, _authorized_slot_payload, _project_slot_context, _slot_context, _slot_target); 2 external calls (JSONResponse, Response).
-
-
-##### `_changes_projection`  (lines 2320–2323)
-
-```
-def _changes_projection(ctx: ConversationSlotContext) -> WorkspaceChanges
-```
-
-**Purpose**: Extracts the workspace-changes projection from a slot context and fails if the context was not prepared correctly.
-
-**Data flow**: It receives a ConversationSlotContext, checks that its projection is WorkspaceChanges, and returns it or raises an error.
-
-**Call relations**: _read_changes and _summarize_changes use it for the built-in changes slot provider.
-
-*Call graph*: called by 2 (_read_changes, _summarize_changes).
-
-
-##### `_read_changes`  (lines 2326–2327)
-
-```
-async def _read_changes(ctx: ConversationSlotContext) -> WorkspaceChanges
-```
-
-**Purpose**: Reads the prepared changes payload for the built-in changes slot. It does not compute changes itself.
-
-**Data flow**: It receives slot context and returns the WorkspaceChanges projection from _changes_projection.
-
-**Call relations**: It is registered as the read function for CHANGES_SLOT.
-
-*Call graph*: calls 1 internal fn (_changes_projection).
-
-
-##### `_summarize_changes`  (lines 2330–2331)
-
-```
-async def _summarize_changes(ctx: ConversationSlotContext) -> int | None
-```
-
-**Purpose**: Counts changes for the built-in changes slot and hides the slot when there are none.
-
-**Data flow**: It receives slot context, gets the changes projection, returns the number of changes or None for zero.
-
-**Call relations**: It is registered as the summarize function for CHANGES_SLOT.
-
-*Call graph*: calls 1 internal fn (_changes_projection).
-
-
-##### `_artifacts_projection`  (lines 2344–2347)
-
-```
-def _artifacts_projection(ctx: ConversationSlotContext) -> ArtifactsSlotPayload
-```
-
-**Purpose**: Extracts the artifacts projection from a slot context and fails if the context was not prepared correctly.
-
-**Data flow**: It receives a ConversationSlotContext, checks that its projection is ArtifactsSlotPayload, and returns it or raises an error.
-
-**Call relations**: _read_artifacts and _summarize_artifacts use it for the built-in artifacts slot provider.
-
-*Call graph*: called by 2 (_read_artifacts, _summarize_artifacts).
-
-
-##### `_read_artifacts`  (lines 2350–2351)
-
-```
-async def _read_artifacts(ctx: ConversationSlotContext) -> ArtifactsSlotPayload
-```
-
-**Purpose**: Reads the prepared artifacts payload for the built-in artifacts slot. It relies on earlier projection work to gather the artifacts.
-
-**Data flow**: It receives slot context and returns the ArtifactsSlotPayload projection from _artifacts_projection.
-
-**Call relations**: It is registered as the read function for ARTIFACTS_SLOT.
-
-*Call graph*: calls 1 internal fn (_artifacts_projection).
-
-
-##### `_summarize_artifacts`  (lines 2354–2356)
-
-```
-async def _summarize_artifacts(ctx: ConversationSlotContext) -> int | None
-```
-
-**Purpose**: Counts artifacts for the built-in artifacts slot and hides the slot when there are none.
-
-**Data flow**: It receives slot context, gets the artifacts projection, counts artifacts, and returns the count or None for zero.
-
-**Call relations**: It is registered as the summarize function for ARTIFACTS_SLOT.
-
-*Call graph*: calls 1 internal fn (_artifacts_projection).
-
-
-##### `workspace_credentials`  (lines 2369–2377)
-
-```
-async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns credential slots that members can fill, without ever returning secret values. This powers the workspace credentials panel.
-
-**Data flow**: It authenticates, asks core for declared credential slots and fill state, serializes them, and returns JSON.
-
-**Call relations**: This workspace route uses _audience_for and core’s list_credential_slots.
-
-*Call graph*: calls 2 internal fn (list_credential_slots, _audience_for); 1 external calls (JSONResponse).
-
-
-##### `workspace_team`  (lines 2380–2398)
-
-```
-async def workspace_team(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the workspace member roster, including admin and seat status, plus whether the current member can add people. It shows the same authority chat would use.
-
-**Data flow**: It authenticates, reads the web audience admin flag, asks core for members, formats email/admin/seated rows, and returns JSON.
-
-**Call relations**: This workspace route uses _audience_for and core’s list_members.
-
-*Call graph*: calls 2 internal fn (list_members, _audience_for); 1 external calls (JSONResponse).
-
-
-##### `workspace_sources`  (lines 2401–2412)
-
-```
-async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns source bindings visible to the member, such as connected knowledge sources. Admins can see more, while normal members see their own and shared sources.
-
-**Data flow**: It authenticates, asks core for sources using member id and admin status, serializes each entry, and returns JSON.
-
-**Call relations**: This workspace route uses _audience_for and core’s list_sources.
-
-*Call graph*: calls 2 internal fn (list_sources, _audience_for); 1 external calls (JSONResponse).
-
-
-##### `workspace_surfaces`  (lines 2415–2426)
-
-```
-async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns installed surface bindings for agents visible to the member. This supports topology or integrations views without exposing hidden agents.
-
-**Data flow**: It authenticates, lists all installations, filters them to audience-allowed agent ids, serializes entries, and returns JSON.
-
-**Call relations**: This workspace route uses _audience_for and core’s list_installations.
-
-*Call graph*: calls 2 internal fn (list_installations, _audience_for); 1 external calls (JSONResponse).
-
-
-##### `workspace_artifacts`  (lines 2429–2480)
-
-```
-async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns a searchable, filterable page of files shared with the member. It includes download and preview links when available.
-
-**Data flow**: It authenticates, validates cursor and filters, asks core for artifact rows under member/admin rules, formats file metadata, links, origins, and paging cursors, and returns JSON.
-
-**Call relations**: This route uses _audience_for, ListingCursor decoding, _iso, and context artifact link helpers.
-
-*Call graph*: calls 6 internal fn (artifact_link, artifact_preview_link, list_artifacts, decode, _audience_for, _iso); 2 external calls (JSONResponse, Response).
-
-
-##### `_radar_run`  (lines 2483–2510)
-
-```
-def _radar_run(ctx: SurfaceContext, run: ScheduledRun, task_names: Mapping[UUID, str]) -> dict[str, object]
-```
-
-**Purpose**: Formats one scheduled run for the workspace radar feed. It includes the task name when it can be resolved and file artifacts the run shared.
-
-**Data flow**: It receives a ScheduledRun and task-name lookup, derives a task id from the idempotency key, formats ids, times, status, text, source, and artifact links, and returns a dictionary.
-
-**Call relations**: workspace_radar calls it for every run in the page.
-
-*Call graph*: calls 3 internal fn (artifact_link, artifact_preview_link, _iso); called by 1 (workspace_radar); 1 external calls (scheduled_fire_task_id).
-
-
-##### `_radar_task_names`  (lines 2513–2536)
-
-```
-async def _radar_task_names(ctx: SurfaceContext, audience: WebAudience, member_id: UUID, runs: tuple[ScheduledRun, ...]) -> dict[UUID, str]
-```
-
-**Purpose**: Builds a lookup from scheduled task ids to task names for runs visible in the radar feed. Deleted or invisible tasks simply have no name.
-
-**Data flow**: It receives runs, finds agents that fired them, lists scheduled-task objects for those visible agents, extracts ids from fields, and returns a UUID-to-name dictionary.
-
-**Call relations**: workspace_radar calls it before formatting runs with _radar_run.
-
-*Call graph*: calls 1 internal fn (list_member_objects); called by 1 (workspace_radar); 2 external calls (__init__, UUID).
-
-
-##### `workspace_radar`  (lines 2539–2586)
-
-```
-async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the feed of scheduled work that ran on its own and reported into readable conversations. It is like an activity radar for automations.
-
-**Data flow**: It authenticates, parses cursor and optional agent filter, chooses a page size that includes today’s runs on the newest page, reads scheduled runs, resolves task names, formats rows, and returns cursors.
-
-**Call relations**: This workspace route uses _audience_for, _radar_task_names, and _radar_run.
-
-*Call graph*: calls 6 internal fn (count_scheduled_runs_since, list_scheduled_runs, decode, _audience_for, _radar_run, _radar_task_names); 4 external calls (now, JSONResponse, Response, UUID).
-
-
-##### `workspace_usage`  (lines 2589–2664)
-
-```
-async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the member’s own usage and cost data, and for admins also the workspace-wide rollup. This is the portal’s main spending view.
-
-**Data flow**: It authenticates, parses the usage window, reads member spend, formats caps and usage, optionally reads workspace rollup for admins, and returns JSON.
-
-**Call relations**: This route uses _audience_for, _window_param, and _usage_payload.
-
-*Call graph*: calls 5 internal fn (member_spend, spend_rollup, _audience_for, _usage_payload, _window_param); 1 external calls (JSONResponse).
-
-
-##### `_member_turn`  (lines 2667–2703)
-
-```
-async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID] | Response
-```
-
-**Purpose**: Checks whether the signed-in member may access a live turn. It protects stream and stop-related access from guessed turn ids.
-
-**Data flow**: It authenticates, parses the turn id, checks the turn owner, reads turn detail, verifies the agent is still allowed or the web chat is still owned, and returns member id plus turn id or a refusal.
-
-**Call relations**: stream calls it before opening the server-sent event stream.
-
-*Call graph*: calls 4 internal fn (turn_detail, turn_owner, _audience_for, _member_chat); called by 1 (stream); 3 external calls (Response, web_extension, UUID).
-
-
-##### `stream`  (lines 2706–2714)
-
-```
-async def stream(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Opens the live event stream for a turn. The browser uses this to receive tokens, tool activity, cost updates, terminal state, files, connection prompts, and credential prompts.
-
-**Data flow**: It verifies turn access, reads the Last-Event-ID header for resume support, and returns a StreamingResponse over _events with text/event-stream media type.
-
-**Call relations**: This GET route delegates authorization to _member_turn and event production to _events.
-
-*Call graph*: calls 2 internal fn (_events, _member_turn); 1 external calls (StreamingResponse).
-
-
-##### `_event`  (lines 2717–2718)
-
-```
-def _event(name: str, payload: dict[str, object]) -> bytes
-```
-
-**Purpose**: Creates one named server-sent event from a JSON payload. Server-sent events are browser-readable chunks formatted as event and data lines.
-
-**Data flow**: It receives an event name and payload dictionary, JSON-encodes the payload, and returns bytes in SSE format.
-
-**Call relations**: _events uses it for extra portal-specific events such as subagents, connection URLs, credential prompts, and files.
-
-*Call graph*: called by 1 (_events); 1 external calls (dumps).
-
-
-##### `_pending_prompts`  (lines 2721–2734)
-
-```
-async def _pending_prompts(ctx: SurfaceContext, request_: CredentialRequest) -> dict[str, object] | None
-```
-
-**Purpose**: Filters a credential request down to prompts that are still waiting for values. This prevents fulfilled or expired prompts from reappearing.
-
-**Data flow**: It receives a credential request, checks each prompt with core, builds prompt dictionaries for pending slots, and returns prompt data or None.
-
-**Call relations**: _events uses it during live streaming, and _open_handoffs uses it when reloading a completed transcript.
-
-*Call graph*: calls 1 internal fn (credential_prompt_pending); called by 2 (_events, _open_handoffs).
-
-
-##### `_file_payload`  (lines 2737–2754)
-
-```
-def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, object]
-```
-
-**Purpose**: Formats one shared artifact as a file card for chat. Preview links are made same-origin when possible so the portal’s browser security policy can load them.
-
-**Data flow**: It receives a shared artifact, asks core for download and preview links, strips the origin from preview URLs, and returns file metadata and links.
-
-**Call relations**: _conversation_messages uses it for transcript file attachments, and _events uses it when a live turn shares files.
-
-*Call graph*: calls 2 internal fn (artifact_link, artifact_preview_link); called by 2 (_conversation_messages, _events); 2 external calls (urlsplit, urlunsplit).
-
-
-##### `_events`  (lines 2757–2794)
-
-```
-async def _events(ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Streams live frames for a running turn and injects web-specific events when a terminal frame arrives. It is the live tail behind the chat UI.
-
-**Data flow**: It tails core frames from a turn, and for terminal frames it may read subagent results, connection URLs, credential prompts, and shared artifacts. It yields those extra events, then yields the original frame as SSE bytes.
-
-**Call relations**: stream returns this async iterator. It uses _event, _sse, _subagent_nodes, _pending_prompts, and _file_payload.
-
-*Call graph*: calls 10 internal fn (connect_url, conversation_subagent_turns, shared_artifacts, tail, turn_detail, _event, _file_payload, _pending_prompts, _sse, _subagent_nodes); called by 1 (stream).
-
-
-##### `fulfill_credential`  (lines 2797–2825)
-
-```
-async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Stores a credential value privately in response to a prompt. The value is not posted as a chat message and does not enter the transcript.
-
-**Data flow**: It authenticates, bounds and parses the form, validates sealed request, slot, and value fields, enforces a secret size limit, calls core to fulfill the sealed request, and returns stored status or an error.
-
-**Call relations**: This POST route uses _authenticate, _framed_length, and _form before calling core’s credential fulfillment.
-
-*Call graph*: calls 4 internal fn (fulfill_credential_request, _authenticate, _form, _framed_length); 2 external calls (JSONResponse, Response).
-
-
-##### `admin_index`  (lines 2828–2879)
-
-```
-async def admin_index(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the workspace administration snapshot for admins only. It includes agents, installations, web grants, members, seats, spend caps, and deploy settings.
-
-**Data flow**: It authenticates, checks the admin flag, reads installations, grants, seat snapshot, spend caps, and deploy metadata, formats them, and returns JSON or 404 for non-admins.
-
-**Call relations**: This route uses _audience_for, web_extension storage, Seats, and several SurfaceContext reads.
-
-*Call graph*: calls 3 internal fn (list_installations, spend_caps, _audience_for); 5 external calls (__init__, JSONResponse, Response, granted_emails, web_extension).
-
-
-##### `_object_gate`  (lines 2882–2896)
-
-```
-async def _object_gate(ctx: SurfaceContext, request: Request) -> tuple[UUID, WebAudience, PortalKind] | Response
-```
-
-**Purpose**: Common gate for generic object pages. It authenticates, gets the web audience, and verifies that the requested object kind exists in this deploy.
-
-**Data flow**: It reads the kind path parameter, asks core for the kind description, and returns member id, audience, and kind metadata or an error response.
-
-**Call relations**: object_index and object_detail call it before reading any object rows.
-
-*Call graph*: calls 2 internal fn (object_kind, _audience_for); called by 2 (object_detail, object_index); 1 external calls (Response).
-
-
-##### `_object_agent`  (lines 2899–2909)
-
-```
-def _object_agent(request: Request, audience: WebAudience) -> AgentSummary | Response
-```
-
-**Purpose**: Finds the one agent namespace requested for an object read. Object data is always read through an agent’s namespace.
-
-**Data flow**: It parses the agent query parameter as a UUID, searches the audience’s agents, and returns the matching AgentSummary or a 404 response.
-
-**Call relations**: object_index uses it for single-agent reads, and object_detail requires it for the named object.
-
-*Call graph*: called by 2 (object_detail, object_index); 2 external calls (Response, UUID).
-
-
-##### `_kind_payload`  (lines 2912–2919)
-
-```
-def _kind_payload(kind: PortalKind) -> dict[str, object]
-```
-
-**Purpose**: Builds shared metadata about an object kind for the frontend. It tells the UI which fields exist and whether apply/delete intents are available.
-
-**Data flow**: It receives a PortalKind and returns kind name, list fields, spec schema, and booleans derived from ApplyIntent capabilities.
-
-**Call relations**: object_index and object_detail include this metadata in their JSON responses.
-
-*Call graph*: calls 2 internal fn (applying_kinds, deleting_kinds); called by 2 (object_detail, object_index).
-
-
-##### `_filter_value`  (lines 2922–2929)
-
-```
-def _filter_value(raw: str) -> JsonValue
-```
-
-**Purpose**: Parses one object-list filter value from the query string. It lets filters express booleans or numbers instead of only strings.
-
-**Data flow**: It receives raw text, tries to JSON-decode it, and returns the decoded scalar or the original string if decoding fails.
-
-**Call relations**: object_index uses it while building ObjectListQuery filters.
-
-*Call graph*: called by 1 (object_index); 1 external calls (loads).
-
-
-##### `_merged_rank`  (lines 2932–2945)
-
-```
-def _merged_rank(row: dict[str, object], order_by: str) -> tuple[int, float | str, str]
-```
-
-**Purpose**: Computes a sort key for rows merged from multiple agents. This keeps a fan-out object index sorted as one list instead of grouped by agent.
-
-**Data flow**: It receives a row and field name, classifies the field as missing, boolean, number, or text, and returns a tuple used for sorting.
-
-**Call relations**: object_index uses it after reading object pages across multiple agents.
-
-
-##### `object_index`  (lines 2948–3018)
-
-```
-async def object_index(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns rows for one generic object kind, either from one agent or fanned out across all visible agents. It powers reusable portal index pages for object kinds.
-
-**Data flow**: It authenticates and validates the kind, parses sorting, cursor, search, agent, and filters, asks core to list objects per agent, formats rows with agent names, sorts fan-out results, and returns metadata plus rows.
-
-**Call relations**: This route uses _object_gate, _object_agent, _filter_value, _merged_rank, and _kind_payload.
-
-*Call graph*: calls 5 internal fn (list_member_objects, _filter_value, _kind_payload, _object_agent, _object_gate); 3 external calls (__init__, JSONResponse, Response).
-
-
-##### `object_detail`  (lines 3021–3067)
-
-```
-async def object_detail(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the detail page for one generic object. It includes visible spec, live status fields, typed links, and timestamps.
-
-**Data flow**: It authenticates, validates kind and agent, reads the named object, checks whether each linked object would open for this member, and returns JSON or 404.
-
-**Call relations**: This route uses _object_gate, _object_agent, _kind_payload, and _iso around core’s member_object reads.
-
-*Call graph*: calls 5 internal fn (member_object, _iso, _kind_payload, _object_agent, _object_gate); 2 external calls (JSONResponse, Response).
-
-
-##### `_sse`  (lines 3070–3100)
-
-```
-def _sse(cursor: str, frame: LiveFrame) -> bytes
-```
-
-**Purpose**: Converts one live core frame into server-sent event bytes. It includes the frame cursor as an event id so reconnects can resume.
-
-**Data flow**: It receives a cursor and LiveFrame, chooses the event name based on frame type, serializes the frame to JSON, and returns formatted SSE bytes.
-
-**Call relations**: _events uses it for every core live frame after adding any portal-specific side events.
-
-*Call graph*: called by 1 (_events); 1 external calls (model_dump_json).
-
-
-##### `intents`  (lines 3103–3108)
-
-```
-async def intents(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Submits a prepared portal intent for the selected agent. Intents are the web panels’ shared mutation lane, rather than each panel writing directly.
-
-**Data flow**: It gates the agent panel, then passes the request, agent id, member id, and email to submit_intent, returning that response.
-
-**Call relations**: This route uses _panel_gate and hands off the real intent work to ufo_ext_web.panels.submit_intent.
-
-*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (submit_intent).
-
-
-##### `settings`  (lines 3111–3119)
-
-```
-async def settings(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the selected agent’s settings view, including configuration and admin-only grant details when allowed.
-
-**Data flow**: It gates the agent panel, then calls agent_settings with the agent id and whether the viewer is admin, returning that response.
-
-**Call relations**: This route uses _panel_gate and delegates formatting to ufo_ext_web.panels.agent_settings.
-
-*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (agent_settings).
-
-
-##### `homepage`  (lines 3122–3147)
-
-```
-async def homepage(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Returns the selected agent’s homepage site URL if the member is allowed to see it. Private homepages remain hidden from other members, even admins, unless the site itself would open.
-
-**Data flow**: It gates the panel, lists site objects filtered to the agent’s homepage binding, finds a row with a site URL, hides private non-owned rows, and returns either none or set with the URL.
-
-**Call relations**: This route uses _panel_gate and core’s object listing for the site kind.
-
-*Call graph*: calls 2 internal fn (list_member_objects, _panel_gate); 2 external calls (__init__, JSONResponse).
-
-
-### Access-controlled data views
-These files govern what users and operators may view, from workspace memory records to agent access rules and public community skill listings.
-
-### `extensions/memory/ufo_ext_memory/surface.py`
-
-`io_transport` · `operator request handling`
-
-This file is the doorway for a small web surface: a read-only memory browser. Its job is to show an operator what the system has stored as “memory” for a selected workspace. Without it, operators would not have this built-in way to inspect what recall is drawing from, including both current and older memory records.
+`io_transport` · `connector OAuth consent flow`
 
-The file does two main things. First, it serves a ready-made HTML page from `static/memory.html`. That page is the visible explorer in the browser. Second, it provides a JSON endpoint that the page can call to fetch the actual memory records.
+When a user needs to connect something like Gmail, ufo expects a simple OAuth flow: make an authorization URL, send the browser there, then exchange the returned code for an account. Pipedream works a little differently. Before the browser can go to Pipedream, the server must first ask Pipedream for a temporary Connect token, and that is an asynchronous API call. This file solves that mismatch.
 
-The important safety idea is workspace scoping. A workspace is the boundary around one group’s data. The surrounding operator session machinery checks who the operator is and binds the request to a workspace. Then this file opens the memory extension’s own scoped storage connection, so reads come from the extension’s `memory_item` table under that same workspace boundary. In plain terms, it is like opening the correct filing cabinet drawer after the receptionist has already checked which office you are allowed to inspect.
+The main class, PipedreamOAuthProvider, presents the shape ufo expects. Its authorization URL does not go straight to Pipedream. Instead, it points the browser to this extension's own `/ext/pipedream/oauth` route. That route then creates the Pipedream Connect token, builds success and error return URLs back to itself, and redirects the browser to Pipedream's hosted connection page.
 
-The routes at the bottom connect web requests to these actions: load the page, bind the operator session, and fetch the memory list as JSON.
+On the way back, the route checks whether the user really connected an account. If they did, it finds the newest account for this exact workspace and state, then redirects back to core ufo with that account id as the code. Later, exchange verifies the account belongs to the expected Pipedream app before returning an OAuthAccount to core. This extra checking matters because browser callbacks can overlap; the file makes sure one user's connection cannot accidentally bind to another flow's account.
 
 #### Function details
 
-##### `app_page`  (lines 27–30)
+##### `PipedreamOAuthProvider.authorize_url`  (lines 50–52)
 
 ```
-async def app_page(ctx: SurfaceContext, request: Request) -> Response
+def authorize_url(self, state: str, redirect_uri: str) -> str
 ```
 
-**Purpose**: This function returns the memory explorer web page to the browser. It is used when an operator opens the surface itself, before the page asks for any memory data.
+**Purpose**: Builds the URL where the user's browser should start the connection process. Instead of sending the browser directly to Pipedream, it sends it to this extension's bridge route so the server can first create the needed Pipedream Connect token.
 
-**Data flow**: It receives the surface context and the incoming web request, but it does not need to inspect them. It checks whether the HTML file was successfully loaded when this module started. If the file is present, it wraps that HTML text in an HTML web response; if it is missing, it raises an error so the problem is obvious instead of serving a broken page.
+**Data flow**: It receives a sealed state value and the core callback URL. It packs the provider name, state, and callback into query parameters, extracts the origin such as `https://example.com` from the callback URL, and returns a bridge URL under `/ext/pipedream/oauth`. It does not contact Pipedream or change stored data.
 
-**Call relations**: This function is attached to the GET route for the surface root path. When that route is visited, it hands the browser a complete HTML page by creating an `HTMLResponse`.
+**Call relations**: Core ufo calls this when it needs an authorization URL for a connector. The function uses `_origin` to keep the bridge on the same web origin as the callback, then hands the browser off to `oauth_route`, which performs the slower Pipedream setup.
 
-*Call graph*: 1 external calls (HTMLResponse).
+*Call graph*: calls 1 internal fn (_origin); 1 external calls (urlencode).
 
 
-##### `memories`  (lines 33–42)
+##### `PipedreamOAuthProvider.exchange`  (lines 54–68)
 
 ```
-async def memories(ctx: SurfaceContext, request: Request) -> Response
+async def exchange(self, code: str, _redirect_uri: str, workspace_id: UUID, state: str) -> OAuthAccount
 ```
 
-**Purpose**: This function returns all memory records for the currently bound workspace as JSON. The memory explorer page uses it to fill the screen with the stored memories an operator is allowed to see.
+**Purpose**: Turns the account id returned from the bridge flow into the OAuth account object that core ufo can bind to a grant. It also double-checks that the account belongs to the expected Pipedream app, so the wrong connector cannot be attached by mistake.
 
-**Data flow**: It receives the surface context, which includes the workspace id selected through the operator session, and the incoming request. It creates an extension-specific storage context for the memory extension, with no extra credentials declared. Through that context it asks the memory store inventory code for records in the current workspace. The returned memory objects are converted into plain JSON-friendly data and sent back as a JSON web response.
+**Data flow**: It receives the returned code, workspace id, and state. It derives the Pipedream external user id for that workspace and state, asks Pipedream for the connected account with that exact id, and rejects it if the account's app does not match this provider. It then tries to fetch a human-friendly account label and returns an OAuthAccount containing the account id and optional label.
 
-**Call relations**: This function is attached to the GET route `api/memories`, which the HTML explorer calls after loading. It builds the `ExtensionContext`, `ScopedStore`, and `CredentialAccess` needed to read the memory extension’s own table, then delegates the actual listing work to `ufo_ext_memory.store.inventory`. Finally, it wraps the resulting list in a `JSONResponse` for the browser.
+**Call relations**: Core ufo calls this after `oauth_route` redirects back with an account id as the code. It relies on the Pipedream client helpers to find and verify the account, then hands a clean OAuthAccount back to core so the grant can be stored without ufo ever storing the provider's secret token.
 
-*Call graph*: 5 external calls (__init__, __init__, __init__, JSONResponse, inventory).
+*Call graph*: 4 external calls (__init__, PipedreamError, connection_user_id, pipedream_client).
 
 
-### `extensions/web/ufo_ext_web/audience.py`
+##### `oauth_route`  (lines 71–114)
 
-`domain_logic` · `request handling`
+```
+async def oauth_route(ctx: ExtensionContext, request: Request) -> Response
+```
 
-The web portal needs a clear answer to a sensitive question: when a person signs in, which agents are they allowed to reach? This file is the authority for that answer on the web surface. Think of it like the guest list at a building front desk: admins can enter every room, regular members can enter the main public room, and they may enter extra rooms only if their email is on that room’s list or if they own a private conversation there.
+**Purpose**: Runs the browser-facing bridge for both halves of the Pipedream connection flow. It starts consent by creating a Pipedream Connect token, and it finishes consent by redirecting core ufo back to the exact connected account.
 
-Access grants are stored as small rows in the web extension’s own storage area. Each row links one agent to one member email. The file can read all those rows for an admin view, or read only the rows for one email when building that member’s portal view.
+**Data flow**: It reads query parameters from the incoming request: provider, state, callback, and optionally an outcome. If state or callback is missing, it returns a bad-request response. If the provider is unknown, it returns not found. If Pipedream reports a successful connection, it finds the newest account for this workspace-and-state external user and redirects to the original callback with the state and account id. If Pipedream reports failure, it returns an error message. If there is no outcome yet, it creates a Pipedream Connect token with success and failure URLs pointing back to this same route, adds the requested app and optional custom OAuth app id, and redirects the browser to Pipedream.
 
-The central result is a `WebAudience`, which says whether the member is an admin, which agents they can generally see, which extra private-conversation agents they may chat with, and which agents were granted explicitly. The difference matters: some screens should open only because an admin deliberately granted access, not merely because a member has a private conversation.
+**Call relations**: The flow reaches this route from `PipedreamOAuthProvider.authorize_url` during the start leg, and from Pipedream during the return leg. It calls `_origin` when building its own bridge URL, uses the connector registry to find the app settings, talks to the Pipedream client to create tokens or find accounts, and finally returns HTTP responses that move the user's browser to the next step.
 
-The file also defines three chat tools. Workspace admins can grant or revoke web access for the current agent, and they can acknowledge opening another member’s private transcript. These tools check that the speaker is a real workspace member, is an admin, and refers to an existing member email before changing anything.
+*Call graph*: calls 1 internal fn (_origin); 5 external calls (Response, get, connection_user_id, pipedream_client, urlencode).
+
+
+##### `_origin`  (lines 117–121)
+
+```
+def _origin(url: str) -> str
+```
+
+**Purpose**: Extracts the safe web origin from a full URL, meaning just the scheme and host such as `https://chat.example.com`. This keeps bridge URLs anchored to the same site as the callback.
+
+**Data flow**: It receives a URL string, parses it into pieces, and checks that it has an `http` or `https` scheme plus a host. If the URL is valid, it returns `scheme://host`. If not, it raises an error explaining that the callback needs a scheme and host.
+
+**Call relations**: `PipedreamOAuthProvider.authorize_url` uses this to build the first bridge URL, and `oauth_route` uses it to build return URLs for Pipedream. In both cases, it acts like a gatekeeper that refuses malformed callback URLs before they are used in browser redirects.
+
+*Call graph*: called by 2 (authorize_url, oauth_route); 1 external calls (urlparse).
+
+
+### Grant completion intake
+Core grant logic records connected external accounts and agent permissions, while the CLI surface provides the post-OAuth landing page.
+
+### `core/src/ufo/grants.py`
+
+`domain_logic` · `request handling, OAuth callback, grant lookup, admin/user connection changes`
+
+This file is the project’s “permission desk” for connected accounts. A member may connect an outside service through OAuth, which is the common browser flow where a service asks “Do you allow this app?” The system must then remember two separate facts: the member owns the connected account, and one or more agents are allowed to use it. Without this file, agents would not know which accounts they can act through, private connections could be accidentally shared, and browser callbacks could not be trusted.
+
+The main flow starts with ConnectFlow.authorize, which builds a provider sign-in URL. It seals important details, like the workspace, agent, member, provider, and conversation, into a short-lived state token. Later, ConnectFlow.complete opens that sealed state, exchanges the provider’s returned code for a stable account identity, records the connection and grant in the database, notifies extension hooks, and optionally resumes the waiting conversation.
+
+GrantStore is the database-facing part. It creates or reuses connection rows, adds or removes agent grant edges, checks ownership and admin rights, and cleans up related feed sources when a connection is disconnected. Helper functions produce safe names, summaries for user interfaces, and deterministic sentinel strings used when grants appear as placeholder credentials.
 
 #### Function details
 
-##### `web_extension`  (lines 28–35)
+##### `grant_sentinel`  (lines 43–47)
 
 ```
-def web_extension() -> ExtensionContext
+def grant_sentinel(account_id: str) -> str
 ```
 
-**Purpose**: Creates the web extension’s own context so code handling the web surface can read and write the web audience store. This matters because web access grants live in the web extension’s private storage area, not in a global permission table.
+**Purpose**: Builds a predictable placeholder credential name for a connected account. The system can pass this harmless marker around instead of passing a real secret.
 
-**Data flow**: It takes no input. It builds a scoped store for the web extension and an empty credential access object, then wraps them in an extension context. The result is a ready-to-use handle for web audience storage and transactions.
+**Data flow**: It receives an account ID string, prefixes it with a fixed marker, and returns the combined string. Nothing is stored or changed.
 
-**Call relations**: When a web surface handler needs to consult or change web audience rows, this helper provides the extension-shaped access point. Internally it puts together the scoped store, credential access, and extension context objects so callers do not have to repeat that setup.
-
-*Call graph*: 3 external calls (__init__, __init__, __init__).
+**Call relations**: This helper gives both sides of the system a shared way to recognize the same grant without registering it in advance: the sandbox can export the marker, and the egress side can recognize it as belonging to a brokered connection.
 
 
-##### `_grant_key`  (lines 38–39)
+##### `OAuthProvider.provider`  (lines 94–94)
 
 ```
-def _grant_key(agent_id: UUID, email: str) -> str
+def provider(self) -> str
 ```
 
-**Purpose**: Builds the storage key for one access grant: one agent plus one member email. It keeps keys consistent so granting, revoking, and listing all refer to the same stored row.
+**Purpose**: Names the provider represented by an OAuth connector. This is the stable internal label used when storing and looking up connections.
 
-**Data flow**: It receives an agent ID and an email address. It trims spaces from the email, lowercases it, and combines it with the fixed audience prefix and agent ID. The output is a single string key that can be used in the extension store.
+**Data flow**: An implementation supplies this property. Callers read it and use the returned string as the provider identity in grant and connection records.
 
-**Call relations**: The grant tool uses this key when writing an access row, and the revoke tool uses the same key when deleting that row. Because both paths call this helper, they agree on exactly where the grant is stored.
-
-*Call graph*: called by 2 (_grant, _revoke).
+**Call relations**: ConnectFlow uses provider descriptors during authorization and completion; this property is part of the contract every installed provider must satisfy.
 
 
-##### `granted_emails`  (lines 42–49)
+##### `OAuthProvider.host`  (lines 97–97)
 
 ```
-async def granted_emails(store: ScopedStore) -> dict[UUID, tuple[str, ...]]
+def host(self) -> str
 ```
 
-**Purpose**: Reads every stored web access grant and groups them by agent. This is useful for an administration view that needs to show who has been explicitly allowed to reach each agent.
+**Purpose**: Gives the provider host that a granted connection is allowed to reach. In plain terms, it says which outside destination this connection is for.
 
-**Data flow**: It receives the web extension’s scoped store. It asks the store for all keys under the audience prefix, pulls the agent ID and email out of each key, groups emails under their agent IDs, sorts each agent’s email list, and returns a dictionary from agent ID to emails.
+**Data flow**: An implementation supplies this property. The grant-recording path reads the string and stores it with the connection.
 
-**Call relations**: This function reads the same rows that the grant and revoke tools write and delete. It depends on the store’s listing operation and converts the agent ID text found in keys back into UUID objects, which are standard unique identifiers.
-
-*Call graph*: calls 1 internal fn (list); 1 external calls (UUID).
+**Call relations**: ConnectFlow.complete reads this through the provider descriptor and passes it into GrantStore.record so later egress decisions know the relevant host.
 
 
-##### `_granted_agent_ids`  (lines 52–59)
+##### `OAuthProvider.authorize_url`  (lines 99–99)
 
 ```
-async def _granted_agent_ids(store: ScopedStore, email: str) -> frozenset[UUID]
+def authorize_url(self, state: str, redirect_uri: str) -> str
 ```
 
-**Purpose**: Finds which agents have been explicitly granted to one email address. It is the lookup used when building a signed-in member’s web portal view.
+**Purpose**: Builds the web link a member opens to approve access with the provider. This is the first half of the OAuth handoff.
 
-**Data flow**: It receives the web extension’s scoped store and an email address. It normalizes the email by trimming and lowercasing it, scans all audience grant rows, keeps only rows whose stored email matches, converts their agent IDs into UUIDs, and returns those IDs as a frozen set.
+**Data flow**: It receives a sealed state string and a callback URL, combines them according to the provider’s rules, and returns a browser URL.
 
-**Call relations**: The `web_audience` function calls this after it has determined the member is not an admin. The returned agent IDs are then mixed with the main agent and member-owned agents to decide which agents appear in the portal.
-
-*Call graph*: calls 1 internal fn (list); called by 1 (web_audience); 1 external calls (UUID).
+**Call relations**: ConnectFlow.authorize calls this after preparing the sealed state. The returned URL is shown to the member or memoized by ConnectHandoff.
 
 
-##### `WebAudience.allows`  (lines 77–78)
+##### `OAuthProvider.exchange`  (lines 101–103)
 
 ```
-def allows(self, agent_id: UUID) -> bool
+async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID, state: str) -> OAuthAccount
 ```
 
-**Purpose**: Answers whether this member’s ordinary web audience includes a given agent. Code can use it as a simple yes-or-no gate before showing or opening an agent.
+**Purpose**: Turns the provider’s returned authorization code into the system’s stable connected account identity. This is where the provider confirms which account was connected.
 
-**Data flow**: It receives an agent ID. It checks that ID against the IDs in `self.agents`, the tuple of agents this audience can normally reach, and returns true if any match and false otherwise.
+**Data flow**: It receives the returned code, callback URL, workspace ID, and original state. It talks to the provider implementation and returns an OAuthAccount containing the broker-side account ID and possibly a friendly label.
 
-**Call relations**: This method is part of the `WebAudience` object produced by `web_audience`. Other web routes can call it when deciding whether a member may access an agent through the normal portal audience rules.
-
-
-##### `WebAudience.allows_chat`  (lines 80–81)
-
-```
-def allows_chat(self, agent_id: UUID) -> bool
-```
-
-**Purpose**: Answers whether this member can chat with a given agent, including agents reachable only through member-private extension conversations. This is broader than ordinary visibility.
-
-**Data flow**: It receives an agent ID. It checks that ID against `self.chat_agents`, which combines normal agents and private-conversation agents, then returns true if the agent is present.
-
-**Call relations**: This method relies on the `chat_agents` property in the same class. It is meant for chat access decisions where a private extension conversation may allow interaction even if the agent is not part of the normal explicitly granted audience.
+**Call relations**: ConnectFlow.complete calls this after verifying the state. Its result is then written into the grant database through GrantStore.record.
 
 
-##### `WebAudience.granted`  (lines 83–84)
+##### `OAuthProviderResolver.claims`  (lines 114–114)
 
 ```
-def granted(self, agent_id: UUID) -> bool
+async def claims(self, provider: str) -> bool
 ```
 
-**Purpose**: Answers whether access to an agent counts as explicitly granted, with admins treated as granted for everything. This is used for stricter checks where merely owning or having a private conversation is not enough.
+**Purpose**: Checks whether an open-ended connector broker recognizes a provider name. This lets the system support provider slugs that were not individually registered at startup.
 
-**Data flow**: It receives an agent ID. If the audience belongs to an admin, it immediately returns true; otherwise it checks whether the ID is in `self.granted_ids`. The result is a yes-or-no answer.
+**Data flow**: It receives a provider string, validates it against the resolver’s catalog or rules, and returns true or false.
 
-**Call relations**: This method is part of the audience object built by `web_audience`. It separates deliberate admin grants from looser chat reachability, which matters for sensitive portal panels.
-
-
-##### `WebAudience.chat_agents`  (lines 87–88)
-
-```
-def chat_agents(self) -> tuple[AgentSummary, ...]
-```
-
-**Purpose**: Builds the full list of agents this member can chat with. It combines the normal web audience with agents available because of private extension conversations.
-
-**Data flow**: It reads `self.agents` and `self.conversation_agents`. It returns a new tuple containing both groups, in that order, without changing the stored audience object.
-
-**Call relations**: The `allows_chat` method uses this property when checking a single agent. The property reflects the split made by `web_audience` between normal portal agents and private-conversation-only agents.
+**Call relations**: ConnectFlow.validate_provider uses this when a provider is not in the fixed provider map, so bad provider names can be rejected before making a dead sign-in link.
 
 
-##### `web_audience`  (lines 91–129)
+##### `OAuthProviderResolver.descriptor`  (lines 116–116)
 
 ```
-async def web_audience(surface: SurfaceContext, extension: ExtensionContext, email: str) -> WebAudience
+def descriptor(self, provider: str) -> OAuthProvider
 ```
 
-**Purpose**: Builds the complete web audience for one signed-in email address. This is the main decision point for what the portal should show and allow for that member.
+**Purpose**: Builds an OAuth provider descriptor for a provider name claimed by the resolver. It gives ConnectFlow the same shape of object as a normal registered provider.
 
-**Data flow**: It receives a surface context, the web extension context, and an email. It normalizes the email, reads the workspace seat snapshot inside a transaction, checks whether the email belongs to an admin or known member, and asks the surface for all agents. If the member is an admin, it returns an audience containing every agent. Otherwise, it reads explicit grants for that email, asks which agents are tied to the member’s private extension conversations, and returns an audience containing the main agent, explicitly granted agents, member-owned agents, and separate private-conversation chat agents.
+**Data flow**: It receives a provider string and returns an OAuthProvider-like descriptor. It does not itself complete the OAuth exchange; it supplies the object that can.
 
-**Call relations**: This function pulls together several sources of truth: workspace membership from `Seats`, the agent list from the surface, explicit web grants from `_granted_agent_ids`, and private extension conversation ownership from the surface. It packages the result as a `WebAudience` so portal routes can ask simple questions instead of repeating the full decision process.
-
-*Call graph*: calls 4 internal fn (transaction, list_agents, member_extension_agent_ids, _granted_agent_ids); 2 external calls (__init__, __init__).
+**Call relations**: ConnectFlow._provider falls back to this resolver when a provider is not explicitly installed in the provider map.
 
 
-##### `_refusal`  (lines 140–141)
+##### `ConnectionHooks.fire`  (lines 216–216)
 
 ```
-def _refusal(text: str) -> ToolResult
+async def fire(self, connection: ConnectionRecorded) -> None
 ```
 
-**Purpose**: Creates a standard error result for a web access tool when the requested action is not allowed or cannot be completed. It keeps refusals consistent and readable for the user.
+**Purpose**: Notifies extensions that a connection has been recorded. Extensions can then create or refresh derived state, such as feed source rows.
 
-**Data flow**: It receives a message string. It wraps that message in text content, marks the tool result as an error, and returns it. It does not change storage or permissions.
+**Data flow**: It receives a ConnectionRecorded payload describing the new or reused connection and performs extension-side work. It returns no useful data to the caller.
 
-**Call relations**: `_gate` uses this helper for failed permission and input checks, and `_read_private_transcript` uses it for failed transcript-opening checks. It hands back a `ToolResult` in the same shape that the tools return on success.
-
-*Call graph*: called by 2 (_gate, _read_private_transcript); 2 external calls (__init__, __init__).
+**Call relations**: ConnectFlow.complete calls this after GrantStore.record succeeds and before resuming the conversation, so follow-up work can see the connection as already present.
 
 
-##### `_gate`  (lines 144–162)
+##### `ConnectResumption.resume`  (lines 229–236)
 
 ```
-async def _gate(ctx: ToolContext, extension: ExtensionContext, args: WebAccessInput) -> ToolResult | None
+async def resume(self, conversation_id: UUID, message: str, *, speaker_member_id: UUID, idempotency_key: str) -> bool
 ```
 
-**Purpose**: Performs the shared safety checks before granting or revoking web access. It makes sure only a real speaking workspace admin can change access, and only for an email that belongs to an existing workspace member.
+**Purpose**: Tells the conversation that requested a connection that the connection has landed. This lets the agent continue instead of waiting silently after the member returns from the browser.
 
-**Data flow**: It receives the tool context, the extension context, and the requested email input. It checks that there is a speaking member, asks whether that member is an admin, checks that the email is not blank, then reads the workspace seat snapshot inside a transaction to confirm the email belongs to a member. If anything fails, it returns an error tool result; if all checks pass, it returns `None`.
+**Data flow**: It receives a conversation ID, a message, the speaking member ID, and an idempotency key, which is a repeat-safe key that prevents duplicate messages. It returns whether the resume message was accepted.
 
-**Call relations**: Both `_grant` and `_revoke` call this before touching the store. `_gate` uses `_refusal` to produce user-facing error messages and reads membership through `Seats`, so the write functions can stay focused on adding or removing the grant.
-
-*Call graph*: calls 3 internal fn (transaction, speaker_is_admin, _refusal); called by 2 (_grant, _revoke); 1 external calls (__init__).
+**Call relations**: ConnectFlow.complete calls this last, after the connection and extension-derived state have been recorded, so the resumed agent sees a ready-to-use workspace.
 
 
-##### `_grant`  (lines 165–187)
+##### `_resume_key`  (lines 239–254)
 
 ```
-async def _grant(ctx: ToolContext, args: WebAccessInput) -> ToolResult
+def _resume_key(state: str) -> str
 ```
 
-**Purpose**: Implements the admin tool that gives one workspace member web access to the current agent. It writes the grant row that later lets the portal include that agent for the member’s email.
+**Purpose**: Creates a repeat-safe key for the conversation-resume message tied to one OAuth attempt. It avoids sending duplicate resume messages if the callback is refreshed.
 
-**Data flow**: It receives the tool context and an input object containing the target email and user-facing description. It first requires an extension context, then runs `_gate`. If the request is refused, it returns that refusal. If the current agent is the main agent, it reports that no grant is needed because everyone can already reach it. Otherwise it writes a grant key for the current agent and email, records who granted it, and returns a success message.
+**Data flow**: It receives the sealed OAuth state string, hashes it with SHA-256, keeps a short prefix of the digest, adds a fixed text prefix, and returns the resulting key.
 
-**Call relations**: This function is registered as the handler for the `grant_web_access` tool. It relies on `_gate` for admin and membership checks, `_grant_key` for the exact store location, and the tool context for the current agent and speaker.
+**Call relations**: ConnectFlow.complete uses this when calling ConnectResumption.resume. The key is based on the one-time state rather than the connection row, because the same connection can be reused by later connect attempts.
 
-*Call graph*: calls 3 internal fn (agent_is_main, _gate, _grant_key); 2 external calls (__init__, __init__).
-
-
-##### `_revoke`  (lines 190–212)
-
-```
-async def _revoke(ctx: ToolContext, args: WebAccessInput) -> ToolResult
-```
-
-**Purpose**: Implements the admin tool that removes one member’s explicit web access to the current agent. It deletes the grant row so that future audience calculations no longer include that agent because of that email grant.
-
-**Data flow**: It receives the tool context and an input object containing the target email and user-facing description. It requires an extension context, runs `_gate`, and stops if the request is refused. Then it deletes the stored grant key for the current agent and email. If the current agent is the main agent, it explains that the member still reaches it because the main agent is open to all members; otherwise it returns a normal revocation message.
-
-**Call relations**: This function is registered as the handler for the `revoke_web_access` tool. Like `_grant`, it uses `_gate` for the shared checks and `_grant_key` so deletion targets the same row that granting would have written.
-
-*Call graph*: calls 3 internal fn (agent_is_main, _gate, _grant_key); 2 external calls (__init__, __init__).
+*Call graph*: called by 1 (complete); 1 external calls (sha256).
 
 
-##### `_read_private_transcript`  (lines 226–253)
+##### `GrantStore.workspace_id`  (lines 276–277)
 
 ```
-async def _read_private_transcript(ctx: ToolContext, args: PrivateTranscriptInput) -> ToolResult
+def workspace_id(self) -> UUID
 ```
 
-**Purpose**: Records an admin’s acknowledgement before opening another member’s private conversation transcript in the web portal. It does not read the transcript itself; it writes the audit-style permission record that lets the portal open it.
+**Purpose**: Reads the workspace ID currently active in the request or task. GrantStore uses this so database changes are always scoped to the current workspace.
 
-**Data flow**: It receives the tool context and an input object containing the conversation ID and user-facing description. It checks that there is a speaking member and that the speaker is an admin. It then asks `record_transcript_access` to record that this admin opened this private conversation for the current agent. If there is nothing valid to acknowledge, it returns an error message. If the record is made, it returns a message naming whose private conversation was opened and saying that the access was recorded.
+**Data flow**: It reads the current workspace context and returns its workspace UUID. It does not change data.
 
-**Call relations**: This function is registered as the handler for the `read_private_transcript` tool. It uses `_refusal` for blocked cases and delegates the actual recording decision to `record_transcript_access`, which enforces whether the conversation ID belongs to a private transcript that can be acknowledged for this agent.
+**Call relations**: GrantStore methods use this property while querying or writing connection and grant rows, keeping each operation inside the active workspace boundary.
 
-*Call graph*: calls 2 internal fn (speaker_is_admin, _refusal); 3 external calls (__init__, __init__, record_transcript_access).
+*Call graph*: 1 external calls (ws_current).
 
 
-### `extensions/web/ufo_ext_web/community.py`
+##### `GrantStore.agent_id`  (lines 280–281)
+
+```
+def agent_id(self) -> UUID
+```
+
+**Purpose**: Reads the agent currently targeted by object dispatch. This decides which agent receives or loses a grant.
+
+**Data flow**: It reads the current object-scope agent ID and returns that UUID. It does not modify anything.
+
+**Call relations**: GrantStore methods use this property when creating, listing, or checking connector grants for the bound agent.
+
+*Call graph*: 1 external calls (object_agent_id).
+
+
+##### `GrantStore.record`  (lines 283–378)
+
+```
+async def record(self, *, provider: str, account_id: str, host: str, grantor_member_id: UUID, conversation_id: UUID, shared: bool, account_label: str | None=None) -> UUID
+```
+
+**Purpose**: Creates or reuses a member-owned connection and grants the current agent access to it. It protects ownership so one member cannot silently take over another member’s connected account.
+
+**Data flow**: It receives provider, account, host, owner member, conversation, sharing choice, and optional account label. It writes or updates a connection row, checks that the same member owns any existing row, writes or refreshes the agent grant edge, and returns the connection ID.
+
+**Call relations**: ConnectFlow.complete calls this after the provider exchange succeeds. The returned connection ID is then used to notify ConnectionHooks and build the final GrantRecorded result.
+
+*Call graph*: 7 external calls (__init__, literal, or_, select, update, workspace_tx, uuid4).
+
+
+##### `GrantStore.active_grants`  (lines 380–417)
+
+```
+async def active_grants(self) -> tuple[Grant, ...]
+```
+
+**Purpose**: Lists the connections that the current agent is allowed to use. This is the agent’s usable view of member-owned accounts.
+
+**Data flow**: It reads the current workspace and agent, joins grant rows to their connection rows, and returns Grant objects with provider, account, host, owner, and sharing information.
+
+**Call relations**: The sandbox environment builder calls this when preparing credential markers for an agent run, so the running agent only receives markers for grants it actually has.
+
+*Call graph*: called by 1 (_grant_cli_env); 3 external calls (__init__, select, workspace_tx).
+
+
+##### `GrantStore.revoke`  (lines 419–431)
+
+```
+async def revoke(self, grant_id: UUID, *, actor_member_id: UUID) -> bool
+```
+
+**Purpose**: Removes one grant edge from the current agent, if the acting member is allowed to do so. The connection itself can remain for other agents.
+
+**Data flow**: It receives a grant ID and actor member ID. It checks whether that actor owns or may administer the underlying connection, deletes the grant row if allowed, and returns whether anything was deleted.
+
+**Call relations**: It relies on GrantStore._grant_for_actor for the permission check. User or admin surfaces can call this when someone removes an agent’s access to a connected account.
+
+*Call graph*: calls 1 internal fn (_grant_for_actor); 2 external calls (delete, workspace_tx).
+
+
+##### `GrantStore.attach`  (lines 433–490)
+
+```
+async def attach(self, *, provider: str, account_id: str, conversation_id: UUID, actor_member_id: UUID, shared: bool) -> bool
+```
+
+**Purpose**: Adds the current agent to an existing connection. It is used when a member wants another agent to use an account that is already connected.
+
+**Data flow**: It receives provider, account ID, conversation ID, actor member ID, and a requested sharing flag. It finds the existing connection, verifies that the actor owns it or it is already shared, refuses attempts to newly share through attach, inserts the grant edge if missing, and returns whether the connection existed.
+
+**Call relations**: This complements GrantStore.record: record lands a new OAuth handoff, while attach reuses an already recorded connection for the current agent.
+
+*Call graph*: 4 external calls (__init__, select, workspace_tx, uuid4).
+
+
+##### `GrantStore.set_shared`  (lines 492–520)
+
+```
+async def set_shared(self, grant_id: UUID, shared: bool, *, actor_member_id: UUID) -> bool
+```
+
+**Purpose**: Changes whether the underlying connection is shared across the workspace. This is the explicit path for widening or narrowing sharing.
+
+**Data flow**: It receives a grant ID, the desired shared value, and actor member ID. It checks permission through the grant, updates the connection’s shared flag if allowed, and returns whether a row changed.
+
+**Call relations**: It uses GrantStore._grant_for_actor, with stricter admin rules when sharing is being enabled. This keeps sharing changes separate from simple attach operations.
+
+*Call graph*: calls 1 internal fn (_grant_for_actor); 3 external calls (select, update, workspace_tx).
+
+
+##### `GrantStore.disconnect`  (lines 522–578)
+
+```
+async def disconnect(self, connection_id: UUID, *, actor_member_id: UUID) -> bool
+```
+
+**Purpose**: Deletes an entire connected account from the workspace, not just one agent’s grant. It also detaches feed sources and marks their pages as tombstoned so stale synced data is no longer treated as live.
+
+**Data flow**: It receives a connection ID and actor member ID. It verifies permission, finds sources tied to the connection, removes source grants, detaches and marks sources removed, tombstones related pages, deletes the connection row, and returns true if the connection was found and removed.
+
+**Call relations**: It calls GrantStore._connection_for_actor for the ownership/admin check. Because grant edges cascade from the deleted connection, this is the broad cleanup path.
+
+*Call graph*: calls 1 internal fn (_connection_for_actor); 5 external calls (now, delete, select, update, workspace_tx).
+
+
+##### `GrantStore._connection_for_actor`  (lines 580–608)
+
+```
+async def _connection_for_actor(self, connection: AsyncConnection, connection_id: UUID, actor_member_id: UUID, *, admin_allowed: bool=True) -> UUID | None
+```
+
+**Purpose**: Checks whether a member may mutate a connection. It returns the connection ID only if the connection exists and the actor is the owner or an allowed admin.
+
+**Data flow**: It receives an open database connection, a connection ID, an actor member ID, and whether admin override is allowed. It locks and reads the connection, checks ownership, optionally checks admin status, and returns the connection ID or raises a permission error.
+
+**Call relations**: GrantStore.disconnect calls it directly. GrantStore._grant_for_actor also uses it when a grant operation must first validate the underlying connection.
+
+*Call graph*: calls 1 internal fn (_is_admin); called by 2 (_grant_for_actor, disconnect); 3 external calls (__init__, execute, select).
+
+
+##### `GrantStore._is_admin`  (lines 610–620)
+
+```
+async def _is_admin(self, connection: AsyncConnection, actor_member_id: UUID) -> bool
+```
+
+**Purpose**: Checks whether a workspace member is an administrator. This supports permission decisions for connection changes.
+
+**Data flow**: It receives an open database connection and member ID, reads the member row in the current workspace, and returns true if that member is marked admin.
+
+**Call relations**: GrantStore._connection_for_actor calls this when the actor is not the connection owner and admin override may be allowed.
+
+*Call graph*: called by 1 (_connection_for_actor); 2 external calls (execute, select).
+
+
+##### `GrantStore._grant_for_actor`  (lines 622–660)
+
+```
+async def _grant_for_actor(self, connection: AsyncConnection, grant_id: UUID, actor_member_id: UUID, *, admin_allowed: bool=True) -> UUID | None
+```
+
+**Purpose**: Checks whether a grant belongs to the current agent and whether the actor may change the connected account behind it. It prevents someone from editing a grant they cannot control.
+
+**Data flow**: It receives an open database connection, grant ID, actor member ID, and admin rule. It finds the grant’s connection, asks _connection_for_actor to validate access, locks and re-reads the matching grant, and returns the grant ID or nothing.
+
+**Call relations**: GrantStore.revoke and GrantStore.set_shared call this before deleting a grant or changing the connection’s sharing flag.
+
+*Call graph*: calls 1 internal fn (_connection_for_actor); called by 2 (revoke, set_shared); 2 external calls (execute, select).
+
+
+##### `ConnectFlow.authorize`  (lines 681–701)
+
+```
+def authorize(self, *, workspace_id: UUID, agent_id: UUID, provider: str, grantor_member_id: UUID, conversation_id: UUID, shared: bool) -> str
+```
+
+**Purpose**: Starts the OAuth connection flow by producing the provider URL a member should open. It seals the important request details into the state parameter so the callback can later be trusted without a separate pending row.
+
+**Data flow**: It receives workspace, agent, provider, member, conversation, and sharing details. It chooses the provider descriptor, builds a ConnectState object, encrypts it, asks the provider for an authorization URL, and returns that URL.
+
+**Call relations**: ConnectHandoff.authorize calls this when a valid terminal connect request needs a browser link. Later, ConnectFlow.complete opens the sealed state created here.
+
+*Call graph*: calls 1 internal fn (_provider); 1 external calls (__init__).
+
+
+##### `ConnectFlow.validate_provider`  (lines 703–708)
+
+```
+async def validate_provider(self, provider: str) -> None
+```
+
+**Purpose**: Checks whether a provider name is currently connectable. It catches typos or unavailable connectors before a user is sent to a broken flow.
+
+**Data flow**: It receives a provider string. It accepts it if it is in the installed provider map or if the optional resolver claims it; otherwise it raises UnknownProvider.
+
+**Call relations**: This is the fuller validation path for connect requests, especially when an open provider namespace may need an external catalog check.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ConnectFlow.knows_provider`  (lines 710–715)
+
+```
+def knows_provider(self, provider: str) -> bool
+```
+
+**Purpose**: Performs a quick local check that the connect machinery still has some way to serve a provider. It is deliberately cheaper than full external validation.
+
+**Data flow**: It receives a provider string and returns true if the provider is registered or if an open resolver exists. It does not call external services.
+
+**Call relations**: ConnectHandoff.authorize uses this while holding a database row lock, where it should not do slow catalog validation.
+
+
+##### `ConnectFlow.bridge_workspace`  (lines 717–723)
+
+```
+def bridge_workspace(self, *, state: str, provider: str, callback: str) -> UUID
+```
+
+**Purpose**: Verifies a browser bridge request and extracts the workspace it is allowed to run as. This protects the bridge from mismatched or tampered state.
+
+**Data flow**: It receives a state string, provider string, and callback URL. It opens the sealed state, confirms the provider and callback match, confirms the provider is known, and returns the workspace ID.
+
+**Call relations**: connect_bridge_workspace calls this through the installed flow when a request arrives. If anything does not match, the caller rejects the bridge request.
+
+*Call graph*: calls 2 internal fn (_open, _provider); 1 external calls (__init__).
+
+
+##### `ConnectFlow.complete`  (lines 725–773)
+
+```
+async def complete(self, *, state: str, code: str) -> GrantRecorded
+```
+
+**Purpose**: Finishes the OAuth handoff after the provider redirects back. It verifies the state, exchanges the code, records the connection and grant, notifies extension hooks, and optionally resumes the waiting conversation.
+
+**Data flow**: It receives the sealed state and provider code. It decrypts and validates the state, gets the provider descriptor, enters the correct workspace and agent context, exchanges the code for an account, records the grant, fires connection hooks, sends a resume message if configured, and returns a GrantRecorded summary.
+
+**Call relations**: This is the landing point for the callback side of the flow. It calls _open, _provider, GrantStore.record, ConnectionHooks.fire, label_for, _resume_key, and ConnectResumption.resume in that order of responsibility.
+
+*Call graph*: calls 4 internal fn (_open, _provider, label_for, _resume_key); 4 external calls (__init__, __init__, agent, ws).
+
+
+##### `ConnectFlow.label_for`  (lines 775–780)
+
+```
+def label_for(self, provider: str) -> str
+```
+
+**Purpose**: Returns the friendly name shown to members for a provider. If no label was declared, it turns the provider slug into readable title words.
+
+**Data flow**: It receives a provider string, looks for it in the labels mapping, and otherwise formats the slug by replacing underscores and title-casing it.
+
+**Call relations**: ConnectFlow.complete uses this when building the success message and the GrantRecorded result.
+
+*Call graph*: called by 1 (complete).
+
+
+##### `ConnectFlow._provider`  (lines 782–788)
+
+```
+def _provider(self, name: str) -> OAuthProvider
+```
+
+**Purpose**: Finds the OAuth descriptor for a provider name. It hides the difference between explicitly installed providers and providers served by an open resolver.
+
+**Data flow**: It receives a provider name, checks the provider map, falls back to the resolver if one exists, and returns an OAuthProvider descriptor or raises UnknownProvider.
+
+**Call relations**: ConnectFlow.authorize, ConnectFlow.bridge_workspace, and ConnectFlow.complete all use this before they can ask a provider to build URLs or exchange codes.
+
+*Call graph*: called by 3 (authorize, bridge_workspace, complete); 1 external calls (__init__).
+
+
+##### `ConnectFlow._open`  (lines 790–795)
+
+```
+def _open(self, state: str) -> ConnectState
+```
+
+**Purpose**: Decrypts and validates the sealed OAuth state. This is what lets the callback trust who requested the connection and what it was for.
+
+**Data flow**: It receives the state token string, asks Fernet to decrypt it with a short time limit, parses it into ConnectState, and returns that object. If the token is expired or changed, it raises ConnectStateInvalid.
+
+**Call relations**: ConnectFlow.bridge_workspace and ConnectFlow.complete call this before trusting any browser-supplied callback data.
+
+*Call graph*: called by 2 (bridge_workspace, complete); 1 external calls (__init__).
+
+
+##### `ConnectHandoff.authorize`  (lines 804–886)
+
+```
+async def authorize(self, workspace_id: UUID, turn_id: UUID, member_id: UUID) -> str
+```
+
+**Purpose**: Turns a saved terminal connect request into a reusable OAuth URL for the right member. It memoizes the URL so refreshing or retrying the handoff uses the same short-lived authorization state.
+
+**Data flow**: It receives workspace ID, turn ID, and member ID. It locks the turn row, verifies the turn still contains a connect request for that member, checks freshness and provider availability, returns an existing unexpired URL if present, or creates and stores a new URL through ConnectFlow.authorize.
+
+**Call relations**: This is the private handoff layer between a conversation turn and the browser OAuth flow. It calls ConnectFlow.authorize only after validating the stored turn request.
+
+*Call graph*: 7 external calls (__init__, model_validate, now, timedelta, select, update, workspace_tx).
+
+
+##### `install_connect_flow`  (lines 892–900)
+
+```
+def install_connect_flow(flow: ConnectFlow | None) -> None
+```
+
+**Purpose**: Installs the process-wide ConnectFlow used by tools and callback routes. Passing None disables grants and makes later callers fail clearly.
+
+**Data flow**: It receives a ConnectFlow or None and stores it in a module-level variable. It returns nothing.
+
+**Call relations**: Startup code or tests use this to set the one active connect flow. installed_connect_flow later reads the installed value.
+
+
+##### `installed_connect_flow`  (lines 903–906)
+
+```
+def installed_connect_flow() -> ConnectFlow
+```
+
+**Purpose**: Returns the currently installed ConnectFlow, or raises a clear error if grants are unavailable. This avoids silent failures when no credential key or connect setup exists.
+
+**Data flow**: It reads the module-level installed flow. If present it returns it; if missing it raises ConnectUnavailable.
+
+**Call relations**: connect_bridge_workspace calls this before verifying bridge requests. Other surfaces can also use it as the single access point for the configured flow.
+
+*Call graph*: called by 1 (connect_bridge_workspace); 1 external calls (__init__).
+
+
+##### `connect_bridge_workspace`  (lines 909–918)
+
+```
+def connect_bridge_workspace(request: Request) -> UUID | None
+```
+
+**Purpose**: Extracts and verifies the workspace for a connector browser bridge request. It returns None instead of raising when the request should be rejected.
+
+**Data flow**: It receives a Starlette request, reads state, provider, and callback from query parameters, asks the installed ConnectFlow to verify them, and returns a workspace UUID or None.
+
+**Call relations**: This is a safe wrapper around installed_connect_flow and ConnectFlow.bridge_workspace for request-routing code that needs a yes-or-no workspace answer.
+
+*Call graph*: calls 1 internal fn (installed_connect_flow).
+
+
+##### `account_object_name`  (lines 925–934)
+
+```
+def account_object_name(provider: str, account_id: str) -> str
+```
+
+**Purpose**: Builds a stable, safe object name for a provider account. It keeps names readable while adding a short hash so similar account IDs do not collide.
+
+**Data flow**: It receives provider and account ID strings. It slugifies both, truncates the readable part to fit the object-name limit, hashes the exact provider/account pair, and returns a combined name.
+
+**Call relations**: It calls _slug for the readable pieces. Other surfaces can use this so connections, grants, and prepared portal intents all refer to the same account edge consistently.
+
+*Call graph*: calls 1 internal fn (_slug); 1 external calls (sha256).
+
+
+##### `_slug`  (lines 937–938)
+
+```
+def _slug(raw: str) -> str
+```
+
+**Purpose**: Turns arbitrary text into a lowercase dash-separated name fragment. This makes provider and account names safe to use in object names.
+
+**Data flow**: It receives a raw string, lowercases it, replaces runs of non-letter-or-digit characters with dashes, trims extra dashes, and returns the result.
+
+**Call relations**: account_object_name calls this for both provider and account ID before adding the collision-preventing hash.
+
+*Call graph*: called by 1 (account_object_name); 1 external calls (sub).
+
+
+##### `grant_summaries`  (lines 941–949)
+
+```
+async def grant_summaries() -> tuple[GrantSummary, ...]
+```
+
+**Purpose**: Returns audit-style summaries of connector grants for the current agent. This is useful for showing what the agent can use.
+
+**Data flow**: It reads the current workspace and object-scope agent, builds a database scope for that agent’s grants, delegates the query to _grant_summaries, and returns GrantSummary objects.
+
+**Call relations**: This is the agent-scoped wrapper around the shared _grant_summaries query helper.
+
+*Call graph*: calls 1 internal fn (_grant_summaries); 3 external calls (and_, object_agent_id, ws_current).
+
+
+##### `workspace_grant_summaries`  (lines 952–955)
+
+```
+async def workspace_grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]
+```
+
+**Purpose**: Returns audit-style summaries of all connector grants in a workspace. This is meant for operator or workspace-wide views.
+
+**Data flow**: It receives a workspace ID, enters that workspace context, delegates a workspace-wide scope to _grant_summaries, and returns GrantSummary objects.
+
+**Call relations**: This is the workspace-wide wrapper around _grant_summaries, unlike grant_summaries which narrows to the current agent.
+
+*Call graph*: calls 1 internal fn (_grant_summaries); 1 external calls (ws).
+
+
+##### `_grant_summaries`  (lines 958–998)
+
+```
+async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary, ...]
+```
+
+**Purpose**: Runs the shared database query that turns grant and connection rows into human-readable grant summaries. It joins in agent names so the result can be shown in audit views.
+
+**Data flow**: It receives a database filter describing which grants to include. It queries grants joined to connections and agents, orders them by provider and agent name, and returns GrantSummary objects.
+
+**Call relations**: grant_summaries and workspace_grant_summaries both call this to avoid duplicating the same summary-building query.
+
+*Call graph*: called by 2 (grant_summaries, workspace_grant_summaries); 3 external calls (__init__, select, workspace_tx).
+
+
+##### `connection_summaries`  (lines 1001–1063)
+
+```
+async def connection_summaries() -> tuple[ConnectionSummary, ...]
+```
+
+**Purpose**: Lists the workspace’s connected accounts and the agents currently granted each one. This gives a connection-first view rather than a grant-first view.
+
+**Data flow**: It reads connection rows in the current workspace, left-joins any grants and agent names, groups rows by provider and account ID, gathers agent names for each connection, and returns ConnectionSummary objects.
+
+**Call relations**: User or admin surfaces can call this when they need to show connected accounts and who can use them.
+
+*Call graph*: 4 external calls (__init__, select, workspace_tx, ws_current).
+
+
+##### `main_agent_connections`  (lines 1066–1101)
+
+```
+async def main_agent_connections() -> tuple[MainAgentConnection, ...]
+```
+
+**Purpose**: Lists connections granted to the workspace’s main agent. Feed registration can use this to know which member-connected accounts the main agent may sync.
+
+**Data flow**: It reads the current workspace, joins connections to grants and agents, filters to the agent marked as main, orders by provider and account ID, and returns MainAgentConnection objects.
+
+**Call relations**: Feed-related code can call this to discover accounts available to the main agent, while accounts granted only to shipped or specialized agents stay out of this list.
+
+*Call graph*: 4 external calls (__init__, select, workspace_tx, ws_current).
+
+
+### `core/src/ufo/surfaces/cli.py`
 
 `io_transport` · `request handling`
 
-The web app has a Community skills area, but the skill data lives on an outside website, skills.sh. This file is the small gateway between the app and that website. It knows how to ask for the popular skills list, how to search by a user’s query, and how to fetch the full SKILL.md document for one skill when the user chooses it.
+This file exists for one special moment: a user has started connecting an outside account, such as through a CLI or a Slack conversation, and their browser is redirected back after they give consent. At that point there is no normal logged-in web session. The only trusted information is the sealed OAuth state that was created earlier and sent through the provider. OAuth is the common “let this app access my account” flow used by many services.
 
-The file is careful because outside services are not always friendly or predictable. It sets time limits, refuses oversized responses, turns rate-limit errors into a readable message, and checks that returned data has the shape the app expects. If the directory gives a bad answer, the app reports a clear failure instead of pretending there are no skills.
+The main route, `/v1/connect/callback`, checks that the browser brought back both the state and the provider’s temporary code. It asks the grants system for the installed connection flow, verifies the state, exchanges the code, and records the resulting grant. Then it returns a tiny plain HTML page saying the account is connected. If the original conversation was successfully resumed, the page tells the user they can close it. If not, it tells them to go back and ask the agent to continue.
 
-It also caches results. A cache is like keeping a recently used menu on the counter instead of walking back to the restaurant every time. Listings are kept for 15 minutes, and fetched skill documents are kept for the life of the process. This reduces calls to skills.sh, which matters because some useful endpoints are rate limited.
-
-The main public object is `COMMUNITY`, an instance of `CommunitySkills`. Routes elsewhere can ask it for a listing or for a single skill document without knowing the details of the skills.sh API.
+The second route, `/v1/connect/logo.svg`, serves the logo for that page. The page is deliberately very small: no JavaScript, no font download, no stylesheet file. This matters because the user may be on a phone or in a one-off browser tab, and the only purpose is to confirm what happened and send them back.
 
 #### Function details
 
-##### `_refusal`  (lines 43–49)
+##### `connect_callback`  (lines 61–88)
 
 ```
-def _refusal(code: int) -> CommunityUnavailable
+async def connect_callback(state: str='', code: str='') -> HTMLResponse
 ```
 
-**Purpose**: Turns an HTTP failure code from the skill directory into a `CommunityUnavailable` error with a message a user can understand. It gives a special explanation for rate limiting, because that is a common and recoverable failure.
+**Purpose**: This is the HTTP endpoint the OAuth provider redirects the browser to after the user approves a connection. It verifies the returned state and code, finishes the account connection, and shows the user a simple confirmation page.
 
-**Data flow**: It receives a numeric response code from skills.sh. If the code is 429, meaning too many requests, it creates an error explaining the hourly limit; otherwise it creates an error saying which code the directory returned. The output is an exception object that callers raise.
+**Data flow**: The browser sends in two query values: `state`, which proves which conversation and user started the connection, and `code`, which is the provider’s temporary approval token. The function first gets the installed connection flow, rejects the request if the feature is unavailable or the browser did not send both values, then asks the flow to complete the connection. If the state is bad, the provider is unknown, or required data is missing, it turns that into a clear HTTP error. If completion succeeds, it builds a short account name, escapes it so it is safe to place into HTML, and returns a small confirmation page telling the user what to do next.
 
-**Call relations**: The lower-level network readers call this when skills.sh does not answer successfully. `_body` uses it for streamed downloads, and `_search` uses it for search requests, so both paths report failures in the same plain way.
+**Call relations**: FastAPI calls this function when a request reaches the `/v1/connect/callback` route. The function hands the real OAuth completion work to `ufo.grants.installed_connect_flow()` and the flow object it returns, then uses FastAPI’s `HTTPException` for error responses and `HTMLResponse` for the final browser page. It uses `html.escape` right before rendering so provider or account names cannot accidentally become page markup.
 
-*Call graph*: called by 2 (_body, _search); 1 external calls (__init__).
-
-
-##### `CommunitySkills.listing`  (lines 79–89)
-
-```
-async def listing(self, query: str) -> list[CommunitySkill]
-```
-
-**Purpose**: Returns the list of community skills to show in the Community tab. With an empty query it returns the popular leaderboard; with a query it returns search results.
-
-**Data flow**: It receives the user’s search text. First it checks the in-memory listing cache; if the same query was fetched recently, it returns that saved list. Otherwise it opens an HTTP client, asks either the search endpoint or the popular leaderboard, trims the result to the display limit, stores it in the cache, and returns the list of `CommunitySkill` items.
-
-**Call relations**: This is the main listing method other web code calls when a user opens or filters Community skills. It delegates network setup to `_client`, chooses `_popular` or `_search` depending on whether there is a query, and uses the cache to avoid repeated directory reads.
-
-*Call graph*: calls 3 internal fn (_client, _popular, _search); 1 external calls (monotonic).
+*Call graph*: 4 external calls (HTTPException, HTMLResponse, escape, installed_connect_flow).
 
 
-##### `CommunitySkills.fetch`  (lines 91–116)
+##### `connect_logo`  (lines 92–100)
 
 ```
-async def fetch(self, source: str, name: str) -> CommunityDocument | None
+async def connect_logo() -> Response
 ```
 
-**Purpose**: Fetches and parses the full document for one community skill, usually when a user opens the install/review view. It returns enough detail to show the skill’s name, description, instructions, and original document.
+**Purpose**: This is the HTTP endpoint that returns the UFO logo shown on the OAuth confirmation page. It exists because the callback page is served by this backend directly and cannot rely on the normal frontend build assets.
 
-**Data flow**: It receives a source repository like `owner/repo` and a skill name. It builds a cache key and returns a saved document if one is already known. If not, it downloads the skill package metadata, finds the `SKILL.md` file inside the returned file list, parses that markdown file, saves the parsed result or a missing result in the document cache, and returns it.
+**Data flow**: A browser requests the logo path. The function reads the SVG logo file from disk, wraps those bytes in an HTTP response, labels it as an SVG image, and adds a long cache header so browsers can reuse it for a long time without asking again.
 
-**Call relations**: This is the main single-skill read used after a user selects a listed skill. It uses `_client` to make the HTTP client, `_body` to safely download the directory response, and `_parse` to turn the skill markdown into a structured `CommunityDocument`. If the downloaded JSON cannot be read, it raises `CommunityUnavailable` so the route can show a clear error.
+**Call relations**: FastAPI calls this function when the confirmation page’s image tag asks for `/v1/connect/logo.svg`. The function does not involve the OAuth flow; it simply serves the static logo through FastAPI’s `Response` so the callback page can stay small while still displaying the project mark.
 
-*Call graph*: calls 3 internal fn (_body, _client, _parse); 2 external calls (__init__, loads).
-
-
-##### `CommunitySkills._client`  (lines 118–119)
-
-```
-def _client(self, timeout: float) -> httpx.AsyncClient
-```
-
-**Purpose**: Creates the HTTP client used to talk to skills.sh. It centralizes timeout, redirect-following, and optional test transport setup.
-
-**Data flow**: It receives a timeout length in seconds. It returns an `httpx.AsyncClient` configured with that timeout, the optional injected transport, and redirect following turned on. It does not make a request by itself.
-
-**Call relations**: `listing` and `fetch` call this before doing network work. In production it creates a normal client; in tests, the injected transport can replace real network calls with predictable fake responses.
-
-*Call graph*: called by 2 (fetch, listing); 1 external calls (AsyncClient).
+*Call graph*: 1 external calls (Response).
 
 
-##### `CommunitySkills._popular`  (lines 121–136)
+### Verified account binding flows
+Specialized extension flows prove ownership or access before binding GitHub App installations or iMessage phone numbers to a workspace member.
 
-```
-async def _popular(self, client: httpx.AsyncClient) -> list[CommunitySkill]
-```
+### `extensions/coding/ufo_ext_coding/connect.py`
 
-**Purpose**: Reads the skills.sh public page payload and extracts the popular skills leaderboard. This is used when the user has not typed a search query.
+`orchestration` · `GitHub connection setup`
 
-**Data flow**: It receives an HTTP client. It downloads the leaderboard page with a special header, scans the response text for small JSON-looking skill entries, decodes each entry, converts valid entries into `CommunitySkill` objects, removes duplicates by source and name, sorts them by install count from highest to lowest, and returns the sorted list. If no valid listing is found, it raises a clear unavailable error.
+This file is the safety gate for hooking a workspace up to GitHub. A GitHub App installation id is just a small number, so the system must not trust it by itself. The file uses GitHub’s own authorization flow to prove that the person returning from GitHub can actually see the installation they are trying to connect.
 
-**Call relations**: `listing` calls this for the default Community view. `_popular` relies on `_body` for safe downloading and `_entry` for validating each possible skill entry before it is shown to users.
+The flow has two halves. First, `connect_github` gives a workspace admin a GitHub installation link. That link includes a sealed piece of state, like a tamper-proof claim ticket, saying which workspace and credential slot this setup belongs to. GitHub sends the browser back to this extension after installation.
 
-*Call graph*: calls 2 internal fn (_body, _entry); called by 1 (listing); 2 external calls (__init__, loads).
+Second, `github_installed` receives that return request. It checks that GitHub provided both an authorization code and an installation id. Then `GitHubInstallExchange.reaches` trades the code for the user’s own GitHub token and asks GitHub which ufo installations that user can access. Only if the claimed installation appears in GitHub’s answer does the workspace bind it as a credential.
 
-
-##### `CommunitySkills._search`  (lines 138–147)
-
-```
-async def _search(self, client: httpx.AsyncClient, query: str) -> list[CommunitySkill]
-```
-
-**Purpose**: Calls the public skills.sh search endpoint for a user’s query. It returns only valid skill rows, sorted by install count.
-
-**Data flow**: It receives an HTTP client and the query string. It sends the query and result limit to the search API, rejects non-success responses through `_refusal`, reads the returned JSON, converts each listed entry through `_entry`, drops invalid entries, sorts the rest by install count, and returns them.
-
-**Call relations**: `listing` calls this whenever the user has entered a search term. It uses `_entry` so search results follow the same validation rules as the popular listing, and `_refusal` so search failures are reported like other directory failures.
-
-*Call graph*: calls 2 internal fn (_entry, _refusal); called by 1 (listing); 1 external calls (get).
-
-
-##### `CommunitySkills._entry`  (lines 149–156)
-
-```
-def _entry(self, entry: object) -> CommunitySkill | None
-```
-
-**Purpose**: Turns one raw skill record from skills.sh into the app’s simple `CommunitySkill` shape. It filters out records that are missing a name or have an unsafe-looking source repository.
-
-**Data flow**: It receives an unknown object from decoded JSON. If the object is not a dictionary, or if it lacks a usable skill name and `owner/repo` source, it returns `None`. Otherwise it creates and returns a `CommunitySkill` with the name, source, and install count.
-
-**Call relations**: Both `_popular` and `_search` send raw directory entries here before showing them to users. This keeps the two listing paths consistent and prevents malformed directory data from leaking into the UI.
-
-*Call graph*: called by 2 (_popular, _search); 1 external calls (__init__).
-
-
-##### `CommunitySkills._body`  (lines 158–178)
-
-```
-async def _body(self, client: httpx.AsyncClient, url: str, cap: int, headers: dict[str, str] | None=None) -> bytes
-```
-
-**Purpose**: Downloads a response body from skills.sh safely. It enforces successful status codes and size limits so the app does not read a huge or failed response as if it were normal data.
-
-**Data flow**: It receives an HTTP client, a URL, a maximum byte count, and optional headers. It streams the response in chunks, checks that the status code is successful, counts how many bytes have arrived, stops with a clear error if the response is too large, and finally returns the combined bytes.
-
-**Call relations**: `_popular` uses this to read the leaderboard page, and `fetch` uses it to read a skill download response. It calls `_refusal` for bad HTTP status codes and raises `CommunityUnavailable` itself when the body is larger than this app accepts.
-
-*Call graph*: calls 1 internal fn (_refusal); called by 2 (_popular, fetch); 2 external calls (__init__, stream).
-
-
-##### `CommunitySkills._parse`  (lines 180–199)
-
-```
-def _parse(self, document: str) -> CommunityDocument | None
-```
-
-**Purpose**: Reads a skill’s `SKILL.md` markdown document and extracts the structured information the app needs. It expects the document to start with YAML front matter, which is a small metadata block at the top of the file.
-
-**Data flow**: It receives the raw markdown text. It looks for a front matter block, safely parses that metadata, checks for a name and description, then returns a `CommunityDocument` containing the name, description, remaining instructions text, and original document. If the document is missing the expected metadata or the metadata cannot be read, it returns `None`.
-
-**Call relations**: `fetch` calls this after finding the `SKILL.md` file in the downloaded skill data. This keeps document interpretation separate from network fetching, so `fetch` can focus on finding the file and caching the result.
-
-*Call graph*: called by 1 (fetch); 2 external calls (__init__, safe_load).
-
-
-### Panel mutation bridge
-The panel bridge turns settings-panel form submissions into the system’s standard chat-based action flow.
-
-### `extensions/web/ufo_ext_web/panels.py`
-
-`orchestration` · `request handling`
-
-The web portal has many buttons and forms: save an agent, add a team member, connect an account, request a credential, grant web access, and so on. This file defines exactly what those forms are allowed to ask for, checks that each request makes sense, turns it into a tool request the engine already understands, and waits for the final result so the browser gets a clear answer.
-
-The important idea is that panel changes do not bypass the normal conversation system. Instead, each submitted form becomes a prepared “intent,” meaning a structured request to run a named tool with exact input. That intent is admitted as its own turn in a durable intent conversation for that member and agent. This is like putting every office form into the same official inbox instead of letting people edit the filing cabinet directly. The turn becomes the audit trail: who asked, what they asked, and what happened.
-
-The file also protects sensitive flows. A credential value is never sent through the panel itself; the panel can only request a private credential prompt. Account connections are started through the same connection handoff used by chat. Agent settings are checked against the models and sandbox options this deployment actually supports. Finally, the file exposes the settings projection used by the portal to render an agent’s current settings and form schema.
+The important behavior is that the installation id from the URL is treated only as a candidate. GitHub’s account of the signed-in user’s access is the final proof.
 
 #### Function details
 
-##### `ApplyIntent.kinds`  (lines 66–70)
+##### `connect_github`  (lines 48–72)
 
 ```
-def kinds(cls) -> frozenset[str]
+async def connect_github(ctx: ToolContext, args: ConnectGitHubInput) -> ToolResult
 ```
 
-**Purpose**: Returns the full set of object kinds that a panel is allowed to submit changes for. This keeps the user interface and the server’s accepted inputs tied to the same source of truth.
+**Purpose**: Starts the GitHub connection process for a workspace admin. It creates a one-use installation link that sends the admin to GitHub and carries sealed workspace information for the return trip.
 
-**Data flow**: It reads the allowed values from the `kind` field on `ApplyIntent` → turns those fixed allowed values into a frozen set → returns that set for other code to compare against or display from.
+**Data flow**: It receives the current tool context and a short user-facing description. It checks that the speaker is a workspace admin, checks that this deployment has a GitHub App configured, asks the context to create sealed authorization state for the GitHub installation slot, and returns a message containing the GitHub install URL with that sealed state attached.
 
-**Call relations**: This is the base helper for the more specific kind lists. Other code can ask it what object kinds the panel lane recognizes, instead of copying the list by hand and risking drift.
+**Call relations**: This is the outward-facing tool call that begins the flow. It calls the tool context to confirm admin permission and create the sealed state, asks the manifest for the GitHub App id, then packages the result as text for the user. GitHub later returns to the callback handled by `github_installed`.
 
-*Call graph*: 1 external calls (get_args).
-
-
-##### `ApplyIntent.applying_kinds`  (lines 73–75)
-
-```
-def applying_kinds(cls) -> frozenset[str]
-```
-
-**Purpose**: Returns the object kinds that can be created or updated through an `apply` intent. It excludes kinds that are only deleted or only connected.
-
-**Data flow**: It starts with all allowed panel kinds → removes credential-like and trigger-like kinds that cannot be applied, plus connection kinds that must use `connect` → returns the remaining kinds.
-
-**Call relations**: The web surface uses this when building object-page controls. It helps the page show an apply/create control only where the intent lane will actually accept one.
-
-*Call graph*: called by 1 (_kind_payload).
+*Call graph*: calls 2 internal fn (begin_credential_authorization, speaker_is_admin); 3 external calls (__init__, __init__, github_app_id).
 
 
-##### `ApplyIntent.deleting_kinds`  (lines 78–83)
+##### `install_workspace`  (lines 75–80)
 
 ```
-def deleting_kinds(cls) -> frozenset[str]
+def install_workspace(request: Request) -> UUID | None
 ```
 
-**Purpose**: Returns the object kinds that can be deleted from the panel. Connection kinds are excluded because they use a connection flow rather than deletion from this route.
+**Purpose**: Finds which workspace a GitHub return request belongs to by reading the sealed state in the request. It is a small helper for turning a browser redirect back into a workspace identity.
 
-**Data flow**: It starts with all allowed panel kinds → removes the kinds reserved for connection-only behavior → returns the kinds for which a delete action may be offered.
+**Data flow**: It receives an HTTP request, reads the `state` query parameter, and asks the credential system to verify and open that sealed value for the expected credential slot and purpose. It returns the workspace UUID if the state is valid, or nothing if it is missing or invalid.
 
-**Call relations**: The web surface uses this to decide where to show delete controls. Because it uses the same rules as validation, the page is less likely to offer a button that the server will reject.
+**Call relations**: This helper relies on `authorized_slot_workspace` to do the real seal-checking. It fits into the return-leg routing story: the browser request has no live conversation attached, so the sealed state is how the system can know which workspace the request is for.
 
-*Call graph*: called by 1 (_kind_payload).
-
-
-##### `ApplyIntent._verb_pairs_with_its_kind`  (lines 86–105)
-
-```
-def _verb_pairs_with_its_kind(self) -> 'ApplyIntent'
-```
-
-**Purpose**: Checks that a submitted object change uses a verb that is valid for that object kind. For example, credentials can only be deleted here, while connections must use `connect`.
-
-**Data flow**: It receives a parsed `ApplyIntent` object → checks combinations such as verb, kind, spec, and `create_only` → either returns the same object as valid or raises a validation error explaining what is wrong.
-
-**Call relations**: This runs automatically during Pydantic validation, before the intent is turned into a tool call. It is the gate that stops the panel route from becoming a general-purpose object editing endpoint.
+*Call graph*: 1 external calls (authorized_slot_workspace).
 
 
-##### `_tool_intent`  (lines 177–273)
+##### `GitHubInstallExchange.reaches`  (lines 99–126)
 
 ```
-def _tool_intent(submitted: ApplyIntent | AddMemberIntent | AudienceIntent | CorrectionIntent | CredentialIntent | TranscriptIntent, slot: CredentialSlotView | None) -> ToolIntent
+async def reaches(self, code: str, installation_id: str) -> bool
 ```
 
-**Purpose**: Converts a validated panel submission into the exact tool request that the engine knows how to run. It is the translation step from “form action” to “system action.”
+**Purpose**: Checks with GitHub whether the user who just authorized can actually access the claimed GitHub App installation. This is the key security check that prevents binding someone else’s organization by guessing or pasting an id.
 
-**Data flow**: It takes one submitted intent, and sometimes credential slot details → chooses the right tool name and builds the tool input → returns a `ToolIntent` object. For object applies, it also formats the object kind, name, and spec into a YAML manifest, which is a readable structured text format.
+**Data flow**: It receives a GitHub authorization code and a claimed installation id. It sends the code, client id, and client secret to GitHub to get a user access token. If GitHub does not return a token, it raises a GitHub authorization error. With the token, it asks GitHub for the installations visible to that user, filters them to this app, and returns true only if the claimed installation id is among them.
 
-**Call relations**: It is called by `submit_intent` after input validation and any extra lookups. Its output is passed into the conversation admission step so the engine can run the same tools that chat would run, without asking a model to reinterpret the request.
+**Call relations**: This method is used during the callback flow started by GitHub’s redirect. `github_installed` gets an exchange object from `install_exchange`, then calls this method to turn GitHub’s authorization code into proof of access before binding anything to the workspace.
 
-*Call graph*: called by 1 (submit_intent); 2 external calls (__init__, safe_dump).
-
-
-##### `_outcome`  (lines 276–292)
-
-```
-def _outcome(frame: TerminalFrame, turn_id: UUID) -> Response
-```
-
-**Purpose**: Turns the terminal result of an admitted intent turn into the JSON response sent back to the browser. It gives the portal a simple success or failure shape.
-
-**Data flow**: It receives the final frame from the turn and the turn id → checks whether the turn finished successfully, requested credentials, or failed → returns a JSON response containing whether it was applied, a message, and the turn id.
-
-**Call relations**: It is called by `submit_intent` when the intent conversation produces a terminal frame. This keeps response formatting separate from the longer request flow.
-
-*Call graph*: called by 1 (submit_intent); 1 external calls (JSONResponse).
+*Call graph*: 2 external calls (__init__, AsyncClient).
 
 
-##### `submit_intent`  (lines 295–412)
+##### `install_exchange`  (lines 129–140)
 
 ```
-async def submit_intent(ctx: SurfaceContext, request: Request, agent_id: UUID, member_id: UUID, email: str) -> Response
+def install_exchange() -> GitHubInstallExchange
 ```
 
-**Purpose**: Accepts one panel form submission, validates it, submits it as a conversation turn, waits for the result, and returns that result to the web client. This is the main write path for portal panel actions.
+**Purpose**: Builds the object that can talk to GitHub during the installation callback. It gathers this deployment’s GitHub App identity from configuration and environment variables.
 
-**Data flow**: It reads the request body → rejects bodies that are too large or malformed → validates the submitted intent → performs special checks such as known agent model names, available sandbox sizes, or existing credential slots → converts the submission into a tool intent → finds or creates the member’s intent conversation for the selected agent → admits the intent as a turn → watches the turn until it finishes, parks, or times out → returns a JSON response describing the outcome.
+**Data flow**: It reads the GitHub App id from the extension manifest and the app client id and secret from environment variables. If no app id is configured, it stops with an error. Otherwise it returns a `GitHubInstallExchange` ready to verify an installation through GitHub.
 
-**Call relations**: This is the central coordinator in the file. It calls `_tool_intent` to build the tool request, uses the surface context to look up agents, credential slots, conversations, and turn frames, and calls `_outcome` when the engine reports a final result. It deliberately routes writes through the conversation system so panel changes are ordered, auditable, and consistent with chat actions.
+**Call relations**: `github_installed` calls this when it needs to validate the installation returned by GitHub. This function keeps configuration lookup separate from the verification work done by `GitHubInstallExchange.reaches`, which also makes tests easier to substitute.
 
-*Call graph*: calls 7 internal fn (admit, agent_detail, conversation_for, list_credential_slots, tail, _outcome, _tool_intent); 5 external calls (timeout, loads, conversation_audience, JSONResponse, body).
-
-
-##### `agent_create_schema`  (lines 415–427)
-
-```
-def agent_create_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]
-```
-
-**Purpose**: Builds the form schema used when creating a new agent from the portal. A schema is a machine-readable description of the fields a form should show and require.
-
-**Data flow**: It starts from the `AgentSpec` JSON schema → removes fields that should not be edited in the create form, such as raw input/output schemas and sometimes sandbox size → marks `prompt` as required → returns the adjusted schema dictionary.
-
-**Call relations**: The portal can use this returned schema to render a create-agent form that matches what the backend expects. It avoids maintaining a separate hand-written form description.
-
-*Call graph*: 1 external calls (model_json_schema).
+*Call graph*: called by 1 (github_installed); 2 external calls (__init__, github_app_id).
 
 
-##### `_update_schema`  (lines 430–440)
+##### `github_installed`  (lines 143–172)
 
 ```
-def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]
+async def github_installed(ctx: ExtensionContext, request: Request) -> Response
 ```
 
-**Purpose**: Builds the form schema used when editing an existing agent’s settings. It leaves out the prompt because the settings page shows the prompt in its own dedicated text area.
+**Purpose**: Finishes the GitHub installation flow after GitHub redirects the user back. It validates the returned code and installation id, checks the user’s real GitHub access, and binds the installation to the workspace only if the proof succeeds.
 
-**Data flow**: It starts from the `AgentSpec` JSON schema → removes fields not meant for the settings form, including input/output schemas, prompt, and sandbox size when this deployment has no sandbox size choices → returns the trimmed schema.
+**Data flow**: It receives the extension context and the HTTP request from GitHub. It reads the `code` and `installation_id` query parameters. If either is missing, it returns an error page. Otherwise it creates an install exchange, asks GitHub whether the user reaches that installation, and handles failure cases with clear pages. If the check passes, it writes the installation id into the workspace credential slot and returns a success page.
 
-**Call relations**: It is called by `agent_settings` when preparing the settings response. That lets the settings page render editable fields from the same schema the agent spec uses.
+**Call relations**: This is the return-leg controller for the connection process begun by `connect_github`. It calls `install_exchange` to get the GitHub verifier, calls `_page` to format all browser responses, and uses the context’s credentials object to save the installation once GitHub has proven it is valid.
 
-*Call graph*: called by 1 (agent_settings); 1 external calls (model_json_schema).
+*Call graph*: calls 2 internal fn (_page, install_exchange).
 
 
-##### `agent_settings`  (lines 443–481)
+##### `_page`  (lines 175–184)
 
 ```
-async def agent_settings(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) -> Response
+def _page(message: str, status: int) -> Response
 ```
 
-**Purpose**: Returns the current settings view for one agent, including its prompt, selected model, deployment capabilities, editable schema, and optionally web audience information for admins.
+**Purpose**: Creates a simple HTML response page for the browser after the GitHub callback. It gives the user a readable success or error message instead of raw API text.
 
-**Data flow**: It receives the surface context, agent id, and whether the requester is an admin → loads the agent detail → returns a 404 response if the agent does not exist → if the requester is an admin, loads the granted web audience emails → builds a JSON response with agent details, deployment limits, available model ids, current editable spec values, the settings schema, and audience data.
+**Data flow**: It receives a message and an HTTP status code. It wraps the message in a small HTML document and returns a response with that status and `text/html` content.
 
-**Call relations**: This is the read-side partner to `submit_intent`. While `submit_intent` sends changes through the conversation lane, `agent_settings` projects the current state needed to display the settings page. It calls `_update_schema` so the page knows which fields to render.
+**Call relations**: `github_installed` calls this for every visible outcome: missing authorization data, GitHub rejecting the code, forbidden installation access, and successful connection. It is the final presentation step after the callback logic decides what happened.
 
-*Call graph*: calls 2 internal fn (agent_detail, _update_schema); 5 external calls (__init__, JSONResponse, Response, granted_emails, web_extension).
+*Call graph*: called by 1 (github_installed); 1 external calls (Response).
+
+
+### `extensions/imessage/ufo_ext_imessage/tools.py`
+
+`domain_logic` · `request handling`
+
+This file is the “connect my phone” doorway for the iMessage extension. Its job is to take a phone number from a member, make sure it is shaped like a real international phone number, connect the workspace to the configured iMessage provider if needed, and then start a short-lived confirmation claim. Without this file, users could not reliably prove that a phone number belongs to them before the system starts using it for iMessage.
+
+The flow is deliberately cautious. First, the input model cleans and checks the phone number. Then the main tool, ImessageConnect.run, confirms that the requester is a signed-in member and that an iMessage provider is available. If the workspace has not yet been bound to that provider, only an admin is allowed to make that binding.
+
+Next, the tool looks in shared storage for an existing pending claim for the phone number. A pending claim is like a temporary reservation ticket: it says which member is trying to connect the number, where to send the confirmation message, and when the ticket expires. If the same member asks again before it expires, the tool resends the confirmation text. If another member has the ticket, the tool refuses.
+
+A special case matters: some messaging lines cannot send to a phone until that phone texts them first. When that happens, the tool returns instructions and a ready-made SMS link so the user can send the required opt-in message.
+
+#### Function details
+
+##### `opt_in_link`  (lines 29–33)
+
+```
+def opt_in_link(assigned_phone_number: str) -> str
+```
+
+**Purpose**: Builds a phone link that opens the Messages app with the required opt-in text already filled in. This makes it easier for the user to send the first message to the assigned iMessage line.
+
+**Data flow**: It receives the assigned phone number for the shared iMessage line. It safely encodes the standard opt-in message so it can be placed inside a link, then returns an sms: link pointing at that number with the message body prepared.
+
+**Call relations**: When the system learns that the target phone has not opted in yet, _opt_in_result calls this helper to include a convenient link in the tool response.
+
+*Call graph*: called by 1 (_opt_in_result); 1 external calls (quote).
+
+
+##### `ImessageConnectInput._e164`  (lines 46–50)
+
+```
+def _e164(cls, value: str) -> str
+```
+
+**Purpose**: Checks that the phone number supplied to the tool is in E.164 format, the common international form like +14155550123. This prevents the rest of the connection flow from working with vague or local-only phone numbers.
+
+**Data flow**: It receives the phone number text from the user input. It removes whitespace, compares the result to the expected international phone-number pattern, and either returns the cleaned phone number or raises an error explaining that the format is invalid.
+
+**Call relations**: This validator runs as part of building ImessageConnectInput, before ImessageConnect.run starts the connection process. It acts as the front-door check so later provider calls receive a predictable phone number.
+
+
+##### `_result`  (lines 53–59)
+
+```
+def _result(state: str, instruction: str, **extra: object) -> ToolResult
+```
+
+**Purpose**: Creates the standard response format returned by this tool. It packages a connection state, a human instruction, and any extra details into a JSON text result.
+
+**Data flow**: It receives a state such as pending or not_connected, an instruction for the user, and optional extra fields. It turns these into a JSON object, wraps that JSON as text content, and returns a ToolResult marked as untrusted content.
+
+**Call relations**: ImessageConnect.run uses this helper whenever it needs to answer the caller, such as when a user is not signed in, an admin is required, or confirmation is pending. _opt_in_result also uses it so opt-in replies have the same shape as other replies.
+
+*Call graph*: called by 2 (run, _opt_in_result); 3 external calls (__init__, __init__, dumps).
+
+
+##### `_opt_in_result`  (lines 62–70)
+
+```
+def _opt_in_result(assigned_phone_number: str) -> ToolResult
+```
+
+**Purpose**: Builds the specific response used when the iMessage line is not allowed to message the user’s phone yet. It tells the user to send the opt-in text first, then try the connection again.
+
+**Data flow**: It receives the assigned iMessage phone number. It creates a not_connected result containing the assigned number, the exact text the user must send, and an SMS link that pre-fills that text.
+
+**Call relations**: ImessageConnect.run calls this when the message provider refuses because the phone has not opted in. This helper delegates the common response packaging to _result and asks opt_in_link to create the convenient Messages link.
+
+*Call graph*: calls 2 internal fn (_result, opt_in_link); called by 1 (run).
+
+
+##### `ImessageConnect.run`  (lines 77–151)
+
+```
+async def run(self, ctx: ToolContext, args: ImessageConnectInput) -> ToolResult
+```
+
+**Purpose**: Runs the full phone-number connection process for the iMessage extension. It verifies who is asking, ensures the workspace is connected to the provider, creates or reuses a temporary phone claim, and sends the confirmation text.
+
+**Data flow**: It receives the tool context, which contains the current member, workspace extension services, storage, and idempotency information, plus validated input containing the phone number. It checks that the requester is signed in, loads the provider, binds the workspace to that provider when an admin is allowed to do so, reads or writes the pending phone claim in storage, and asks the provider to register the phone and send the confirmation text. It returns a ToolResult telling the caller whether the connection is pending, blocked, or requires opt-in first; it may also update extension installation binding and shared claim storage.
+
+**Call relations**: This is the main function callers use when a member asks to connect iMessage. It calls _result for normal user-facing replies, _opt_in_result for the special first-message-required path, checks admin status through the tool context, uses phone_key and PendingClaim to store the temporary claim, and calls provider methods to register the phone and send confirmation messages.
+
+*Call graph*: calls 3 internal fn (speaker_is_admin, _opt_in_result, _result); 5 external calls (__init__, now, model_validate, phone_key, uuid4).
