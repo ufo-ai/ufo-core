@@ -90,7 +90,7 @@ API write uses either the installed App assignment above or the GitHub connector
 
 ```
 spawn(
-  profile="coding",
+  target="coding",
   payload={
     "objective": "Repository setup: clone https://github.com/acme/cobbledb into /workspace/acme-cobbledb with git, then work inside it.\n\nRust codebase. Ticket LIN-1234: Add cursor-based pagination to the /query endpoint. Requirements: support `cursor` and `limit` query params, default limit 50, max 200. Write tests."
   }
@@ -98,5 +98,35 @@ spawn(
 ```
 
 A second spawn after the first finishes opens with `Repository setup: use the existing checkout at /workspace/acme-cobbledb, from https://github.com/acme/cobbledb. Do not clone.`
+
+**Example fan-out (two concurrent children, one repository):**
+
+```
+spawn(
+  target="coding",
+  payload={
+    "objective": "Repository setup: clone https://github.com/acme/cobbledb into /workspace/acme-cobbledb with git, verify the checkout, report the checked-out branch as the base, then finish without task work."
+  }
+)
+```
+
+After it reports the base branch, start the workers concurrently, each at its own path:
+
+```
+spawn(
+  target="coding",
+  payload={
+    "objective": "Repository setup: copy the committed tree at /workspace/acme-cobbledb to /workspace/acme-cobbledb-files with git, base the work on main, keep the source as workspace, use https://github.com/acme/cobbledb as origin, then work inside it.\n\nReport the number of files tracked in git."
+  }
+)
+spawn(
+  target="coding",
+  payload={
+    "objective": "Repository setup: copy the committed tree at /workspace/acme-cobbledb to /workspace/acme-cobbledb-commit with git, base the work on main, keep the source as workspace, use https://github.com/acme/cobbledb as origin, then work inside it.\n\nReport the current commit."
+  }
+)
+```
+
+Never start two children that each clone the repository, even to different paths: the one remote clone is the setup child's, and every worker copies from it.
 
 For an unusually deep task, add `"extended_context": true` to the payload to run the child under the main agent's round ceiling instead of its default budget.

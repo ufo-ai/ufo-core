@@ -16,29 +16,46 @@ GITHUB_APP_API_COMMAND = 'GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api'
 
 
 def github_app_api_scorer() -> Grader:
+    """The command may arrive by either leg: the parent writes it into the objective, or the child
+    knows it from its own prompt and the final answer carries it back. Both prove the member gets
+    the installed-App auth without a connector connection — the connector attempt is the guarded
+    failure, not the order the skill loaded in — and only the delegation route is fixed."""
+
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         loaded = False
+        objectives: list[str] = []
         for call in output.calls:
             if call.name == "connect_account":
                 return CapabilityVerdict(False, "attempted a connector connection")
-            if call.name == "load_skill" and call.succeeded and call.input == {"name": "coding"}:
+            if call.name == "load_skill" and call.succeeded and call.input.get("name") == "coding":
                 loaded = True
                 continue
-            if not loaded or call.name != "spawn" or not call.succeeded:
+            if call.name != "spawn" or not call.succeeded:
                 continue
             match call.input:
                 case {"target": str(target), "payload": {"objective": str(objective)}} if (
                     target.removeprefix("profile:") == "coding"
                 ):
-                    if GITHUB_APP_API_COMMAND in objective:
-                        return CapabilityVerdict(True, "loaded coding and delegated App API auth")
+                    objectives.append(objective)
                 case _:
                     continue
-        return CapabilityVerdict(False, "no coding objective carries the App API auth command")
+        if not loaded:
+            return CapabilityVerdict(False, "never loaded the coding skill")
+        if not objectives:
+            return CapabilityVerdict(False, "no successful coding spawn")
+        if any(GITHUB_APP_API_COMMAND in objective for objective in objectives):
+            return CapabilityVerdict(True, "loaded coding and delegated App API auth")
+        if GITHUB_APP_API_COMMAND in output.response:
+            return CapabilityVerdict(
+                True, "loaded coding, delegated, and the answer carries the App API command"
+            )
+        return CapabilityVerdict(
+            False, "neither a coding objective nor the answer carries the App API auth command"
+        )
 
     return DescribedGrader(
-        "coding loads before a coding spawn whose objective carries the installed-App gh command, "
-        "without a connector connection",
+        "coding loads, a coding spawn succeeds, no connector connection is attempted, and the "
+        "objective or the final answer carries the installed-App gh command",
         grade,
     )
 
@@ -113,7 +130,7 @@ SPECS: list[tuple[str, str, Grader]] = [
 
 CASES = (
     *(
-        CapabilityCase(name, brief, grader, digest_tag=f"delegation:{name}")
+        CapabilityCase(name, brief, grader, digest_tag=f"delegation:{name}:lane-success")
         for name, brief, grader in SPECS
     ),
     CapabilityCase(
@@ -131,6 +148,6 @@ CASES = (
         "state how it would make a GitHub API write as that App. Do not make the request and do "
         "not connect another GitHub account.",
         github_app_api_scorer(),
-        digest_tag="delegation:coding-subagent-github-app-api",
+        digest_tag="delegation:coding-subagent-github-app-api:answer-or-objective",
     ),
 )

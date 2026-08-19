@@ -33,7 +33,7 @@ from evals.harness.capability import (
     WorkspaceFile,
 )
 from evals.harness.handoff import handoff_record
-from evals.harness.harness import Json
+from evals.harness.harness import WAIT_EXPIRED, Json
 from evals.harness.judge import JudgeLeg
 from evals.harness.timing import CaseTiming, TurnSteps, TurnTiming, case_timing, turn_timing
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
@@ -313,13 +313,13 @@ class InProcessTarget:
                 TargetResult(
                     CapabilityOutput("", (), (), tokens=tokens, cost_micro_usd=cost_micro_usd),
                     False,
-                    "turn produced no terminal transcript",
+                    WAIT_EXPIRED,
                     trajectory=EvalTrajectory(
                         conversation_id=conversation_id,
                         turn_id=turn_id,
                         status=await self._turn_status(turn_id),
                         messages=(),
-                        error="turn produced no terminal transcript",
+                        error=WAIT_EXPIRED,
                     ),
                 )
             )

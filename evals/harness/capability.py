@@ -25,6 +25,7 @@ from evals.harness.harness import (
     Json,
     JsonObject,
     infra_error,
+    infra_owned_fault,
     is_transient_fault,
 )
 from evals.harness.judge import (
@@ -526,15 +527,20 @@ def _unclean_verdict(result: TargetResult) -> CapabilityVerdict:
     """The verdict for a turn that never reached a grader. A terminal `error_class` naming a model
     or transport fault the provider owns put no capability question to the model at all, so the
     sample is excluded rather than scored — the same call the scenario harness makes on the same
-    field. Every other unclean end (a wedge of ours, a turn row that vanished, a class the
-    transient set does not name) stays a failure: exclusion reaches only turns that never
-    terminated cleanly, so a graded answer, a refusal, and a failed rubric are all out of its
-    reach by construction."""
-    if not is_transient_fault(result.error_class):
+    field. A wait that expired on a still-live turn is excluded on the same reasoning: the harness
+    stopped listening, the turn did not stop working. Every other unclean end (a wedge of ours, a
+    turn that reached a terminal status without a transcript, a class the transient set does not
+    name) stays a failure: exclusion reaches only turns that never terminated cleanly, so a graded
+    answer, a refusal, and a failed rubric are all out of its reach by construction."""
+    status = result.trajectory.status if result.trajectory is not None else None
+    if not infra_owned_fault(result.error_class, result.failure_reason, status):
         return CapabilityVerdict(False, result.failure_reason)
-    return CapabilityVerdict(
-        False, f"{result.failure_reason}; the provider owns this fault", excluded=True
+    owner = (
+        "the provider owns this fault"
+        if is_transient_fault(result.error_class)
+        else "the wait expired on a still-running turn"
     )
+    return CapabilityVerdict(False, f"{result.failure_reason}; {owner}", excluded=True)
 
 
 async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> CapabilitySample:

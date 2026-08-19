@@ -29,6 +29,7 @@ from dbos import DBOSClient
 from dbos import error as dbos_error
 from httpx import AsyncClient
 
+import evals.harness.capability as harness_capability
 import evals.harness.target as harness_target
 from evals import coding_subagent, cos_workflows, github_connections, low_stakes_default
 from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports
@@ -69,7 +70,14 @@ from evals.harness.capability import (
     source_digest,
 )
 from evals.harness.handoff import SubagentHandoff
-from evals.harness.harness import EvalCaseResult, EvalMetric, EvalReport, is_transient_fault
+from evals.harness.harness import (
+    WAIT_EXPIRED,
+    EvalCaseResult,
+    EvalMetric,
+    EvalReport,
+    infra_owned_fault,
+    is_transient_fault,
+)
 from evals.harness.judge import (
     JUDGE_REVISION,
     MAX_ANSWER_CHARS,
@@ -182,7 +190,7 @@ from ufo.models.interface import (
 from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef, validate_object_name
 from ufo.schema import tables
-from ufo.schema.records import AgentChange, Usage
+from ufo.schema.records import AgentChange, TurnStatus, Usage
 from ufo.transcript import (
     CompactionSummary,
     CompactionWindow,
@@ -2725,8 +2733,24 @@ async def test_github_app_api_scorer_requires_the_skill_command_and_no_connector
     grader = coding_subagent.github_app_api_scorer()
 
     assert (await grader(CapabilityOutput("done", (coding, spawn)))).passed
-    assert not (await grader(CapabilityOutput("done", (spawn, coding)))).passed
+    assert (await grader(CapabilityOutput("done", (spawn, coding)))).passed
+    assert not (await grader(CapabilityOutput("done", (spawn,)))).passed
     assert not (await grader(CapabilityOutput("done", (coding, connector, spawn)))).passed
+
+    bare = ToolInvocation(
+        "spawn",
+        {
+            "target": "coding",
+            "payload": {"objective": "State how you would authenticate the App API write."},
+        },
+        "done",
+        True,
+    )
+    answer = f"Run {coding_subagent.GITHUB_APP_API_COMMAND} repos/acme/cobbledb/issues -f title=t."
+    assert (await grader(CapabilityOutput(answer, (coding, bare)))).passed
+    assert (await grader(CapabilityOutput(answer, (bare, coding)))).passed
+    assert not (await grader(CapabilityOutput("use the App token", (coding, bare)))).passed
+    assert not (await grader(CapabilityOutput(answer, (bare,)))).passed
 
 
 async def test_landed_branch_scorer_reads_the_remote_the_prepare_hook_built(
@@ -2779,14 +2803,52 @@ async def test_coding_landing_objective_scorer_requires_the_authorized_objective
     authorized = spawn(
         "Fix the spelling in README.md, push the branch you create, and open its pull request."
     )
+    forgeless = spawn(
+        "Fix the spelling on a new branch, push the branch to origin, and raise the review with "
+        "`git request-pull`, saved as /workspace/pull-request.md."
+    )
     withheld = spawn("Fix the spelling in README.md and report what you would do.")
     asked = ToolInvocation("ask_user", {"question": "Open the PR?"}, "asked", True)
     grader = low_stakes_default.coding_landing_objective_scorer()
 
     assert (await grader(delegated((authorized,)))).passed
+    assert (await grader(delegated((forgeless,)))).passed
     assert not (await grader(delegated((withheld,)))).passed
     assert not (await grader(delegated((asked, authorized)))).passed
     assert not (await grader(delegated(()))).passed
+
+
+async def test_a_wait_expired_on_a_live_turn_is_excluded_a_terminal_wedge_is_not() -> None:
+    def unclean(status: TurnStatus | None, reason: str = WAIT_EXPIRED) -> TargetResult:
+        return TargetResult(
+            CapabilityOutput("", ()),
+            clean=False,
+            failure_reason=reason,
+            trajectory=EvalTrajectory(
+                conversation_id=uuid4(),
+                turn_id=uuid4(),
+                status=status,
+                messages=(),
+                error=reason,
+            ),
+        )
+
+    still_running = harness_capability._unclean_verdict(unclean("running"))
+    assert still_running.excluded
+    assert "still-running" in still_running.reason
+    assert harness_capability._unclean_verdict(unclean("queued")).excluded
+    assert not harness_capability._unclean_verdict(unclean("failed")).excluded
+    assert not harness_capability._unclean_verdict(unclean(None)).excluded
+    assert not harness_capability._unclean_verdict(unclean("running", "turn row vanished")).excluded
+    provider = TargetResult(
+        CapabilityOutput("", ()),
+        clean=False,
+        failure_reason="model call failed",
+        error_class="APIConnectionError",
+    )
+    assert harness_capability._unclean_verdict(provider).excluded
+    assert infra_owned_fault(None, WAIT_EXPIRED, "parked")
+    assert not infra_owned_fault(None, WAIT_EXPIRED, "done")
 
 
 async def test_the_delegated_case_guard_reads_the_change_not_the_inspection(tmp_path: Path) -> None:
@@ -3198,20 +3260,19 @@ async def test_local_file_scorer_requires_a_successful_completed_call() -> None:
     assert (await grader(successful)).passed
 
 
-async def test_lane_scorer_requires_a_successful_completed_spawn() -> None:
+async def test_lane_scorer_grades_the_first_lane_and_wants_a_success_in_it() -> None:
     grader = lane_scorer(frozenset({"coding"}))
-    errored = CapabilityOutput(
-        "",
-        (ToolInvocation("spawn", {"target": "coding"}, "child failed", True, True),),
-    )
-    unfinished = CapabilityOutput("", (ToolInvocation("spawn", {"target": "coding"}),))
-    successful = CapabilityOutput(
-        "", (ToolInvocation("spawn", {"target": "coding"}, "done", True),)
-    )
+    failed_attempt = ToolInvocation("spawn", {"target": "coding"}, "child failed", True, True)
+    unfinished_attempt = ToolInvocation("spawn", {"target": "coding"})
+    succeeded = ToolInvocation("spawn", {"target": "coding"}, "done", True)
+    wrong_lane = ToolInvocation("spawn", {"target": "writing"}, "done", True)
 
-    assert not (await grader(errored)).passed
-    assert not (await grader(unfinished)).passed
-    assert (await grader(successful)).passed
+    assert not (await grader(CapabilityOutput("", (failed_attempt,)))).passed
+    assert not (await grader(CapabilityOutput("", (unfinished_attempt,)))).passed
+    assert (await grader(CapabilityOutput("", (succeeded,)))).passed
+    assert (await grader(CapabilityOutput("", (failed_attempt, succeeded)))).passed
+    assert not (await grader(CapabilityOutput("", (wrong_lane, succeeded)))).passed
+    assert not (await grader(CapabilityOutput("", ()))).passed
 
 
 async def test_target_loads_the_successfully_shared_artifact_for_grading(

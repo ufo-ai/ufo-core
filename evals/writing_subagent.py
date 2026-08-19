@@ -373,7 +373,7 @@ CASES = (
         "each option on one line prefixed 1., 2., and 3.",
         tweet_scorer((("csv",), ("100,000", "100k"), ("pro",), ("today",))),
         samples=3,
-        digest_tag="writing:subagent-draft-tweets",
+        digest_tag="writing:subagent-draft-tweets:lane-success",
         rubric=(
             "Across the set, the options accurately preserve CSV export, availability today, Pro "
             "workspaces, and the 100,000-row limit without adding a result, customer claim, or "
@@ -393,7 +393,7 @@ CASES = (
         "one line prefixed 1., 2., and 3.",
         tweet_scorer((("csv",), ("100,000", "100k"), ("pro",), ("today",)), ("read", "edit")),
         samples=3,
-        digest_tag="writing:subagent-edit-tweets",
+        digest_tag="writing:subagent-edit-tweets:lane-success",
         workspace_files=(SOURCE_DRAFT,),
         rubric=(
             "Every revised option preserves only the source facts: CSV export, Pro teams, up to "
@@ -425,7 +425,7 @@ LAUNCH_CASES = (
             DescribedGrader(LaunchThreadGrader().grading, LaunchThreadGrader()),
         ),
         samples=3,
-        digest_tag="writing:subagent-edit-launch-thread",
+        digest_tag="writing:subagent-edit-launch-thread:lane-success",
         workspace_files=(LAUNCH_THREAD_DRAFT,),
         rubric=(
             "The source explicitly says UFO.ai is an AI system that builds important work. "

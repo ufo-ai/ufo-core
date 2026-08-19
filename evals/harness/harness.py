@@ -10,6 +10,8 @@ from json import dumps
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.schema.records import NON_TERMINAL_STATUSES, TurnStatus
+
 type Json = str | int | float | bool | None | list[Json] | dict[str, Json]
 type JsonObject = dict[str, Json]
 
@@ -256,3 +258,18 @@ def is_transient_fault(error_class: str | None) -> bool:
     builtin `TimeoutError` or `ConnectionError` there is an internal wedge that must surface as a
     failure, never be masked as external."""
     return error_class in TRANSIENT_ERROR_CLASSES
+
+
+WAIT_EXPIRED = "turn produced no terminal transcript"
+
+
+def infra_owned_fault(
+    error_class: str | None, failure_reason: str, status: TurnStatus | None
+) -> bool:
+    """Whether an unclean run's fault lies outside the model's capability: a provider-owned
+    transient, or a wait that expired while the turn was still live — the harness stopped
+    listening, the turn did not stop working, so no capability question was put. A turn that
+    reached a terminal status without a transcript is a wedge of ours and stays a failure."""
+    if is_transient_fault(error_class):
+        return True
+    return failure_reason == WAIT_EXPIRED and status in NON_TERMINAL_STATUSES

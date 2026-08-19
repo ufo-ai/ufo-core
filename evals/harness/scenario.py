@@ -16,7 +16,13 @@ from evals.harness.capability import (
     grading_statement,
     source_digest,
 )
-from evals.harness.harness import EvalCaseResult, Json, JsonObject, is_transient_fault
+from evals.harness.harness import (
+    EvalCaseResult,
+    Json,
+    JsonObject,
+    infra_owned_fault,
+    is_transient_fault,
+)
 from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, JudgeLeg, rubric_pass
 from evals.harness.target import CapabilityTarget, TargetResult
 from ufo.sdk.models import Message
@@ -295,7 +301,11 @@ class _ScenarioRun:
                     result.failure_reason,
                     tokens,
                     cost_micro_usd,
-                    infra=is_transient_fault(result.error_class),
+                    infra=infra_owned_fault(
+                        result.error_class,
+                        result.failure_reason,
+                        result.trajectory.status if result.trajectory is not None else None,
+                    ),
                 )
         if last is None:
             return _Trial(

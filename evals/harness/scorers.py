@@ -402,25 +402,38 @@ def _delivered_artifact(output: CapabilityOutput, suffix: str) -> SharedArtifact
     return None
 
 
+def _spawn_lane(call: ToolInvocation) -> str:
+    chosen = call.input.get("subagent_type") or call.input.get("target")
+    return str(chosen).removeprefix("profile:") if chosen else "subagent"
+
+
 def lane_scorer(acceptable: frozenset[str]) -> Grader:
-    """Pass iff the first delegation succeeds in an acceptable subagent lane."""
+    """Pass iff the first delegation names an acceptable subagent lane and a delegation in that
+    lane completes successfully. The lane is the subject: a first attempt whose payload fails
+    validation and is retried in the same lane still routed correctly, while a first spawn aimed
+    at another lane fails regardless of what succeeds later."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        first = next((call for call in output.calls if call.name == "spawn"), None)
-        if first is None:
+        spawns = [call for call in output.calls if call.name == "spawn"]
+        if not spawns:
             return CapabilityVerdict(False, "did not delegate")
-        chosen_raw = first.input.get("subagent_type") or first.input.get("target")
-        chosen = str(chosen_raw).removeprefix("profile:") if chosen_raw else "subagent"
-        if not first.has_result:
-            return CapabilityVerdict(False, f"{chosen!r} delegation produced no result")
-        if first.is_error:
-            return CapabilityVerdict(False, f"{chosen!r} delegation failed: {first.result[:120]}")
-        if chosen in acceptable:
+        chosen = _spawn_lane(spawns[0])
+        if chosen not in acceptable:
+            return CapabilityVerdict(
+                False, f"spawned {chosen!r}, expected one of {sorted(acceptable)}"
+            )
+        lane = [call for call in spawns if _spawn_lane(call) == chosen]
+        if any(call.succeeded for call in lane):
             return CapabilityVerdict(True, f"spawned {chosen!r}")
-        return CapabilityVerdict(False, f"spawned {chosen!r}, expected one of {sorted(acceptable)}")
+        errored = next((call for call in lane if call.is_error), None)
+        if errored is not None:
+            return CapabilityVerdict(False, f"{chosen!r} delegation failed: {errored.result[:120]}")
+        return CapabilityVerdict(False, f"{chosen!r} delegation produced no result")
 
     return DescribedGrader(
-        f"the first spawn delegation succeeds in one of {sorted(acceptable)}", grade
+        f"the first spawn delegation names one of {sorted(acceptable)} and a delegation in that "
+        "lane completes successfully",
+        grade,
     )
 
 
