@@ -458,12 +458,16 @@ class SlackInstall:
     """What one OAuth `oauth.v2.access` exchange yields: the workspace's own bot token and the team,
     bot-user, and app ids Slack minted it for. The token is the credential; the team and bot-user
     ids become the surface's identity record, proven by the exchange itself — no `auth.test`
-    round-trip. The app id is what the finished install page links back through."""
+    round-trip. Those three are the install, and a response missing any of them is malformed.
+
+    The app id only addresses the link home on the last page, so it is read the same way and held
+    loosely: a response without one still installs, and the page tells the member to close the tab
+    rather than pointing at a workspace Slack was never named for."""
 
     bot_token: str
     team_id: str
     bot_user_id: str
-    app_id: str
+    app_id: str | None
 
 
 async def slack_oauth_exchange(code: str, redirect_uri: str) -> SlackInstall:
@@ -487,15 +491,16 @@ async def slack_oauth_exchange(code: str, redirect_uri: str) -> SlackInstall:
     team = payload.get("team")
     team_id = team.get("id") if isinstance(team, dict) else None
     bot_user_id = payload.get("bot_user_id")
-    app_id = payload.get("app_id")
+    named_app = payload.get("app_id")
     if not isinstance(access_token, str) or not access_token:
         raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
     if not isinstance(team_id, str) or not re.match(TEAM_ID_PATTERN, team_id):
         raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
     if not isinstance(bot_user_id, str) or not re.match(BOT_USER_ID_PATTERN, bot_user_id):
         raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
-    if not isinstance(app_id, str) or not re.match(APP_ID_PATTERN, app_id):
-        raise SlackIdentityError(MALFORMED_IDENTITY_ERROR)
+    app_id = (
+        named_app if isinstance(named_app, str) and re.match(APP_ID_PATTERN, named_app) else None
+    )
     return SlackInstall(
         bot_token=access_token, team_id=team_id, bot_user_id=bot_user_id, app_id=app_id
     )
@@ -1429,6 +1434,7 @@ async def _declared_files(
 
 ASK_UFO_AGAIN = "Ask ufo to connect Slack again."
 CONTINUE_IN_SLACK = "Continue in Slack"
+TALK_IN_SLACK = "You can close this page. Talk to ufo in Slack."
 
 
 async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
@@ -1500,11 +1506,11 @@ async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
     )
     await ctx.blob.put(IDENTITY_BLOB_KEY, identity.model_dump_json().encode())
     await _mirror_self_user_id(ctx.workspace_id, identity.bot_user_id)
+    home = None if install.app_id is None else slack_app_dm_url(install.app_id, install.team_id)
     return callback_page(
         headline="ufo is installed.",
-        link=PageLink(
-            label=CONTINUE_IN_SLACK, url=slack_app_dm_url(install.app_id, install.team_id)
-        ),
+        detail="" if home else TALK_IN_SLACK,
+        link=None if home is None else PageLink(label=CONTINUE_IN_SLACK, url=home),
         close=True,
     )
 

@@ -1488,12 +1488,13 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
         await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT)
 
 
-async def test_oauth_callback_refuses_an_install_with_no_app_id(
+async def test_an_install_with_no_app_id_lands_and_says_to_close_the_tab(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """The install page's only way back into the conversation is built from the app id Slack
-    returns with the token. A response without one is malformed, so the install is refused whole
-    rather than landing a workspace whose finished page leads nowhere."""
+    """The link home on the last page is addressed by the app id Slack returns with the token, and
+    nothing else needs it. So a response without one still installs — refusing the token, the team
+    binding, and the identity over a link would cost the member the whole product — and the page
+    falls back to the line it can honour."""
     workspace_id, member_id = await _seed(member_email="owner@acme.com")
 
     def anonymous(request: httpx.Request) -> httpx.Response:
@@ -1535,9 +1536,10 @@ async def test_oauth_callback_refuses_an_install_with_no_app_id(
             f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
             params={"code": "the-code", "state": sealed},
         )
-    assert response.status_code == 502
-    with pytest.raises(CredentialSlotUnset):
-        await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT)
+    assert response.status_code == 200
+    assert await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT) == BOT_TOKEN
+    assert slack.TALK_IN_SLACK in response.text
+    assert "app_redirect" not in response.text
 
 
 async def test_shared_oauth_callback_binds_the_sealed_workspace(
