@@ -993,10 +993,7 @@ bundle installs OSS, on-prem, or hosted.
 
 Packs (activation bundles, not code — see Packs): **assistant** bundles memory, the browser pack
 (its BUA engine over the default `sandbox_chrome` transport), brokered connectors, and web research
-(the research tools over the Perplexity search backend) (the flagship); **chief-of-staff** bundles
-brokered connector grants plus feed sync (Google Meet transcripts and Gemini smart notes, Slack, a
-folder-synced state repo) with memory, the Slack surface, scheduling, todos, workspace
-skills, and self-improvement behind four pack skills (`sync`, `prep`, `triage`, setup).
+(the research tools over the Perplexity search backend) (the flagship).
 **support bot** bundles knowledge sources, keys onboarding, and websites.
 Each activates one coherent config, no code of its own beyond what it references.
 

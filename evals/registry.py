@@ -12,7 +12,6 @@ from evals import (
     coding_subagent,
     connector_connections,
     connector_refs,
-    cos_workflows,
     credential_handoff,
     daily_brief,
     dead_route_repeat,
@@ -150,7 +149,6 @@ TASKS: tuple[EvalTask, ...] = (
         judge_max_tokens=16_000,
         judge_reasoning="high",
     ),
-    capability_task("cos_workflows", cos_workflows.CASES, packs=cos_workflows.COS_WORKFLOWS_PACKS),
     capability_task(
         "onboarding_help",
         onboarding_help.CASES,

@@ -7,11 +7,6 @@ name: Nightly evals
 # whole suite set run serially in one job passes that, so the shards also hold the sweep inside the
 # ceiling and let a shard fail without taking the night's other records with it.
 #
-# Suites bound to a pack run under it: `cos_workflows` needs `chief_of_staff` and `onboarding_help`
-# needs `assistant_hosted`, and `python -m evals` refuses either under any other pack. The planner
-# groups by that binding, so each shard carries one pack, one template, and its own knobs — a knob
-# naming an extension its pack does not ship fails `serve` at boot.
-#
 # A pull request touching the sweep, and a dispatch asking for it, run the proving subset instead:
 # a handful of cases per arm, each arm booting its own serve, so the machinery is exercised for a
 # few dollars before a night's run depends on it.

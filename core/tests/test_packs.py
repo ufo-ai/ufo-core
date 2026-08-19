@@ -14,7 +14,6 @@ import ufo_pack_assistant as assistant
 import ufo_pack_assistant_billing as assistant_billing
 import ufo_pack_assistant_eval as assistant_eval
 import ufo_pack_assistant_hosted as assistant_hosted
-import ufo_pack_chief_of_staff as chief_of_staff
 import ufo_pack_dsqa_eval as dsqa_eval
 import ufo_pack_gdpval_eval as gdpval
 
@@ -196,26 +195,6 @@ def test_the_hosted_onboarding_corpus_ships_its_reference_files() -> None:
         "slack-install.md",
         "troubleshooting.md",
     }
-
-
-def test_chief_of_staff_pack_is_discovered_with_its_bundle() -> None:
-    packs = discovered_packs()
-    assert chief_of_staff.NAME in packs
-    assert packs[chief_of_staff.NAME].extensions == chief_of_staff.EXTENSIONS
-
-
-def test_activating_the_chief_of_staff_pack_makes_exactly_its_bundle_active() -> None:
-    """The chief-of-staff pack narrows to its feed-and-review bundle (brokered connectors plus
-    sources, memory, the Slack front door, scheduling, todos, workspace skills, self-improvement)
-    in declared order, followed by the pack's own manifest carrying its four workflow skills."""
-    manifests = load_manifests(chief_of_staff.NAME)
-    assert [manifest.name for manifest in manifests] == [
-        *chief_of_staff.EXTENSIONS,
-        chief_of_staff.NAME,
-    ]
-    own = manifests[-1]
-    parsed = {parse_skill(spec.path).name for spec in own.skills}
-    assert parsed == set(chief_of_staff.SKILL_NAMES)
 
 
 @pytest.mark.parametrize(

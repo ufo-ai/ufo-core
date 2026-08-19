@@ -30,11 +30,8 @@ CONCURRENCY = 4
 SHARD_WEIGHT = 45
 DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 PUBLIC_BASE_URL = "http://evals.invalid"
-# One capability suite with a judge, one scenario with its simulator, one arc, and the pack the
-# `chief_of_staff` arm exists for. `SMOKE_PROBE` runs on every arm, so each arm proves its own
-# knobs boot a serve — the hosted arm carries no other suite this cheap.
 SMOKE_PROBE = "basics"
-SMOKE_SUITES = (SMOKE_PROBE, "semantic_quality", "scenario_smoke", "ab_reversal", "cos_workflows")
+SMOKE_SUITES = (SMOKE_PROBE, "semantic_quality", "scenario_smoke", "ab_reversal")
 
 
 @dataclass(frozen=True)
@@ -48,7 +45,6 @@ class Arm:
 
 ARMS = (
     Arm("assistant_eval", {"research": {"search_provider": "perplexity"}}),
-    Arm("chief_of_staff", {}),
     Arm(
         "assistant_hosted",
         {

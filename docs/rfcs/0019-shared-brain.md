@@ -37,7 +37,7 @@ Three fragments of one idea, none composing with the others.
 | Fragment | Has | Lacks | Where |
 |---|---|---|---|
 | memory ext | 3-leg recall (lexical + vector + unembedded-tail), RRF/cosine blend, per-kind decay, hourly consolidation, `memory_100` evals | write-time classify (identity is `uuid5` over exact body bytes — a reworded duplicate is a new row), typed provenance (`source_ref` is a nullable free-text column **the model itself writes**, `manifest.py:139-141`, and consolidation nulls it, `condenser.py:276`), forget path, index cleanup of superseded rows, durable refs in results | `extensions/memory/ufo_ext_memory/store.py:396-434` |
-| knowledge_graph ext | 2-tier extraction, typed edges with page provenance, stub-on-reference | entity resolution — `entity_type` sits inside the `uuid5` identity (`store.py:433-436`), so an org chart in prose mints `topic` nodes a *person* lookup can never find, breaking the "place a person" workflow four `chief_of_staff` skills teach; a working seed (`context_for` substring-scans the newest 500 entities); any eval | `extensions/knowledge_graph/ufo_ext_knowledge_graph/store.py:425-436,557-574` |
+| knowledge_graph ext | 2-tier extraction, typed edges with page provenance, stub-on-reference | entity resolution — `entity_type` sits inside the `uuid5` identity (`store.py:433-436`), so an org chart in prose mints `topic` nodes a *person* lookup can never find; a working seed (`context_for` substring-scans the newest 500 entities); any eval | `extensions/knowledge_graph/ufo_ext_knowledge_graph/store.py:425-436,557-574` |
 | objects (RFC 0017) | one address `(kind, name)`, five verbs, per-kind typed storage, `MemberOwnedObjects` | typed links between a memory and its page; durable refs in search results (#613) | `core/src/ufo/objects.py:505-565` |
 
 Two gaps are worse than they read. **Recall silently shrinks** — consolidation supersedes rows
@@ -117,10 +117,8 @@ detection and the classify cache one cheap join key. Typed provenance is the ent
 
 The rest of the organ, each change with its cost:
 
-- **`graph_search`, its seeder, and the `knowledge_graph` extension die whole.** Four
-  `chief_of_staff` skills call the tool (`triage:13`, `prep:12`, `sync:22`, `setup:52`) — those
-  edits and their routing evals land in the same unit, so no live workflow loses capability
-  between units. One query surface remains: `memory_search`. Whether a graph arm is ever
+- **`graph_search`, its seeder, and the `knowledge_graph` extension die whole.** One query surface
+  remains: `memory_search`. Whether a graph arm is ever
   *rebuilt* — entity resolution, provider-structure extraction, a fusion leg inside recall — is
   a measured question, never a design default: the `graph_arm` eval set and a
   relational-query-share meter land first, and the arm stays deferred until measured share
@@ -246,7 +244,7 @@ or not it appears in the chain.
 
 | Unit | Lands | Proof |
 |---|---|---|
-| **1. Measure, delete the second surface** | `graph_arm` eval set + relational-share meter + per-workspace stuff-vs-retrieve crossover; `graph_search`, its seeder, and the `knowledge_graph` extension deleted whole, the four `chief_of_staff` skills re-routed to `memory_search` in the same unit so no live workflow loses capability between units | The meter's number decides whether the deferred graph arm is ever built and sets each workspace's derivation floor; `graph_search` no longer registers and the four skills' routing evals pass against `memory_search` |
+| **1. Measure, delete the second surface** | `graph_arm` eval set + relational-share meter + per-workspace stuff-vs-retrieve crossover; `graph_search`, its seeder, and the `knowledge_graph` extension deleted whole | The meter's number decides whether the deferred graph arm is ever built and sets each workspace's derivation floor; `graph_search` no longer registers |
 | **2. One recall, computed audience** | typed provenance columns + `memory_provenance` set + `body_digest`; the audience function — `∩` over root audiences — denormalized at index with its rebind recompute job; `acl_fidelity` declared by connectors and consumed by the function; `MAX_PROVENANCE_ROOTS`; classify-on-index with memoized verdicts and the reversal notification; superseded-chunk pruning; cascade forget; `FORGET_GRACE_DAYS` + `BULK_DELETE_CONFIRM_THRESHOLD` behind the live-speaker confirm; the `ModelClient` memory-endpoint boot gate; `ObjectRef`s in results (#613's search half); the `access` record on operator surfaces; the withheld-at-recall counter and its report | A reworded duplicate stops minting a second row; a page tombstone erases its derived facts; recall stops shrinking; within one agent computed audience matches the scope filter except where it is narrower — an item whose only root is a page bound narrower than its write scope stops over-serving — and across agents a member who may read every root of another agent's item recalls it, attributed, with no act; a fact derived from an `upstream`-fidelity page reads at the writer's scope only; a synthesis past `MAX_PROVENANCE_ROOTS` reads at write scope only; a reversal supersede notifies the subject member; a superseder the reader may not read leaves that reader's head unchanged; a bulk delete with no live speaker refuses; an unmarked supersede restores the elder head; results carry `ObjectRef`s; an operator read appears in the tenant's `access` list; boot refuses a model endpoint offering provider-side memory; the withheld-at-recall report renders |
 
 **Deliberately deferred, each with its reason:**
