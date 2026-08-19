@@ -187,4 +187,7 @@ short line, a headline, or a quick tighten for yourself.
    against `references/checklist.md`.
 5. Fix every failed check and run them again.
 6. Deliver the full draft plus a short `What changed` section. When the draft is long enough to be an
-   artifact, share the file and keep the inline message to the conclusion and what changed.
+   artifact, keep the inline message to the conclusion and what changed, and share the file only when
+   the ask carries a share trigger from the delivery register: the user asked for a file, a document,
+   or a format, asked for the draft itself, or asked for proof, evidence, or a fuller explanation.
+   Length is not a trigger, and neither is "send" or "give me" on its own.

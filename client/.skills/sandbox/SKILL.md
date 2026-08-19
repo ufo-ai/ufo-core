@@ -29,5 +29,9 @@ that may be rebuilt between turns. Anything outside `/workspace` is off limits.
 
 A file reaches the user through `share_file`, which returns a time-limited download link — put that
 link in your reply. Writing a file into `/workspace` does not deliver it; nothing leaves the sandbox
-until it is shared. Save the finished artifact, then share the exact path. Without `share_file` in
-your tool set, the workspace is the handoff: name the path in your result, and the parent shares it.
+until it is shared. Save the finished artifact, then share the exact path only when the ask carries a
+share trigger from the delivery register: the user asked for a file, a document, or a format, asked
+for the artifact itself, or asked for proof, evidence, or a fuller explanation the artifact answers.
+A verb alone is not a trigger — "send", "give me", and "write up" name the delivery, so answer inline
+and leave the file in `/workspace` unshared. Without `share_file` in your tool set, the workspace is
+the handoff: name the path in your result, and the parent shares it.

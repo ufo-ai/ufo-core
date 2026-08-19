@@ -9,6 +9,14 @@ and never shared, because the ask named no file — carries the structured detai
 register mid-thread — an acknowledgement after a report, an analysis after banter — because the
 register is chosen per turn, never inherited from the thread.
 
+Sending that report is decided by the trigger in the ask and by nothing else, so the cases sit on
+both sides of the line: an ask that names a file, or that asks for the proof behind a claim, has to
+arrive through share_file, while an ask that only says "send me" or "give me" leaves the same report
+unsent. A suite that graded one side alone would score highest on a turn that always shares or never
+does. One further case grades a chat register against the workspace, because a discuss reply that
+quietly writes a report satisfies its word budget while breaking the rule that an ack, answer, or
+discuss delivery has no report.
+
 Where a case asks about a shipped change whose note claims the opposite of what its code does,
 shape is only half of it: the rubric there passes the reply that took the precedence off the
 code rather than the note, settled the yes-or-no premise in its first sentence, and stayed in the
@@ -120,6 +128,40 @@ def conversational_scorer(max_words: int, max_lines: int) -> Grader:
     )
 
 
+def unwritten_reply_scorer(max_words: int, max_lines: int) -> Grader:
+    """A chat-register reply that produced no report at all.
+
+    `conversational_scorer` reads the reply and nothing else, so a turn that answered a discuss ask
+    in eighty words and also wrote and sent a report passed it. An ack, answer, or discuss delivery
+    has no report, and the workspace and the share calls are where that shows."""
+    conversational = conversational_scorer(max_words, max_lines)
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        verdict = await conversational(output)
+        failures = [] if verdict.passed else [verdict.reason]
+        written = written_markdown(output, REPORT_GLOB)
+        shared = tuple(name for call in output.calls for name in shared_file_names(call))
+        delivered = max(len(shared), len(output.artifacts))
+        if written:
+            failures.append(f"wrote {len(written)} Markdown reports for a chat-register reply")
+        if delivered:
+            failures.append(f"shared {delivered} files for an ask that named none")
+        evidence: JsonObject = verdict.evidence | {
+            "writtenReports": len(written),
+            "sharedFiles": delivered,
+        }
+        if failures:
+            return CapabilityVerdict(False, "unwritten reply: " + ", ".join(failures), evidence)
+        return CapabilityVerdict(True, f"{verdict.reason}, nothing written or shared", evidence)
+
+    return DescribedGrader(
+        f"a chat-register reply: at most {max_words} words and {max_lines} lines, no section "
+        "headers, no bullet list, with no Markdown report written to the workspace and no file "
+        "shared",
+        grade,
+    )
+
+
 def written_report_scorer(
     summary_min_words: int,
     summary_max_words: int,
@@ -203,6 +245,98 @@ def written_report_scorer(
         f"{summary_max_words} words over at most {summary_max_lines} lines that names the "
         f"write-up, plus exactly one Markdown report of at least {report_min_words} words under "
         f"at least {report_min_headers} section headers, written to the workspace and never shared",
+        grade,
+    )
+
+
+def shared_report_scorer(
+    summary_max_words: int,
+    summary_max_lines: int,
+    report_min_words: int,
+    report_min_headers: int,
+    summary_min_words: int = 0,
+    expected_name: str = "",
+) -> Grader:
+    """A chat summary inside its register's budget, plus one Markdown report the turn sent.
+
+    The mirror of `written_report_scorer`: here the ask carries a share trigger, so the report has
+    to leave the sandbox and a turn that only wrote it fails. The floors run over the delivered
+    bytes, which is what fails a report the turn clipped on its way out, and `expected_name` pins
+    the name reuse a follow-up ask needs. The workspace still holds one report, so a turn that
+    answers a file request by writing a second copy fails."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        summary = measure(output.response.strip())
+        failures = []
+        if summary.words < summary_min_words:
+            failures.append(
+                f"summary has {summary.words} words under the {summary_min_words} floor"
+            )
+        if summary.words > summary_max_words:
+            failures.append(
+                f"summary has {summary.words} words over the {summary_max_words} budget"
+            )
+        if summary.lines > summary_max_lines:
+            failures.append(
+                f"summary has {summary.lines} lines over the {summary_max_lines} budget"
+            )
+        if summary.headers:
+            failures.append(f"summary has {summary.headers} section headers")
+        if summary.bullets:
+            failures.append(f"summary has {summary.bullets} bullet lines")
+        if output.artifact_error:
+            failures.append(f"artifact inspection failed: {output.artifact_error}")
+        shared = tuple(name for call in output.calls for name in shared_file_names(call))
+        delivered = tuple(
+            artifact for artifact in output.artifacts if artifact.name.lower().endswith(".md")
+        )
+        report_shape = None
+        if len(shared) != 1 or len(delivered) != 1:
+            failures.append(
+                f"shared {len(shared)} files and delivered {len(delivered)} Markdown artifacts, "
+                "expected one report sent"
+            )
+        else:
+            report = delivered[0]
+            if expected_name and report.name != expected_name:
+                failures.append(f"sent {report.name} instead of reusing {expected_name}")
+            try:
+                report_shape = measure(report.content.decode())
+            except UnicodeDecodeError:
+                failures.append("Markdown report is not UTF-8")
+            else:
+                if report_shape.words < report_min_words:
+                    failures.append(
+                        f"report has {report_shape.words} words under the {report_min_words} floor"
+                    )
+                if report_shape.headers < report_min_headers:
+                    failures.append(
+                        f"report has {report_shape.headers} headers under the "
+                        f"{report_min_headers} floor"
+                    )
+        written = written_markdown(output, REPORT_GLOB)
+        if len(written) != 1:
+            failures.append(f"left {len(written)} Markdown reports in the workspace, expected one")
+        evidence: JsonObject = {"summary": summary.evidence, "sharedFiles": len(shared)}
+        if report_shape is not None:
+            evidence["report"] = {"name": delivered[0].name, **report_shape.evidence}
+        if failures:
+            return CapabilityVerdict(False, "shared delivery: " + ", ".join(failures), evidence)
+        assert report_shape is not None
+        return CapabilityVerdict(
+            True,
+            f"shared delivery: {summary.words}-word summary sending a "
+            f"{report_shape.words}-word report",
+            evidence,
+        )
+
+    floor = f"at least {summary_min_words} and " if summary_min_words else ""
+    reuse = f" under the name {expected_name}" if expected_name else ""
+    return DescribedGrader(
+        f"a shared delivery: a plain chat summary of {floor}at most {summary_max_words} words over "
+        f"at most {summary_max_lines} lines, plus exactly one Markdown report of at least "
+        f"{report_min_words} words under at least {report_min_headers} section headers, sent with "
+        f"share_file{reuse} because the ask asked for it",
         grade,
     )
 
@@ -382,6 +516,59 @@ def resolve_source_credential(source, connections, credential_slot):
 """,
 )
 
+NIGHTLY_RUNNER_REPORT = _file(
+    "nightly-runner-queue.md",
+    """
+# Nightly runner: cron against an event-driven queue
+
+## Recommendation
+Move each job that has a real upstream event onto the queue, and keep cron for the jobs whose only
+trigger is the clock. The split costs one more mechanism to operate and removes the class of
+incident a clock trigger cannot avoid.
+
+## What cron gets wrong here
+Cron fires on wall-clock time, so a job that depends on an upstream step either polls for that step
+or races it. The digest job is the clearest case: it reads the rows the aggregation writes, and when
+the aggregation runs late the digest sends a partial batch and reports success.
+
+## What the queue costs
+The queue adds dead-letter handling, redelivery semantics, and a consumer that must be idempotent,
+because a message can arrive twice. It also adds a second place to look when a job does not run,
+which lengthens the first minutes of an incident until the team knows the new shape.
+
+## Next step
+Migrate the digest job first. It has the cleanest upstream event and the smallest blast radius. Run
+it beside its cron entry until it has a week of clean runs, then delete the cron entry.
+""",
+)
+
+DEDUP_EVIDENCE = _file(
+    "dedup-null-emails.md",
+    """
+# NULL emails under the (tenant_id, email) unique index
+
+## What the index does
+Postgres treats two NULLs as distinct inside a unique index. The index on (tenant_id, email)
+accepts any number of rows that carry the same tenant_id and a NULL email: each such row is a new
+key as far as the index is concerned, so the second insert never conflicts with the first.
+
+## What that means for the ticket
+Two imports of the same contact with no email address both land. The dedup report then counts one
+member twice, and a later merge has no key to join on. The index blocks a repeated address and
+nothing else, so closing the ticket on the index leaves the reported duplicates in place.
+
+## Remedies
+UNIQUE NULLS NOT DISTINCT over the same pair makes one NULL email per tenant the rule and needs no
+application change. A partial unique index on (tenant_id) WHERE email IS NULL covers the NULL case
+only. A NOT NULL column with a synthetic placeholder is the heaviest option and the one that
+changes reads.
+
+## How to settle it
+Insert two rows with the same tenant_id and a NULL email against a copy of the schema. Both are
+accepted today, and only one is accepted after the constraint change.
+""",
+)
+
 BANTER = (
     "morning, is the office wifi still doing the thing where it drops every twenty minutes",
     "I can't see the network from here. If it is still dropping, the office IT channel is the "
@@ -494,6 +681,25 @@ CASES = (
             "The reply gives an opinion on where the retry belongs rather than laying out options "
             "for the asker to decide.",
             "The reply reads as one person talking to another, not as a written-up analysis.",
+        ),
+    ),
+    CapabilityCase(
+        "discuss-writes-no-report",
+        "we could keep the digest cron and just add a retry, or move the whole thing to the queue "
+        "— which would you rather defend in a postmortem?",
+        unwritten_reply_scorer(max_words=80, max_lines=4),
+        digest_tag="register:discuss-writes-no-report",
+        samples=3,
+        prior_messages=(
+            "the digest missed its 7am slot twice this week and both times the enqueue call had "
+            "timed out",
+            "Twice in a week is a retry problem before it is a scheduler problem. The question is "
+            "which side can tell a missed run from a second one.",
+        ),
+        rubric=(
+            "The reply picks one of the two options and gives the one reason that decides it.",
+            "The reply reads as one person talking to another, and does not defer its substance to "
+            "a written report or a promised document.",
         ),
     ),
     CapabilityCase(
@@ -671,6 +877,110 @@ CASES = (
             "The comparison states that LISTEN/NOTIFY drops notifications for a listener that is "
             "not connected, so a restart loses them, while a durable queue retains them.",
             "The comparison reaches a clear conclusion about which fits job triggers.",
+        ),
+    ),
+    CapabilityCase(
+        "report-summary-request-shares-nothing",
+        "send me a short summary of whether we should move image thumbnailing off the web "
+        "request path onto a background worker, and cover the failure modes we would take on. "
+        "Answer from your own knowledge, no need to research it.",
+        written_report_scorer(
+            summary_min_words=25,
+            summary_max_words=120,
+            summary_max_lines=6,
+            report_min_words=200,
+            report_min_headers=3,
+        ),
+        digest_tag="register:report-summary-request-shares-nothing",
+        written_report=REPORT_GLOB,
+        rubric=(
+            "The summary recommends whether to move thumbnailing onto a background worker and "
+            "gives the one tradeoff that decides the recommendation.",
+        ),
+        artifact_rubric=(
+            "The report develops the failure modes the move takes on rather than naming them.",
+            "The failure modes are specific to a queue, such as redelivery, dead-letter handling, "
+            "ordering, or lost events.",
+            "The report reaches a recommendation instead of listing considerations for the reader "
+            "to weigh.",
+        ),
+    ),
+    CapabilityCase(
+        "report-file-asked-for-up-front",
+        "write me a markdown file comparing Postgres LISTEN/NOTIFY against a durable queue for our "
+        "job triggers, and send it over. Cover delivery guarantees, what happens across a restart, "
+        "and how each behaves under load. In the thread just give me your recommendation. Answer "
+        "from your own knowledge, no need to research it.",
+        shared_report_scorer(
+            summary_min_words=25,
+            summary_max_words=60,
+            summary_max_lines=6,
+            report_min_words=200,
+            report_min_headers=3,
+        ),
+        digest_tag="register:report-file-asked-for-up-front",
+        rubric=(
+            "The reply recommends a durable queue or durable record for job triggers and gives the "
+            "delivery guarantee that decides it.",
+        ),
+        artifact_rubric=(
+            "The comparison covers delivery guarantees, restart behavior, and behavior under load "
+            "for both options.",
+            "The comparison states that LISTEN/NOTIFY drops notifications for a listener that is "
+            "not connected, so a restart loses them, while a durable queue retains them.",
+            "The comparison reaches a clear conclusion about which fits job triggers.",
+        ),
+    ),
+    CapabilityCase(
+        "report-then-file-requested",
+        "can you send me that as a file?",
+        shared_report_scorer(
+            summary_max_words=25,
+            summary_max_lines=2,
+            report_min_words=150,
+            report_min_headers=3,
+            expected_name="nightly-runner-queue.md",
+        ),
+        digest_tag="register:report-then-file-requested",
+        workspace_files=(NIGHTLY_RUNNER_REPORT,),
+        prior_messages=(
+            "give me an analysis of whether we should move the nightly job runner off cron",
+            "Move the jobs that have a real upstream event onto a queue, and keep cron for those "
+            "whose only trigger is the clock: cron races the upstream step a job depends on, which "
+            "is why the digest sends partial batches. The full analysis, with what the queue costs "
+            "to operate, is written to nightly-runner-queue.md and can be sent.",
+        ),
+        rubric=(
+            "The reply is a brief acknowledgement that the file is sent, in the register of a "
+            "quick chat message.",
+            "The reply does not restate the analysis, its costs, or its next step.",
+        ),
+    ),
+    CapabilityCase(
+        "dispute-evidence-requested",
+        "I don't buy it. show me the evidence.",
+        shared_report_scorer(
+            summary_max_words=80,
+            summary_max_lines=4,
+            report_min_words=150,
+            report_min_headers=2,
+            expected_name="dedup-null-emails.md",
+        ),
+        digest_tag="register:dispute-evidence-requested",
+        workspace_files=(DEDUP_EVIDENCE,),
+        prior_messages=(
+            "Closing the dedup ticket. Our unique index on (tenant_id, email) already prevents two "
+            "rows with a NULL email for the same tenant, since Postgres treats NULLs as equal "
+            "inside a unique index. Confirm and I'll close it out.",
+            "Postgres treats NULLs as distinct inside a unique index, so that index accepts any "
+            "number of NULL-email rows for one tenant. Keep the ticket open and add UNIQUE NULLS "
+            "NOT DISTINCT or a NOT NULL column. The evidence is in dedup-null-emails.md.",
+        ),
+        rubric=(
+            "The reply holds the same verdict: the unique index does not block two NULL-email rows "
+            "for one tenant.",
+            "The reply points at the evidence it sent rather than repeating the demonstration in "
+            "the thread.",
         ),
     ),
 )

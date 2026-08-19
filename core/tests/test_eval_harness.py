@@ -130,13 +130,17 @@ from evals.response_formatting import structured_answer_scorer
 from evals.response_register import CASES as REGISTER_CASES
 from evals.response_register import (
     CHANGE_NOTE,
+    DEDUP_EVIDENCE,
     DELEGATED_CASES,
+    NIGHTLY_RUNNER_REPORT,
     REPORT_GLOB,
     SOURCE_CREDENTIALS,
     Shape,
     conversational_scorer,
     delegated_written_report_scorer,
     measure,
+    shared_report_scorer,
+    unwritten_reply_scorer,
     written_report_scorer,
 )
 from ufo.accounting import Pricing
@@ -3587,6 +3591,135 @@ async def test_written_report_scorer_keeps_the_summary_budget_and_the_header_flo
     assert "summary has 1 words under the 25 floor" in clipped.reason
 
 
+async def test_shared_report_scorer_requires_the_report_to_leave_the_sandbox(
+    tmp_path: Path,
+) -> None:
+    scorer = shared_report_scorer(120, 6, 200, 3, summary_min_words=25)
+    report = _written_report(tmp_path, "report.md", headers=3, words=210)
+    summary = " ".join(["summary"] * 40)
+    sent = CapabilityOutput(
+        summary,
+        (
+            ToolInvocation(
+                "share_file",
+                {"files": [{"file_path": str(report)}]},
+                '[{"name":"report.md"}]',
+                has_result=True,
+            ),
+        ),
+        artifacts=(SharedArtifact("report.md", report.read_bytes()),),
+        workspace_dir=tmp_path,
+    )
+
+    passing = await scorer(sent)
+
+    assert passing.passed
+    assert passing.evidence["sharedFiles"] == 1
+    assert passing.evidence["report"] == {
+        "name": "report.md",
+        "words": 219,
+        "lines": 6,
+        "headers": 3,
+        "bullets": 0,
+    }
+    assert "sent with share_file" in grading_statement(scorer)
+    unsent = await scorer(CapabilityOutput(summary, (), workspace_dir=tmp_path))
+    assert not unsent.passed
+    assert "shared 0 files and delivered 0 Markdown artifacts" in unsent.reason
+
+
+async def test_shared_report_scorer_pins_the_reused_name_and_the_sent_bytes(
+    tmp_path: Path,
+) -> None:
+    """A follow-up ask for the file the thread already named is answered by that file: a fresh name
+    leaves the member with two write-ups, and clipped bytes deliver the ask's subject in name
+    only."""
+    scorer = shared_report_scorer(25, 2, 150, 3, expected_name="nightly-runner-queue.md")
+    report = _written_report(tmp_path, "nightly-runner-queue.md", headers=3, words=210)
+    sent = CapabilityOutput(
+        "Sent.",
+        (
+            ToolInvocation(
+                "share_file",
+                {"files": [{"file_path": str(report)}]},
+                '[{"name":"nightly-runner-queue.md"}]',
+                has_result=True,
+            ),
+        ),
+        artifacts=(SharedArtifact("nightly-runner-queue.md", report.read_bytes()),),
+        workspace_dir=tmp_path,
+    )
+
+    passing = await scorer(sent)
+
+    assert passing.passed
+    assert grading_statement(scorer).startswith(
+        "a shared delivery: a plain chat summary of at most 25 words"
+    )
+    assert "under the name nightly-runner-queue.md" in grading_statement(scorer)
+    renamed = await scorer(
+        replace(
+            sent,
+            calls=(
+                ToolInvocation(
+                    "share_file",
+                    {"files": [{"file_path": str(report)}]},
+                    '[{"name":"queue-analysis.md"}]',
+                    has_result=True,
+                ),
+            ),
+            artifacts=(SharedArtifact("queue-analysis.md", report.read_bytes()),),
+        )
+    )
+    assert not renamed.passed
+    assert "sent queue-analysis.md instead of reusing nightly-runner-queue.md" in renamed.reason
+    clipped = await scorer(
+        replace(sent, artifacts=(SharedArtifact("nightly-runner-queue.md", b"## One\nshort"),))
+    )
+    assert not clipped.passed
+    assert "report has 3 words under the 150 floor" in clipped.reason
+    _written_report(tmp_path, "copy.md", headers=3, words=210)
+    doubled = await scorer(sent)
+    assert not doubled.passed
+    assert "left 2 Markdown reports in the workspace, expected one" in doubled.reason
+
+
+async def test_unwritten_reply_scorer_closes_the_hole_the_chat_scorer_leaves(
+    tmp_path: Path,
+) -> None:
+    """`conversational_scorer` reads the reply and nothing else, so it passes a discuss turn that
+    also filed and sent a report the ask never asked for."""
+    scorer = unwritten_reply_scorer(80, 4)
+    reply = "Keep the cron and add the retry in the worker: it is the only side that can tell a "
+    reply += "retry from a first attempt."
+    clean = await scorer(CapabilityOutput(reply, (), workspace_dir=tmp_path))
+
+    assert clean.passed
+    assert clean.evidence["writtenReports"] == 0
+    assert clean.evidence["sharedFiles"] == 0
+    report = _written_report(tmp_path, "retry-placement.md", headers=3, words=210)
+    filed = CapabilityOutput(
+        reply,
+        (
+            ToolInvocation(
+                "share_file",
+                {"files": [{"file_path": str(report)}]},
+                '[{"name":"retry-placement.md"}]',
+                has_result=True,
+            ),
+        ),
+        artifacts=(SharedArtifact("retry-placement.md", report.read_bytes()),),
+        workspace_dir=tmp_path,
+    )
+
+    verdict = await scorer(filed)
+
+    assert not verdict.passed
+    assert "wrote 1 Markdown reports for a chat-register reply" in verdict.reason
+    assert "shared 1 files for an ask that named none" in verdict.reason
+    assert (await conversational_scorer(80, 4)(filed)).passed
+
+
 async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: Path) -> None:
     report_path = str(tmp_path / "evidence.md")
     sources = ("/workspace/note.md", "/workspace/code.py")
@@ -3838,13 +3971,45 @@ def test_measure_counts_every_structure_marker() -> None:
 
 def test_register_length_floors_keep_brevity_from_rewarding_clipped_disputes() -> None:
     gradings = [grading_statement(case.grader) for case in REGISTER_CASES]
-    assert sum("at most" in grading for grading in gradings) == 10
-    assert sum("at least" in grading for grading in gradings) == 5
-    assert sum("written to the workspace and never shared" in grading for grading in gradings) == 5
-    assert sum("that names the write-up" in grading for grading in gradings) == 5
+    assert sum("at most" in grading for grading in gradings) == 15
+    assert sum("at least" in grading for grading in gradings) == 9
+    assert sum("written to the workspace and never shared" in grading for grading in gradings) == 6
+    assert sum("that names the write-up" in grading for grading in gradings) == 6
     written = [case for case in REGISTER_CASES if case.written_report]
-    assert [case.written_report for case in written] == [REPORT_GLOB] * 5
+    assert [case.written_report for case in written] == [REPORT_GLOB] * 6
     assert all(case.artifact_rubric for case in written)
+
+
+def test_the_register_suite_grades_both_sides_of_the_share_trigger() -> None:
+    """A trigger list pays only while cases sit on each side of it. The share cases fail a report
+    left in the workspace, their near-miss partner fails the same report sent for an ask that only
+    said "send me", and the discuss case fails a report written at all."""
+    gradings = {case.name: grading_statement(case.grader) for case in REGISTER_CASES}
+    cases = {case.name: case for case in REGISTER_CASES}
+
+    assert [name for name, grading in gradings.items() if "sent with share_file" in grading] == [
+        "report-file-asked-for-up-front",
+        "report-then-file-requested",
+        "dispute-evidence-requested",
+    ]
+    assert "markdown file" in cases["report-file-asked-for-up-front"].message
+    assert not cases["report-file-asked-for-up-front"].written_report
+    assert "send me a short summary" in cases["report-summary-request-shares-nothing"].message
+    assert (
+        "written to the workspace and never shared"
+        in gradings["report-summary-request-shares-nothing"]
+    )
+    assert (
+        "no Markdown report written to the workspace and no file shared"
+        in gradings["discuss-writes-no-report"]
+    )
+    for name, staged in (
+        ("report-then-file-requested", NIGHTLY_RUNNER_REPORT),
+        ("dispute-evidence-requested", DEDUP_EVIDENCE),
+    ):
+        assert cases[name].workspace_files == (staged,)
+        assert f"under the name {staged.path}" in gradings[name]
+        assert staged.path in cases[name].prior_messages[-1]
 
 
 def test_an_explicit_file_request_still_produces_one_shared_markdown() -> None:
