@@ -52,13 +52,19 @@ from ufo.sdk.sources import PageChange
 RRF_K = 60
 RRF_WEIGHT = 0.7
 COSINE_WEIGHT = 0.3
-"""How near a row the lexical legs never matched must be to stand at all. A vector search answers
-every query with its closest chunks however far away they are, so without a floor a meaningless
-string recalls whatever it happens to sit nearest. Measured against the testing corpus (29k items,
-`text-embedding-3-large`): 200 random strings in five shapes reached 0.5038 at the very top, while
-queries with real intent that shared no word with their answer ran 0.53 and up. The floor sits just
-above the garbage tail; a row any lexical leg matched holds words the member typed and never faces
-it, which is what keeps a one-word query answering."""
+"""How near something must be for a query the lexical legs matched nowhere to recall anything. A
+vector search answers every query with its closest chunks however far away they are, so without a
+floor a meaningless string recalls whatever it happens to sit nearest.
+
+The bar judges the query, never a row inside a wordful query's pool. A cosine height means
+something only within one corpus on one embedding model — measured across three corpora, correct
+answers sit at 0.44 where garbage tops 0.16, and garbage reaches 0.50 where a terse question's
+answer sits at 0.34 — so a constant held against each row cuts real answers wherever the corpus
+runs cool, and the rows it cuts first are the ones worded unlike their question: a memory filed
+under a full name, asked for by handle. What a constant can judge is total lexical silence, because
+across those same corpora every real question matched some word and no random string matched any.
+The value sits just above the highest garbage measured: 200 random strings in five shapes against
+the largest live corpus (29k items, `text-embedding-3-large`) reached 0.5038 at the very top."""
 RECALL_COSINE_FLOOR = 0.52
 TAIL_SCAN_MAX = 200
 RECALL_CANDIDATE_POOL = 200
@@ -370,17 +376,14 @@ def fuse_hits(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int) -> 
     """Pure reciprocal-rank fusion collapsed to one score per owning row — source-page search's
     ranking, where the fused rank across the lexical and vector legs is the whole signal.
 
-    A page the lexical leg never matched is held to `RECALL_COSINE_FLOOR`, as a recalled item is:
-    this search answers the same box and the same tool, so a query with no meaning must come back
-    empty here too. Fused rank cannot carry that bar, being relative to whatever the legs returned.
-    """
+    A query whose lexical leg matched nothing is held to `RECALL_COSINE_FLOOR`, as recall is: this
+    search answers the same box and the same tool, so a query with no meaning must come back empty
+    here too. Fused rank cannot carry that bar, being relative to whatever the legs returned; and
+    once any page is worded the query is a real question, so the fusion ranks everything — the page
+    a member wants is not always the page carrying their words."""
     fused = _fuse((lexical, vector), vector)
-    worded = {hit.owner_id for hit in lexical}
-    kept = {
-        owner_id: held
-        for owner_id, held in fused.items()
-        if owner_id in worded or held[1] >= RECALL_COSINE_FLOOR
-    }
+    floor = 0.0 if lexical else RECALL_COSINE_FLOOR
+    kept = {owner_id: held for owner_id, held in fused.items() if held[1] >= floor}
     ranked = sorted(kept.items(), key=lambda item: item[1][0], reverse=True)[:limit]
     return tuple(Fused(owner_id, rrf, text) for owner_id, (rrf, _cosine, text) in ranked)
 
@@ -396,18 +399,21 @@ def fuse_recall(
     the un-embedded rows the index has not chunked yet — it carries no cosine, so a just-committed
     fact ranks on normalized RRF alone until the index job serves it.
 
-    A row no lexical leg matched stands only if its cosine reaches `RECALL_COSINE_FLOOR`: the
-    vector leg answers every query with its nearest chunks, so without that floor a string with no
-    meaning recalls whatever it sits closest to. The normalized RRF cannot carry the floor itself —
-    it is relative to the top row of whatever came back, so the best of a set of far rows still
-    scores 1.0."""
+    A query neither lexical leg matched anywhere stands only on cosine, every row held to
+    `RECALL_COSINE_FLOOR`: the vector leg answers every query with its nearest chunks, so without
+    that floor a string with no meaning recalls whatever it sits closest to. The normalized RRF
+    cannot carry the floor itself — it is relative to the top row of whatever came back, so the
+    best of a set of far rows still scores 1.0. Once either leg worded anything the floor lifts
+    for the whole pool: the query is one a member means, and the row it wants is not always a row
+    carrying its words — a memory filed under a full name, asked for by handle, sits under any bar
+    high enough to stop garbage."""
     fused = _fuse((lexical, vector, tail), vector)
-    worded = {hit.owner_id for hit in lexical} | {hit.owner_id for hit in tail}
+    floor = 0.0 if lexical or tail else RECALL_COSINE_FLOOR
     top_rrf = max((rrf for rrf, _cosine, _text in fused.values()), default=0.0) or 1.0
     scored = [
         (owner_id, RRF_WEIGHT * (rrf / top_rrf) + COSINE_WEIGHT * cosine, text)
         for owner_id, (rrf, cosine, text) in fused.items()
-        if owner_id in worded or cosine >= RECALL_COSINE_FLOOR
+        if cosine >= floor
     ]
     ranked = sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
     return tuple(Fused(owner_id, score, text) for owner_id, score, text in ranked)

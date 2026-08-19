@@ -975,6 +975,41 @@ def test_fuse_recall_keeps_a_vector_only_row_at_the_floor() -> None:
     assert [fused.owner_id for fused in fuse_recall((), near, (), 10)] == ["N"]
 
 
+def test_fuse_recall_floor_guards_the_query_not_each_row() -> None:
+    """A cosine height is meaningful only within one corpus and one embedding model — measured
+    across three, garbage tops 0.16 on one corpus while correct answers sit at 0.44 on it, and
+    garbage reaches 0.50 on another — so a constant held against each row cuts real answers
+    wherever the corpus runs cool. What a constant CAN judge is a query that worded nothing
+    anywhere: across those corpora every real question matched some word and no random string
+    matched any. So the same under-floor row is dropped when the query worded nothing and ranked
+    when it worded anything — a member asking by a handle recalls the memory filed under the full
+    name, which shares no word with the query."""
+    under = Hit(
+        "u", OWNER_KIND_MEMORY_ITEM, "U", SHARED_SUBJECT, 0, "under", RECALL_COSINE_FLOOR / 2
+    )
+    worded = Hit("w", OWNER_KIND_MEMORY_ITEM, "W", SHARED_SUBJECT, 0, "worded", 3.0)
+
+    assert fuse_recall((), (under,), (), 10) == ()
+    both = fuse_recall((worded,), (under,), (), 10)
+    assert {fused.owner_id for fused in both} == {"W", "U"}
+
+    fresh = Hit("tail:T", OWNER_KIND_MEMORY_ITEM, "T", SHARED_SUBJECT, 0, "fresh", 2.0)
+    tail_worded = fuse_recall((), (under,), (fresh,), 10)
+    assert {fused.owner_id for fused in tail_worded} == {"T", "U"}
+
+
+def test_fuse_hits_floor_guards_the_query_not_each_page() -> None:
+    """Source search reads the same rule through the same constant: a query that worded no page
+    answers only with near ones, and a query that worded any page ranks everything its legs
+    returned."""
+    under = Hit("u", OWNER_KIND_PAGE, "U", SHARED_SUBJECT, 0, "under", RECALL_COSINE_FLOOR / 2)
+    worded = Hit("w", OWNER_KIND_PAGE, "W", SHARED_SUBJECT, 0, "worded", 3.0)
+
+    assert fuse_hits((), (under,), 10) == ()
+    both = fuse_hits((worded,), (under,), 10)
+    assert {fused.owner_id for fused in both} == {"W", "U"}
+
+
 def test_fuse_recall_folds_in_the_un_embedded_tail_leg() -> None:
     """The un-embedded tail is a third, lexical-only leg: a row present only in the tail fuses into
     the ranking (no index hit needed), while an indexed row keeps its index-hit ranking."""
@@ -1113,6 +1148,35 @@ async def test_recall_keeps_a_row_worded_by_part_of_a_whole_sentence(db: None) -
     )
 
     assert [item.memory_id for item in recalled] == [worded]
+
+
+async def test_recall_reaches_the_row_that_names_the_asked_for_person_another_way(
+    db: None,
+) -> None:
+    """A member asks by a handle; one row carries the handle, the sibling row carries the same
+    person's full name and nothing else the query says. The sibling shares no word with the query
+    and its cosine sits under the floor — under any bar high enough to stop garbage, since aliases
+    are exactly the rows worded unlike their question. The query matched a word, so both rows
+    stand. This is the shape memory_100's alias leaf grades at full coverage."""
+    workspace_id = await _workspace()
+    handle = await _seed_item(
+        workspace_id, SHARED_SUBJECT, "@tnk runs the escalation rotation", _at_cosine(0.9)
+    )
+    named = await _seed_item(
+        workspace_id,
+        SHARED_SUBJECT,
+        "Tobias Nkemdirim prefers phone calls over chat messages",
+        _at_cosine(RECALL_COSINE_FLOOR - 0.08),
+    )
+
+    recalled = await _store(StubEmbed(_at_cosine(1.0)), workspace_id).recall(
+        "@tnk is covering tonight, how does he want to be reached",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
+
+    assert {item.memory_id for item in recalled} == {handle, named}
 
 
 async def test_fresh_fact_recalls_before_indexing_then_via_the_index(db: None) -> None:
