@@ -339,12 +339,12 @@ resource "kubectl_manifest" "ufo" {
   for_each  = local.ufo_workload_manifests
   yaml_body = each.value
 
-  # CI pushes the ufo-egress image after this apply, because its ECR repository is created in this
-  # same apply and the push cannot precede it. So this apply must not block on the sandbox-proxy
-  # rollout, or it deadlocks: the new ReplicaSet would wait for an image the post-apply push has not
-  # produced yet. The workflow's own `kubectl rollout status deployment/ufo-sandbox-proxy` confirms
-  # the rollout once the push lands, and maxUnavailable=0 keeps the old proxy pods serving egress
-  # until the new ones pull it — so the gap is drained, never downtime.
+  # The ufo-egress and ufo-preview images are pushed by the testing deploy of this commit, into the
+  # account-level ECR repositories testing owns — so their tags already exist by the time a promotion
+  # reaches this apply. The wait stays off on those two Deployments because only `Require tested
+  # images` verifies tags, and it verifies the bundle and gateway ones: a promotion whose egress or
+  # preview image never landed should fail the workflow's own `kubectl rollout status` below rather
+  # than deadlock this apply. maxUnavailable=0 keeps the old pods serving until the new ones are ready.
   wait_for_rollout = !strcontains(each.key, "deployments/ufo-sandbox-proxy") && !strcontains(each.key, "deployments/ufo-preview")
 
   depends_on = [kubectl_manifest.ufo_migrate, module.platform]
