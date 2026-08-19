@@ -69,7 +69,7 @@ GIT_READ_SUBCOMMANDS = frozenset(
 )
 GIT_LISTING_SUBCOMMANDS = frozenset({"branch", "config", "remote", "tag"})
 GIT_LISTING_WORDS = frozenset(
-    {"--get", "--get-all", "--get-regexp", "--list", "-l", "get-url", "list", "show"}
+    {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "get-url", "list", "show"}
 )
 WRITER_COMMANDS = frozenset(
     {
@@ -501,7 +501,7 @@ def _stage_reads_only(argv: tuple[str, ...]) -> bool:
     if program == "git":
         return _git_reads_only(tuple(arguments))
     if program == "sed":
-        return not any(argument.startswith("-i") for argument in arguments)
+        return not any(argument.startswith(("-i", "--in-place")) for argument in arguments)
     return program not in WRITER_COMMANDS
 
 
@@ -513,16 +513,17 @@ def _reads_only(call: ToolInvocation) -> bool:
     else it is asked to do counts as work. Off git, the named programs are the ones that write a
     file — an interpreter, an in-place editor, a copy — plus any redirect to a real path. A program
     neither list names inspects: a turn that probes for a forge, or pages a file, has not touched
-    the repository, and failing it there is the false report this guard exists to avoid."""
+    the repository, and failing it there is the false report this guard exists to avoid.
+
+    A `;` is injected after every newline before lexing: posix shlex consumes a bare newline as
+    whitespace and emits no token for it, so a newline-separated command line would otherwise read
+    as one stage. The newline itself stays — an unquoted `#` comment still has to end there — and
+    inside quotes the injected character is part of the word, so it splits nothing."""
 
     if call.name in ("grep", "glob"):
         return True
     if call.name != "bash" or not isinstance(command := call.input.get("command"), str):
         return False
-    # shlex consumes a newline as whitespace and emits no token for it, so a newline-separated
-    # command line would read as one stage. Keep the newline — an unquoted `#` comment still has to
-    # end there — and add the `;` the lexer does emit. Inside quotes the added character is part of
-    # the word, so it splits nothing.
     lexer = shlex.shlex(command.replace("\n", "\n;"), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
@@ -592,14 +593,22 @@ def delegation_only_scorer(forbidden: tuple[str, ...], *, reads_allowed: bool = 
 
 
 def combine(*graders: Grader) -> Grader:
-    """Pass iff every grader passes; the reason concatenates each grader's reason so a failure names
-    which dimension (answer, trajectory, ...) fell short."""
+    """Pass iff every grader passes; the reason concatenates each grader's reason so a failure
+    names which dimension (answer, trajectory, ...) fell short, and the evidence merges every
+    member's. One member's exclusion excludes the whole sample: an environment the case does not
+    describe poisons every dimension, and folding it into a failure would charge the model for
+    the harness."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         verdicts = [await grader(output) for grader in graders]
+        evidence: JsonObject = {}
+        for verdict in verdicts:
+            evidence |= verdict.evidence
         return CapabilityVerdict(
             all(verdict.passed for verdict in verdicts),
             "; ".join(verdict.reason for verdict in verdicts),
+            evidence,
+            excluded=any(verdict.excluded for verdict in verdicts),
         )
 
     return DescribedGrader(

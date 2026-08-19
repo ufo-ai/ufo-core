@@ -89,6 +89,7 @@ from evals.harness.judge import (
 from evals.harness.registry import EvalTask, capability_task, gather_cases
 from evals.harness.scorers import (
     WEB_TOOLS,
+    combine,
     delegation_only_scorer,
     exact_scorer,
     lane_scorer,
@@ -2792,6 +2793,7 @@ async def test_the_delegated_case_guard_reads_the_change_not_the_inspection(tmp_
             bash(f"cd {checkout} && grep -n {low_stakes_default.TYPO} {low_stakes_default.README}"),
             bash(f"cd /workspace/{low_stakes_default.REMOTE} && git show-ref"),
             bash(f"git -C {checkout} remote -v && git -C {checkout} config --get user.email"),
+            bash(f"git -C {checkout} config get user.email"),
             bash(f"cd {checkout} && gh --version; gh auth status 2>&1 | head -20"),
             bash(f"cd {checkout}\ngit status --short\ngit log --oneline -3"),
             bash(f"git -C {checkout} log \\\n  --oneline -3"),
@@ -2811,6 +2813,8 @@ async def test_the_delegated_case_guard_reads_the_change_not_the_inspection(tmp_
         "git push origin fix-recieve",
         f"cd {checkout} # where the child worked\ngit push origin fix-recieve",
         f"cd {checkout} && sed -i s/{low_stakes_default.TYPO}/{low_stakes_default.FIX}/ README.md",
+        f"cd {checkout} && sed --in-place s/{low_stakes_default.TYPO}/{low_stakes_default.FIX}/"
+        " README.md",
         f"echo {low_stakes_default.FIX} > {checkout}/{low_stakes_default.README}",
         f"cd {checkout} && python3 -c 'print(1)'",
         f"cd {checkout} && git add {low_stakes_default.README}",
@@ -2840,6 +2844,20 @@ async def test_the_delegated_case_guard_reads_the_change_not_the_inspection(tmp_
     )
     assert not wrote.passed
     assert wrote.evidence["checkoutCalls"] == ["write"]
+
+
+async def test_combine_excludes_the_sample_a_member_verdict_excluded() -> None:
+    delegated = low_stakes_default.CASES[1]
+    missing_remote = await delegated.grader(CapabilityOutput("done", ()))
+    assert not missing_remote.passed
+    assert missing_remote.excluded
+
+    failed = await combine(
+        exact_scorer("yes"), delegation_only_scorer(("bash",), reads_allowed=True)
+    )(CapabilityOutput("ANSWER: no", ()))
+    assert not failed.passed
+    assert not failed.excluded
+    assert failed.evidence["checkoutCalls"] == []
 
 
 async def test_shared_history_gated_scorer_holds_the_pulled_commit(tmp_path: Path) -> None:
