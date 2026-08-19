@@ -20,7 +20,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # Terraform template `if`/`endif` directive lines, stripped before a template parses as YAML.
 TEMPLATE_DIRECTIVE = (
     r'(?m)^%\{ (?:if workload_ha|if cache_enabled|if cache_s3_bucket != ""'
-    r"|if preview_enabled|endif) \}\n?"
+    r"|if preview_enabled|for shared_host in shared_hosts|endif|endfor) ~?\}\n?"
 )
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
@@ -177,9 +177,13 @@ HOST="${URL#https://}"
 HOST="${HOST%%/*}"
 case "$URL" in
   */login)
-    [ "$BAD_LOGIN_HOST" != "$HOST" ] || HOST=wrong.example
+    case "$HOST" in
+      *testing*) APP_HOST=app.testing.ufo.ai ;;
+      *) APP_HOST=app.ufo.ai ;;
+    esac
+    [ "$BAD_LOGIN_HOST" != "$HOST" ] || APP_HOST=wrong.example
     printf '%s' "$FORMAT" |
-      sed -e 's/%{http_code}/302/g' -e "s|%{redirect_url}|https://app.$HOST/login|g"
+      sed -e 's/%{http_code}/302/g' -e "s|%{redirect_url}|https://$APP_HOST/login|g"
     ;;
   */v1/onboard/ufo)
     [ "$BAD_ONBOARD_HOST" != "$HOST" ] || { printf 'wrong\n'; exit; }
@@ -3222,7 +3226,9 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
 
 
 def test_runtime_certificates_match_ingress_tls() -> None:
-    source = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    source = re.sub(
+        TEMPLATE_DIRECTIVE, "", (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    )
     documents = [
         yaml.safe_load(re.sub(r"\$\{([^}]+)\}", r"\1", document))
         for document in source.split("\n---\n")
@@ -3244,12 +3250,12 @@ def test_runtime_certificates_match_ingress_tls() -> None:
     }
     assert certificates == {
         "ufo-gateway-tls": ("apex_host",),
-        "ufo-ingress-tls": ("*.apex_host",),
+        "ufo-ingress-tls": ("*.sites_host", "gateway_origin_host"),
         "ufo-serve-tls": ("shared_host",),
     }
     assert ingresses == [
         ("ufo-gateway-tls", ("apex_host",)),
-        ("ufo-ingress-tls", ("*.apex_host",)),
+        ("ufo-ingress-tls", ("*.sites_host",)),
         ("ufo-ingress-tls", ("gateway_origin_host",)),
         ("ufo-serve-tls", ("shared_host",)),
     ]

@@ -32,6 +32,7 @@ globalThis.fetch = async (input) => {
 const env = {
   DB: d1(),
   ORIGIN_BASE: "https://testing.flyingobject.ai",
+  APP_HOST: "app.testing.ufo.ai",
   WAITLIST_EMAILS: { async send() {} },
   WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
 };
@@ -482,12 +483,15 @@ test("any other path passes through untouched", async () => {
   assert.equal(await reply.text(), "origin:https://flyingobject.ai/status");
 });
 
-test("apex /login 302s to the app host, the sole authenticated origin", async () => {
-  const prod = await request("https://flyingobject.ai/login", { ua: "Mozilla/5.0" });
-  assert.equal(prod.status, 302);
-  assert.equal(prod.headers.get("location"), "https://app.flyingobject.ai/login");
+test("apex /login 302s to the bound app host, the sole authenticated origin", async () => {
   const testing = await request("https://testing.flyingobject.ai/login", { ua: "Mozilla/5.0" });
-  assert.equal(testing.headers.get("location"), "https://app.testing.flyingobject.ai/login");
+  assert.equal(testing.status, 302);
+  assert.equal(testing.headers.get("location"), "https://app.testing.ufo.ai/login");
+  const prod = await worker.fetch(
+    new Request("https://flyingobject.ai/login", { headers: { "user-agent": "Mozilla/5.0" } }),
+    { ...env, APP_HOST: "app.ufo.ai" },
+  );
+  assert.equal(prod.headers.get("location"), "https://app.ufo.ai/login");
 });
 
 test("/ufo serves byte-identical content to every user agent", async () => {

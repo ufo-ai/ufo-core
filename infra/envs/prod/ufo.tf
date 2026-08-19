@@ -89,7 +89,9 @@ locals {
     manifest if strcontains(path, "/jobs/ufo-migrate-")
   ])
 
-  shared_host         = "app.${module.platform.hostname}"
+  dns_zone_names      = ["flyingobject.ai", "ufo.ai"]
+  shared_hosts        = ["app.ufo.ai", "app.flyingobject.ai"]
+  sites_host          = "ufo.ai"
   gateway_origin_host = "origin.${module.platform.hostname}"
 
   # The shared fleet configuration.
@@ -130,12 +132,12 @@ locals {
     [sandbox]
     backend = "e2b"
     proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
-    ingress_public_url = "https://${module.platform.hostname}"
+    ingress_public_url = "https://${local.sites_host}"
     ${local.cache_enabled ? "cache_daemon = \"127.0.0.1:9110\"" : ""}
     ${local.preview_enabled ? "preview_service = \"ufo-preview.${local.system_namespace}.svc.cluster.local:8930\"" : ""}
 
     [connect]
-    public_base_url = "https://${local.shared_host}"
+    public_base_url = "https://${local.shared_hosts[0]}"
 
     [o11y]
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
@@ -240,7 +242,8 @@ data "kubectl_file_documents" "hosted" {
     namespace                        = local.system_namespace
     apex_host                        = module.platform.hostname
     gateway_origin_host              = local.gateway_origin_host
-    shared_host                      = local.shared_host
+    shared_hosts                     = local.shared_hosts
+    sites_host                       = local.sites_host
     cluster_issuer                   = "letsencrypt"
     ingress_class                    = "nginx"
     bundle_image                     = local.bundle_image
@@ -277,7 +280,7 @@ data "kubectl_file_documents" "cluster_services" {
   content = templatefile("${path.module}/../../templates/cluster-services.yaml.tpl", {
     acme_server     = var.acme_server
     acme_email      = var.letsencrypt_email
-    dns_zone        = module.platform.hostname
+    dns_zones       = jsonencode(local.dns_zone_names)
     region          = var.region
     namespace       = local.system_namespace
     secret_postgres = module.platform.secret_names.postgres

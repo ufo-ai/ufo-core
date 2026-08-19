@@ -162,7 +162,7 @@ removed {
 # record names this environment's own host, so each environment owns its own; the zone's shared
 # singletons stay with testing.
 data "cloudflare_zone" "dns" {
-  filter = { name = var.dns_zone_name }
+  filter = { name = var.dns_zone_names[0] }
 }
 
 resource "aws_acm_certificate" "sandbox_proxy_public" {

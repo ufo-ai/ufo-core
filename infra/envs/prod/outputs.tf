@@ -26,6 +26,10 @@ output "hostname" {
   value = module.platform.hostname
 }
 
+output "shared_host" {
+  value = local.shared_hosts[0]
+}
+
 output "system_namespace" {
   value = module.platform.system_namespace
 }

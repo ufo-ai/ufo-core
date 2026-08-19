@@ -83,6 +83,11 @@ resource "cloudflare_workers_script" "edge" {
       text = var.origin_base
     },
     {
+      name = "APP_HOST"
+      type = "plain_text"
+      text = var.app_host
+    },
+    {
       name       = "WAITLIST_EMAILS"
       type       = "queue"
       queue_name = cloudflare_queue.waitlist_email.queue_name

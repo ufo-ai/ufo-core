@@ -17,7 +17,7 @@ spec:
               name: cloudflare-api-token
               key: cloudflare_api_token
         selector:
-          dnsZones: [${dns_zone}]
+          dnsZones: ${dns_zones}
 ---
 apiVersion: external-secrets.io/v1beta1
 kind: ClusterSecretStore

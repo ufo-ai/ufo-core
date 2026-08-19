@@ -99,7 +99,7 @@ spec:
             - {name: UFO_PUBLIC_BASE_URL, value: "https://${apex_host}"}
             # The workspace serve host the member's `ufo` surface talks to (has the `/surface` route),
             # distinct from the onboarding apex above — signed in, the member's turns go here.
-            - {name: UFO_WORKSPACE_BASE_URL, value: "https://${shared_host}"}
+            - {name: UFO_WORKSPACE_BASE_URL, value: "https://${shared_hosts[0]}"}
             # The terminal client version this deploy serves — a stale x-ufo-script gets `install`.
             - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
             - {name: UFO_SES_SENDER, value: "${ses_sender}"}
@@ -123,7 +123,7 @@ spec:
             # refuses to start without all three. The redirect URI is the app
             # host's own callback, where the ingress routes /v1/onboard to this pod, and the same
             # string is registered in this deploy's WorkOS environment.
-            - {name: WORKOS_REDIRECT_URI, value: "https://${shared_host}/v1/onboard/auth/callback"}
+            - {name: WORKOS_REDIRECT_URI, value: "https://${shared_hosts[0]}/v1/onboard/auth/callback"}
             - name: WORKOS_API_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-gateway-workos, key: WORKOS_API_KEY}
@@ -576,17 +576,20 @@ spec:
   ports:
     - {name: ingress, port: 8100, targetPort: ingress}
 ---
-# Every hosted site answers at its own subdomain of ${apex_host}, so one wildcard record and one
-# wildcard certificate cover all of them and each site is its own browser origin — which is what
-# keeps one site's cookies and storage away from the next. A site is one label deep, not two, and
-# that depth is load-bearing: a wildcard SAN matches exactly one label, so the zone's edge
-# certificate (`*.${apex_host}`, measured) covers `<label>.${apex_host}` and covers nothing under a
-# `sites.` prefix. Proxying is not optional here — the NLB admits only Cloudflare's ranges
+# Every hosted site answers at its own subdomain of ${sites_host} — the host of `[sandbox]
+# ingress_public_url`, on the same registrable domain as the primary portal host so the frame's
+# `SameSite=Lax` view cookie survives — and one wildcard record and one wildcard certificate cover
+# all of them while each site stays its own browser origin, which is what keeps one site's cookies
+# and storage away from the next. A site is one label deep, not two, and that depth is
+# load-bearing: a wildcard SAN matches exactly one label, so the zone's edge certificate
+# (`*.${sites_host}`, measured) covers `<label>.${sites_host}` and covers nothing under a `sites.`
+# prefix. Proxying is not optional here — the NLB admits only Cloudflare's ranges
 # (`loadBalancerSourceRanges`), so a DNS-only site address resolves and then drops every connection.
-# The wildcard rule is the last resort for this apex: nginx matches an exact server name ahead of a
+# The wildcard rule is the last resort for this host: nginx matches an exact server name ahead of a
 # wildcard, and any unclaimed name lands here and is refused for naming no site. The certificate
 # needs no proxied record —
-# cert-manager issues it over DNS-01.
+# cert-manager issues it over DNS-01; it also carries ${gateway_origin_host}, whose ingress serves
+# the same secret and sat under the old wildcard only while sites and gateway shared an apex.
 # Every proxied response carries `Cache-Control: private, no-store` from the ingress, since a shared
 # cache that stored a site's bytes would answer later requests without the cookie check.
 apiVersion: networking.k8s.io/v1
@@ -595,15 +598,15 @@ metadata:
   name: ufo-ingress
   namespace: ${namespace}
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: "*.${apex_host}"
+    external-dns.alpha.kubernetes.io/hostname: "*.${sites_host}"
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
   ingressClassName: ${ingress_class}
   tls:
-    - hosts: ["*.${apex_host}"]
+    - hosts: ["*.${sites_host}"]
       secretName: ufo-ingress-tls
   rules:
-    - host: "*.${apex_host}"
+    - host: "*.${sites_host}"
       http:
         paths:
           - path: /
@@ -621,7 +624,7 @@ metadata:
 spec:
   secretName: ufo-ingress-tls
   issuerRef: {name: ${cluster_issuer}, kind: ClusterIssuer}
-  dnsNames: ["*.${apex_host}"]
+  dnsNames: ["*.${sites_host}", ${gateway_origin_host}]
 ---
 # The shared serve fleet is one Deployment serving turns for every workspace. It runs the
 # bundle image (`ufoctl serve`) over the ufo-serve Secret's ufo.toml (mounted over the image's baked
@@ -773,28 +776,34 @@ spec:
     - {name: http, port: 80, targetPort: http}
     - {name: internal, port: 8710, targetPort: http}
 ---
-# The one authenticated host for every hosted workspace (no per-workspace subdomain — RFC 0011):
-# the whole browser sign-in flow is same-origin here, so the host-only `ufo_session` cookie is set
-# and read on this one host. The gateway's browser-facing login endpoints (`/login`, the web
+# The authenticated hosts for every hosted workspace (no per-workspace subdomain — RFC 0011):
+# every listed host serves the same fleet and database; the first is the primary the fleet hands
+# out (`UFO_WORKSPACE_BASE_URL`, `WORKOS_REDIRECT_URI`), so a fresh browser sign-in completes only
+# there — the flow is same-origin on one host, and the host-only `ufo_session` cookie is set and
+# read on the host that minted it. The gateway's browser-facing login endpoints (`/login`, the web
 # onboarding wire, the `/ufo` install script) are routed here to `ufo-gateway`, while `/` and every
 # `/surface/*` product route stay on `ufo-serve`; nginx's longest-prefix match makes the split
-# unambiguous. cert-manager issues TLS; ExternalDNS publishes the record Cloudflare-proxied, so the
-# shared NLB (Cloudflare-only) is reachable only through the proxy. `[connect] public_base_url =
-# https://${shared_host}` matches this host.
+# unambiguous. cert-manager issues TLS; ExternalDNS publishes the records Cloudflare-proxied, so
+# the shared NLB (Cloudflare-only) is reachable only through the proxy. `[connect] public_base_url
+# = https://${shared_hosts[0]}` matches the primary.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: ufo-serve
   namespace: ${namespace}
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: ${shared_host}
+    external-dns.alpha.kubernetes.io/hostname: ${join(",", shared_hosts)}
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
   ingressClassName: ${ingress_class}
   tls:
-    - hosts: [${shared_host}]
+    - hosts:
+%{ for shared_host in shared_hosts ~}
+        - ${shared_host}
+%{ endfor ~}
       secretName: ufo-serve-tls
   rules:
+%{ for shared_host in shared_hosts ~}
     - host: ${shared_host}
       http:
         paths:
@@ -822,6 +831,7 @@ spec:
               service:
                 name: ufo-serve
                 port: {name: http}
+%{ endfor ~}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -831,4 +841,7 @@ metadata:
 spec:
   secretName: ufo-serve-tls
   issuerRef: {name: ${cluster_issuer}, kind: ClusterIssuer}
-  dnsNames: [${shared_host}]
+  dnsNames:
+%{ for shared_host in shared_hosts ~}
+    - ${shared_host}
+%{ endfor ~}

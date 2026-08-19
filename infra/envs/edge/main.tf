@@ -52,6 +52,7 @@ module "prod" {
   zone_id          = data.cloudflare_zone.flyingobject_ai.id
   account_id       = data.cloudflare_zone.flyingobject_ai.account.id
   origin_base      = "https://origin.flyingobject.ai"
+  app_host         = "app.ufo.ai"
   favicon_svg      = local.favicon_svg
   favicon_dark_svg = local.favicon_dark_svg
 }
@@ -64,6 +65,7 @@ module "testing" {
   zone_id          = data.cloudflare_zone.flyingobject_ai.id
   account_id       = data.cloudflare_zone.flyingobject_ai.account.id
   origin_base      = "https://origin.testing.flyingobject.ai"
+  app_host         = "app.testing.ufo.ai"
   favicon_svg      = local.favicon_svg
   favicon_dark_svg = local.favicon_dark_svg
 }

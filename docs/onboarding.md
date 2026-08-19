@@ -237,8 +237,10 @@ and sends values to AWS Secrets Manager through stdin.
 
 ## Web login
 
-The whole browser sign-in flow is same-origin on the **app host** (`app.<env>`), the sole
-authenticated host. The apex `GET /login` 302s there (edge worker); on the app host the ingress
+The whole browser sign-in flow is same-origin on the **app host** — `app.ufo.ai` in production,
+`app.testing.ufo.ai` on testing, with the same fleet also answering as `app.<env apex>` — and the
+primary is the sole host a fresh sign-in completes on (`WORKOS_REDIRECT_URI` names it). The apex
+`GET /login` 302s to the primary (edge worker); on the app host the ingress
 routes the front-door prefixes (`ufo.serve.RESERVED_HOST_PREFIXES`: `/login`, `/v1/onboard`,
 `/ufo`) to `ufo-gateway`, while `/` and `/surface/*` stay on `ufo-serve` (nginx longest-prefix).
 Two invariants hold this up by construction rather than by convention: the serve fleet **fails its

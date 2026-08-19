@@ -115,7 +115,7 @@ resource "helm_release" "external_dns" {
     # that dropped `ingress` would stop publishing all three with nothing failing.
     sources        = ["service", "ingress"]
     txtOwnerId     = module.eks.cluster_name
-    domainFilters  = [var.dns_zone_name]
+    domainFilters  = var.dns_zone_names
     serviceAccount = { name = "external-dns" }
     env = [{
       name = "CF_API_TOKEN"

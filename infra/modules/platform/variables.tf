@@ -13,15 +13,20 @@ variable "hostname" {
   description = "Public apex FQDN the service serves (e.g. flyingobject.ai)."
 }
 
-variable "dns_zone_name" {
-  type        = string
-  description = "DNS zone name that owns hostname (e.g. flyingobject.ai), authoritative on Cloudflare. external-dns publishes records and cert-manager solves DNS-01 there."
+variable "dns_zone_names" {
+  type        = list(string)
+  description = "Cloudflare DNS zone names external-dns publishes into; the first owns hostname. Ingress hosts may live in any of them."
+
+  validation {
+    condition     = length(var.dns_zone_names) > 0
+    error_message = "dns_zone_names must name at least the zone that owns hostname."
+  }
 }
 
 variable "cloudflare_api_token" {
   type        = string
   sensitive   = true
-  description = "Cloudflare API token (Zone:Read + DNS:Edit on dns_zone_name's Cloudflare zone) for external-dns and cert-manager's DNS-01 solver. Supplied out-of-band (TF_VAR_cloudflare_api_token / gitignored tfvars), never committed."
+  description = "Cloudflare API token (Zone:Read + DNS:Edit on every dns_zone_names zone) for external-dns and cert-manager's DNS-01 solver. Supplied out-of-band (TF_VAR_cloudflare_api_token / gitignored tfvars), never committed."
 
   validation {
     condition     = length(var.cloudflare_api_token) >= 20

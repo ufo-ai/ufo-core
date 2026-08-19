@@ -21,8 +21,10 @@ function served(answer: Response | string) {
 test("the host the page came from names the deploy", () => {
   expect(deployment("flyingobject.ai")).toBe("production");
   expect(deployment("app.flyingobject.ai")).toBe("production");
+  expect(deployment("app.ufo.ai")).toBe("production");
   expect(deployment("testing.flyingobject.ai")).toBe("testing");
   expect(deployment("app.testing.flyingobject.ai")).toBe("testing");
+  expect(deployment("app.testing.ufo.ai")).toBe("testing");
   expect(deployment("localhost")).toBe("local");
   expect(deployment("ufo-4.localhost")).toBe("local");
   expect(deployment("127.0.0.1")).toBe("local");

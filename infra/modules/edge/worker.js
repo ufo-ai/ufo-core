@@ -203,7 +203,7 @@ export default {
       case "/fleet":
         return fetch(`${env.ORIGIN_BASE}/fleet`);
       case "/login":
-        return Response.redirect(`https://app.${url.hostname}/login`, 302);
+        return Response.redirect(`https://${env.APP_HOST}/login`, 302);
       default:
         return fetch(request);
     }
