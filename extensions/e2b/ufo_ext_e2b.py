@@ -145,6 +145,24 @@ INSTALL_CA_COMMAND = (
     f"install -m 0644 {CA_STAGING_PATH} {CA_SANDBOX_PATH} && "
     f"/usr/sbin/update-ca-certificates; }} || {{ rm -f {CA_SANDBOX_PATH}; exit 1; }}"
 )
+WORKLOAD_CGROUPS = ("/sys/fs/cgroup/user", "/sys/fs/cgroup/ptys")
+"""Where envd runs everything a turn does: `commands.run` processes land in `user`, PTY sessions
+in `ptys`. envd itself runs apart in `system.slice/envd.service`, so a ceiling on these two bounds
+the workload's whole reach without touching the daemon that runs it."""
+WORKLOAD_MEMORY_RESERVE_KB = 512 * 1024
+"""Guest memory the workload's ceiling leaves for envd and the kernel. A workload that exhausts
+the guest takes envd with it, and a wedged envd frozen into a pause snapshot is a sandbox that can
+never resume — the OOM killer must find its victim inside the workload's cgroup, never outside."""
+WORKLOAD_PIDS_MAX = 2048
+CAP_WORKLOAD_COMMAND = (
+    "total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) && "
+    f"max_bytes=$(( (total_kb - {WORKLOAD_MEMORY_RESERVE_KB}) * 1024 )) && "
+    '[ "$max_bytes" -gt 0 ] && '
+    f"for cg in {' '.join(WORKLOAD_CGROUPS)}; do "
+    'echo "$max_bytes" > "$cg/memory.max" && '
+    f'echo {WORKLOAD_PIDS_MAX} > "$cg/pids.max" || exit 1; done'
+)
+WORKLOAD_CAP_TIMEOUT_SECONDS = 30
 
 
 def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
@@ -553,12 +571,15 @@ class E2BCarrier:
 
     async def _prepare(self, sandbox: E2BSandbox, ca_cert: str) -> None:
         """Make the box usable: the proxy's CA in system trust, `/workspace` in place and owned by
-        the sandbox user. Both steps reach `envd`, and neither can be bounded from the SDK — the
-        command runs over a stream the SDK gives no read timeout at all, so a silent `envd` holds
-        it open with nothing to expire. The upload is bounded, but raises a class the SDK leaves
-        unmapped. A caller that needs this to end bounds the whole of it, in one place."""
+        the sandbox user, and the workload cgroups capped below the guest's memory so no command
+        can starve `envd` itself. Every step reaches `envd`, and none can be bounded from the
+        SDK — the command runs over a stream the SDK gives no read timeout at all, so a silent
+        `envd` holds it open with nothing to expire. The upload is bounded, but raises a class the
+        SDK leaves unmapped. A caller that needs this to end bounds the whole of it, in one
+        place."""
         await self._install_ca(sandbox, ca_cert)
         await self._ensure_workspace(sandbox)
+        await self._cap_workload(sandbox)
 
     def _leased(self, conversation_id: UUID) -> _Lease | None:
         """The conversation's lease, having dropped every lease whose deadline has passed. `destroy`
@@ -597,6 +618,18 @@ class E2BCarrier:
         except CommandExitException as error:
             detail = (error.stderr or error.stdout or "").strip()
             raise RuntimeError(f"sandbox workspace setup failed: {detail}") from error
+
+    async def _cap_workload(self, sandbox: E2BSandbox) -> None:
+        """Ceilings on the cgroups the workload runs in — memory at the guest's total minus the
+        reserve, pids against fork exhaustion. Kernel state, so a pause carries it into the
+        snapshot and a resume restores it; re-asserting on every preparation is idempotent."""
+        try:
+            await sandbox.commands.run(
+                CAP_WORKLOAD_COMMAND, user="root", timeout=WORKLOAD_CAP_TIMEOUT_SECONDS
+            )
+        except CommandExitException as error:
+            detail = (error.stderr or error.stdout or "").strip()
+            raise RuntimeError(f"sandbox workload cap failed: {detail}") from error
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int

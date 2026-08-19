@@ -42,6 +42,7 @@ from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
     CA_SANDBOX_PATH,
     CA_STAGING_PATH,
+    CAP_WORKLOAD_COMMAND,
     CARRIER_NAME,
     CONVERSATION_METADATA_KEY,
     DIAL_LEASE_SECONDS,
@@ -64,6 +65,10 @@ from ufo_ext_e2b import (
     SILENT_MARK_SECONDS,
     SILENT_PROBE_CMD,
     SYSTEM_CA_BUNDLE,
+    WORKLOAD_CAP_TIMEOUT_SECONDS,
+    WORKLOAD_CGROUPS,
+    WORKLOAD_MEMORY_RESERVE_KB,
+    WORKLOAD_PIDS_MAX,
     WORKSPACE_ENSURE_TIMEOUT_SECONDS,
     E2BCarrier,
     build_e2b_carrier,
@@ -563,6 +568,25 @@ async def test_create_installs_the_proxy_ca_into_system_trust_as_root() -> None:
     assert sandbox.commands.users[0] == "root"
 
 
+async def test_every_preparation_caps_the_workload_cgroups_as_root() -> None:
+    """The ceilings are kernel state a pause snapshots and a resume restores, but nothing vouches
+    for a box this process did not prepare itself — so every preparation path re-asserts them, on
+    the fresh box, the cached one, and the reconnected one alike."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    conversation = uuid4()
+    await carrier.create(_spec(conversation))
+    await carrier.create(_spec(conversation))
+    other = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    await other.create(replace(_spec(conversation), resume_id="sbx-1"))
+
+    commands = sdk.sandboxes["sbx-1"].commands
+    capped = [index for index, run in enumerate(commands.runs) if run[0] == CAP_WORKLOAD_COMMAND]
+    assert len(capped) == 3
+    assert all(commands.users[index] == "root" for index in capped)
+    assert commands.runs[capped[0]] == (CAP_WORKLOAD_COMMAND, None, WORKLOAD_CAP_TIMEOUT_SECONDS)
+
+
 async def test_a_failed_trust_update_raises_a_named_ca_install_error() -> None:
     """The CA install is the precondition for every HTTPS call a sandbox makes, so its failure
     detail is what an operator reads when egress starts refusing. Mapping `CommandExitException`
@@ -641,6 +665,7 @@ async def test_a_dropped_ca_upload_is_tried_again_on_the_same_new_box(
     assert [command for command, _, _ in sandbox.commands.runs] == [
         INSTALL_CA_COMMAND,
         ENSURE_WORKSPACE_COMMAND,
+        CAP_WORKLOAD_COMMAND,
     ]
 
 
@@ -863,6 +888,39 @@ def test_ca_install_command_removes_a_target_after_a_failed_bundle_update(
 
     assert succeeded.returncode == 0
     assert installed.read_text() == "ca-pem"
+
+
+def _cap_command_against(tmp_path: Path, total_kb: int) -> tuple[str, dict[str, Path]]:
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(f"MemTotal:       {total_kb} kB\nMemFree:        1024 kB\n")
+    directories = {cgroup: tmp_path / Path(cgroup).name for cgroup in WORKLOAD_CGROUPS}
+    command = CAP_WORKLOAD_COMMAND.replace("/proc/meminfo", shlex.quote(str(meminfo)))
+    for cgroup, directory in directories.items():
+        directory.mkdir()
+        command = command.replace(cgroup, str(directory))
+    return command, directories
+
+
+def test_cap_workload_command_writes_the_ceilings_from_the_guest_total(tmp_path: Path) -> None:
+    command, directories = _cap_command_against(tmp_path, total_kb=4_024_320)
+
+    done = subprocess.run(["bash", "-c", command], check=False)
+
+    assert done.returncode == 0
+    expected_bytes = (4_024_320 - WORKLOAD_MEMORY_RESERVE_KB) * 1024
+    for directory in directories.values():
+        assert (directory / "memory.max").read_text().strip() == str(expected_bytes)
+        assert (directory / "pids.max").read_text().strip() == str(WORKLOAD_PIDS_MAX)
+
+
+def test_cap_workload_command_refuses_a_guest_smaller_than_the_reserve(tmp_path: Path) -> None:
+    command, directories = _cap_command_against(tmp_path, total_kb=262_144)
+
+    done = subprocess.run(["bash", "-c", command], check=False)
+
+    assert done.returncode != 0
+    for directory in directories.values():
+        assert not (directory / "memory.max").exists()
 
 
 async def test_exec_runs_under_the_turn_egress_env() -> None:
@@ -2200,6 +2258,14 @@ async def test_create_fails_loud_when_the_workspace_setup_fails() -> None:
     carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
 
     with pytest.raises(RuntimeError, match="workspace setup"):
+        await carrier.create(_spec(uuid4()))
+
+
+async def test_create_fails_loud_when_the_workload_cap_fails() -> None:
+    sdk = _Sdk(command_fail_counts={"memory.max": 1})
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+
+    with pytest.raises(RuntimeError, match="workload cap"):
         await carrier.create(_spec(uuid4()))
 
 
