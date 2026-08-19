@@ -81,7 +81,6 @@ from ufo.hub import (
     TextDelta,
     ToolCall,
 )
-from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.queue import _load_turn
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import Message, ModelEvent, ModelRequest, TextBlock, Usage
@@ -4890,18 +4889,12 @@ async def test_the_dm_partner_is_in_the_name_cache_before_they_are_ever_mentione
     assert (row["name"], row["team"]) == ("Bee Jones", TEAM_ID)
 
 
-def test_the_manifest_teaches_the_agent_to_write_a_name_and_never_an_id() -> None:
-    """Both ends of the contribution seam: the Slack pack declares the prompt section, and the same
-    tuple the loop builds from `manifest.prompt_sections` renders into the shell's `{{sections}}`
-    slot — which is what gets agents writing `@Alex Graveley` for the send path to map."""
-    (section,) = slack_manifest().prompt_sections
-    assert section.name == "slack_mentions"
-    rendered = render_system_prompt(
-        "You are the assistant.", ((section.name, section.body),), knowledge_cutoff="2026-01"
-    )
-    assert "never a raw id" in rendered.content
-    assert "Never write `@here`, `@channel` or `@everyone`" in rendered.content
-    assert "{{" not in rendered.content
+def test_the_manifest_declares_no_workspace_global_prompt_section() -> None:
+    """The loop renders every active manifest's sections for every turn, so a rule teaching the
+    mention syntax would also reach a turn whose only output is GitHub text, where `@name` resolves
+    against an account nobody in the conversation owns. The send path maps a name the agent writes
+    of its own accord, so the pack teaches the syntax nowhere."""
+    assert not slack_manifest().prompt_sections
 
 
 def _long_reply_transport(
