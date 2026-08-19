@@ -26,6 +26,12 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: actionlint
+        name: actionlint
+        entry: uv run actionlint -color
+        language: system
+        files: ^\.github/(workflows/|actionlint\.yaml$)
+        pass_filenames: false
       - id: fmt-control
         name: cargo fmt control
         entry: sh -c 'cd control && cargo fmt --check'

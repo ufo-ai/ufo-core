@@ -55,7 +55,7 @@ jobs:
       - run: |
           docker run --rm -d --name preview-ci -p 18930:8930 \
             -e UFO_PREVIEW_LISTEN=0.0.0.0:8930 -e UFO_PREVIEW_TOKEN=ci ufo-preview-ci
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18930/_health && break; sleep 1; done
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:18930/_health && break; sleep 1; done
           curl -fsS -o /tmp/smoke.png -H 'Authorization: Bearer ci' \
             -F 'request={"kind":"docx","max_width":800,"max_height":800,"sink":{"inline":true}}' \
             -F 'file=@tests/fixtures/fixture.docx' http://127.0.0.1:18930/render

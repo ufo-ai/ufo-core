@@ -105,6 +105,8 @@ ufo_testsupport = "ufo_testsupport.plugin"
 [dependency-groups]
 dev = [
     "pre-commit>=4.0",
+    # Ships the official actionlint release binary, so the workflow gate needs no separate install.
+    "actionlint-py>=1.7.12.24",
     "mammoth>=1.8",
     "mypy>=1.13",
     "openpyxl>=3.1",
