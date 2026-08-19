@@ -473,7 +473,13 @@ function Question({
         <Questionnaire
           items={items}
           item={at}
-          onItemChange={setAt}
+          onItemChange={(name) => {
+            // A step the member moved by hand — the stepper, Skip, an invalid jump — outranks a
+            // press still waiting out its beat: firing it after would carry them somewhere they
+            // just chose to leave.
+            clearTimeout(moving.current ?? undefined);
+            setAt(name);
+          }}
           onSubmit={(event) => {
             event.preventDefault();
             const answers = new FormData(event.currentTarget);
@@ -492,8 +498,13 @@ function Question({
                         key={option.label}
                         value={option.label}
                         defaultChecked={option.label === entry.chosen}
-                        onClick={() => {
-                          if (entry.multi_select) return;
+                        // The pointer's press, never the click alone: arrowing through a radio
+                        // group fires a click on every option the arrows pass — detail 0, no
+                        // pointer under it — and a run that moved on those carried a keyboard
+                        // member off the question mid-read. A letter-pressed answer stays put the
+                        // same way; Enter is the keyboard's own way on.
+                        onClick={(event) => {
+                          if (entry.multi_select || event.detail === 0) return;
                           const next = onward(names.indexOf(String(index)));
                           if (next === undefined) return;
                           clearTimeout(moving.current ?? undefined);
@@ -515,12 +526,18 @@ function Question({
                           : option.label}
                       </Meta>
                     ))}
-                <QuestionnaireInput
-                  aria-label={entry.question}
-                  placeholder="Your answer"
-                  shortcut={KEYS[choosable(entry) ? (entry.options ?? []).length : 0]}
-                  defaultValue={written(entry)}
-                />
+                {/* A multi-select's answers post joined under one name, so words typed beside its
+                    boxes would read back as one more label no option holds — the boxes are the
+                    whole form there, and words go to the composer. Everywhere else the row is an
+                    answer like any other. */}
+                {entry.multi_select && choosable(entry) ? null : (
+                  <QuestionnaireInput
+                    aria-label={entry.question}
+                    placeholder="Your answer"
+                    shortcut={KEYS[choosable(entry) ? (entry.options ?? []).length : 0]}
+                    defaultValue={written(entry)}
+                  />
+                )}
               </QuestionnaireChoices>
               <QuestionnaireError />
             </QuestionnaireItem>

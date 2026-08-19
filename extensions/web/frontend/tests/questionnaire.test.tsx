@@ -54,6 +54,29 @@ test("the ask is one card, headed by what it is about and marked at its trailing
   expect(within(card).getByRole("button", { name: "Continue" })).toBeTruthy();
 });
 
+/** jsdom lays nothing out, so the class is the contract: a row without its own minimum is a grid
+ *  item sized to its never-wrapping description, and every row rides past the card's edge. */
+test("an answer row shrinks inside the card rather than carrying past it", async () => {
+  asking({
+    title: "Pick one",
+    questions: [
+      {
+        question: "Which?",
+        options: [
+          { label: "left", description: "a description far longer than the card is wide" },
+          { label: "right" },
+        ],
+      },
+    ],
+  });
+
+  const row = (await screen.findByRole("radio", { name: /left/ })).closest(
+    "[data-slot=questionnaire-choice]",
+  )!;
+  expect(row.className).toContain("min-w-0");
+  expect(document.querySelector("[data-slot=questionnaire-write]")!.className).toContain("min-w-0");
+});
+
 test("an ask carrying no mark is headed by its words alone", async () => {
   asking({ title: "Pick one", questions: [ASKED] });
 
@@ -403,6 +426,53 @@ test("a question taking several answers is asked even with one of them chosen", 
   const alpha = (await screen.findByRole("checkbox", { name: "alpha" })) as HTMLInputElement;
   expect(alpha.checked).toBe(true);
   expect(document.querySelector("[data-slot=questionnaire-stepper]")!.textContent).toBe("1/2");
+});
+
+/** The arrow keys select each radio they pass and the browser fires a click for every one —
+ *  detail 0, no pointer under it. fireEvent.click carries the same signature, so this is the
+ *  arrow-borne click by proxy: a run that moves on it fails here. */
+test("a click no pointer pressed does not carry the member off the question", async () => {
+  asking({
+    title: "Two things",
+    questions: [
+      { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
+      { question: "Second?", options: [{ label: "gamma" }] },
+    ],
+  });
+
+  const alpha = await screen.findByRole("radio", { name: "alpha" });
+  fireEvent.click(alpha.closest("[data-slot=questionnaire-choice]")!);
+  await new Promise((wake) => setTimeout(wake, 400));
+
+  expect(document.querySelector("[data-slot=questionnaire-stepper]")!.textContent).toBe("1/2");
+});
+
+test("a stepper act outranks a pressed answer's pending move", async () => {
+  asking({
+    title: "Two things",
+    questions: [
+      { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
+      { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
+    ],
+  });
+
+  await userEvent.click(await screen.findByRole("radio", { name: "alpha" }));
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await new Promise((wake) => setTimeout(wake, 400));
+
+  expect(document.querySelector("[data-slot=questionnaire-stepper]")!.textContent).toBe("1/2");
+});
+
+test("a multi-select question is answered by its boxes alone", async () => {
+  asking({
+    title: "Pick any",
+    questions: [{ ...ASKED, question: "Which ones?", multi_select: true }],
+  });
+
+  expect(await screen.findByRole("checkbox", { name: "left" })).toBeTruthy();
+  expect(screen.queryByRole("textbox", { name: "Which ones?" })).toBeNull();
+  expect(document.querySelector("[data-slot=questionnaire-write]")).toBeNull();
 });
 
 test("a selection the member did not press does not carry them off the question", async () => {

@@ -569,6 +569,25 @@ test("each row in the index draws its own app's mark, and states nothing by it",
     .toBeTruthy();
 });
 
+/** The out-of-shortlist test walks the object's own properties, never the prototype's: a slug
+ *  every object answers — `constructor` — would otherwise read as bundled, and the picker would
+ *  open with the agent's own mark neither led with nor checked. */
+test("a mark named for what every object answers still leads the picker as the agent's own", async () => {
+  wire({
+    "/settings": () => json({ ...SETTINGS, spec: { ...SETTINGS.spec, icon: "constructor" } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await openAgentSettings();
+
+  const marks = await screen.findAllByRole("radio");
+  expect(marks.length).toBe(Object.keys(AGENT_ICONS).length + 1);
+  expect(marks[0].getAttribute("value")).toBe("constructor");
+  expect((marks[0] as HTMLInputElement).checked).toBe(true);
+});
+
 test("a member picks another mark, and the pick rides one intent and comes back", async () => {
   const posted: unknown[] = [];
   let icon = "robot";

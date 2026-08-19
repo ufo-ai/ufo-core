@@ -250,7 +250,7 @@ export function Settings({ agent }: { agent: Agent }) {
                 >
                   <legend className="sr-only">Icon</legend>
                   {[
-                    ...(icon && !(icon in AGENT_ICONS) ? [icon] : []),
+                    ...(icon && !Object.hasOwn(AGENT_ICONS, icon) ? [icon] : []),
                     ...Object.keys(AGENT_ICONS),
                   ].map((slug) => {
                     const word = slug.replaceAll("-", " ");

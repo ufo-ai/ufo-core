@@ -9,9 +9,11 @@ import { cn } from "@/lib/cn";
 export type { QuestionnaireItemDefinition, QuestionnaireItemStatus } from "@shadcn/react/questionnaire";
 
 /** One answer, drawn as the whole row rather than as a mark with a label beside it: the member
- *  presses anywhere in it, or types anywhere in it. */
+ *  presses anywhere in it, or types anywhere in it. `min-w-0` is what keeps the row inside the
+ *  card that holds it: a grid item's automatic minimum is its content, and a description that
+ *  never wraps would otherwise carry every row past the card's own edge. */
 export const ROW = cn(
-  "relative flex min-h-(--size-touch) items-center gap-md rounded-panel border border-edge",
+  "relative flex min-h-(--size-touch) min-w-0 items-center gap-md rounded-panel border border-edge",
   "bg-transparent px-lg py-sm text-start text-ui transition-colors hover:bg-fill",
 );
 
