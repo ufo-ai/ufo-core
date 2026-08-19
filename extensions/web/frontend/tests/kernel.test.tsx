@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { expect, test, vi } from "vitest";
+import { expect, onTestFinished, test, vi } from "vitest";
 
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { Pager } from "@/kernel/pager";
@@ -110,6 +110,62 @@ test("the fence aborts the request the member left behind", async () => {
 
   expect(signals[0].aborted).toBe(true);
   expect(signals[1].aborted).toBe(false);
+});
+
+/** A pane whose read is waiting on something the member does off the page, so it asks at its own
+ *  rate rather than at the rate a pane showing records asks. */
+function Watched({ everyMs }: { everyMs: number }) {
+  const state = usePanelRead<{ rows: Row[] }>("/watched", 0, everyMs);
+  return <Panel state={state}>{(payload) => <span>{payload.rows[0].name}</span>}</Panel>;
+}
+
+/** Answers what it is told to, so a case moves the answer under a mounted read. */
+function answering(held: { name: string }): () => Promise<Response> {
+  return async () => json({ rows: [{ name: held.name }] });
+}
+
+/** The tab going away and being looked at again. */
+async function returning() {
+  for (const state of ["hidden", "visible"]) {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+  }
+}
+
+test("a read re-reads on the interval it was given, not the one every other pane holds", async () => {
+  vi.useFakeTimers();
+  onTestFinished(() => {
+    vi.useRealTimers();
+  });
+  const held = { name: "before" };
+  vi.stubGlobal("fetch", vi.fn(answering(held)));
+  render(<Watched everyMs={1_000} />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  expect(screen.getByText("before")).toBeTruthy();
+
+  held.name = "after";
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1_000);
+  });
+
+  expect(screen.getByText("after")).toBeTruthy();
+});
+
+test("a tab looked at again reads at once rather than serving what it held", async () => {
+  const held = { name: "before" };
+  const fetched = vi.fn(answering(held));
+  vi.stubGlobal("fetch", fetched);
+  render(<Watched everyMs={30_000} />);
+  expect(await screen.findByText("before")).toBeTruthy();
+
+  held.name = "after";
+  await returning();
+
+  expect(await screen.findByText("after")).toBeTruthy();
 });
 
 test("the fence answers a failed read with the message and no rows", async () => {

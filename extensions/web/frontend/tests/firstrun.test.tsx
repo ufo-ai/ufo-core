@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, onTestFinished, test, vi } from "vitest";
 
 import { App } from "@/App";
 
@@ -98,6 +98,17 @@ function commit(): HTMLButtonElement {
 
 function toolingIntent(...providers: string[]) {
   return { verb: "record_tooling", kind: "memory", providers };
+}
+
+/** The member coming back from the provider's install page: the tab they left is looked at again,
+ *  which is the whole account this page has of an install granted somewhere else. */
+async function returning() {
+  for (const state of ["hidden", "visible"]) {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+  }
 }
 
 test("the card's query lands on the first run's own address", async () => {
@@ -203,7 +214,7 @@ test("the foot carries only the acts the step has", async () => {
   expect((screen.getByRole("button", { name: "Invite" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
-test("continue is held closed until a listed connector is connected", async () => {
+test("continue is held closed until the install itself lands, not until the link is minted", async () => {
   const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
   open({ "/intents": posted.route });
 
@@ -213,11 +224,102 @@ test("continue is held closed until a listed connector is connected", async () =
   expect(commit().disabled).toBe(true);
   await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
 
-  await waitFor(() => expect(commit().disabled).toBe(false));
-  await userEvent.click(commit());
-  // The next connector is a step of its own, and closed on its own terms.
+  // The member has been handed the install page and has not been to it: the workspace holds
+  // nothing yet, and the step says so.
+  await screen.findByRole("link", { name: "Open the Slack install page" });
+  await returning();
+  expect(commit().disabled).toBe(true);
+  expect(screen.getByRole("heading", { name: "The agent answers in Slack" })).toBeTruthy();
+});
+
+test("the connect step passes itself when the install lands", async () => {
+  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  let landed = false;
+  open({
+    "/intents": posted.route,
+    "/workspace/first-run": () => json(landed ? HELD_SLACK : FIRST_RUN),
+  });
+
+  await record("Slack", "GitHub");
+  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
+  await screen.findByRole("link", { name: "Open the Slack install page" });
+
+  landed = true;
+  await returning();
+
+  // Nothing was pressed: the member finished on Slack's pages and comes back to the next question.
   await screen.findByRole("heading", { name: "The agent works in your repositories" });
   expect(commit().disabled).toBe(true);
+});
+
+test("a connector the workspace already held waits to be read rather than passing itself", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route }, ADMIN, HELD_SLACK);
+
+  await record("Slack");
+  await screen.findByText("Slack connected");
+  await returning();
+
+  expect(screen.getByRole("heading", { name: "The agent answers in Slack" })).toBeTruthy();
+  expect(commit().disabled).toBe(false);
+});
+
+test("a step passed by its own install is connected on the way back to it", async () => {
+  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  let landed = false;
+  open({
+    "/intents": posted.route,
+    "/workspace/first-run": () => json(landed ? HELD_SLACK : FIRST_RUN),
+  });
+
+  await record("Slack", "GitHub");
+  await userEvent.click(await screen.findByRole("button", { name: "Connect Slack" }));
+  await screen.findByRole("link", { name: "Open the Slack install page" });
+  landed = true;
+  await returning();
+  await screen.findByRole("heading", { name: "The agent works in your repositories" });
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+
+  // The step states what the workspace holds and stands still: passing it again would take the
+  // member the one way they did not ask to go.
+  await screen.findByText("Slack connected");
+  expect(commit().disabled).toBe(false);
+
+});
+
+test("a step passed while the tab stayed open is settled before the page's own read lands", async () => {
+  vi.useFakeTimers();
+  onTestFinished(() => {
+    vi.useRealTimers();
+  });
+  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  let landed = false;
+  open({
+    "/intents": posted.route,
+    "/workspace/first-run": () => json(landed ? HELD_SLACK : FIRST_RUN),
+  });
+  const settle = () => act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Slack" }));
+  fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
+  fireEvent.click(commit());
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
+  await settle();
+
+  // The install is granted in another window and this tab never goes away, so the step's own watch
+  // is the only read that sees it: the page's own read is half a minute behind.
+  landed = true;
+  await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
+  expect(screen.getByRole("heading", { name: "The agent works in your repositories" })).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await settle();
+
+  expect(screen.getByText("Slack connected")).toBeTruthy();
+  expect(commit().disabled).toBe(false);
 });
 
 test("skip leaves the connect step behind with nothing connected", async () => {
@@ -303,7 +405,7 @@ test("a link minted on one connector's step is not shown on the next one's", asy
   await record("Slack", "GitHub");
   await userEvent.click(await screen.findByRole("button", { name: "Connect Slack" }));
   await screen.findByRole("link", { name: "Open the Slack install page" });
-  await userEvent.click(commit());
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
   await screen.findByRole("button", { name: "Connect GitHub" });
   expect(screen.queryByRole("link")).toBeNull();

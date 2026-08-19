@@ -47,6 +47,16 @@ function opening(labels: string[]): string {
   return labels.length ? "We use " + labels.join(", ") + ". " + ask : ask;
 }
 
+/** The first run's own read. The page reads it for the steps it draws, and a connect step waiting
+ *  on an install reads the same one again for the single fact it is waiting on. */
+const FIRST_RUN_READ = "/workspace/first-run";
+
+/** How often a standing connect step re-reads while it waits. The install happens on the provider's
+ *  own pages, so nothing on this page can say when it lands — the wait is the member's, and it is
+ *  measured in the seconds they spend over there rather than in the half-minute a pane showing
+ *  records can hold a stale answer for. */
+const WATCH_MS = 3_000;
+
 /** The intent each connect step submits. The named tool mints the install link inside the turn and
  *  the outcome carries it back, so installing takes no message the member has to send. */
 const CONNECT_VERB: Record<string, string> = {
@@ -155,7 +165,13 @@ function Frame({
  *  is nothing behind it. Continue commits the step and is held closed until the step's act is
  *  done — so a step that asks for an install says plainly that it is still waiting — and every
  *  step that can be left undone carries Skip beside it, because a closed Continue with no way past
- *  it is a dead end rather than a question. */
+ *  it is a dead end rather than a question.
+ *
+ *  An install lands on the provider's pages, not this one, so a connect step watches for it and
+ *  passes itself when it arrives: the member finishes over there, comes back, and reads the next
+ *  question rather than a step they already answered with a Continue standing under it. A connector
+ *  the workspace already held when the step opened is not that — the member never left, so it
+ *  states it is connected and waits to be read. */
 export function FirstRun({
   agent,
   member,
@@ -165,10 +181,10 @@ export function FirstRun({
   member: Member;
   onOpenChat: () => void;
 }) {
-  const state = usePanelRead<FirstRunPayload>("/workspace/first-run");
+  const state = usePanelRead<FirstRunPayload>(FIRST_RUN_READ);
   const [picked, setPicked] = useState<string[]>([]);
   const [recorded, setRecorded] = useState<string[] | null>(null);
-  const [reached, setReached] = useState<string[]>([]);
+  const [connected, setConnected] = useState<string[]>([]);
   const [rows, setRows] = useState<string[]>(() => Array<string>(INVITE_ROWS).fill(""));
   const [added, setAdded] = useState<string[]>([]);
   const [at, setAt] = useState(0);
@@ -224,7 +240,7 @@ export function FirstRun({
             : [TOOLS_STEP, ...chosen.map((row) => row.name), TEAM_STEP];
         const step = revealed[at];
         const connector = chosen.filter((row) => row.name === step)[0];
-        const held = connector ? connector.installed || reached.includes(step) : false;
+        const held = connector ? connector.installed || connected.includes(step) : false;
         const finish = () => {
           setPendingAsk(
             agent.id,
@@ -321,7 +337,10 @@ export function FirstRun({
                 admin={member.admin}
                 row={connector}
                 held={held}
-                onReached={() => setReached((names) => [...names, connector.name])}
+                onConnected={() => {
+                  setConnected((names) => [...names, connector.name]);
+                  advance();
+                }}
               />
             ) : null}
             {step === TEAM_STEP ? (
@@ -379,6 +398,29 @@ function Tile({ name, label }: { name: string; label: string }) {
   );
 }
 
+/** Waits for the install this step asked for, and reports it once. The install is granted on the
+ *  provider's pages, which tell this page nothing, so the only account of it is the projection the
+ *  page already reads — asked for often while a step waits on it, and once more the moment the tab
+ *  carrying that step is looked at again, which is what a member coming back from the install is
+ *  doing.
+ *
+ *  `watching` is what arms it, and a step that opened on a connector the workspace already held
+ *  never arms: it reads nothing, and reports nothing to advance past. So the report is only ever
+ *  the install arriving under a member who was waiting for it, which is the one thing that should
+ *  move them on. */
+function useConnected(name: string, watching: boolean, onConnected: () => void) {
+  const state = usePanelRead<FirstRunPayload>(watching ? FIRST_RUN_READ : null, 0, WATCH_MS);
+  const landed =
+    state.phase === "ready" &&
+    state.payload.connectors.some((row) => row.name === name && row.installed);
+  const reported = useRef(false);
+  useEffect(() => {
+    if (!landed || reported.current) return;
+    reported.current = true;
+    onConnected();
+  }, [landed, onConnected]);
+}
+
 /** One connector's own step. The intent dispatches that connector's admin-gated tool, which seals
  *  the install link for this workspace and answers with it — a non-admin is told who installs it
  *  rather than pressing an act the workspace refuses. The link expires, so the act stays on the
@@ -395,17 +437,18 @@ function Connect({
   admin,
   row,
   held,
-  onReached,
+  onConnected,
 }: {
   agent: Agent;
   admin: boolean;
   row: Connector;
   held: boolean;
-  onReached: () => void;
+  onConnected: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
+  useConnected(row.name, !held, onConnected);
 
   async function connect() {
     if (busy) return;
@@ -414,7 +457,6 @@ function Connect({
     setBusy(false);
     setLink(outcome.url ?? null);
     setNotice(outcome.url ? QUIET : outcomeNotice(outcome));
-    if (outcome.url) onReached();
   }
 
   return (

@@ -11,17 +11,30 @@ export type PanelState<T> =
 
 const POLL_MS = 30_000;
 
-/** A read holds its answer until the next one lands. The visible pane re-reads at a fixed interval,
+/** A read holds its answer until the next one lands. The visible pane re-reads on its own interval,
  *  while a hidden tab does not poll and a failed read waits for the member's next move. Only a
- *  first read, which has nothing to hold, shows the skeleton. */
-export function usePanelRead<T>(path: string | null, reloads: number = 0): PanelState<T> {
+ *  first read, which has nothing to hold, shows the skeleton.
+ *
+ *  A tab that is looked at again reads at once rather than serving what it held until the next
+ *  tick: the member left to do something the answer depends on, and coming back is the move that
+ *  asks for it. That is what `everyMs` is for — a pane waiting on an act taking place off the page
+ *  reads at its own rate until the act lands, and states the wait rather than a stale answer. */
+export function usePanelRead<T>(
+  path: string | null,
+  reloads: number = 0,
+  everyMs: number = POLL_MS,
+): PanelState<T> {
   const [state, setState] = useState<PanelState<T>>({ phase: "loading" });
   const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
   const [pollTick, setPollTick] = useState(0);
   const reading = useRef(false);
   const failed = useRef(false);
   useEffect(() => {
-    const change = () => setVisible(document.visibilityState !== "hidden");
+    const change = () => {
+      const shown = document.visibilityState !== "hidden";
+      setVisible(shown);
+      if (shown && !reading.current && !failed.current) setPollTick((tick) => tick + 1);
+    };
     document.addEventListener("visibilitychange", change);
     return () => document.removeEventListener("visibilitychange", change);
   }, []);
@@ -29,9 +42,9 @@ export function usePanelRead<T>(path: string | null, reloads: number = 0): Panel
     if (!visible) return;
     const interval = window.setInterval(() => {
       if (!reading.current && !failed.current) setPollTick((tick) => tick + 1);
-    }, POLL_MS);
+    }, everyMs);
     return () => window.clearInterval(interval);
-  }, [visible]);
+  }, [visible, everyMs]);
   useEffect(() => {
     if (path === null) return;
     const superseded = new AbortController();
