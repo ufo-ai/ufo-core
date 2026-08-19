@@ -4,8 +4,8 @@ export type Agent = {
   name: string;
   model: string;
   main: boolean;
-  /** The tabler mark this app is drawn with. `AGENT_ICONS` is the ordered set the picker offers;
-   *  the mark itself may be any tabler outline icon. */
+  /** The mark this app is drawn with. `AGENT_ICONS` is the ordered set the picker offers and the
+   *  bundle carries; any other name a tabler outline mark answers still draws. */
   icon: string;
   web_audience?: string[];
 };

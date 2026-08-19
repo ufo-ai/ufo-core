@@ -408,7 +408,7 @@ test("a connect frame offers the consent link, and a connect_error states the fa
 test("an apps frame draws the application the turn created, pressable to its own screen", async () => {
   const stream = await streaming();
   stream.emit("apps", {
-    apps: [{ id: SECOND_ID, name: "daily-digest", model: "claude-sonnet-5", icon: "notebook" }],
+    apps: [{ id: SECOND_ID, name: "daily-digest", model: "claude-sonnet-5", icon: "acanthus" }],
   });
   const card = await screen.findByRole("link", { name: /Daily-Digest/ });
   expect(card.getAttribute("href")).toBe("#/agents/" + SECOND_ID);

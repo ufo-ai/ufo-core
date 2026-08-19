@@ -41,6 +41,8 @@ proposal and picks one is three questions ahead of a member asked "what would yo
 ## Interview
 
 One `ask_user`, these three questions, `title` `Create new app`, and an `icon` that draws the job.
+That is the ask's own mark, any tabler outline name — not the app's icon, which comes from the
+portal's own pack.
 
 | Question | What it settles |
 |---|---|
@@ -112,7 +114,8 @@ spec:
 ```
 
 Decide `internet_access_allowed` yourself: false when the job stays inside connected accounts, true
-when it reads the open web. Omit `icon` and `sandbox_size`.
+when it reads the open web. Omit `icon` and `sandbox_size`: the app's mark is dealt from the
+portal's pack by the app's own name.
 
 A refusal is yours to fix and say plainly — a name already taken takes a new name, not a retry of
 the same one.

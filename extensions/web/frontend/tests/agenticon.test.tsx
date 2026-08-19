@@ -5,6 +5,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 
 import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
+import { ELEMENT_ICONS } from "@/lib/elementIcons";
 
 /** The sprites `vite.config.ts` cut, named as it hashed them. */
 declare const __MARK_SPRITES__: Record<string, string>;
@@ -121,8 +122,10 @@ test("the picker's marks are the bundle's own, in the order it draws them", () =
   const slugs = Object.keys(AGENT_ICONS);
   expect(slugs).toHaveLength(41);
   expect(slugs[0]).toBe("ufo");
-  expect(slugs.slice(0, 4)).toEqual(["ufo", "robot", "rocket", "bolt"]);
-  for (const slug of slugs) expect(OUTLINE[slug]).toBeTruthy();
+  expect(slugs.slice(0, 4)).toEqual(["ufo", "propylon", "nabatu", "gibil"]);
+  // The product's own mark is tabler's; the rest of the set is the element pack, whole and in the
+  // pack module's own order, so the picker offers no mark the pack does not draw.
+  expect(slugs.slice(1)).toEqual(Object.keys(ELEMENT_ICONS));
 
   const { container } = render(
     <>
@@ -132,14 +135,78 @@ test("the picker's marks are the bundle's own, in the order it draws them", () =
     </>,
   );
 
-  for (const slug of slugs) expect(container.querySelector(`.tabler-icon-${slug}`)).not.toBeNull();
+  expect(container.querySelector(".tabler-icon-ufo")).not.toBeNull();
+  for (const slug of slugs.slice(1))
+    expect(container.querySelector(`.element-icon-${slug}`)).not.toBeNull();
   expect(asked).toEqual([]);
+});
+
+/** A mark whose paths were copied short or dropped still draws, so nothing but reading the paths
+ *  back off what each one renders catches it. The floor on length holds only for the pack's own
+ *  marks: tabler draws a mark from short segments as readily as from one long outline. */
+test("every mark the picker offers draws paths of its own", () => {
+  const asked = servesSprites();
+
+  for (const slug of Object.keys(AGENT_ICONS)) {
+    const { container } = render(<AgentIcon name={slug} />);
+    const drawn = [...container.querySelectorAll("path")].map((path) => path.getAttribute("d"));
+    expect(drawn.length, slug).toBeGreaterThan(0);
+    for (const d of drawn) expect(d, slug).toMatch(/^[Mm]/);
+  }
+  for (const slug of Object.keys(ELEMENT_ICONS)) {
+    const { container } = render(<AgentIcon name={slug} />);
+    const drawn = [...container.querySelectorAll("path")];
+    for (const path of drawn) expect(path.getAttribute("d")!.length, slug).toBeGreaterThan(40);
+  }
+  expect(asked).toEqual([]);
+});
+
+test("an element mark fills itself with the ink around it, and states no colour of its own", () => {
+  const { container } = render(<AgentIcon name="propylon" />);
+
+  const svg = container.querySelector("svg")!;
+  expect(svg.getAttribute("fill")).toBe("currentColor");
+  expect(svg.getAttribute("stroke")).toBeNull();
+  expect(svg.getAttribute("class")!.split(" ")).toContain("element-icon");
+  expect(container.innerHTML).not.toMatch(/#[0-9a-fA-F]{3}|rgba?\(|hsla?\(|oklch\(/);
+});
+
+/** The pack's art fills only part of the 64-unit canvas it was drawn on, and a different part per
+ *  mark, so every mark drawn on the whole canvas reads lighter than the tabler marks beside it and
+ *  no two read alike. Each mark instead carries a square window cropped to its own glyph. The
+ *  window is the only thing that crops — the path data is the source's own, so nothing is lost.
+ *  Two marks sharing a window would draw at least one of them at the wrong weight, and nothing
+ *  else in the tree would say so. */
+test("each element mark carries its own square window inside the pack's canvas", () => {
+  const windows = new Set<string>();
+  const slugs = Object.keys(ELEMENT_ICONS);
+
+  for (const slug of slugs) {
+    const { container } = render(<AgentIcon name={slug} />);
+    const box = container.querySelector("svg")!.getAttribute("viewBox")!;
+    const [x, y, width, height] = box.split(" ").map(Number);
+    expect([x, y, width, height].every(Number.isFinite), slug).toBe(true);
+    expect(width, slug).toBe(height);
+    expect(width, slug).toBeLessThan(64);
+    expect(x, slug).toBeGreaterThanOrEqual(0);
+    expect(y, slug).toBeGreaterThanOrEqual(0);
+    expect(x + width, slug).toBeLessThanOrEqual(64);
+    expect(y + height, slug).toBeLessThanOrEqual(64);
+    windows.add(box);
+  }
+
+  expect(windows.size).toBe(slugs.length);
 });
 
 test("the bundle carries the marks the picker offers and none of the rest", () => {
   const bundle = entry();
+  const { container } = render(<AgentIcon name="propylon" />);
+  const drawn = container.querySelector("path")!.getAttribute("d")!;
 
-  expect(bundle.includes(OUTLINE.rocket[0][1].d)).toBe(true);
+  expect(bundle.includes(drawn)).toBe(true);
+  // `rocket` is a mark the picker offered before the element pack and offers no longer, so its
+  // paths belong to the sprite now and not to the bundle.
+  expect(bundle.includes(OUTLINE.rocket[0][1].d)).toBe(false);
   expect(bundle.includes(OUTLINE.anchor[0][1].d)).toBe(false);
   expect(bundle.includes(OUTLINE.zeppelin[0][1].d)).toBe(false);
 });
@@ -147,8 +214,8 @@ test("the bundle carries the marks the picker offers and none of the rest", () =
 test("a mark draws at the glyph size unless its caller sets another", async () => {
   servesSprites();
 
-  const bundled = render(<AgentIcon name="rocket" />);
-  const sized = render(<AgentIcon name="rocket" className="size-8" />);
+  const bundled = render(<AgentIcon name="propylon" />);
+  const sized = render(<AgentIcon name="propylon" className="size-8" />);
   const fetched = render(<AgentIcon name="anchor" className="size-8" />);
 
   const classes = (from: HTMLElement) =>

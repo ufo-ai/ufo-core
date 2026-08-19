@@ -38,10 +38,10 @@ def test_a_slug_no_mark_could_be_named_by_is_refused(refused: str) -> None:
 
 
 def test_the_first_keyword_token_of_the_name_wins() -> None:
-    assert auto_agent_icon("Support Desk", ()) == "lifebuoy"
-    assert auto_agent_icon("Desk Support", ()) == "headset"
-    assert auto_agent_icon("data_ops", ()) == "database"
-    assert auto_agent_icon("Q4 finance review", ()) == "receipt"
+    assert auto_agent_icon("Support Desk", ()) == "kardia"
+    assert auto_agent_icon("Desk Support", ()) == "kalyx"
+    assert auto_agent_icon("data_ops", ()) == "ziggurat"
+    assert auto_agent_icon("Q4 finance review", ()) == "ashnan"
 
 
 def test_a_name_no_keyword_names_lands_the_same_way_every_time() -> None:
@@ -56,7 +56,7 @@ def test_a_workspace_fills_the_set_before_it_repeats() -> None:
     for index in range(len(AUTO_AGENT_ICONS)):
         taken.append(auto_agent_icon(f"agent-{index}", taken))
     assert set(taken) == set(AUTO_AGENT_ICONS)
-    assert auto_agent_icon("support", taken) == "lifebuoy"
+    assert auto_agent_icon("support", taken) == "kardia"
     assert auto_agent_icon("nightly digest", taken) in AUTO_AGENT_ICONS
 
 

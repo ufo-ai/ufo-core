@@ -1992,7 +1992,7 @@ test("a reloaded conversation draws files on the earlier reply that shared them"
 });
 
 /** An application a turn created, as the surface names it on the reply that made it. */
-const CREATED_APP = { id: SECOND_ID, name: "second", model: "claude-sonnet-5", icon: "telescope" };
+const CREATED_APP = { id: SECOND_ID, name: "second", model: "claude-sonnet-5", icon: "aten" };
 
 test("an application the turn created stands on the reply that made it, and opens it", async () => {
   wire({
@@ -2976,19 +2976,21 @@ test("the composer's agent picker draws each app's mark, and keeps the chosen on
 
   await screen.findByLabelText("Message the agent");
   const control = screen.getByRole("combobox", { name: "Agent" });
-  expect(control.querySelector(".tabler-icon-robot")).toBeTruthy();
+  expect(control.querySelector(".element-icon-propylon")).toBeTruthy();
 
   await userEvent.click(control);
   const assistant = await screen.findByRole("option", { name: "Assistant" });
-  expect(assistant.querySelector("[data-slot=avatar-fallback] .tabler-icon-robot")).toBeTruthy();
   expect(
-    screen.getByRole("option", { name: "Second" }).querySelector(".tabler-icon-telescope"),
+    assistant.querySelector("[data-slot=avatar-fallback] .element-icon-propylon"),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("option", { name: "Second" }).querySelector(".element-icon-aten"),
   ).toBeTruthy();
 
   await userEvent.click(screen.getByRole("option", { name: "Second" }));
   await waitFor(() =>
     expect(
-      screen.getByRole("combobox", { name: "Agent" }).querySelector(".tabler-icon-telescope"),
+      screen.getByRole("combobox", { name: "Agent" }).querySelector(".element-icon-aten"),
     ).toBeTruthy(),
   );
 });

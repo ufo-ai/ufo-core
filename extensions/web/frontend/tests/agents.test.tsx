@@ -34,7 +34,7 @@ const RESEARCH = {
   name: "research",
   model: "claude-opus-4-8",
   main: false,
-  icon: "telescope",
+  icon: "aten",
 };
 /** An app whose name a member typed as two lowercase words, which is the case the drawn name and
  *  the stored name differ in most plainly. */
@@ -563,9 +563,9 @@ test("each row in the index draws its own app's mark, and states nothing by it",
   const index = within(await agentIndex());
 
   const assistant = index.getByRole("button", { name: /^Assistant/ });
-  expect(assistant.querySelector(".tabler-icon-robot")).toBeTruthy();
+  expect(assistant.querySelector(".element-icon-propylon")).toBeTruthy();
   expect(assistant.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
-  expect(index.getByRole("button", { name: /^Research/ }).querySelector(".tabler-icon-telescope"))
+  expect(index.getByRole("button", { name: /^Research/ }).querySelector(".element-icon-aten"))
     .toBeTruthy();
 });
 
@@ -590,7 +590,7 @@ test("a mark named for what every object answers still leads the picker as the a
 
 test("a member picks another mark, and the pick rides one intent and comes back", async () => {
   const posted: unknown[] = [];
-  let icon = "robot";
+  let icon = "propylon";
   wire({
     "/settings": () => json({ ...SETTINGS, spec: { ...SETTINGS.spec, icon } }),
     "/connections": () => json({ connections: [] }),
@@ -614,13 +614,15 @@ test("a member picks another mark, and the pick rides one intent and comes back"
   // Every label is the slug's words capitalized, except the product's own name, which is read as
   // it is written.
   expect(marks[0].getAttribute("aria-label")).toBe("ufo");
-  expect(screen.getByRole("radio", { name: "Shopping cart" })).toBeTruthy();
-  expect((screen.getByRole("radio", { name: "Robot" }) as HTMLInputElement).checked).toBe(true);
+  expect(screen.getByRole("radio", { name: "Kylix" })).toBeTruthy();
+  expect((screen.getByRole("radio", { name: "Propylon" }) as HTMLInputElement).checked).toBe(
+    true,
+  );
   // The schema hides `icon` the way it hides `prompt`, so the generic form draws no control for it.
   expect(screen.queryByRole("combobox", { name: "icon" })).toBeNull();
   expect(screen.queryByRole("textbox", { name: "icon" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("radio", { name: "Chart line" }));
+  await userEvent.click(screen.getByRole("radio", { name: "Krepis" }));
   await userEvent.click(screen.getByRole("button", { name: "Save icon" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
@@ -628,15 +630,17 @@ test("a member picks another mark, and the pick rides one intent and comes back"
     verb: "apply",
     kind: "agent",
     name: "assistant",
-    spec: { icon: "chart-line" },
+    spec: { icon: "krepis" },
   });
   expect(await screen.findByText("Applied.")).toBeTruthy();
   await waitFor(() =>
-    expect((screen.getByRole("radio", { name: "Chart line" }) as HTMLInputElement).checked).toBe(
+    expect((screen.getByRole("radio", { name: "Krepis" }) as HTMLInputElement).checked).toBe(
       true,
     ),
   );
-  expect((screen.getByRole("radio", { name: "Robot" }) as HTMLInputElement).checked).toBe(false);
+  expect((screen.getByRole("radio", { name: "Propylon" }) as HTMLInputElement).checked).toBe(
+    false,
+  );
 });
 
 test("a name is drawn word by word, and only a word written wholly in lowercase is raised", () => {

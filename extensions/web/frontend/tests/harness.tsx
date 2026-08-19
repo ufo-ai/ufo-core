@@ -150,7 +150,7 @@ export const AGENT = {
   name: "assistant",
   model: "opus",
   main: true,
-  icon: "robot",
+  icon: "propylon",
 };
 
 export const ADMIN_AGENT = {
@@ -165,7 +165,7 @@ export const SECOND = {
   id: SECOND_ID,
   name: "second",
   main: false,
-  icon: "telescope",
+  icon: "aten",
 };
 
 export const MEMBER = { id: "m1", email: "member@example.com", admin: false };
@@ -181,7 +181,7 @@ export const SETTINGS = {
     prompt: "be useful",
     prompt_digest: "abc123",
   },
-  spec: { icon: "robot", model: "opus", reasoning: "high", internet_access_allowed: true },
+  spec: { icon: "propylon", model: "opus", reasoning: "high", internet_access_allowed: true },
   spec_schema: {
     properties: {
       model: { type: "string" },

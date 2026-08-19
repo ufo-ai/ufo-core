@@ -34,6 +34,7 @@ from ufo.objects import (
 )
 from ufo.schema import tables
 from ufo.schema.records import (
+    AGENT_ICONS,
     DEFAULT_AGENT_VISIBILITY,
     DEFAULT_SANDBOX_SIZE,
     AgentVisibility,
@@ -102,9 +103,10 @@ class AgentSpec(BaseModel):
     icon: TablerIcon | None = Field(
         default=None,
         description=(
-            "The agent's icon in the member portal, any tabler outline icon name. Omit it on an "
-            "update to keep the current icon; a new agent without one takes an icon from its "
-            "name."
+            "The agent's icon in the member portal, one of the marks the portal draws: "
+            f"{', '.join(AGENT_ICONS)}. Any other name applies but the portal does not offer it. "
+            "Omit it on an update to keep the current icon; a new agent without one takes an icon "
+            "from its name."
         ),
     )
     prompt: str | None = Field(
@@ -439,9 +441,9 @@ AGENT_OBJECT = ObjectKind(
         "deploy's sandbox backend offers sizes; existing conversations keep the sandbox they "
         "have. Visibility 'workspace' answers every member in the portal, 'private' answers its "
         "owner, workspace admins, and members granted web access in chat; the agent's homepage "
-        "follows it, and the main agent stays 'workspace'. The icon the portal shows is any tabler "
-        "outline icon name, so name the one that draws the job; a new agent takes one from its "
-        "name, and omitting it on an update keeps the current icon. "
+        "follows it, and the main agent stays 'workspace'. The icon the portal shows is one of the "
+        "marks it draws, the set the icon field names, so name the one that draws the job; a new "
+        "agent takes one from its name, and omitting it on an update keeps the current icon. "
         "input_schema and output_schema (raw JSON Schema, top-level type 'object') fix the "
         "contract a spawn of this agent validates against; unset means {task} in and {result} "
         "out. Applying a name no agent holds "

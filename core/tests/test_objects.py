@@ -916,7 +916,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
             "reasoning": "high",
             "sandbox_size": "small",
             "visibility": "workspace",
-            "icon": "robot",
+            "icon": "propylon",
             "prompt": "be brief",
             "input_schema": None,
             "output_schema": None,
@@ -1187,8 +1187,8 @@ async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_nam
                     )
                 ).all()
             )
-        assert icons["support-desk"] == "lifebuoy"
-        assert icons["support-team"] not in ("lifebuoy", "robot", MAIN_AGENT_ICON)
+        assert icons["support-desk"] == "kardia"
+        assert icons["support-team"] not in ("kardia", "propylon", MAIN_AGENT_ICON)
 
         await apply_tool.handler(
             ctx,
@@ -1206,9 +1206,9 @@ async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_nam
                     tables.agent.c.name == "support-desk",
                 )
             )
-        assert kept == "lifebuoy"
+        assert kept == "kardia"
 
-        for slug in ("rocket", MAIN_AGENT_ICON, "anchor"):
+        for slug in ("nabatu", MAIN_AGENT_ICON, "anchor"):
             applied = json.loads(
                 await _text(
                     tools,

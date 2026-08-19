@@ -1,101 +1,101 @@
 import { useEffect, useState } from "react";
-import {
-  IconAtom,
-  IconBolt,
-  IconBook,
-  IconBrain,
-  IconBriefcase,
-  IconBug,
-  IconBulb,
-  IconCalendar,
-  IconChartLine,
-  IconChartPie,
-  IconChecklist,
-  IconClock,
-  IconCloud,
-  IconCode,
-  IconCompass,
-  IconDatabase,
-  IconFlask,
-  IconFolder,
-  IconGavel,
-  IconHeadset,
-  IconLifebuoy,
-  IconMail,
-  IconMapPin,
-  IconMessage,
-  IconMicroscope,
-  IconNotebook,
-  IconPalette,
-  IconPencil,
-  IconPlane,
-  IconQuestionMark,
-  IconReceipt,
-  IconRobot,
-  IconRocket,
-  IconSearch,
-  IconServer,
-  IconShield,
-  IconShoppingCart,
-  IconSparkles,
-  IconTelescope,
-  IconTerminal2,
-  IconUfo,
-  IconUsers,
-} from "@tabler/icons-react";
+import { IconQuestionMark, IconUfo } from "@tabler/icons-react";
 
 import { cn } from "@/lib/cn";
+import {
+  Acanthus,
+  Adyton,
+  Akhet,
+  Anthemion,
+  Ashnan,
+  Atef,
+  Aten,
+  Carnyx,
+  Cedrus,
+  Deltoton,
+  Denticulus,
+  Dingir,
+  Flabellum,
+  Furcula,
+  Gibil,
+  Gnomon,
+  Gorgoneion,
+  Hydria,
+  Kalyx,
+  Kardia,
+  Krepis,
+  Kylix,
+  Lekythos,
+  Menhir,
+  Nabatu,
+  Nephele,
+  Nirah,
+  Nochtli,
+  Omphalos,
+  Osculum,
+  Ostrakon,
+  Patera,
+  Propylon,
+  Sesen,
+  Shushan,
+  Stele,
+  Thyrsus,
+  Triglyph,
+  Wedjat,
+  Ziggurat,
+} from "@/lib/elementIcons";
 
 /** The sprite each opening letter's marks are drawn in, by letter, under the hashed name
  *  `vite.config.ts` cut and emitted it as. */
 declare const __MARK_SPRITES__: Record<string, string>;
 
 /** The marks the picker offers, in the order it draws them: the workspace's own mark first, then
- *  kindred marks adjacent, so the member scans groups instead of a wall of unrelated shapes. The
- *  set a mark may come from is every outline mark tabler draws — this is the finite, ordered part
- *  of it a member chooses from by eye, and the part the bundle carries. */
+ *  the element pack with kindred marks adjacent, so the member scans groups instead of a wall of
+ *  unrelated shapes. This is the whole of what an app is offered, and the whole of what the bundle
+ *  carries. A row holding any other slug tabler draws still draws it, read from that letter's
+ *  sprite, so an icon written before this pack arrived keeps its mark. */
 export const AGENT_ICONS = {
   ufo: IconUfo,
-  robot: IconRobot,
-  rocket: IconRocket,
-  bolt: IconBolt,
-  brain: IconBrain,
-  sparkles: IconSparkles,
-  bulb: IconBulb,
-  compass: IconCompass,
-  telescope: IconTelescope,
-  microscope: IconMicroscope,
-  flask: IconFlask,
-  atom: IconAtom,
-  code: IconCode,
-  "terminal-2": IconTerminal2,
-  bug: IconBug,
-  database: IconDatabase,
-  server: IconServer,
-  cloud: IconCloud,
-  mail: IconMail,
-  message: IconMessage,
-  calendar: IconCalendar,
-  clock: IconClock,
-  checklist: IconChecklist,
-  notebook: IconNotebook,
-  book: IconBook,
-  folder: IconFolder,
-  search: IconSearch,
-  "chart-line": IconChartLine,
-  "chart-pie": IconChartPie,
-  receipt: IconReceipt,
-  "shopping-cart": IconShoppingCart,
-  users: IconUsers,
-  headset: IconHeadset,
-  lifebuoy: IconLifebuoy,
-  shield: IconShield,
-  "map-pin": IconMapPin,
-  plane: IconPlane,
-  briefcase: IconBriefcase,
-  palette: IconPalette,
-  pencil: IconPencil,
-  gavel: IconGavel,
+  propylon: Propylon,
+  nabatu: Nabatu,
+  gibil: Gibil,
+  adyton: Adyton,
+  dingir: Dingir,
+  akhet: Akhet,
+  deltoton: Deltoton,
+  aten: Aten,
+  omphalos: Omphalos,
+  lekythos: Lekythos,
+  anthemion: Anthemion,
+  stele: Stele,
+  nirah: Nirah,
+  nochtli: Nochtli,
+  ziggurat: Ziggurat,
+  menhir: Menhir,
+  nephele: Nephele,
+  carnyx: Carnyx,
+  osculum: Osculum,
+  denticulus: Denticulus,
+  gnomon: Gnomon,
+  triglyph: Triglyph,
+  acanthus: Acanthus,
+  ostrakon: Ostrakon,
+  hydria: Hydria,
+  wedjat: Wedjat,
+  krepis: Krepis,
+  patera: Patera,
+  ashnan: Ashnan,
+  kylix: Kylix,
+  furcula: Furcula,
+  kalyx: Kalyx,
+  kardia: Kardia,
+  gorgoneion: Gorgoneion,
+  thyrsus: Thyrsus,
+  flabellum: Flabellum,
+  cedrus: Cedrus,
+  sesen: Sesen,
+  shushan: Shushan,
+  atef: Atef,
 };
 
 type AgentIconName = keyof typeof AGENT_ICONS;
@@ -111,10 +111,10 @@ const MARK_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
  *  whatever it sits in. It is always hidden from assistive technology: the mark restates what the
  *  row's own text and the picker's own label already say.
  *
- *  The picker's marks are bundled and draw at once; any other slug tabler draws is read from its
- *  letter's sprite, one fetch per letter for the page's life. A slug no sprite answers is reported
- *  to the console and drawn as the unknown mark, so the hole is visible and named while the row it
- *  sits in still lists its app. */
+ *  The picker's marks are the element pack's own paths, bundled and drawn at once; any other slug
+ *  tabler draws is read from its letter's sprite, one fetch per letter for the page's life. A slug
+ *  no sprite answers is reported to the console and drawn as the unknown mark, so the hole is
+ *  visible and named while the row it sits in still lists its app. */
 export function AgentIcon({ name, className }: { name: string; className?: string }) {
   if (!MARK_NAME.test(name)) return <UnknownMark name={name} className={className} />;
   if (Object.hasOwn(AGENT_ICONS, name)) {

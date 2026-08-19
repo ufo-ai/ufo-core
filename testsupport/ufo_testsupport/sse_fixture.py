@@ -128,7 +128,7 @@ def _synthesized() -> list[bytes]:
                         "id": APP_ID,
                         "name": "daily-digest",
                         "model": "claude-sonnet-5",
-                        "icon": "notebook",
+                        "icon": "acanthus",
                     }
                 ]
             },
