@@ -326,6 +326,11 @@ spec:
             # The local cache daemon a Service rule relays to (RFC 0032); the daemon binds loopback.
             - {name: UFO_EGRESS_CACHE_DAEMON, value: "127.0.0.1:9110"}
 %{ endif }
+%{ if preview_enabled }
+            # The preview service a Service rule relays to (RFC 0037): its own Deployment, reached by
+            # cluster DNS rather than loopback, so the proxy resolves the address per connect.
+            - {name: UFO_EGRESS_PREVIEW_DAEMON, value: "ufo-preview.${namespace}.svc.cluster.local:8930"}
+%{ endif }
           resources:
             requests: {cpu: 250m, memory: 384Mi}
             limits: {cpu: "2", memory: 768Mi}
@@ -394,6 +399,66 @@ spec:
   unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels: {app: ufo-sandbox-proxy}
+%{ endif }
+%{ if preview_enabled }
+---
+# The preview service (RFC 0037): renders a shared document to a PNG. Share-nothing — no database, no
+# AWS credentials, no state. The sandbox reaches it through the egress proxy (a Service rule); it
+# renders, PUTs the PNG to the caller-supplied presigned URL, and answers only metadata. tini is the
+# image entrypoint, reaping the soffice children a timed-out render leaves behind.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ufo-preview
+  namespace: ${namespace}
+  labels: {app: ufo-preview}
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0
+  selector:
+    matchLabels: {app: ufo-preview}
+  template:
+    metadata:
+      labels: {app: ufo-preview}
+      annotations: {flyingobject.ai/deployment-id: "${deployment_id}"}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: preview
+          image: ${registry}/ufo-preview:${image_tag}
+          ports:
+            - {name: http, containerPort: 8930}
+          env:
+            - {name: UFO_PREVIEW_LISTEN, value: "0.0.0.0:8930"}
+            # Gates only the `inline` sink, which prod never calls; the service requires it at boot.
+            - name: UFO_PREVIEW_TOKEN
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: UFO_PREVIEW_TOKEN}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /_health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /_health, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ufo-preview
+  namespace: ${namespace}
+  labels: {app: ufo-preview}
+spec:
+  selector: {app: ufo-preview}
+  ports:
+    - {name: http, port: 8930, targetPort: http}
 %{ endif }
 ---
 # The sandbox ingress is the inbound twin of the egress proxy: a generic token-gated reverse proxy
@@ -640,6 +705,12 @@ spec:
             # The terminal client version this deploy serves — the ufo surface tells a stale
             # x-ufo-script to install.
             - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
+%{ if preview_enabled }
+            # The preview service the render-previews job calls directly (RFC 0037): serve reaches its
+            # ClusterIP, not the proxy-relayed host the sandbox uses. Set only when preview is enabled,
+            # so the job registers only where the service runs.
+            - {name: UFO_PREVIEW_URL, value: "http://ufo-preview.${namespace}.svc.cluster.local:8930"}
+%{ endif }
             # The fleet's platform Fernet key (seals hosted credential rows) and artifact-delivery
             # secret — minted for the fleet, in the ufo-serve Secret.
             - name: UFO_CREDENTIAL_KEY

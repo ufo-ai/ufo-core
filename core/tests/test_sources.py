@@ -2900,6 +2900,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         TurnDispatcher(client=None),
         runner,
         DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
+        None,
     )
     assert [spec.name for spec in specs] == [
         SOURCE_SYNC_JOB,

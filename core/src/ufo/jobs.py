@@ -37,6 +37,7 @@ from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChang
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import emit_metric, formatted_stack, log, log_error, warn
+from ufo.preview_renderer import PreviewRenderer
 from ufo.provisioning import AgentProvisioning
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.schema import tables
@@ -84,6 +85,8 @@ RESULT_DELIVERY_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_JOB = "page_change"
 PAGE_CHANGE_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_CURSOR_KEY = "page_change_cursor"
+RENDER_PREVIEWS_JOB = "render_previews"
+RENDER_PREVIEWS_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_BATCH = 50
 JOB_WORKER_CONCURRENCY = 8
 JOB_QUEUE = Queue(JOB_QUEUE_NAME, worker_concurrency=JOB_WORKER_CONCURRENCY)
@@ -541,6 +544,7 @@ def core_jobs(
     turn_dispatcher: TurnDispatcher,
     page_change_runner: PageChangeRunner,
     delivery_sweep: ResultDeliverer,
+    preview_renderer: PreviewRenderer | None,
 ) -> tuple[JobSpec, ...]:
     """The jobs a deploy always runs, before any extension's — all core because the source pipeline,
     spend enforcement, the page-change fan-out, and the subagent loop are core. The sync driver
@@ -563,6 +567,14 @@ def core_jobs(
 
     async def _deliver_results(context: ExtensionContext) -> None:
         await delivery_sweep.run()
+
+    async def _render_previews(context: ExtensionContext) -> None:
+        assert preview_renderer is not None
+        await preview_renderer.run()
+
+    async def _preview_candidates() -> tuple[UUID, ...]:
+        assert preview_renderer is not None
+        return await preview_renderer.candidate_workspaces()
 
     def _drive_consumer(
         consumer: PageChangeConsumer,
@@ -606,6 +618,18 @@ def core_jobs(
             schedule=RESULT_DELIVERY_SCHEDULE,
             handler=_deliver_results,
             candidates=delivery_sweep.candidate_workspaces,
+        ),
+        *(
+            (
+                JobSpec(
+                    name=RENDER_PREVIEWS_JOB,
+                    schedule=RENDER_PREVIEWS_SCHEDULE,
+                    handler=_render_previews,
+                    candidates=_preview_candidates,
+                ),
+            )
+            if preview_renderer is not None
+            else ()
         ),
     )
 

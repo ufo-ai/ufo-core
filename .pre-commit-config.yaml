@@ -38,3 +38,15 @@ repos:
         language: system
         files: ^control/
         pass_filenames: false
+      - id: fmt-preview
+        name: cargo fmt preview
+        entry: sh -c 'cd preview && cargo fmt --check'
+        language: system
+        files: ^preview/
+        pass_filenames: false
+      - id: clippy-preview
+        name: cargo clippy preview
+        entry: sh -c 'cd preview && cargo clippy --all-targets -- -D warnings'
+        language: system
+        files: ^preview/
+        pass_filenames: false

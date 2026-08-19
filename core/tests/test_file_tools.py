@@ -706,76 +706,21 @@ async def _shared_row(blob_key: str) -> sa.Row:
         ).one()
 
 
-@pytest.mark.parametrize(
-    ("filename", "build"),
-    [
-        (
-            "deck.pptx",
-            "python3 - <<'PY'\n"
-            "from pptx import Presentation\n"
-            "p = Presentation()\n"
-            "slide = p.slides.add_slide(p.slide_layouts[5])\n"
-            "slide.shapes.title.text = 'Quarterly review'\n"
-            "p.save('/workspace/deck.pptx')\n"
-            "PY\n",
-        ),
-        (
-            "brief.docx",
-            "python3 - <<'PY'\n"
-            "from docx import Document\n"
-            "d = Document()\n"
-            "d.add_heading('Quarterly review')\n"
-            "d.add_paragraph('The number moved.')\n"
-            "d.save('/workspace/brief.docx')\n"
-            "PY\n",
-        ),
-        (
-            "notes.pdf",
-            "python3 - <<'PY'\n"
-            "from pptx import Presentation\n"
-            "p = Presentation()\n"
-            "p.slides.add_slide(p.slide_layouts[6])\n"
-            "p.save('/workspace/notes.pptx')\n"
-            "PY\n"
-            "soffice --headless --convert-to pdf --outdir /workspace /workspace/notes.pptx\n",
-        ),
-        (
-            "grid.xlsx",
-            "python3 - <<'PY'\n"
-            "from openpyxl import Workbook\n"
-            "w = Workbook()\n"
-            "w.active['A1'] = 'the number moved'\n"
-            "w.save('/workspace/grid.xlsx')\n"
-            "PY\n",
-        ),
-        (
-            "diagram.svg",
-            'printf \'%s\' \'<svg width="320" height="180">'
-            '<rect width="320" height="180" fill="#10b981"/></svg>\''
-            " > /workspace/diagram.svg\n",
-        ),
-    ],
-)
-async def test_share_file_renders_a_document_first_page_beside_its_bytes(
+async def test_share_file_records_no_preview_without_an_s3_store(
     file_ctx: tuple[ToolContext, Path],
     db: None,
-    filename: str,
-    build: str,
 ) -> None:
-    """A shared document carries a picture of itself: the sandbox's own soffice/pdftoppm render
-    its first page while the container is up, and it lands as a second blob the row names."""
+    """The service stores through a presigned PUT, which only an S3 store can mint. On a filesystem
+    store an eligible document shares with no preview — the file lands, the picture is simply
+    absent."""
     ctx, _ = file_ctx
     await _seed_turn_rows(ctx.turn)
-    built = await ctx.sandbox.bash(build, timeout_s=180)
-    assert built.exit_code == 0, built.stderr
-    claims = _download_claims((await _share(ctx, file_path=filename))["url"])
+    await ctx.sandbox.write_file("report.pdf", b"%PDF-1.7 minimal\n")
+    claims = _download_claims((await _share(ctx, file_path="report.pdf"))["url"])
     row = await _shared_row(claims.blob_key)
-    assert row.preview_blob_key is not None and row.preview_blob_key != claims.blob_key
-    assert row.preview_media_type == "image/png"
-    with ws(ctx.turn.workspace_id):
-        rendered = await ctx.blob.get(row.preview_blob_key)
-    assert rendered.startswith(b"\x89PNG")
-    assert row.preview_size_bytes == len(rendered)
+    assert row.preview_blob_key is None
+    assert row.preview_media_type is None
+    assert row.preview_size_bytes is None
 
 
 async def test_share_file_leaves_a_plain_file_without_a_rendered_page(
@@ -792,21 +737,6 @@ async def test_share_file_leaves_a_plain_file_without_a_rendered_page(
     assert row.preview_blob_key is None
     assert row.preview_media_type is None
     assert row.preview_size_bytes is None
-
-
-async def test_share_file_shares_a_document_whose_render_fails(
-    file_ctx: tuple[ToolContext, Path],
-    db: None,
-) -> None:
-    """A file that names itself a document but holds nothing renderable still shares: the member's
-    bytes are already stored, and a picture that cannot be drawn is not a reason to lose them."""
-    ctx, _ = file_ctx
-    await _seed_turn_rows(ctx.turn)
-    await ctx.sandbox.write_file("broken.pdf", b"not a pdf at all\n")
-    claims = _download_claims((await _share(ctx, file_path="broken.pdf"))["url"])
-    with ws(ctx.turn.workspace_id):
-        assert await ctx.blob.get(claims.blob_key) == b"not a pdf at all\n"
-    assert (await _shared_row(claims.blob_key)).preview_blob_key is None
 
 
 async def test_share_file_uploads_from_inside_the_sandbox_on_the_s3_backend(

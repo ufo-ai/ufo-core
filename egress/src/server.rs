@@ -49,6 +49,10 @@ const EGRESS_AUTHORIZATION_UNAVAILABLE: &str = "egress authorization unavailable
 /// The synthetic git-cache origins the daemon mirrors; a git-path fall-through refuses any other.
 const CACHE_GIT_HOSTS: [&str; 1] = ["github.com"];
 
+/// The preview service's host, the other end of core's `sandbox/preview.py` constant: the one
+/// `Service` rule the preview daemon owns. Every other service host is the cache's.
+const PREVIEW_HOST: &str = "preview.ufo.internal";
+
 const SERVICE_STRIPPED: [&[u8]; 7] = [
     b"x-ufo-workspace",
     b"x-ufo-user",
@@ -68,12 +72,22 @@ const DIRECT_STRIPPED: [&[u8]; 7] = [
     b"proxy-authorization",
 ];
 
+/// The local daemons a matched `Service` rule relays to, each owning the hosts it serves: the cache
+/// fronts public git and package origins, the preview service owns `PREVIEW_HOST` alone. Unset means
+/// this deploy runs that daemon nowhere — the cache's hosts then dispatch as ordinary egress, while
+/// the preview host, which nothing else serves, answers 502.
+#[derive(Clone, Debug, Default)]
+pub struct ServiceDaemons {
+    pub cache: Option<String>,
+    pub preview: Option<String>,
+}
+
 pub struct EgressProxy {
     control: Arc<Control>,
     leaves: Arc<LeafStore>,
     meter: MeterSink,
     token_secret: Vec<u8>,
-    cache_daemon: Option<SocketAddr>,
+    daemons: ServiceDaemons,
     public_url: Option<String>,
     graceful_shutdown: Duration,
     upstream_tls: Arc<ClientConfig>,
@@ -85,7 +99,7 @@ impl EgressProxy {
         leaves: Arc<LeafStore>,
         meter: MeterSink,
         token_secret: Vec<u8>,
-        cache_daemon: Option<std::net::SocketAddr>,
+        daemons: ServiceDaemons,
         public_url: Option<String>,
         graceful_shutdown: Duration,
     ) -> EgressProxy {
@@ -94,7 +108,7 @@ impl EgressProxy {
             leaves,
             meter,
             token_secret,
-            cache_daemon,
+            daemons,
             public_url,
             graceful_shutdown,
             upstream_tls: upstream_client_config(),
@@ -140,7 +154,7 @@ impl EgressProxy {
             leaves: self.leaves.clone(),
             meter: self.meter.clone(),
             token_secret: self.token_secret.clone(),
-            cache_daemon: self.cache_daemon,
+            daemons: self.daemons.clone(),
             upstream_tls: self.upstream_tls.clone(),
             resolver,
             caps: Arc::new(Caps::new()),
@@ -184,7 +198,7 @@ struct Shared {
     leaves: Arc<LeafStore>,
     meter: MeterSink,
     token_secret: Vec<u8>,
-    cache_daemon: Option<SocketAddr>,
+    daemons: ServiceDaemons,
     upstream_tls: Arc<ClientConfig>,
     resolver: TokioAsyncResolver,
     caps: Arc<Caps>,
@@ -382,9 +396,37 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         }
     };
 
-    if let Some(daemon) = shared.cache_daemon {
-        if let Some(daemon_prefix) = find_service(&rules, &host) {
-            service(&shared, stream, host, principal, daemon_prefix, daemon).await;
+    // A matched service rule relays to the daemon that owns its host. The preview service is the
+    // origin of its own host, so it takes the service path whether or not a daemon is configured —
+    // an absent one answers 502 inside the tunnel rather than falling through to a public dispatch
+    // that would refuse the CONNECT. The cache fronts real origins, so with no cache daemon there is
+    // no service path at all and its host dispatches as ordinary egress.
+    if let Some(daemon_prefix) = find_service(&rules, &host) {
+        if host == PREVIEW_HOST {
+            let daemon = shared.daemons.preview.clone();
+            service(
+                &shared,
+                stream,
+                host,
+                principal,
+                daemon_prefix,
+                daemon,
+                false,
+            )
+            .await;
+            return;
+        }
+        if let Some(daemon) = shared.daemons.cache.clone() {
+            service(
+                &shared,
+                stream,
+                host,
+                principal,
+                daemon_prefix,
+                Some(daemon),
+                true,
+            )
+            .await;
             return;
         }
     }
@@ -793,7 +835,8 @@ async fn service(
     host: String,
     principal: Principal,
     daemon_prefix: Option<String>,
-    daemon: SocketAddr,
+    daemon: Option<String>,
+    allow_origin_fallthrough: bool,
 ) {
     let server_config = match shared.leaves.server_config(&host).await {
         Ok(config) => config,
@@ -824,7 +867,13 @@ async fn service(
         ReadHead::Closed => return,
     };
     let (daemon_line, billed_host, fallthrough) = match &daemon_prefix {
-        None => match service_origin(&line) {
+        // A synthetic host that fronts real origins (the cache) re-originates by the request's own
+        // path when its daemon is down — the git host lives in `/git/<host>/…`, so the fall-through
+        // reads it from there. A host that IS the origin (the preview service) fronts nothing public,
+        // so it never re-originates: an absent daemon fails the request in the tunnel, and a
+        // path-shaped request through its host reaches no origin. Gating this on the daemon, not the
+        // path, is what keeps the preview host from becoming a second, ungated route to `github.com`.
+        None if allow_origin_fallthrough => match service_origin(&line) {
             Some((origin_host, origin_line)) => {
                 let fall = CACHE_GIT_HOSTS
                     .contains(&origin_host.as_str())
@@ -833,16 +882,40 @@ async fn service(
             }
             None => (line.clone(), None, None),
         },
+        None => (line.clone(), None, None),
         Some(prefix) => (
             prefix_target(&line, prefix),
             Some(host.clone()),
             Some((host.clone(), line.clone())),
         ),
     };
-    let daemon_conn = match timeout(CONNECT_UPSTREAM_TIMEOUT, TcpStream::connect(daemon)).await {
-        Ok(Ok(sock)) => sock,
-        _ => {
-            service_direct(shared, client, fallthrough, &headers, leftover, principal).await;
+    // The daemon's address is a name resolved here, per connect, so a cluster DNS record that moves
+    // is followed rather than pinned at boot.
+    let connected = match &daemon {
+        Some(address) => timeout(
+            CONNECT_UPSTREAM_TIMEOUT,
+            TcpStream::connect(address.as_str()),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok),
+        None => None,
+    };
+    let daemon_conn = match connected {
+        Some(sock) => sock,
+        None => {
+            // The cache fronts a public origin, so a daemon that is down or unconfigured
+            // re-originates; a service that IS the origin has nothing behind it and fails the
+            // request in the tunnel the client already opened.
+            match fallthrough {
+                Some(origin) => {
+                    service_direct(shared, client, origin, &headers, leftover, principal).await
+                }
+                None => {
+                    let _ = respond(&mut client, 502, &format!("cannot reach {host}")).await;
+                    drain_refused(&mut client, MAX_REFUSAL_DRAIN_BYTES).await;
+                }
+            }
             return;
         }
     };
@@ -868,18 +941,12 @@ async fn service(
 async fn service_direct(
     shared: &Arc<Shared>,
     mut client: tokio_rustls::server::TlsStream<TcpStream>,
-    fallthrough: Option<(String, Vec<u8>)>,
+    origin: (String, Vec<u8>),
     headers: &[Vec<u8>],
     leftover: Vec<u8>,
     principal: Principal,
 ) {
-    let (host, origin_line) = match fallthrough {
-        Some(pair) => pair,
-        None => {
-            let _ = respond(&mut client, 502, "cache unavailable").await;
-            return;
-        }
-    };
+    let (host, origin_line) = origin;
     let tcp = match timeout(
         CONNECT_UPSTREAM_TIMEOUT,
         TcpStream::connect((host.as_str(), DEFAULT_HTTPS_PORT)),

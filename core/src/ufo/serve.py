@@ -128,6 +128,7 @@ from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
 from ufo.objects import BoundKind
 from ufo.onboard_control import ONBOARD_CONTROL_TOKEN_ENV, OnboardControl
+from ufo.preview_renderer import PREVIEW_SERVICE_URL_ENV, PREVIEW_TOKEN_ENV, PreviewRenderer
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.runtime_instance import (
     CancelReconciler,
@@ -144,6 +145,7 @@ from ufo.sandbox.cache import (
 )
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import ProbeEnv
+from ufo.sandbox.preview import PREVIEW_HOST, parse_preview_service
 from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import (
     EGRESS_CA_CERT_ENV,
@@ -469,6 +471,12 @@ def _launch_jobs(
         probes=probes,
         background_model=runtime.config.models.background_jobs_model,
     )
+    preview_url = os.environ.get(PREVIEW_SERVICE_URL_ENV)
+    preview_renderer = (
+        PreviewRenderer(blob=runtime.blob, service_url=preview_url.rstrip("/"))
+        if preview_url
+        else None
+    )
     bindings = bindings_from(
         runtime.manifests,
         core_jobs(
@@ -476,6 +484,7 @@ def _launch_jobs(
             TurnDispatcher(client=runtime.dbos, key_slot_for=runtime.registry.key_slot_for),
             page_change_runner,
             DeliverySweep(invoker_for=invoker_for, registry=runtime.subagents),
+            preview_renderer,
         ),
     )
     JobRunner(
@@ -974,6 +983,9 @@ def _mount_shared_surfaces(
         for kind in manifest.objects
     }
 
+    preview_service_url = os.environ.get(PREVIEW_SERVICE_URL_ENV)
+    preview_token = os.environ.get(PREVIEW_TOKEN_ENV)
+
     def context_for(workspace_id: UUID, surface: str) -> SurfaceContext:
         return SurfaceContext(
             workspace_id=workspace_id,
@@ -1001,6 +1013,8 @@ def _mount_shared_surfaces(
             _memory=memory,
             _objects=objects or {},
             _conversation_slots=conversation_slots,
+            _preview_url=preview_service_url.rstrip("/") if preview_service_url else None,
+            _preview_token=preview_token,
         )
 
     for manifest in manifests:
@@ -1166,6 +1180,7 @@ def _proxy_endpoint(
         ca_cert = os.environ.get(EGRESS_CA_CERT_ENV) or _ephemeral_egress_ca()
         control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32)
     cache_daemon = parse_cache_daemon(config.sandbox.cache_daemon)
+    preview_service = parse_preview_service(config.sandbox.preview_service)
     cache_control_token = os.environ.get(CACHE_CONTROL_TOKEN_ENV)
     if cache_daemon is not None and not cache_control_token:
         raise RuntimeError(
@@ -1184,6 +1199,7 @@ def _proxy_endpoint(
         clis=clis,
         cache_host=CACHE_HOST if cache_daemon is not None else None,
         cache_pkg_hosts=CACHE_PKG_HOSTS if cache_daemon is not None else (),
+        preview_host=PREVIEW_HOST if preview_service is not None else None,
     )
     control = EgressControl(
         control_token=control_token,

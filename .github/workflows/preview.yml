@@ -1,0 +1,63 @@
+name: preview
+
+# The preview renderer (RFC 0037) is a standalone Rust crate. `check` builds and lints without any
+# document tooling — the ignored tests need no soffice or pdfium. `render` runs the full suite,
+# ignored tests included, inside the hermetic testbed image: the GitHub runner's Ubuntu apt mirror
+# is too unreliable to install LibreOffice live (see the incident this replaced).
+on:
+  push:
+    branches: [main]
+    paths: ["preview/**", ".github/workflows/preview.yml"]
+  pull_request:
+    paths: ["preview/**", ".github/workflows/preview.yml"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: preview
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: preview
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: preview
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f testbed.Dockerfile -t ufo-preview-testbed .
+      - run: |
+          docker run --rm --init -v "$PWD:/crate" -w /crate ufo-preview-testbed \
+            cargo test -- --include-ignored --test-threads=4
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: preview
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ufo-preview-ci .
+      - run: |
+          docker run --rm -d --name preview-ci -p 18930:8930 \
+            -e UFO_PREVIEW_LISTEN=0.0.0.0:8930 -e UFO_PREVIEW_TOKEN=ci ufo-preview-ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18930/_health && break; sleep 1; done
+          curl -fsS -o /tmp/smoke.png -H 'Authorization: Bearer ci' \
+            -F 'request={"kind":"docx","max_width":800,"max_height":800,"sink":{"inline":true}}' \
+            -F 'file=@tests/fixtures/fixture.docx' http://127.0.0.1:18930/render
+          file /tmp/smoke.png | grep -q 'PNG image data'
+          docker rm -f preview-ci

@@ -28,6 +28,8 @@ from ufo.egress_rules import (
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.models.catalog import CORE_PRICING
+from ufo.sandbox.cache import CACHE_HOST
+from ufo.sandbox.preview import PREVIEW_HOST
 from ufo.sandbox.session import (
     SENTINEL_MODEL_KEY,
     ProbeToken,
@@ -283,6 +285,59 @@ async def test_resolve_returns_the_seeded_grant_and_forward_rules(db: None) -> N
         "header": CLI_HEADER,
         "sentinel": grant_sentinel(ACCOUNT),
         "account_id": ACCOUNT,
+    }
+
+
+async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_policy(
+    db: None,
+) -> None:
+    """The cache fronts public hosts, so it is admitted only for an agent that already holds the
+    internet; the preview service fronts nothing, and rendering a file the sandbox already holds is
+    not reaching the internet. An agent narrowed off the internet therefore resolves the preview
+    service rule and nothing else — no internet, no cache — while an unnarrowed one gets both."""
+    async with workspace_tx() as connection:
+        offline = await _seed_turn(connection, internet_access_allowed=False)
+        online = await _seed_turn(connection)
+    resolver = PerAgentRules(
+        base=(),
+        grants=None,
+        internet=(InternetRule(),),
+        cache_host=CACHE_HOST,
+        cache_pkg_hosts=("registry.npmjs.org",),
+        preview_host=PREVIEW_HOST,
+    )
+    async with _client(_control(resolver)) as client:
+        narrowed = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={
+                "proxy_auth": _basic(
+                    RUN_TOKENS.encode(RunToken(offline.workspace_id, offline.turn_id))
+                )
+            },
+        )
+        unnarrowed = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={
+                "proxy_auth": _basic(
+                    RUN_TOKENS.encode(RunToken(online.workspace_id, online.turn_id))
+                )
+            },
+        )
+    preview = {"kind": "service", "host": PREVIEW_HOST, "daemon_prefix": None}
+    assert narrowed.json() == {"rules": [preview]}
+    assert unnarrowed.json() == {
+        "rules": [
+            {"kind": "internet"},
+            {"kind": "service", "host": CACHE_HOST, "daemon_prefix": None},
+            {
+                "kind": "service",
+                "host": "registry.npmjs.org",
+                "daemon_prefix": "/pkg/registry.npmjs.org",
+            },
+            preview,
+        ]
     }
 
 

@@ -95,6 +95,7 @@ from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_
 from ufo.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT,
     CONVERSATION_TITLE_CHARS,
+    SurfaceContext,
     fence_member_message,
     member_message_text,
     mint_marker,
@@ -6652,6 +6653,55 @@ async def test_an_attachment_answers_no_other_member(
     )
     assert refused.status_code == 404
     await _consume(client, token, admitted.json()["turn_id"])
+
+
+async def test_preview_returns_the_rendered_png(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composer uploads one file and gets back the picture the preview service produced —
+    nothing stored, no turn admitted. The render itself is the service's, stubbed here; the route's
+    auth, kind check, and delegation are what this proves."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+
+    async def _rendered(self: SurfaceContext, kind: str, data: bytes) -> bytes:
+        assert kind == "pdf"
+        return b"\x89PNGrendered"
+
+    monkeypatch.setattr(SurfaceContext, "render_preview", _rendered)
+    got = await client.post(
+        "/surface/web/preview",
+        files=[("file", ("report.pdf", b"%PDF-1.7", "application/pdf"))],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert got.status_code == 200
+    assert got.headers["content-type"] == "image/png"
+    assert got.content == b"\x89PNGrendered"
+
+
+async def test_preview_refuses_an_unpreviewable_type(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    refused = await client.post(
+        "/surface/web/preview",
+        files=[("file", ("archive.zip", b"PK\x03\x04", "application/zip"))],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 415
+
+
+async def test_preview_without_a_session_is_refused(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, _workspace_id, _agent_id = web
+    unauth = await client.post(
+        "/surface/web/preview",
+        files=[("file", ("report.pdf", b"%PDF-1.7", "application/pdf"))],
+    )
+    assert unauth.status_code in (401, 403, 404)
 
 
 async def test_an_oversize_request_is_refused_at_the_door(

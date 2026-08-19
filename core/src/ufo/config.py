@@ -192,6 +192,10 @@ class SandboxConfig(BaseModel):
     """`host:port` of the sandbox cache daemon co-located on the proxy pod (RFC 0032). Set enables
     the cache: the proxy relays the cache host to it and internet-holding sandboxes route git and
     npm through it. Unset, no sandbox is rewritten and the cache host is not admitted."""
+    preview_service: str | None = None
+    """`host:port` of the preview service the proxy relays the preview host to (RFC 0037). Set
+    admits that host for every sandbox, whatever its internet policy. Unset, the host is not
+    admitted and a share carries no rendered preview."""
 
     @model_validator(mode="after")
     def _ingress_base_is_addressable(self) -> "SandboxConfig":

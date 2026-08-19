@@ -70,6 +70,7 @@ class PerAgentRules:
     internet: tuple[InternetRule, ...] = ()
     cache_host: str | None = None
     cache_pkg_hosts: tuple[str, ...] = ()
+    preview_host: str | None = None
     transfer_hosts: ConnectorTransferHosts = field(
         default_factory=lambda: ConnectorTransferHosts(explicit={})
     )
@@ -99,6 +100,8 @@ class PerAgentRules:
                             for host in self.cache_pkg_hosts
                         ),
                     )
+                if self.preview_host is not None:
+                    rules = (*rules, ServiceRule(host=self.preview_host))
                 if self.credentials is not None and self.slots:
                     rules = (
                         *rules,

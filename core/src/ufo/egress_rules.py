@@ -65,15 +65,19 @@ class InjectionRule:
 
 @dataclass(frozen=True)
 class ServiceRule:
-    """Admit `host`'s CONNECT and relay its TLS-terminated requests to the local cache daemon, which
-    fetches and caches upstream on the sandbox's behalf. Present only for an agent that already
-    holds `InternetRule` — the cache fronts several public hosts at once, so admitting it must never
-    widen an agent's reach beyond the internet it already has.
+    """Admit `host`'s CONNECT and relay its TLS-terminated requests to the local daemon that owns
+    that host, which serves them on the sandbox's behalf.
 
-    `daemon_prefix` distinguishes the two shapes the daemon serves. None: `host` is the synthetic
-    cache host and the sandbox already addressed the daemon (`/git/<origin>/…`), so the request
-    relays verbatim. Set: `host` is a real registry the proxy transparently intercepts, so the
-    request's path is prefixed with `daemon_prefix` (`/pkg/<host>`) to name the daemon's package
+    A cache host is present only for an agent that already holds `InternetRule` — the cache fronts
+    several public hosts at once, so admitting it must never widen an agent's reach beyond the
+    internet it already has. The preview host carries no such condition: the service fronts nothing
+    public, so admitting it widens nothing, and rendering a file the sandbox already holds is not
+    reaching the internet — an agent narrowed off the internet still shares files.
+
+    `daemon_prefix` distinguishes the two shapes a daemon serves. None: `host` is the synthetic
+    service host and the sandbox already addressed the daemon (`/git/<origin>/…`, `/render`), so the
+    request relays verbatim. Set: `host` is a real registry the proxy transparently intercepts, so
+    the request's path is prefixed with `daemon_prefix` (`/pkg/<host>`) to name the daemon's package
     route while the origin stays `host` itself."""
 
     host: str

@@ -262,6 +262,39 @@ async def test_s3_presigned_put_signs_v4_with_both_measurements(s3_store: S3Blob
     assert query["X-Amz-SignedHeaders"] == ["content-length;host;x-amz-checksum-sha256"]
 
 
+async def test_s3_presigned_put_unmeasured_signs_neither_measurement(
+    s3_store: S3BlobStore,
+) -> None:
+    """The preview renderer cannot report its output's size at mint time, so its PUT is unmeasured:
+    only `host` is signed, and a PUT of any length under the key succeeds. The key is still fixed by
+    the URL, so it stays authority over exactly one key — this is the whole difference from the
+    measured `presigned_put`."""
+    url = await s3_store.presigned_put_unmeasured("artifacts/abc/preview.png", 60)
+    query = parse_qs(urlsplit(url).query)
+    assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+    assert query["X-Amz-SignedHeaders"] == ["host"]
+
+    payload = b"a preview png of any length"
+    async with AsyncClient() as client:
+        put = await client.put(url, content=payload)
+    assert put.status_code == 200
+    assert await s3_store.get("artifacts/abc/preview.png") == payload
+
+
+async def test_s3_presigned_get_fetches_the_stored_bytes(s3_store: S3BlobStore) -> None:
+    """The read-side mirror of `presigned_put`: a URL any holder can GET the exact stored bytes
+    from, for exactly as long as the ttl grants, and nothing else — no query authorizes writing or
+    naming a different key."""
+    await s3_store.put("artifacts/abc/source.pdf", b"source bytes")
+    url = await s3_store.presigned_get("artifacts/abc/source.pdf", 60)
+
+    async with AsyncClient() as client:
+        fetched = await client.get(url)
+
+    assert fetched.status_code == 200
+    assert fetched.content == b"source bytes"
+
+
 async def test_s3_client_is_built_once_per_loop() -> None:
     store = S3BlobStore(bucket="b", endpoint_url="http://localhost:1", region="us-east-1")
     first = await store._client()
@@ -430,6 +463,15 @@ async def test_workspace_store_presigns_the_full_key(s3_store: S3BlobStore) -> N
     with ws(workspace_id):
         url = await store.presigned_put("artifacts/abc/report.bin", 1, "x" * 44, 60)
     assert f"workspaces/{workspace_id}/artifacts/abc/report.bin" in urlsplit(url).path
+
+
+async def test_workspace_store_presigned_get_reads_the_full_key(s3_store: S3BlobStore) -> None:
+    store = WorkspaceBlobStore(backend=s3_store)
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        await store.put("artifacts/abc/source.pdf", b"source bytes")
+        url = await store.presigned_get("artifacts/abc/source.pdf", 60)
+    assert f"workspaces/{workspace_id}/artifacts/abc/source.pdf" in urlsplit(url).path
 
 
 async def test_losers_failing_close_does_not_mask_the_won_client(

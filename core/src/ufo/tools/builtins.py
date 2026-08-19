@@ -55,9 +55,9 @@ from ufo.artifacts import artifact_object_names
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
-from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.members import ADD_MEMBER_TOOL_DEF
 from ufo.o11y import log
+from ufo.sandbox.preview import PREVIEW_HOST
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
@@ -93,31 +93,12 @@ SHA256_DIGEST_PREFIX = "sha256:"
 ARTIFACT_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024
 ARTIFACT_PUT_TTL_SECONDS = 900
 ARTIFACT_PUT_TIMEOUT_SECONDS = 900
-ARTIFACT_PREVIEW_SUFFIXES = frozenset((".docx", ".pdf", ".pptx", ".svg", ".xlsx"))
+ARTIFACT_PREVIEW_SUFFIXES = frozenset((".csv", ".docx", ".md", ".pdf", ".pptx", ".svg", ".xlsx"))
 ARTIFACT_PREVIEW_MEDIA_TYPE = "image/png"
-ARTIFACT_PREVIEW_DPI = 100
-ARTIFACT_PREVIEW_TIMEOUT_SECONDS = 180
+ARTIFACT_PREVIEW_MAX_WIDTH = 1000
+ARTIFACT_PREVIEW_MAX_HEIGHT = 1400
+ARTIFACT_PREVIEW_TIMEOUT_SECONDS = 330
 ARTIFACT_PREVIEW_DETAIL_CHARS = 500
-# One page, one raster: `soffice` reaches PDF from the Office formats and SVG (its import is
-# lenient — an `xmlns`-less generated file, dead in a browser's `<img>`, still draws) and
-# `pdftoppm` reaches a picture from the PDF, so a `.pdf` skips the first step and every type
-# shares the second.
-# `-singlefile` fixes the output at `<stem>.png` — a page-numbered name would have to be guessed
-# back. The convert writes into the engine's own offload dir, never beside the member's file.
-ARTIFACT_PREVIEW_PROG = """
-set -e
-source={source}
-stem={stem}
-if [ "${{source##*.}}" = "pdf" ]; then
-  pdf="$source"
-else
-  soffice --headless --convert-to pdf --outdir "$(dirname "$stem")" "$source" >/dev/null
-  pdf="$(dirname "$stem")/$(basename "${{source%.*}}").pdf"
-fi
-test -f "$pdf"
-pdftoppm -png -r {dpi} -f 1 -l 1 -singlefile "$pdf" "$stem"
-test -f "$stem.png"
-"""
 
 SHARE_DIR_PROBE_CMD = "[ -d {path} ] && [ ! -L {path} ]"
 SHARE_PACK_TIMEOUT_SECONDS = 900
@@ -672,29 +653,43 @@ class ArtifactPreview:
 
 
 async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> ArtifactPreview | None:
-    """Rasterize the first page of a shared document so a member sees the file rather than its name.
+    """Render the first page of a shared document so a member sees the file rather than its name.
 
-    The renderers are the sandbox's own — `soffice` for the Office formats and `pdftoppm` for the
-    PDF they convert to, the same pair the `read` builtin shows the agent — so nothing new is
-    installed beside the engine and the picture a member gets is the picture the agent saw. This
-    runs while the sandbox is still up and the file is still local, which is the only moment both
-    are true: the artifact outlives its conversation, and a later render would have to rebuild a
-    container to reach a renderer.
+    The picture is produced by the preview service (RFC 0037), not in the sandbox: the file streams
+    to it over the egress proxy in one `curl`, the service renders and PUTs the PNG to a presigned
+    URL core mints for the preview key, and answers only the metadata core records. The URL is
+    unmeasured — core cannot know the render's size before it exists — and its key is fixed here, so
+    the service can store this one preview and nothing else. The store must be S3 for core to mint
+    that URL; a filesystem dev store renders no preview and the share still lands.
 
-    A render that fails, times out, or comes back oversize yields no preview and never the share:
+    A render that fails, times out, or comes back unparseable yields no preview and never the share:
     the member's file is already stored, and a missing picture is not a reason to lose it. The
     reason is logged, so a format that never renders is visible rather than merely absent."""
-    if PurePosixPath(safe_name).suffix.lower() not in ARTIFACT_PREVIEW_SUFFIXES:
+    suffix = PurePosixPath(safe_name).suffix.lower()
+    if suffix not in ARTIFACT_PREVIEW_SUFFIXES:
         return None
-    await ctx.sandbox.ensure_tool_output_dir()
-    stem = f"{TOOL_OUTPUT_DIR}/preview-{uuid4().hex}"
+    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{PurePosixPath(safe_name).stem}.png"
+    match ctx.blob.backend:
+        case S3BlobStore():
+            put_url = await ctx.blob.presigned_put_unmeasured(key, ARTIFACT_PUT_TTL_SECONDS)
+        case _:
+            return None
+    request_json = json.dumps(
+        {
+            "kind": suffix[1:],
+            "max_width": ARTIFACT_PREVIEW_MAX_WIDTH,
+            "max_height": ARTIFACT_PREVIEW_MAX_HEIGHT,
+            "pages": 1,
+            "sink": {"put_url": put_url},
+        }
+    )
     render = await ctx.sandbox.bash(
-        ARTIFACT_PREVIEW_PROG.format(
-            source=shlex.quote(scoped), stem=shlex.quote(stem), dpi=ARTIFACT_PREVIEW_DPI
-        ),
+        "curl -sS --fail-with-body "
+        f"-F {shlex.quote('request=' + request_json)} "
+        f"-F {shlex.quote('file=@' + scoped)} "
+        f"--url {shlex.quote(f'https://{PREVIEW_HOST}/render')}",
         timeout_s=ARTIFACT_PREVIEW_TIMEOUT_SECONDS,
     )
-    rendered = f"{stem}.png"
     if render.exit_code != 0:
         log(
             "share_file.preview.refused",
@@ -702,20 +697,15 @@ async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> Arti
             detail=(render.stderr.strip() or render.stdout.strip())[:ARTIFACT_PREVIEW_DETAIL_CHARS],
         )
         return None
-    preflight = await ctx.sandbox.bash(
-        SHARE_PREFLIGHT_CMD.format(path=shlex.quote(rendered)),
-        timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
-    )
-    if preflight.exit_code != 0:
-        log("share_file.preview.unmeasured", filename=safe_name)
+    try:
+        size_bytes = int(json.loads(render.stdout)["size_bytes"])
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        log(
+            "share_file.preview.unparsed",
+            filename=safe_name,
+            detail=render.stdout[:ARTIFACT_PREVIEW_DETAIL_CHARS],
+        )
         return None
-    stat = json.loads(preflight.stdout)
-    size_bytes = int(stat["size"])
-    if size_bytes == 0 or size_bytes > IMAGE_PREVIEW_MAX_BYTES:
-        log("share_file.preview.oversize", filename=safe_name, size_bytes=size_bytes)
-        return None
-    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{PurePosixPath(safe_name).stem}.png"
-    await _store_artifact(ctx, rendered, key, size_bytes, str(stat["digest"]))
     return ArtifactPreview(
         blob_key=key, media_type=ARTIFACT_PREVIEW_MEDIA_TYPE, size_bytes=size_bytes
     )

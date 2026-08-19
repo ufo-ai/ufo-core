@@ -317,6 +317,27 @@ class S3BlobStore:
             ExpiresIn=ttl_seconds,
         )
 
+    async def presigned_put_unmeasured(self, key: str, ttl_seconds: int) -> str:
+        """A presigned PUT that signs only the key and expiry, not the body's size or checksum — so
+        the holder may store bytes of any length under `key`. `presigned_put` is the rule for an
+        untrusted writer of an arbitrary file, where the measurement is what bounds it; this is for
+        a writer that already controls the content and whose length is unknown at mint time (the
+        preview renderer, which cannot report its output's size until it has produced it). The key
+        is still fixed here, so the holder can write only this one key until the URL expires."""
+        client = await self._client()
+        return await client.generate_presigned_url(
+            "put_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=ttl_seconds
+        )
+
+    async def presigned_get(self, key: str, ttl_seconds: int) -> str:
+        """A URL any holder can GET `key` from, until it expires — the read-side mirror of
+        `presigned_put`. No measurement to sign: a GET carries no body, so there is nothing a
+        forged request could substitute."""
+        client = await self._client()
+        return await client.generate_presigned_url(
+            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=ttl_seconds
+        )
+
     async def put_host(self) -> str:
         """The host a presigned URL resolves to — what the egress proxy admits so the sandbox can
         reach it. Read off the client that does the signing rather than recomposed from config, so
@@ -428,6 +449,23 @@ class WorkspaceBlobStore:
                 )
             case _:
                 raise TypeError("presigned_put requires the s3 backend")
+
+    async def presigned_put_unmeasured(self, key: str, ttl_seconds: int) -> str:
+        """The backend's unmeasured presigned PUT for the full workspace key — S3 only."""
+        match self.backend:
+            case S3BlobStore() as s3:
+                return await s3.presigned_put_unmeasured(self._full(key), ttl_seconds)
+            case _:
+                raise TypeError("presigned_put_unmeasured requires the s3 backend")
+
+    async def presigned_get(self, key: str, ttl_seconds: int) -> str:
+        """The backend's presigned GET for the full workspace key — S3 only, and the caller's
+        backend match already established that."""
+        match self.backend:
+            case S3BlobStore() as s3:
+                return await s3.presigned_get(self._full(key), ttl_seconds)
+            case _:
+                raise TypeError("presigned_get requires the s3 backend")
 
     def _full(self, key: str) -> str:
         if key.startswith(WORKSPACE_KEY_PREFIX):

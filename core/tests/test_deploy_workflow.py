@@ -19,7 +19,8 @@ ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 # Terraform template `if`/`endif` directive lines, stripped before a template parses as YAML.
 TEMPLATE_DIRECTIVE = (
-    r'(?m)^%\{ (?:if workload_ha|if cache_enabled|if cache_s3_bucket != ""|endif) \}\n?'
+    r'(?m)^%\{ (?:if workload_ha|if cache_enabled|if cache_s3_bucket != ""'
+    r"|if preview_enabled|endif) \}\n?"
 )
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
@@ -3084,6 +3085,7 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
         "daemonset/otel-logs-agent",
         "deployment/otel-collector",
         "deployment/ufo-gateway",
+        "deployment/ufo-preview",
         "deployment/ufo-sandbox-proxy",
         "deployment/ufo-ingress",
         "deployment/ufo-serve",
@@ -3289,6 +3291,7 @@ def test_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
             "otel-collector",
             "ufo-gateway",
             "ufo-ingress",
+            "ufo-preview",
             "ufo-sandbox-proxy",
             "ufo-serve",
         )

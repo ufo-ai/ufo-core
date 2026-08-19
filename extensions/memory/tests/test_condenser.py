@@ -2312,6 +2312,7 @@ def test_memory_registers_two_independent_page_change_consumers(tmp_path: object
         TurnDispatcher(client=None),
         runner,
         DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
+        None,
     )
     page_change = {spec.name for spec in specs if spec.name.startswith("page_change:")}
     assert page_change == {

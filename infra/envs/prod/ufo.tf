@@ -8,6 +8,9 @@ locals {
   # run the daemon sidecar and route sandbox git through it.
   cache_enabled = false
 
+  # The preview service (RFC 0037): its Deployment renders every shared document to a preview PNG.
+  preview_enabled = true
+
   # https://www.cloudflare.com/ips-v4 — the edge ranges Cloudflare connects to origins from. The NLB
   # admits only these, so the ingress is unreachable except through Cloudflare's proxy (DDoS/WAF edge).
   cloudflare_ipv4_ranges = [
@@ -129,6 +132,7 @@ locals {
     proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
     ingress_public_url = "https://${module.platform.hostname}"
     ${local.cache_enabled ? "cache_daemon = \"127.0.0.1:9110\"" : ""}
+    ${local.preview_enabled ? "preview_service = \"ufo-preview.${local.system_namespace}.svc.cluster.local:8930\"" : ""}
 
     [connect]
     public_base_url = "https://${local.shared_host}"
@@ -256,6 +260,7 @@ data "kubectl_file_documents" "hosted" {
     # platform module); set `cache_s3_bucket = module.platform.cache_s3_bucket` to turn on durability.
     cache_enabled     = local.cache_enabled
     cache_s3_bucket   = ""
+    preview_enabled   = local.preview_enabled
     cache_s3_role_arn = module.platform.cache_s3_role_arn
 
     ses_sender           = var.ses_sender
@@ -340,7 +345,7 @@ resource "kubectl_manifest" "ufo" {
   # produced yet. The workflow's own `kubectl rollout status deployment/ufo-sandbox-proxy` confirms
   # the rollout once the push lands, and maxUnavailable=0 keeps the old proxy pods serving egress
   # until the new ones pull it — so the gap is drained, never downtime.
-  wait_for_rollout = !strcontains(each.key, "deployments/ufo-sandbox-proxy")
+  wait_for_rollout = !strcontains(each.key, "deployments/ufo-sandbox-proxy") && !strcontains(each.key, "deployments/ufo-preview")
 
   depends_on = [kubectl_manifest.ufo_migrate, module.platform]
 }

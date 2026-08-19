@@ -1,0 +1,362 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use ufo_preview::Config;
+
+fn base_map() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("UFO_PREVIEW_LISTEN".into(), "127.0.0.1:0".into());
+    m.insert("UFO_PREVIEW_TOKEN".into(), "test-token".into());
+    m.insert(
+        "UFO_PREVIEW_PDFIUM_LIB".into(),
+        std::env::var("UFO_PREVIEW_PDFIUM_LIB").unwrap_or_else(|_| "/nonexistent".into()),
+    );
+    m.insert("UFO_PREVIEW_ALLOW_LOCAL".into(), "1".into());
+    m
+}
+
+fn config(concurrency: Option<usize>) -> Arc<Config> {
+    let mut m = base_map();
+    if let Some(c) = concurrency {
+        m.insert("UFO_PREVIEW_CONCURRENCY".into(), c.to_string());
+    }
+    Arc::new(Config::from_map(&m).unwrap())
+}
+
+async fn serve_app(cfg: Arc<Config>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, ufo_preview::app(cfg)).await.unwrap() });
+    format!("http://{addr}")
+}
+
+fn multipart(
+    request_json: serde_json::Value,
+    file: Option<(&str, Vec<u8>)>,
+) -> reqwest::multipart::Form {
+    let mut form = reqwest::multipart::Form::new().text("request", request_json.to_string());
+    if let Some((name, bytes)) = file {
+        form = form.part(
+            "file",
+            reqwest::multipart::Part::bytes(bytes).file_name(name.to_string()),
+        );
+    }
+    form
+}
+
+fn req_json(kind: &str, pages: u32) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind, "max_width": 800, "max_height": 800, "pages": pages,
+        "sink": {"inline": true},
+    })
+}
+
+#[tokio::test]
+async fn missing_bearer_is_401() {
+    let base = serve_app(config(None)).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .multipart(multipart(
+            req_json("pdf", 1),
+            Some(("f.pdf", b"%PDF-".to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn unknown_kind_is_unsupported_type() {
+    let base = serve_app(config(None)).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(
+            req_json("exe", 1),
+            Some(("f.exe", b"MZ".to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 415);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["error"],
+        "unsupported_type"
+    );
+}
+
+#[tokio::test]
+async fn kind_magic_mismatch_is_422() {
+    let base = serve_app(config(None)).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(
+            req_json("pdf", 1),
+            Some(("f.pdf", b"PK\x03\x04zip".to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn held_capacity_answers_busy() {
+    let cfg = config(Some(1));
+    let render = ufo_preview::render::Render::new(cfg.clone());
+    let _held = render.semaphore().clone().acquire_owned().await.unwrap();
+    let base = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = ufo_preview::server::app_with(cfg, render);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    };
+    // No file part at all: were the busy check to run after parsing, the missing file (and no
+    // source_url) would answer 415, not 503 — a 503 here proves the gate sits before parsing.
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(req_json("pdf", 1), None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
+#[tokio::test]
+async fn file_part_over_max_input_is_413() {
+    let mut m = base_map();
+    m.insert("UFO_PREVIEW_MAX_INPUT_MB".into(), "1".into());
+    let cfg = Arc::new(Config::from_map(&m).unwrap());
+    let base = serve_app(cfg).await;
+    let oversized = vec![0u8; 1_200_000];
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(req_json("pdf", 1), Some(("f.pdf", oversized))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["error"],
+        "too_large"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pdf_inline_round_trip() {
+    let base = serve_app(config(None)).await;
+    let pdf = std::fs::read("tests/fixtures/fixture.pdf").unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(req_json("pdf", 1), Some(("f.pdf", pdf))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "image/png");
+    assert_eq!(resp.headers()["x-preview-page-count"], "2");
+    let w: u32 = resp.headers()["x-preview-width"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(w <= 800);
+    let body = resp.bytes().await.unwrap();
+    assert!(body.starts_with(b"\x89PNG"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn docx_from_source_url_to_put_url() {
+    type SinkStore = Arc<tokio::sync::Mutex<Option<(String, Vec<u8>)>>>;
+    let fixture = std::fs::read("tests/fixtures/fixture.docx").unwrap();
+    let store: SinkStore = Arc::default();
+    let sink = store.clone();
+    let origin = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/doc.docx",
+                axum::routing::get(move || {
+                    let f = fixture.clone();
+                    async move { f }
+                }),
+            )
+            .route(
+                "/sink.png",
+                axum::routing::put(move |h: axum::http::HeaderMap, b: axum::body::Bytes| {
+                    let sink = sink.clone();
+                    async move {
+                        let ct = h["content-type"].to_str().unwrap().to_string();
+                        *sink.lock().await = Some((ct, b.to_vec()));
+                        "ok"
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    };
+    let base = serve_app(config(None)).await;
+    let request = serde_json::json!({
+        "kind": "docx", "max_width": 640, "max_height": 640, "pages": 1,
+        "source_url": format!("{origin}/doc.docx"),
+        "sink": {"put_url": format!("{origin}/sink.png")},
+    });
+    // No bearer: the caller-minted put_url is itself the capability.
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .multipart(multipart(request, None))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    assert_eq!(resp.headers()["content-type"], "application/json");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "{body:?}");
+    assert_eq!(body["page_count"], 1);
+    assert!(body["size_bytes"].as_u64().unwrap() > 0);
+    let stored = store.lock().await.clone().unwrap();
+    assert_eq!(stored.0, "image/png");
+    assert!(stored.1.starts_with(b"\x89PNG"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn multi_page_answers_zip() {
+    let base = serve_app(config(None)).await;
+    let pdf = std::fs::read("tests/fixtures/fixture.pdf").unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(req_json("pdf", 5), Some(("f.pdf", pdf))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/zip");
+    let body = resp.bytes().await.unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(body.to_vec())).unwrap();
+    assert_eq!(archive.len(), 2);
+    assert!(archive.by_name("page-01.png").is_ok());
+    assert!(archive.by_name("page-02.png").is_ok());
+}
+
+#[tokio::test]
+#[ignore]
+async fn requested_pages_above_one_answers_zip_even_with_one_rendered_page() {
+    let base = serve_app(config(None)).await;
+    let pdf = std::fs::read("tests/fixtures/fixture-1page.pdf").unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(req_json("pdf", 5), Some(("f.pdf", pdf))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/zip");
+    let body = resp.bytes().await.unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(body.to_vec())).unwrap();
+    assert_eq!(archive.len(), 1);
+    assert!(archive.by_name("page-01.png").is_ok());
+}
+
+#[tokio::test]
+#[ignore]
+async fn rendered_output_over_max_output_bytes_is_413() {
+    let mut m = base_map();
+    m.insert("UFO_PREVIEW_MAX_OUTPUT_BYTES".into(), "64".into());
+    let cfg = Arc::new(Config::from_map(&m).unwrap());
+    let base = serve_app(cfg).await;
+    let pdf = std::fs::read("tests/fixtures/fixture.pdf").unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(req_json("pdf", 1), Some(("f.pdf", pdf))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["error"],
+        "too_large"
+    );
+}
+
+#[tokio::test]
+async fn put_url_sink_admits_without_bearer() {
+    // A magic-mismatched file reaches admission and answers 422 — proving the request got past the
+    // auth gate with no bearer (a 401 would mean the put_url capability was not honored).
+    let base = serve_app(config(None)).await;
+    let request = serde_json::json!({
+        "kind": "pdf", "max_width": 800, "max_height": 800, "pages": 1,
+        "sink": {"put_url": "https://sink.example/preview.png"},
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .multipart(multipart(
+            request,
+            Some(("f.pdf", b"PK\x03\x04zip".to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn total_request_deadline_answers_504_and_frees_the_permit() {
+    let mut m = base_map();
+    m.insert("UFO_PREVIEW_REQUEST_TIMEOUT_SECS".into(), "1".into());
+    m.insert("UFO_PREVIEW_CONCURRENCY".into(), "1".into());
+    let cfg = Arc::new(Config::from_map(&m).unwrap());
+    let base = serve_app(cfg).await;
+
+    use futures_util::StreamExt;
+    let trickle = futures_util::stream::once(async {
+        Ok::<_, std::io::Error>(b"--ufo-test-boundary\r\n".to_vec())
+    })
+    .chain(futures_util::stream::pending());
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("{base}/render"))
+        .header(
+            "content-type",
+            "multipart/form-data; boundary=ufo-test-boundary",
+        )
+        .body(reqwest::Body::wrap_stream(trickle))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 504);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["error"],
+        "render_timeout"
+    );
+
+    // A follow-up request is admitted rather than answered `busy`, proving the stalled request's
+    // permit was released when its deadline expired rather than held forever.
+    let follow_up = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(
+            req_json("exe", 1),
+            Some(("f.exe", b"MZ".to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(follow_up.status(), 415);
+}

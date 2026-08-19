@@ -2,7 +2,7 @@
 # binaries of a client tree.
 
 locals {
-  ecr_repositories = ["ufo", "ufo-control", "ufo-cache", "ufo-egress", "ufo-clientbin"]
+  ecr_repositories = ["ufo", "ufo-control", "ufo-cache", "ufo-egress", "ufo-preview", "ufo-clientbin"]
 }
 
 resource "aws_ecr_repository" "this" {

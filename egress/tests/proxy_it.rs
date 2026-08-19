@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use ufo_egress::control::Control;
 use ufo_egress::meter::Meter;
-use ufo_egress::server::EgressProxy;
+use ufo_egress::server::{EgressProxy, ServiceDaemons};
 use ufo_egress::tls::{generate_ca, LeafStore};
 use ufo_egress::token::RunTokenCodec;
 use ufo_egress::types::{MeterRecord, RunToken};
@@ -153,13 +153,13 @@ struct Proxy {
 }
 
 async fn start_proxy(state: Arc<ControlState>) -> Proxy {
-    start_proxy_trusting(state, None, None).await
+    start_proxy_trusting(state, None, ServiceDaemons::default()).await
 }
 
 async fn start_proxy_trusting(
     state: Arc<ControlState>,
     upstream_ca_pem: Option<String>,
-    cache_daemon: Option<SocketAddr>,
+    daemons: ServiceDaemons,
 ) -> Proxy {
     let control_url = spawn_control(state.clone()).await;
     let (ca_pem, ca_key) = generate_ca().unwrap();
@@ -171,7 +171,7 @@ async fn start_proxy_trusting(
         leaves,
         meter.sink(),
         SECRET.to_vec(),
-        cache_daemon,
+        daemons,
         None,
         Duration::from_secs(10),
     );
@@ -326,6 +326,78 @@ async fn mitm_request(proxy: &Proxy, sock: TcpStream, host: &str, request: &[u8]
         }
     }
     String::from_utf8_lossy(&response).to_string()
+}
+
+/// A plaintext local daemon standing in for the cache or the preview service: it records the head of
+/// every request handed to it and answers `body`. Returns its `host:port` and the recorded heads.
+async fn spawn_daemon(body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_task = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let seen_conn = seen_task.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    if find(&buf, b"\r\n\r\n").is_some() {
+                        break;
+                    }
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                seen_conn
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf).to_string());
+                let _ = sock
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n\
+                             {body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    (addr.to_string(), seen)
+}
+
+/// An address nothing listens on: bound to learn a free port, then released.
+async fn closed_port() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr.to_string()
+}
+
+/// Complete the MITM handshake, send one request, and read the response head alone — a refusal the
+/// proxy answers while it drains the rest of the request is read as soon as it lands.
+async fn mitm_response_head(proxy: &Proxy, sock: TcpStream, host: &str, request: &[u8]) -> String {
+    let connector = TlsConnector::from(client_config_trusting(&proxy.ca_pem));
+    let name = ServerName::try_from(host.to_string()).unwrap();
+    let mut tls = connector.connect(name, sock).await.unwrap();
+    tls.write_all(request).await.unwrap();
+    let mut head = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while find(&head, b"\r\n\r\n").is_none() {
+        match tls.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => head.extend_from_slice(&chunk[..n]),
+        }
+    }
+    String::from_utf8_lossy(&head).to_string()
 }
 
 async fn spawn_echo() -> SocketAddr {
@@ -485,7 +557,12 @@ async fn an_injection_host_mitms_and_swaps_the_real_secret_upstream() {
     let (origin, origin_ca, seen) = spawn_tls_origin("localhost").await;
     let target = format!("localhost:{}", origin.port());
     let rules = r#"[{"kind":"scope","hosts":["localhost"]},{"kind":"injection","host":"localhost","header":"authorization","sentinel":"SENTINEL","real":"real-secret"}]"#;
-    let proxy = start_proxy_trusting(ControlState::new(rules), Some(origin_ca), None).await;
+    let proxy = start_proxy_trusting(
+        ControlState::new(rules),
+        Some(origin_ca),
+        ServiceDaemons::default(),
+    )
+    .await;
     let auth = basic(&run_token(None));
     let (sock, head) = connect(&proxy, &target, Some(&auth)).await;
     assert_eq!(
@@ -549,6 +626,118 @@ async fn a_forward_sentinel_request_executes_through_the_broker() {
     assert!(
         response.ends_with("hello"),
         "broker body missing: {response}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
+    let (cache, cached) = spawn_daemon("packed refs").await;
+    let (preview, rendered) = spawn_daemon("png bytes").await;
+    let rules = r#"[{"kind":"service","host":"cache.ufo.internal","daemon_prefix":null},{"kind":"service","host":"preview.ufo.internal","daemon_prefix":null}]"#;
+    let proxy = start_proxy_trusting(
+        ControlState::new(rules),
+        None,
+        ServiceDaemons {
+            cache: Some(cache),
+            preview: Some(preview),
+        },
+    )
+    .await;
+    let auth = basic(&run_token(None));
+
+    let (sock, head) = connect(&proxy, "cache.ufo.internal:443", Some(&auth)).await;
+    assert_eq!(status_of(&head), 200, "cache CONNECT was refused: {head}");
+    let answer = mitm_request(
+        &proxy,
+        sock,
+        "cache.ufo.internal",
+        b"GET /git/github.com/o/r/info/refs HTTP/1.1\r\nhost: cache.ufo.internal\r\n\r\n",
+    )
+    .await;
+    assert!(answer.contains("packed refs"), "cache answer: {answer}");
+
+    let (sock, head) = connect(&proxy, "preview.ufo.internal:443", Some(&auth)).await;
+    assert_eq!(status_of(&head), 200, "preview CONNECT was refused: {head}");
+    let answer = mitm_request(
+        &proxy,
+        sock,
+        "preview.ufo.internal",
+        b"POST /render HTTP/1.1\r\nhost: preview.ufo.internal\r\ncontent-length: 0\r\n\r\n",
+    )
+    .await;
+    assert!(answer.contains("png bytes"), "preview answer: {answer}");
+
+    let cached = cached.lock().unwrap().clone();
+    let rendered = rendered.lock().unwrap().clone();
+    assert_eq!(cached.len(), 1, "cache daemon saw {cached:?}");
+    assert!(
+        cached[0].starts_with("GET /git/github.com/o/r/info/refs"),
+        "cache daemon saw {cached:?}"
+    );
+    assert_eq!(rendered.len(), 1, "preview daemon saw {rendered:?}");
+    assert!(
+        rendered[0].starts_with("POST /render"),
+        "preview daemon saw {rendered:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_preview_request_fails_in_the_tunnel_when_its_daemon_is_gone() {
+    // Nothing else serves the preview host, so there is no origin to fall through to: whether the
+    // deploy configured no preview daemon or configured one that is down, the sandbox's render call
+    // is answered 502 inside the tunnel it already opened.
+    let rules = r#"[{"kind":"service","host":"preview.ufo.internal","daemon_prefix":null}]"#;
+    let render =
+        b"POST /render HTTP/1.1\r\nhost: preview.ufo.internal\r\ncontent-length: 0\r\n\r\n";
+    for daemons in [
+        ServiceDaemons::default(),
+        ServiceDaemons {
+            cache: None,
+            preview: Some(closed_port().await),
+        },
+    ] {
+        let proxy = start_proxy_trusting(ControlState::new(rules), None, daemons.clone()).await;
+        let (sock, head) = connect(
+            &proxy,
+            "preview.ufo.internal:443",
+            Some(&basic(&run_token(None))),
+        )
+        .await;
+        assert_eq!(status_of(&head), 200, "preview CONNECT was refused: {head}");
+        let answer = mitm_response_head(&proxy, sock, "preview.ufo.internal", render).await;
+        assert_eq!(
+            status_of(&answer),
+            502,
+            "preview daemon {:?} did not answer 502: {answer}",
+            daemons.preview
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_git_path_through_the_preview_host_never_reaches_an_origin() {
+    // The cache re-originates a `/git/<host>/…` request when its daemon is down, reading the host
+    // from the path. The preview host must not inherit that: it fronts no public origin, so a
+    // request whose path names `github.com` sent through its tunnel with no daemon is answered 502
+    // inside the tunnel, never relayed to `github.com` — otherwise an agent held off the internet
+    // would hold a second, ungated route to it.
+    let rules = r#"[{"kind":"service","host":"preview.ufo.internal","daemon_prefix":null}]"#;
+    let git =
+        b"GET /git/github.com/owner/repo/info/refs HTTP/1.1\r\nhost: preview.ufo.internal\r\n\r\n";
+    let proxy =
+        start_proxy_trusting(ControlState::new(rules), None, ServiceDaemons::default()).await;
+    let (sock, head) = connect(
+        &proxy,
+        "preview.ufo.internal:443",
+        Some(&basic(&run_token(None))),
+    )
+    .await;
+    assert_eq!(status_of(&head), 200, "preview CONNECT was refused: {head}");
+    let answer = mitm_response_head(&proxy, sock, "preview.ufo.internal", git).await;
+    assert_eq!(
+        status_of(&answer),
+        502,
+        "a git-path request through the preview host was not answered 502: {answer}"
     );
 }
 

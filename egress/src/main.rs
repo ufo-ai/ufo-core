@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ufo_egress::config::Config;
 use ufo_egress::control::Control;
 use ufo_egress::meter::Meter;
-use ufo_egress::server::EgressProxy;
+use ufo_egress::server::{EgressProxy, ServiceDaemons};
 use ufo_egress::tls;
 
 #[tokio::main]
@@ -37,7 +37,10 @@ async fn main() {
         Arc::new(leaves),
         meter.sink(),
         config.token_secret.clone(),
-        config.cache_daemon,
+        ServiceDaemons {
+            cache: config.cache_daemon.clone(),
+            preview: config.preview_daemon.clone(),
+        },
         config.public_url.clone(),
         config.graceful_shutdown,
     );

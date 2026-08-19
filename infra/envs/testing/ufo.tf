@@ -8,6 +8,11 @@ locals {
   # it rolls. `cache_s3_bucket` stays empty — disk-only, cold on each pod roll. Prod stays off.
   cache_enabled = true
 
+  # The preview service (RFC 0037), on for testing: the image builds every deploy and the
+  # UFO_PREVIEW_TOKEN secret is provisioned, so the Deployment has both when it rolls. Prod stays off
+  # until proven here.
+  preview_enabled = true
+
   # https://www.cloudflare.com/ips-v4 — the edge ranges Cloudflare connects to origins from. The NLB
   # admits only these, so the ingress is unreachable except through Cloudflare's proxy (DDoS/WAF edge).
   cloudflare_ipv4_ranges = [
@@ -134,6 +139,7 @@ locals {
     proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
     ingress_public_url = "https://${module.platform.hostname}"
     ${local.cache_enabled ? "cache_daemon = \"127.0.0.1:9110\"" : ""}
+    ${local.preview_enabled ? "preview_service = \"ufo-preview.${local.system_namespace}.svc.cluster.local:8930\"" : ""}
 
     [connect]
     public_base_url = "https://${local.shared_host}"
@@ -231,6 +237,9 @@ data "kubectl_file_documents" "hosted" {
     cache_s3_bucket   = module.platform.cache_s3_bucket
     cache_s3_role_arn = module.platform.cache_s3_role_arn
 
+    # The preview service (RFC 0037), its own Deployment reached by cluster DNS.
+    preview_enabled = local.preview_enabled
+
     # Onboarding email uses the gateway's SES identity.
     ses_sender           = var.ses_sender
     ses_region           = var.region
@@ -314,7 +323,7 @@ resource "kubectl_manifest" "ufo" {
   # produced yet. The workflow's own `kubectl rollout status deployment/ufo-sandbox-proxy` confirms
   # the rollout once the push lands, and maxUnavailable=0 keeps the old proxy pods serving egress
   # until the new ones pull it — so the gap is drained, never downtime.
-  wait_for_rollout = !strcontains(each.key, "deployments/ufo-sandbox-proxy")
+  wait_for_rollout = !strcontains(each.key, "deployments/ufo-sandbox-proxy") && !strcontains(each.key, "deployments/ufo-preview")
 
   depends_on = [kubectl_manifest.ufo_migrate, module.platform]
 }

@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
+import httpx
 import sqlalchemy as sa
 from pydantic import BaseModel, JsonValue, ValidationError, field_validator
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
@@ -175,6 +176,10 @@ if TYPE_CHECKING:
     )
 
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
+
+PREVIEW_THUMBNAIL_MAX_WIDTH = 600
+PREVIEW_THUMBNAIL_MAX_HEIGHT = 800
+PREVIEW_RENDER_TIMEOUT_SECONDS = 330.0
 
 
 AMBIENT_CONTEXT_ELEMENT = "channel_context"
@@ -1086,6 +1091,8 @@ class SurfaceContext:
     _memory: "MemorySearch | None" = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
     _conversation_slots: tuple["BoundConversationSlot", ...] = ()
+    _preview_url: str | None = None
+    _preview_token: str | None = None
 
     @property
     def fleet_blob(self) -> FleetBlobStore:
@@ -1882,6 +1889,36 @@ class SurfaceContext:
                     "workspace write"
                 )
         await self._sandboxes.write(conversation_id, rel, bytes(body))
+
+    async def render_preview(self, kind: str, data: bytes) -> bytes | None:
+        """Render a document `data` of `kind` to a preview PNG through the preview service, so a
+        surface can show a member the file they are about to send. The bytes go to the service's
+        `inline` sink and the PNG comes straight back — nothing is stored and this process never
+        rasterizes. Returns None when the service is unconfigured or refuses the file, so a surface
+        shows a named card rather than failing the compose."""
+        if self._preview_url is None or self._preview_token is None:
+            return None
+        request = json.dumps(
+            {
+                "kind": kind,
+                "max_width": PREVIEW_THUMBNAIL_MAX_WIDTH,
+                "max_height": PREVIEW_THUMBNAIL_MAX_HEIGHT,
+                "pages": 1,
+                "sink": {"inline": True},
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=PREVIEW_RENDER_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    f"{self._preview_url}/render",
+                    headers={"Authorization": f"Bearer {self._preview_token}"},
+                    files={"request": (None, request), "file": ("upload", data)},
+                )
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200 or response.headers.get("content-type") != "image/png":
+            return None
+        return response.content
 
     async def list_agents(self) -> tuple[AgentSummary, ...]:
         """Every agent of this workspace, main first then by name — the read a surface whose

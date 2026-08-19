@@ -20,9 +20,12 @@ object, status, usage, and audit data (a portal page reads directly), **prepared
 portal form's one mutation path: the panel's structured intent is admitted as a turn the engine
 dispatches verbatim to the typed object verb, so the turn IS the chat transport and the audit
 record, the route only prepares and admits, and the panel reads back the typed result or refusal —
-and unavoidable third-party plumbing (e.g. an OAuth callback). The speaker gates the granting
-act; subsequent use is the wire's job. (`ufoctl` CLI verbs are the operator surface — a
-different audience, not member actions.)
+a **stateless display render** (the composer rasterizing a member's picked file to show them what
+they are about to send: bytes in, a picture back, storing nothing and admitting no turn — a preview
+is not an action, it grants nothing and changes nothing, so it never has to be a chat turn) — and
+unavoidable third-party plumbing (e.g. an OAuth callback). The speaker gates the granting act;
+subsequent use is the wire's job. (`ufoctl` CLI verbs are the operator surface — a different
+audience, not member actions.)
 
 - Study how established products solve the problem before designing a solution. Adopt their proven
   patterns and conventions rather than inventing an approach from scratch.

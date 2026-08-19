@@ -315,6 +315,23 @@ jobs:
             docker push "$ECR_REGISTRY/ufo-egress:$IMAGE_TAG"
           fi
 
+      # Preview service (RFC 0037): the Rust document rasterizer built from `preview/`, its own
+      # Deployment. After the apply for the same reason as egress — a first run creates the repository
+      # before the push; the apply sets wait_for_rollout=false on the ufo-preview Deployment so it does
+      # not block on the unpushed image, and the rollout is confirmed below once the push lands. The
+      # Deployment is gated by preview_enabled, so a disabled env builds the image but runs nothing.
+      - name: Build + push preview image
+        if: github.event_name != 'pull_request'
+        run: |
+          if ! aws ecr describe-repositories --repository-names ufo-preview >/dev/null 2>&1; then
+            echo "ufo-preview repository not provisioned yet (terraform apply creates it) — skipping"
+          elif aws ecr describe-images --repository-name ufo-preview --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "ufo-preview:$IMAGE_TAG already pushed — skipping"
+          else
+            docker build -f preview/Dockerfile -t "$ECR_REGISTRY/ufo-preview:$IMAGE_TAG" preview
+            docker push "$ECR_REGISTRY/ufo-preview:$IMAGE_TAG"
+          fi
+
       - name: Wait for runtime rollout
         if: github.event_name != 'pull_request'
         run: |
@@ -338,6 +355,10 @@ jobs:
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-ingress --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
+          # Only when the env enables it: preview_enabled=false renders no Deployment to wait on.
+          if kubectl --namespace "$NAMESPACE" get deployment/ufo-preview >/dev/null 2>&1; then
+            kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-preview --timeout=15m
+          fi
           kubectl --namespace "$NAMESPACE" rollout status deployment/otel-collector --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status daemonset/otel-logs-agent --timeout=15m
 

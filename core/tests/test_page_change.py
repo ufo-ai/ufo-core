@@ -308,6 +308,7 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
         TurnDispatcher(client=None),
         runner,
         DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
+        None,
     )
     page_change = [spec.name for spec in specs if spec.name.startswith(f"{PAGE_CHANGE_JOB}:")]
     assert page_change == [

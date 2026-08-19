@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+import httpx
 import lz4.frame
 import pytest
 import sqlalchemy as sa
@@ -4171,3 +4172,57 @@ async def _seed_pending_arrival(
             )
         )
     return arrival_id
+
+
+def _preview_service(handler, monkeypatch):
+    from ufo.ext import surface as ext_surface
+
+    real = httpx.AsyncClient
+
+    def factory(**kwargs):
+        kwargs.pop("transport", None)
+        return real(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(ext_surface.httpx, "AsyncClient", factory)
+
+
+async def test_render_preview_returns_the_service_png(tmp_path, monkeypatch) -> None:
+    context = replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _preview_url="http://preview.svc:8930",
+        _preview_token="preview-token",
+    )
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("authorization")
+        captured["body"] = request.content
+        return httpx.Response(
+            200, content=b"\x89PNGrendered", headers={"content-type": "image/png"}
+        )
+
+    _preview_service(handler, monkeypatch)
+    png = await context.render_preview("pdf", b"%PDF-1.7")
+    assert png == b"\x89PNGrendered"
+    assert captured["auth"] == "Bearer preview-token"
+    assert str(captured["url"]).endswith("/render")
+    assert b'"inline": true' in captured["body"]  # type: ignore[operator]
+    assert b'"kind": "pdf"' in captured["body"]  # type: ignore[operator]
+
+
+async def test_render_preview_is_none_when_unconfigured(tmp_path) -> None:
+    context = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.render_preview("pdf", b"%PDF-1.7") is None
+
+
+async def test_render_preview_is_none_on_service_refusal(tmp_path, monkeypatch) -> None:
+    context = replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _preview_url="http://preview.svc:8930",
+        _preview_token="preview-token",
+    )
+    _preview_service(
+        lambda request: httpx.Response(415, json={"error": "unsupported_type"}), monkeypatch
+    )
+    assert await context.render_preview("pdf", b"not a pdf") is None

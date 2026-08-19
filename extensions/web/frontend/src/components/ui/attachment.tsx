@@ -1,6 +1,7 @@
 import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 
+import { BASE } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 /** A file the conversation is carrying — one the member attached to a message, or one a reply
@@ -116,12 +117,16 @@ export function attachmentBadge(mediaType: string): string | null {
 export function AttachmentThumbnail({
   filename,
   previewUrl,
+  loading = false,
   mediaType,
   className,
   children,
 }: {
   filename: string;
   previewUrl: string | null;
+  /** The picture is still being rendered — draw a shimmer over the card so the member sees a
+   *  preview is coming rather than a bare name that may or may not gain one. */
+  loading?: boolean;
   mediaType: string;
   className?: string;
   /** What the card carries over its picture beside the badge — the act that takes the file back
@@ -130,6 +135,7 @@ export function AttachmentThumbnail({
 }) {
   const [failed, setFailed] = useState<string | null>(null);
   const drawn = previewUrl !== null && failed !== previewUrl ? previewUrl : null;
+  const shimmering = loading && drawn === null;
   const badge = attachmentBadge(mediaType);
   return (
     <div
@@ -149,9 +155,16 @@ export function AttachmentThumbnail({
           className="absolute inset-0 size-full object-cover"
         />
       )}
+      {shimmering ? (
+        <div
+          data-slot="attachment-shimmer"
+          aria-hidden
+          className="absolute inset-0 animate-pulse bg-muted"
+        />
+      ) : null}
       <div className="relative flex min-w-0 flex-1 items-end gap-xs p-sm">
         {badge === null ? null : <AttachmentBadge>{badge}</AttachmentBadge>}
-        {drawn === null ? (
+        {drawn === null && !shimmering ? (
           <span className="min-w-0 flex-1 truncate text-small leading-chrome">{filename}</span>
         ) : null}
       </div>
@@ -179,25 +192,63 @@ export function AttachmentBadge({ className, ...props }: ComponentProps<"span">)
 
 const PICKED_PICTURE_MAX_BYTES = 10 * 1024 * 1024;
 const PICKED_PICTURE_TYPES = /^image\/(gif|jpeg|png|webp)$/;
+const PICKED_DOCUMENT_MAX_BYTES = 25 * 1024 * 1024;
+const PICKED_DOCUMENT_TYPES = /\.(pdf|docx|xlsx|pptx|csv|md|svg)$/i;
 
-/** The picture of a file the member has picked but not sent yet, read off the file itself — nothing
- *  on the server holds it while they are still writing the message.
+/** The picture of a file the member has picked but not sent yet.
  *
- *  It is read as a `data:` URL because the page's own policy admits those images and no `blob:` at
- *  all, and only for the raster types a browser draws: an SVG is a document that can carry script,
- *  and this page never draws one off bytes it was handed. A file over the ceiling is left as a named
- *  card rather than held in the page a second time as text. */
-function usePickedPicture(file: File): string | null {
-  const [picture, setPicture] = useState<string | null>(null);
+ *  A raster image is read straight off the file into a `data:` URL — the page's policy admits those
+ *  and no `blob:` at all, and a browser draws them safely. A document (pdf, office, csv, md, svg) is
+ *  sent to the preview service, which renders its first page to a PNG and hands it straight back;
+ *  the page draws that PNG, never the document's own bytes, so even an SVG — a document that can
+ *  carry script — is safe here because the page never draws it, only the raster the service made of
+ *  it. Anything else, or a file over the ceiling, is left as a named card. Nothing is stored while
+ *  the member is still writing the message. */
+type PickedPicture = { preview: string | null; loading: boolean };
+
+function usePickedPicture(file: File): PickedPicture {
+  const [state, setState] = useState<PickedPicture>({ preview: null, loading: false });
   useEffect(() => {
-    setPicture(null);
-    if (!PICKED_PICTURE_TYPES.test(file.type) || file.size > PICKED_PICTURE_MAX_BYTES) return;
-    const reader = new FileReader();
-    reader.onload = () => setPicture(typeof reader.result === "string" ? reader.result : null);
-    reader.readAsDataURL(file);
-    return () => reader.abort();
+    let cancelled = false;
+    const draw = (blob: Blob) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (!cancelled) {
+          setState({
+            preview: typeof reader.result === "string" ? reader.result : null,
+            loading: false,
+          });
+        }
+      };
+      reader.readAsDataURL(blob);
+    };
+    if (PICKED_PICTURE_TYPES.test(file.type) && file.size <= PICKED_PICTURE_MAX_BYTES) {
+      setState({ preview: null, loading: false });
+      draw(file);
+    } else if (PICKED_DOCUMENT_TYPES.test(file.name) && file.size <= PICKED_DOCUMENT_MAX_BYTES) {
+      // The card shows a shimmer until the render lands, so the member sees a preview is coming
+      // rather than a bare name that may or may not gain a picture.
+      setState({ preview: null, loading: true });
+      const form = new FormData();
+      form.append("file", file);
+      fetch(`${BASE}/preview`, { method: "POST", body: form, credentials: "same-origin" })
+        .then((res) => (res.ok ? res.blob() : null))
+        .then((blob) => {
+          if (cancelled) return;
+          if (blob) draw(blob);
+          else setState({ preview: null, loading: false });
+        })
+        .catch(() => {
+          if (!cancelled) setState({ preview: null, loading: false });
+        });
+    } else {
+      setState({ preview: null, loading: false });
+    }
+    return () => {
+      cancelled = true;
+    };
   }, [file]);
-  return picture;
+  return state;
 }
 
 /** One file in the member's hand, drawn as the card it will be drawn as once it is sent. */
@@ -210,10 +261,12 @@ export function PickedThumbnail({
   className?: string;
   children?: ReactNode;
 }) {
+  const { preview, loading } = usePickedPicture(file);
   return (
     <AttachmentThumbnail
       filename={file.name}
-      previewUrl={usePickedPicture(file)}
+      previewUrl={preview}
+      loading={loading}
       mediaType={file.type}
       className={className}
     >

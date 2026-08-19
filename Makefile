@@ -26,7 +26,7 @@ STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
 COMPOSE := $(STACK_ENV) docker compose --project-name $(STACK_NAME)
 
 .PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs db \
-	check fmt test test-one test-control test-web test-integration
+	check fmt test test-one test-control test-preview test-web test-integration
 
 help: ## List targets
 	@grep -hE '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) \
@@ -118,6 +118,14 @@ test-control: ## Run the control (gateway) suite — needs `make control-pg`
 
 check-control: ## Run the control crate's static gates — fmt and clippy
 	cd control && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+
+test-preview: ## Run the preview renderer suite — needs soffice and scripts/fetch-pdfium.sh
+	@lib=$$(ls preview/.pdfium/libpdfium.* 2>/dev/null | head -n1); \
+	test -n "$$lib" || { echo "missing preview/.pdfium — run preview/scripts/fetch-pdfium.sh first" >&2; exit 1; }; \
+	UFO_PREVIEW_PDFIUM_LIB="$$PWD/$$lib" sh -c 'cd preview && cargo test -- --include-ignored --test-threads=4'
+
+check-preview: ## Run the preview crate's static gates — fmt and clippy
+	cd preview && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 test-web: $(WEB)/node_modules ## Run the portal's vitest suite
 	npm --prefix $(WEB) test

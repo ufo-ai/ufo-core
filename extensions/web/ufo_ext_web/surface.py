@@ -3573,6 +3573,51 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"state": "set", "url": bound.fields["site_url"]})
 
 
+PREVIEW_KINDS = {
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".xlsx": "xlsx",
+    ".pptx": "pptx",
+    ".csv": "csv",
+    ".md": "md",
+    ".svg": "svg",
+}
+
+
+async def preview(ctx: SurfaceContext, request: Request) -> Response:
+    """Render one attached file to a preview PNG so the composer shows the member the document they
+    are about to send. The bytes go to the preview service and the picture comes straight back —
+    nothing is stored and no turn is admitted: this changes nothing, it only renders for display, so
+    it is not a member action the chat transport must carry. A valid member session is the whole
+    gate; the render is agent-agnostic, so the route is not scoped to one."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        return Response("unsupported body type", status_code=415)
+    refused = _framed_length(request, MAX_REQUEST_BYTES)
+    if refused is not None:
+        return refused
+    form = await _form(request)
+    if isinstance(form, Response):
+        return form
+    uploads = [
+        upload
+        for upload in form.getlist("file")
+        if isinstance(upload, UploadFile) and upload.filename
+    ]
+    if not uploads:
+        return Response("no file", status_code=400)
+    upload = uploads[0]
+    kind = PREVIEW_KINDS.get(PurePosixPath(upload.filename or "").suffix.lower())
+    if kind is None:
+        return Response("unpreviewable type", status_code=415)
+    png = await ctx.render_preview(kind, await upload.read())
+    if png is None:
+        return Response("no preview", status_code=415)
+    return Response(png, media_type="image/png")
+
+
 ROUTES = (
     SurfaceRoute(method="GET", path="", handler=portal_page),
     SurfaceRoute(method="POST", path="", handler=open_session),
@@ -3581,6 +3626,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="api/chats", handler=chats_index),
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
+    SurfaceRoute(method="POST", path="preview", handler=preview),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
     SurfaceRoute(method="GET", path="agents/{agent_id}/settings", handler=settings),
     SurfaceRoute(method="GET", path="agents/{agent_id}/homepage", handler=homepage),

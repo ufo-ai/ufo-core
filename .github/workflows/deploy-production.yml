@@ -358,6 +358,10 @@ jobs:
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-ingress --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
+          # Only when the env enables it: preview_enabled=false renders no Deployment to wait on.
+          if kubectl --namespace "$NAMESPACE" get deployment/ufo-preview >/dev/null 2>&1; then
+            kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-preview --timeout=15m
+          fi
           kubectl --namespace "$NAMESPACE" rollout status deployment/otel-collector --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status daemonset/otel-logs-agent --timeout=15m
 
