@@ -253,6 +253,14 @@ turn = sa.Table(
         postgresql_where=sa.text("result_delivery = 'pending'"),
         sqlite_where=sa.text("result_delivery = 'pending'"),
     ),
+    sa.Index(
+        "turn_agent_live",
+        "agent_id",
+        "status",
+        postgresql_where=sa.text("terminal is null"),
+        sqlite_where=sa.text("terminal is null"),
+    ),
+    sa.Index("turn_agent_activity", "agent_id", "updated_at", "id"),
 )
 
 inbound_message = sa.Table(

@@ -324,6 +324,7 @@ test("the bar is drawn while the first read is still in flight", async () => {
         });
       }
       if (url.includes("/settings")) return json(SETTINGS);
+      if (url.includes("/api/agents/status")) return json({ statuses: [] });
       return json({ chats: [] });
     }),
   );

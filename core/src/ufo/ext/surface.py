@@ -93,7 +93,7 @@ from ufo.grants import (
     account_object_name,
     installed_connect_flow,
 )
-from ufo.hub import LiveFrame
+from ufo.hub import LiveFrame, SkillLoad, ToolCall
 from ufo.image_previews import (
     IMAGE_PREVIEW_MAX_BYTES,
     ImagePreviewGrant,
@@ -329,11 +329,15 @@ class TurnTailer(Protocol):
     touches the hub directly, it reaches it through this one primitive.
 
     A tail is a scope: it holds a hub subscription and the tasks feeding it, and the block's exit
-    releases them — a surface that renders one frame and answers included."""
+    releases them — a surface that renders one frame and answers included. `latest_activity` is
+    the tail's peek half: the newest ToolCall or SkillLoad the hub retains for a turn, no
+    subscription held."""
 
     def tail(
         self, turn_id: UUID, since: str = ""
     ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]: ...
+
+    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None: ...
 
 
 class TurnStopper(Protocol):
@@ -422,6 +426,27 @@ class ScheduledRun:
     surface: str
     source: str | None
     artifacts: tuple["SharedArtifact", ...]
+
+
+LIVE_TURN_PRIORITY: tuple[Literal["running", "queued", "parked"], ...] = (
+    "running",
+    "queued",
+    "parked",
+)
+
+
+@dataclass(frozen=True)
+class AgentTurnStatus:
+    """One agent's turn aggregate as a portal status read draws it: the liveest non-terminal turn
+    it holds (`LIVE_TURN_PRIORITY` order) with that turn's id when it is running — the id a hub
+    activity peek reads — when any turn of its last moved, and whether its most recent terminal
+    turn failed."""
+
+    agent_id: UUID
+    live: Literal["running", "queued", "parked"] | None
+    running_turn_id: UUID | None
+    last_active_at: datetime | None
+    last_failed: bool
 
 
 @dataclass(frozen=True)
@@ -1868,6 +1893,12 @@ class SurfaceContext:
         the scope ends the subscription and the tasks behind it, however the block ends."""
         return self._tailer.tail(turn_id, since)
 
+    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
+        """The newest activity frame the hub retains for a turn — what a running turn is doing
+        right now — or None when it retains none. A peek through the same injected tailer `tail`
+        rides, holding no subscription."""
+        return await self._tailer.latest_activity(turn_id)
+
     async def spend_rollup(self, window_seconds: int | None) -> SpendReport:
         """The workspace usage report for a selected range or all time."""
         async with workspace_tx() as connection:
@@ -2609,6 +2640,136 @@ class SurfaceContext:
             )
         )
         return query if agent_id is None else query.where(tables.turn.c.agent_id == agent_id)
+
+    async def agent_turn_statuses(
+        self, agent_ids: Sequence[UUID], member_id: UUID
+    ) -> tuple[AgentTurnStatus, ...]:
+        """Each named agent's turn aggregate, one row per id in the given order: the liveest
+        non-terminal turn it holds (its id too when it is running, so the caller can peek that
+        turn's hub activity), the newest `updated_at` across those turns, and whether its most
+        recent terminal turn ended `failed`. The caller's audience authority picks the ids — this
+        read never widens them.
+
+        An agent is reached by many members and its turns are not: every part of the aggregate is
+        computed only from turns in conversations this reader reads — the workspace-shared ones and
+        their own — so one member's private turn is never what another member's screen reports, and
+        the running turn id this hands back can only open a hub the reader may already tail. An
+        agent whose readable turns are none is still a row, all nulls.
+
+        A screen polls this every few seconds for the life of a tab, so no part of it may grow with
+        an agent's history. `last_active_at` and the last terminal status are each the newest turn
+        matching a predicate, asked as a correlated `order by updated_at desc limit 1` per agent —
+        an index walk from the newest end that stops at the first readable row, where a `group by`
+        or a window over the same rows must first read every turn the agent ever took. The live read
+        ranks instead, because it needs two columns of one row and its partial index already bounds
+        it to the turns actually in flight."""
+        if not agent_ids:
+            return ()
+        liveness = sa.case(
+            *(
+                (tables.turn.c.status == status, rank)
+                for rank, status in enumerate(LIVE_TURN_PRIORITY)
+            )
+        )
+        readable = tables.turn.join(
+            tables.conversation, tables.turn.c.conversation_id == tables.conversation.c.id
+        )
+        audiences = readable_audiences(member_id)
+        live_ranked = (
+            sa.select(
+                tables.turn.c.agent_id,
+                tables.turn.c.id,
+                tables.turn.c.status,
+                sa.func.row_number()
+                .over(
+                    partition_by=tables.turn.c.agent_id,
+                    order_by=(
+                        liveness.asc(),
+                        tables.turn.c.updated_at.desc(),
+                        tables.turn.c.id.desc(),
+                    ),
+                )
+                .label("recency"),
+            )
+            .select_from(readable)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.agent_id.in_(agent_ids),
+                tables.conversation.c.audience.in_(audiences),
+                tables.turn.c.terminal.is_(None),
+            )
+            .subquery()
+        )
+        moved_at = (
+            sa.select(tables.turn.c.updated_at)
+            .select_from(readable)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.agent_id == tables.agent.c.id,
+                tables.conversation.c.audience.in_(audiences),
+            )
+            .order_by(tables.turn.c.updated_at.desc(), tables.turn.c.id.desc())
+            .limit(1)
+            .correlate(tables.agent)
+            .scalar_subquery()
+        )
+        ended_status = (
+            sa.select(tables.turn.c.status)
+            .select_from(readable)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.agent_id == tables.agent.c.id,
+                tables.conversation.c.audience.in_(audiences),
+                tables.turn.c.terminal.is_not(None),
+            )
+            .order_by(tables.turn.c.updated_at.desc(), tables.turn.c.id.desc())
+            .limit(1)
+            .correlate(tables.agent)
+            .scalar_subquery()
+        )
+        async with workspace_tx() as connection:
+            live_rows = (
+                await connection.execute(
+                    sa.select(live_ranked.c.agent_id, live_ranked.c.id, live_ranked.c.status).where(
+                        live_ranked.c.recency == 1
+                    )
+                )
+            ).all()
+            latest_rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.agent.c.id.label("agent_id"),
+                        moved_at.label("moved_at"),
+                        ended_status.label("ended_status"),
+                    ).where(
+                        tables.agent.c.workspace_id == self.workspace_id,
+                        tables.agent.c.id.in_(agent_ids),
+                    )
+                )
+            ).all()
+        live = {row.agent_id: row for row in live_rows}
+        latest = {row.agent_id: row for row in latest_rows}
+        statuses = []
+        for agent_id in agent_ids:
+            liveest = live.get(agent_id)
+            newest = latest.get(agent_id)
+            moved = None if newest is None else newest.moved_at
+            statuses.append(
+                AgentTurnStatus(
+                    agent_id=agent_id,
+                    live=None if liveest is None else liveest.status,
+                    running_turn_id=(
+                        liveest.id if liveest is not None and liveest.status == "running" else None
+                    ),
+                    last_active_at=(
+                        None
+                        if moved is None
+                        else (moved if moved.tzinfo else moved.replace(tzinfo=UTC))
+                    ),
+                    last_failed=newest is not None and newest.ended_status == "failed",
+                )
+            )
+        return tuple(statuses)
 
     async def list_member_objects(
         self,

@@ -129,6 +129,11 @@
   --color-affirm: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
   --color-attention: color-mix(in srgb, var(--accent-secondary) 15%, var(--bkgd-100));
   --color-attention-ink: var(--accent-secondary);
+  /* The two states a presence dot states, in the two accents the portal already answers with: the
+     first marks what is live the way it marks a link, and the second is the one saturated tone a
+     surface wears when it wants the member, which is what a stopped app is asking for. */
+  --color-live: var(--accent-primary);
+  --color-blocked: var(--accent-secondary);
 
   --shadow-raised:
     0 8px 18px color-mix(in srgb, var(--text-primary) 10%, transparent),
@@ -553,6 +558,44 @@
   color: color-mix(in srgb, var(--pulse-hi) calc(var(--f) * 1%), var(--pulse-lo));
 }
 
+/* The line an app prints while its work is moving: a band of the reading tone travelling along
+   words otherwise set in the resting one. shadcn draws its `shimmer` as a gradient clipped to the
+   text, which asks the text itself to be transparent — and a line whose words are only there while
+   a gradient paints is a line that renders blank the moment the browser has reason not to paint
+   one. The band is carried a character at a time instead, off the same cells the reveal already
+   splits: colour is drawn wherever text is drawn. Each cell runs the one cycle offset by where it
+   sits, so the band travels, and a cycle that restarts under a new line restarts every cell with
+   it — the band's shape is the offsets, never the moment it started. */
+@keyframes shimmer-sweep {
+  0% {
+    color: var(--color-ink-soft);
+  }
+  10% {
+    color: var(--color-ink);
+  }
+  35%,
+  100% {
+    color: var(--color-ink-soft);
+  }
+}
+
+@utility shimmer {
+  & [data-cut] {
+    animation:
+      cut-reveal 0.32s var(--ease-enter) calc(var(--cut) * 14ms) both,
+      shimmer-sweep 2.4s linear calc(var(--cut) * -80ms) infinite;
+  }
+}
+
+/* An infinite sweep is a cycle rather than an arrival, so the global rule cutting every duration to
+   nothing would strobe it rather than settle it: stillness has to end it outright, which leaves the
+   words in the resting tone they spend most of the cycle in anyway. */
+@media (prefers-reduced-motion: reduce) {
+  [data-cut] {
+    animation: none;
+  }
+}
+
 /* A row that scrolls sideways has no scrollbar over it, so a mask is honest here. */
 @utility scroll-fade-x {
   mask-image: linear-gradient(
@@ -595,6 +638,26 @@
 
   [data-arrive] {
     animation: arrive 0.18s var(--ease-control) min(calc(var(--arrive) * 22ms), 400ms) both;
+  }
+
+  /* What an app is doing is replaced rather than edited, so the new words are cut up from under the
+     line one character at a time while the line's own box holds still. Insertion is the whole
+     trigger, the way an arriving word's is: the line is keyed by its own text, so the characters
+     that run this are exactly the characters that changed. The global reduced-motion rule cuts the
+     travel to nothing, which lands every character where it settles anyway. */
+  @keyframes cut-reveal {
+    from {
+      transform: translateY(100%);
+    }
+  }
+
+  /* A cell is its own box so it can be moved, and a box of its own is where an inline space would
+     be dropped — the space between two words is a cell like any other, so it states that it is
+     text to be kept rather than layout to be collapsed. */
+  [data-cut] {
+    display: inline-block;
+    white-space: pre;
+    animation: cut-reveal 0.32s var(--ease-enter) calc(var(--cut) * 14ms) both;
   }
 
   /* The head of a reply resolves out of braille, a character at a time. `lib/arrive.ts` writes a

@@ -7,6 +7,7 @@ import threading
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Protocol
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from ufo.schema.records import TerminalFrame
 
 SUBSCRIBER_QUEUE_FRAMES = 256
 REPLAY_BUFFER_FRAMES = 10_000
+ACTIVITY_PEEK_FRAMES = 500
 
 
 class Terminal(BaseModel):
@@ -144,9 +146,11 @@ class Hub(Protocol):
     """The per-turn live-frame stream a surface tails. Cursor-replayable: `publish` returns the
     opaque cursor of the frame it appended, `subscribe(cursor)` replays the frames after that cursor
     before streaming live ones, and `covers` reports whether the hub still holds a cursor so a
-    reconnecting surface knows to resume gaplessly or redraw. Core ships the in-process backend; a
-    shared backend an extension registers through its Manifest `hubs` point fans out across
-    processes, which is what lifts the single-instance boot guard."""
+    reconnecting surface knows to resume gaplessly or redraw. `latest_activity` peeks the newest
+    retained ToolCall or SkillLoad without subscribing — a status read's one-frame view of what a
+    running turn is doing. Core ships the in-process backend; a shared backend an extension
+    registers through its Manifest `hubs` point fans out across processes, which is what lifts the
+    single-instance boot guard."""
 
     async def publish(self, turn_id: UUID, frame: LiveFrame) -> str: ...
 
@@ -155,6 +159,8 @@ class Hub(Protocol):
     ) -> AsyncIterator[tuple[str, LiveFrame]]: ...
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool: ...
+
+    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None: ...
 
 
 def _offer(queue: asyncio.Queue[tuple[str, LiveFrame]], item: tuple[str, LiveFrame]) -> None:
@@ -278,3 +284,22 @@ class InProcessHub:
                 return False
             earliest = stream.buffer[0][0]
         return int(earliest) <= int(cursor)
+
+    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
+        """The newest activity frame among the last `ACTIVITY_PEEK_FRAMES` the ring retains for this
+        turn — what the turn is doing right now, for a status read that never subscribes. None when
+        the hub holds no ring for the turn, or none of those frames is a ToolCall or SkillLoad.
+
+        The bound is the peek's whole point: a turn only streaming text carries no activity frame
+        at all, and searching a ten-thousand-frame ring to learn that is work a four-second poll
+        repeats for every such agent. A turn that has published this many frames since its last
+        tool call or skill load has been narrating prose for thousands of tokens, so that frame no
+        longer names what it is doing and the honest answer is None."""
+        with self._lock:
+            stream = self._turns.get(turn_id)
+            if stream is None:
+                return None
+            for _cursor, frame in islice(reversed(stream.buffer), ACTIVITY_PEEK_FRAMES):
+                if isinstance(frame, ToolCall | SkillLoad):
+                    return frame
+        return None

@@ -28,7 +28,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from ufo.hub import InProcessHub, LiveFrame
+from ufo.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
 from ufo.models.interface import TextDelta
 
 FIRST_DELTA_GATE_TIMEOUT_SECONDS = 20
@@ -103,6 +103,9 @@ class GatingHub:
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool:
         return await self.inner.covers(turn_id, cursor)
+
+    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
+        return await self.inner.latest_activity(turn_id)
 
 
 def release_when_running(

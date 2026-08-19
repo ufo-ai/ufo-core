@@ -5,6 +5,7 @@ subscribe survives, and frames cross event loops (the DBOS-loop-publishes, serve
 topology) because clients are per running loop."""
 
 import asyncio
+import json
 import os
 import socket
 import threading
@@ -12,7 +13,11 @@ from uuid import UUID, uuid4
 
 import pytest
 import ufo_ext_redis_hub.manifest as ext
+from pydantic import ValidationError
+from redis.asyncio import Redis
 from ufo_ext_redis_hub.stream_hub import (
+    ACTIVITY_PEEK_FRAMES,
+    STREAM_PREFIX,
     RedisStreamHub,
     frame_from_payload,
     frame_payload,
@@ -105,6 +110,63 @@ async def test_a_blocking_read_timeout_is_an_idle_tick_the_subscribe_survives() 
     await hub.publish(turn_id, TextDelta(text="alive"))
     await asyncio.wait_for(task, timeout=5)
     assert received == [TextDelta(text="alive")]
+
+
+@needs_redis
+async def test_latest_activity_reads_newest_first_across_pages() -> None:
+    """The peek walks the stream newest-first in bounded pages, so the activity frame is found
+    even when more than one XREVRANGE batch of deltas was published after it, and a newer skill
+    load supersedes an older tool call."""
+    hub = RedisStreamHub(url=REDIS_TEST_URL)
+    turn_id = uuid4()
+    assert await hub.latest_activity(turn_id) is None
+    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    await hub.publish(turn_id, call)
+    for index in range(150):
+        await hub.publish(turn_id, TextDelta(text=f"delta {index}"))
+    assert await hub.latest_activity(turn_id) == call
+    load = SkillLoad(skill="memory")
+    await hub.publish(turn_id, load)
+    assert await hub.latest_activity(turn_id) == load
+
+
+@needs_redis
+async def test_latest_activity_reads_back_no_further_than_the_peek_bound() -> None:
+    """The peek pages back over the newest ACTIVITY_PEEK_FRAMES entries and stops: an activity
+    frame that far back is still answered, and one entry more of narration puts it out of reach —
+    so a turn only streaming text costs the poll a bounded walk rather than the whole retained
+    stream."""
+    hub = RedisStreamHub(url=REDIS_TEST_URL)
+    turn_id = uuid4()
+    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    await hub.publish(turn_id, call)
+    for index in range(ACTIVITY_PEEK_FRAMES - 1):
+        await hub.publish(turn_id, TextDelta(text=f"delta {index}"))
+    assert await hub.latest_activity(turn_id) == call
+    await hub.publish(turn_id, TextDelta(text="one narration too many"))
+    assert await hub.latest_activity(turn_id) is None
+
+
+@needs_redis
+async def test_latest_activity_reads_an_entrys_kind_before_decoding_it() -> None:
+    """Only the frame the peek returns is validated: an entry whose kind is not an activity one is
+    skipped on the wire tag alone, so a payload that would fail `frame_from_payload` sits between
+    the newest entry and the tool call without stopping the walk."""
+    hub = RedisStreamHub(url=REDIS_TEST_URL)
+    turn_id = uuid4()
+    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    await hub.publish(turn_id, call)
+    client = Redis.from_url(REDIS_TEST_URL, decode_responses=True)
+    try:
+        await client.xadd(
+            f"{STREAM_PREFIX}:{turn_id}",
+            {"frame": json.dumps({"kind": "text_delta", "data": {"not": "a delta"}})},
+        )
+    finally:
+        await client.aclose()
+    with pytest.raises(ValidationError):
+        frame_from_payload({"kind": "text_delta", "data": {"not": "a delta"}})
+    assert await hub.latest_activity(turn_id) == call
 
 
 @needs_redis

@@ -15,7 +15,7 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.hub import Hub, LiveFrame, Parked, Terminal
+from ufo.hub import Hub, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import PARKED, TerminalFrame
@@ -122,3 +122,6 @@ class HubTailer:
         self, turn_id: UUID, since: str = ""
     ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
         return aclosing(tail_frames(self.hub, turn_id, since))
+
+    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
+        return await self.hub.latest_activity(turn_id)

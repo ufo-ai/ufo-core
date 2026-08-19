@@ -263,7 +263,8 @@ test("a non-admin reads an agent prompt but cannot edit it", async () => {
   expect(screen.queryByRole("button", { name: "Save prompt" })).toBeNull();
 });
 
-test("the agents index states a row's name and model, and leaves the address list to its own page", async () => {
+test("the agents index states a row's name alone, and leaves the address list to its own page", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
   location.hash = "#/agents";
   render(
     <App
@@ -279,7 +280,9 @@ test("the agents index states a row's name and model, and leaves the address lis
 
   const index = within(await screen.findByRole("navigation", { name: "Agents" }));
   expect(index.getByText("Main")).toBeTruthy();
-  expect(index.getAllByText("opus").length).toBe(3);
+  expect(index.getByText("Second")).toBeTruthy();
+  expect(index.getByText("Private")).toBeTruthy();
+  expect(index.queryByText("opus")).toBeNull();
   expect(within(screen.getByRole("main")).queryByText("member@example.com")).toBeNull();
   expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });

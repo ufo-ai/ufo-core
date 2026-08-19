@@ -141,6 +141,7 @@ export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
   const table: Record<string, Route> = {
     "/api/chats": () => json({ chats: [] }),
+    "/api/agents/status": () => json({ statuses: [] }),
     "/homepage": () => json({ state: "none" }),
     ...routes,
   };

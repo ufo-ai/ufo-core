@@ -3,7 +3,7 @@ import json
 import re
 import secrets
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
-from contextlib import AbstractAsyncContextManager, aclosing
+from contextlib import AbstractAsyncContextManager, aclosing, contextmanager
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
@@ -90,6 +90,7 @@ from ufo_testsupport.surfaces import (
     no_user_skills,
 )
 
+import ufo.db
 from ufo.accounting import record_egress_request, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
 from ufo.bearer import mint_token
@@ -2331,6 +2332,412 @@ async def test_every_agent_read_carries_its_icon_and_no_form_asks_for_one(
     assert "icon" not in settings["spec_schema"]["properties"]
 
 
+STATUS_PATH = "/surface/web/api/agents/status"
+
+
+async def _seed_status_agent(workspace_id: UUID, name: str) -> UUID:
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=name,
+                prompt="be operational",
+                model="claude-sonnet-5",
+                icon="telescope",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id
+
+
+async def _seed_status_turn(
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    *,
+    seq: int,
+    status: str,
+    at: datetime,
+) -> UUID:
+    turn_id = uuid4()
+    terminal = (
+        None
+        if status in ("queued", "running", "parked")
+        else TerminalFrame(status=status, text="ended").model_dump(mode="json")
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status=status,
+                inbound="asked",
+                terminal=terminal,
+                created_at=at,
+                updated_at=at,
+            )
+        )
+    return turn_id
+
+
+async def test_agents_status_reports_the_liveest_turn_and_last_activity(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The status read answers every visible agent: the liveest non-terminal turn wins in
+    running > queued > parked order however the turns are aged — a newer queued turn does not
+    displace a running one, nor a newer parked turn a queued one — `last_active_at` is the newest
+    turn's `updated_at` whichever turn that is, and an agent holding no turns reads all nulls."""
+    client, workspace_id, agent_id = web
+    ops = await _seed_status_agent(workspace_id, "ops")
+    scout = await _seed_status_agent(workspace_id, "scout")
+    still = await _seed_status_agent(workspace_id, "still")
+    _admin, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    base = datetime(2026, 8, 18, 9, 0, tzinfo=UTC)
+    main_conversation = await _seed_agent_conversation(
+        workspace_id, agent_id, queue_key="web/main", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_status_turn(
+        workspace_id, agent_id, main_conversation, seq=1, status="running", at=base
+    )
+    await _seed_status_turn(
+        workspace_id,
+        agent_id,
+        main_conversation,
+        seq=2,
+        status="queued",
+        at=base + timedelta(minutes=5),
+    )
+    ops_conversation = await _seed_agent_conversation(
+        workspace_id, ops, queue_key="web/ops", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_status_turn(workspace_id, ops, ops_conversation, seq=1, status="queued", at=base)
+    await _seed_status_turn(
+        workspace_id, ops, ops_conversation, seq=2, status="parked", at=base + timedelta(minutes=9)
+    )
+    scout_conversation = await _seed_agent_conversation(
+        workspace_id, scout, queue_key="web/scout", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_status_turn(
+        workspace_id, scout, scout_conversation, seq=1, status="parked", at=base
+    )
+    payload = (
+        await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()
+    statuses = {row["agent_id"]: row for row in payload["statuses"]}
+    assert set(statuses) == {str(agent_id), str(ops), str(scout), str(still)}
+    assert statuses[str(agent_id)] == {
+        "agent_id": str(agent_id),
+        "turn": "running",
+        "activity": None,
+        "next_run_at": None,
+        "last_active_at": (base + timedelta(minutes=5)).isoformat(),
+        "last_failed": False,
+    }
+    assert statuses[str(ops)]["turn"] == "queued"
+    assert statuses[str(ops)]["last_active_at"] == (base + timedelta(minutes=9)).isoformat()
+    assert statuses[str(scout)]["turn"] == "parked"
+    assert statuses[str(still)] == {
+        "agent_id": str(still),
+        "turn": None,
+        "activity": None,
+        "next_run_at": None,
+        "last_active_at": None,
+        "last_failed": False,
+    }
+
+
+async def test_agents_status_fences_the_turn_aggregate_to_the_readers_conversations(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, WorkspaceBlobStore, ConversationSandbox],
+) -> None:
+    """The main agent is every member's row and its turns are not. A turn taken in one member's
+    private conversation is theirs alone: it is the liveest turn, the hub activity, the last
+    movement, and the last failure on their own status read, and the colleague who shares that
+    agent reads the same row as all nulls — never the running turn's id, and never the tool
+    arguments `activity` would spell out of it."""
+    client, workspace_id, agent_id = web
+    _config, hub, _blob, _sandboxes = dbos_runtime
+    mine, my_token = await _seed_member(workspace_id, "mine@example.com")
+    _theirs, their_token = await _seed_member(workspace_id, "theirs@example.com")
+    private = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="web/mine",
+        audience=str(conversation_audience(mine)),
+        member_id=mine,
+    )
+    base = datetime(2026, 8, 18, 9, 0, tzinfo=UTC)
+    await _seed_status_turn(workspace_id, agent_id, private, seq=1, status="failed", at=base)
+    running = await _seed_status_turn(
+        workspace_id,
+        agent_id,
+        private,
+        seq=2,
+        status="running",
+        at=base + timedelta(minutes=5),
+    )
+    await hub.publish(running, ToolCall(tool="bash", preview='{"command":"cat secrets.txt"}'))
+    owner = (
+        await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={my_token}"})
+    ).json()
+    assert owner["statuses"] == [
+        {
+            "agent_id": str(agent_id),
+            "turn": "running",
+            "activity": 'bash {"command":"cat secrets.txt"}',
+            "next_run_at": None,
+            "last_active_at": (base + timedelta(minutes=5)).isoformat(),
+            "last_failed": True,
+        }
+    ]
+    colleague = (
+        await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={their_token}"})
+    ).json()
+    assert colleague["statuses"] == [
+        {
+            "agent_id": str(agent_id),
+            "turn": None,
+            "activity": None,
+            "next_run_at": None,
+            "last_active_at": None,
+            "last_failed": False,
+        }
+    ]
+
+
+async def test_agents_status_narrates_the_running_turn_from_the_hubs_newest_activity(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, WorkspaceBlobStore, ConversationSandbox],
+) -> None:
+    """`activity` is the hub's newest ToolCall or SkillLoad for the running turn, composed the way
+    the transcript's activity rail labels it: the model's description when it gave one, else the
+    tool with its args preview, and a skill load names the skill. A running turn the hub holds no
+    frames for states nothing."""
+    client, workspace_id, agent_id = web
+    _config, hub, _blob, _sandboxes = dbos_runtime
+    _admin, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation = await _seed_agent_conversation(
+        workspace_id, agent_id, queue_key="web/live", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    turn_id = await _seed_status_turn(
+        workspace_id,
+        agent_id,
+        conversation,
+        seq=1,
+        status="running",
+        at=datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
+    )
+    quiet = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
+    assert quiet["turn"] == "running"
+    assert quiet["activity"] is None
+    await hub.publish(turn_id, ToolCall(tool="bash", preview='{"command":"ls"}'))
+    bare = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
+    assert bare["activity"] == 'bash {"command":"ls"}'
+    await hub.publish(
+        turn_id, ToolCall(tool="bash", preview='{"command":"ls"}', description="Checking the queue")
+    )
+    described = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
+    assert described["activity"] == "Checking the queue"
+    await hub.publish(turn_id, SkillLoad(skill="call-triage"))
+    loading = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
+    assert loading["activity"] == "Loading skill · call-triage"
+
+
+async def test_agents_status_marks_the_latest_terminal_failure_until_a_later_run_clears_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _admin, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation = await _seed_agent_conversation(
+        workspace_id, agent_id, queue_key="web/runs", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    base = datetime(2026, 8, 18, 9, 0, tzinfo=UTC)
+    await _seed_status_turn(workspace_id, agent_id, conversation, seq=1, status="failed", at=base)
+    failed = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
+    assert failed["last_failed"] is True
+    assert failed["turn"] is None
+    assert failed["last_active_at"] == base.isoformat()
+    await _seed_status_turn(
+        workspace_id, agent_id, conversation, seq=2, status="done", at=base + timedelta(hours=1)
+    )
+    cleared = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
+    assert cleared["last_failed"] is False
+    assert cleared["last_active_at"] == (base + timedelta(hours=1)).isoformat()
+
+
+async def test_agents_status_surfaces_the_soonest_unpaused_scheduled_task(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation = await _seed_agent_conversation(
+        workspace_id, agent_id, queue_key="web/tasks", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    soonest = datetime(2026, 8, 19, 7, 0, tzinfo=UTC)
+    await _seed_radar_task(
+        workspace_id,
+        agent_id,
+        conversation,
+        name="later",
+        created_by_member_id=member_id,
+        next_run_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+    )
+    await _seed_radar_task(
+        workspace_id,
+        agent_id,
+        conversation,
+        name="sooner",
+        created_by_member_id=member_id,
+        next_run_at=soonest,
+    )
+    await _seed_radar_task(
+        workspace_id,
+        agent_id,
+        conversation,
+        name="stopped",
+        created_by_member_id=member_id,
+        next_run_at=datetime(2026, 8, 18, 6, 0, tzinfo=UTC),
+        paused=True,
+    )
+    payload = (
+        await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()
+    row = next(entry for entry in payload["statuses"] if entry["agent_id"] == str(agent_id))
+    assert row["next_run_at"] == soonest.isoformat()
+
+
+@contextmanager
+def _executed_statements() -> Iterator[list[str]]:
+    """Every statement this loop's pool sends to the database while the block runs, read off the
+    engine rather than any stand-in, so a test can observe a read that was skipped as well as one
+    whose answer was thrown away."""
+    loop = asyncio.get_running_loop()
+    engines = [engine for (held, _url), engine in ufo.db._APP.engines.items() if held is loop]
+    assert engines
+    executed: list[str] = []
+
+    def record(
+        connection: sa.Connection,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        executed.append(statement)
+
+    for engine in engines:
+        sa.event.listen(engine.sync_engine, "before_cursor_execute", record)
+    try:
+        yield executed
+    finally:
+        for engine in engines:
+            sa.event.remove(engine.sync_engine, "before_cursor_execute", record)
+
+
+async def test_agents_status_leaves_the_task_store_alone_for_an_agent_holding_a_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The scheduled-task read is skipped for an agent whose turn state already fills its row, not
+    taken and discarded: the poll sends the database no `scheduled_task` statement at all while the
+    turn runs, and sends one the moment that turn ends and the row has nothing else to say."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation = await _seed_agent_conversation(
+        workspace_id, agent_id, queue_key="web/tasks", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_radar_task(
+        workspace_id,
+        agent_id,
+        conversation,
+        name="nightly",
+        created_by_member_id=member_id,
+        next_run_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+    )
+    turn_id = await _seed_status_turn(
+        workspace_id,
+        agent_id,
+        conversation,
+        seq=1,
+        status="running",
+        at=datetime(2026, 8, 19, 6, 0, tzinfo=UTC),
+    )
+
+    with _executed_statements() as busy:
+        payload = (
+            await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+        ).json()
+
+    row = next(entry for entry in payload["statuses"] if entry["agent_id"] == str(agent_id))
+    assert row["turn"] == "running"
+    assert row["next_run_at"] is None
+    assert [statement for statement in busy if "scheduled_task" in statement] == []
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(status="done", terminal=TerminalFrame(status="done", text="ended").model_dump())
+        )
+    with _executed_statements() as idle:
+        settled = (
+            await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+        ).json()
+
+    row = next(entry for entry in settled["statuses"] if entry["agent_id"] == str(agent_id))
+    assert row["next_run_at"] == datetime(2026, 8, 20, 9, 0, tzinfo=UTC).isoformat()
+    assert [statement for statement in idle if "scheduled_task" in statement]
+
+
+async def test_agents_status_answers_only_the_member_audience(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    private_agent = await _seed_status_agent(workspace_id, "ops")
+    _member, member_token = await _seed_member(workspace_id, "m@example.com")
+    _admin, admin_token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    conversation = await _seed_agent_conversation(
+        workspace_id,
+        private_agent,
+        queue_key="web/private",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+    )
+    await _seed_status_turn(
+        workspace_id,
+        private_agent,
+        conversation,
+        seq=1,
+        status="running",
+        at=datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
+    )
+    member_view = (
+        await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={member_token}"})
+    ).json()
+    assert [row["agent_id"] for row in member_view["statuses"]] == [str(agent_id)]
+    admin_view = (
+        await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"})
+    ).json()
+    assert {row["agent_id"] for row in admin_view["statuses"]} == {
+        str(agent_id),
+        str(private_agent),
+    }
+    private_row = next(
+        row for row in admin_view["statuses"] if row["agent_id"] == str(private_agent)
+    )
+    assert private_row["turn"] == "running"
+    anonymous = await client.get(STATUS_PATH)
+    assert anonymous.status_code == 401
+
+
 async def _seed_connection(
     workspace_id: UUID, agent_id: UUID, owner_member_id: UUID, provider: str, *, shared: bool
 ) -> None:
@@ -3179,6 +3586,8 @@ async def _seed_radar_task(
     *,
     name: str,
     created_by_member_id: UUID,
+    next_run_at: datetime = datetime(2026, 8, 15, 9, 0, tzinfo=UTC),
+    paused: bool = False,
 ) -> UUID:
     task_id = uuid4()
     async with workspace_tx() as connection:
@@ -3193,8 +3602,8 @@ async def _seed_radar_task(
                 schedule="0 9 * * *",
                 prompt="check the queue",
                 description="the queue check",
-                next_run_at=datetime(2026, 8, 15, 9, 0, tzinfo=UTC),
-                paused=False,
+                next_run_at=next_run_at,
+                paused=paused,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

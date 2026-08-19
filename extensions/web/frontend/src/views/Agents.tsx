@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ObjectPane } from "@/kernel/objects";
 import { BesideHost } from "@/kernel/beside";
 import { useDrawerList, useShutDrawer } from "@/kernel/drawer";
+import { usePanelRead } from "@/kernel/panel";
 import { BANDS } from "@/kernel/pane";
 import { TabPanel, TabRow } from "@/kernel/tabs";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -13,6 +15,7 @@ import { agentName } from "@/lib/agentName";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
+import { friendlyMoment } from "@/lib/moments";
 import { AgentPane } from "@/views/AgentPane";
 import { AgentSkills } from "@/views/AgentSkills";
 import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
@@ -37,6 +40,179 @@ export type AgentsProps = {
 };
 
 const MAIN = "Main";
+
+/** One app's live picture: the liveest turn it holds, what that turn is doing when the engine
+ *  said so, and the marks that place a resting app in time. */
+export type AgentStatus = {
+  agent_id: string;
+  turn: "running" | "queued" | "parked" | null;
+  activity: string | null;
+  next_run_at: string | null;
+  last_active_at: string | null;
+  last_failed: boolean;
+};
+
+const RESPONDING = "Responding";
+
+/** How often the index asks what its apps are doing: at the rate a step changes while any of them
+ *  is working, and at the panel's own resting rate when none is. */
+export const WORKING_STATUS_MS = 4_000;
+const RESTING_STATUS_MS = 30_000;
+
+/** The line a green row prints under its name, and how it is drawn: the engine's own word for the
+ *  work in flight shimmers while that work moves, and a turn still waiting for its slot states so
+ *  in the resting tone. A row holding no work prints nothing here. */
+function activeLine(status: AgentStatus | undefined): { text: string; shimmer: boolean } | null {
+  if (status === undefined) return null;
+  if (status.turn === "running") return { text: status.activity ?? RESPONDING, shimmer: true };
+  if (status.turn === "queued") return { text: "Queued", shimmer: false };
+  return null;
+}
+
+/** The fact the dot cannot state, held at the pointer the way the chat rail holds a row's facts:
+ *  where a resting app sits in time. A row the read has not answered for triggers nothing and
+ *  draws no tooltip. */
+export function statusLine(status: AgentStatus | undefined): string | null {
+  if (status === undefined) return null;
+  const now = new Date();
+  if (status.turn === "parked") return "Paused";
+  if (status.last_failed) return "Last run failed";
+  if (status.next_run_at) return "Next run " + friendlyMoment(status.next_run_at, now);
+  if (status.last_active_at) return "Active " + friendlyMoment(status.last_active_at, now);
+  return "Idle";
+}
+
+/** What an app is doing, drawn so a change to it is seen: the words that replace the line are cut
+ *  up from under it a character at a time, left to right.
+ *
+ *  The line itself is the one element across every change, so the sweep over it never restarts and
+ *  never breaks — the characters are what the browser replaces, and a character it has just
+ *  inserted is what runs the cut, which is why each carries the line it belongs to in its key. The
+ *  sweep is painted by the line and clipped to the text under it, its own characters' travel
+ *  included.
+ *
+ *  A screen reader is read the line once, whole: a character per element is a spelling, not a
+ *  sentence. */
+function ActivityLine({ text, shimmer }: { text: string; shimmer: boolean }) {
+  return (
+    <span
+      className={cn(
+        "block w-full truncate font-mono text-small text-ink-soft",
+        shimmer && "shimmer",
+      )}
+    >
+      <span className="sr-only">{text}</span>
+      <span aria-hidden>
+        {Array.from(text, (character, at) => (
+          <span key={text + at} data-cut style={{ "--cut": at } as CSSProperties}>
+            {character}
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
+/** The dot the avatar wears, read before any words: the live tone while the app holds work in
+ *  flight, the blocked tone when that work stopped wanting the member, and nothing otherwise. */
+function statusDot(status: AgentStatus | undefined): string | null {
+  if (status === undefined) return null;
+  if (status.turn === "running" || status.turn === "queued") return "bg-live";
+  if (status.turn === "parked" || status.last_failed) return "bg-blocked";
+  return null;
+}
+
+/** One app's row: the whole row is the one control, and it opens the app. What acts on the open app
+ *  is worn by that app's own pane, beside its name.
+ *
+ *  The row is one shape whether or not the app is working — a name, and under it a slot the work it
+ *  is doing opens. Both lines are held to one line each and cut off where the rail ends: an app
+ *  names itself, and the rail is not where either is read in full. The slot is a grid track rather
+ *  than a line that appears, so the row's height is a number the browser can move between; the line
+ *  that closed it stays drawn behind the fold, since a track collapsing over nothing collapses
+ *  instantly. A resting app's mark is held at the pointer instead, where the row costs nothing to
+ *  read. */
+function AgentRow({
+  agent,
+  status,
+  open,
+  onOpen,
+}: {
+  agent: Agent;
+  status: AgentStatus | undefined;
+  open: boolean;
+  onOpen: () => void;
+}) {
+  const active = activeLine(status);
+  /** The line the fold closes over. A track collapsing over nothing collapses instantly, so the
+   *  words that were there stay drawn until the fold has shut — and are then dropped, because a
+   *  line nobody can see is a line that must not still be animating. */
+  const [held, setHeld] = useState(active);
+  if (active !== null && (held === null || held.text !== active.text || held.shimmer !== active.shimmer)) {
+    setHeld(active);
+  }
+  const dot = statusDot(status);
+  const line = active === null ? statusLine(status) : null;
+  const row = (
+    <button
+      type="button"
+      aria-current={open}
+      onClick={onOpen}
+      className={cn(
+        "flex min-h-(--size-row) min-w-0 flex-1 items-center gap-sm border-0 bg-transparent",
+        "px-sm py-2xs text-left text-inherit",
+      )}
+    >
+      <span className="relative shrink-0">
+        <Avatar>
+          <AvatarFallback>
+            <AgentIcon name={agent.icon} />
+          </AvatarFallback>
+        </Avatar>
+        {/* The mark is always drawn and scales away when the app has nothing to say, so a change of
+            state is a mark growing or turning rather than one appearing out of nothing. */}
+        <span
+          aria-hidden
+          className={cn(
+            "absolute right-0 bottom-0 size-sm rounded-full outline-2 transition duration-200 ease-control",
+            open ? "outline-fill" : "outline-sidebar group-hover/row:outline-fill",
+            dot ?? "scale-0",
+          )}
+        />
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="flex w-full items-baseline gap-sm">
+          <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
+          {agent.main ? <span className="shrink-0 text-small">{MAIN}</span> : null}
+        </span>
+        <span
+          className={cn(
+            "grid transition-[grid-template-rows] duration-200 ease-control",
+            active === null ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
+          )}
+          onTransitionEnd={() => {
+            if (active === null) setHeld(null);
+          }}
+        >
+          <span className="min-h-0 min-w-0 overflow-hidden">
+            {held === null ? null : <ActivityLine text={held.text} shimmer={held.shimmer} />}
+          </span>
+        </span>
+      </span>
+    </button>
+  );
+  return (
+    <li className={cn("group/row flex items-center rounded-row hover:bg-fill", open && "bg-fill")}>
+      {/* The row is worn by the same tooltip whether or not it has a fact to hold, because an app
+          gains and loses one as it works and a row swapped for another element takes the member's
+          focus down with it. A row with nothing to say draws no content and so opens nothing. */}
+      <Tooltip>
+        <TooltipTrigger asChild>{row}</TooltipTrigger>
+        {line ? <TooltipContent>{line}</TooltipContent> : null}
+      </Tooltip>
+    </li>
+  );
+}
 
 /** The clock-fired tasks the app holds. Radar reads them across the workspace, beside what they
  *  did; here they are read and written for the one app they run on, which is where a member sets
@@ -73,6 +249,34 @@ export function Agents({
 }: AgentsProps) {
   const mainAgent = useMainAgent();
   const shown = selected ?? mainAgent;
+  const [statusRate, setStatusRate] = useState(RESTING_STATUS_MS);
+  const statusRead = usePanelRead<{ statuses: AgentStatus[] }>(
+    "/api/agents/status",
+    0,
+    statusRate,
+  );
+  const statuses: Record<string, AgentStatus> =
+    statusRead.phase === "ready"
+      ? Object.fromEntries(statusRead.payload.statuses.map((status) => [status.agent_id, status]))
+      : {};
+  /** A step an app takes is over in seconds, so a line naming one is only true if it is re-read at
+   *  that rate — but a screen of resting apps says the same thing every time it is asked, so the
+   *  rate rides on whether anything is working at all. */
+  const working = Object.values(statuses).some(
+    (status) => status.turn === "running" || status.turn === "queued",
+  );
+  const wanted = working ? WORKING_STATUS_MS : RESTING_STATUS_MS;
+  if (statusRead.phase === "ready" && statusRate !== wanted) setStatusRate(wanted);
+  /** The index reads most-recent-first: an app holding work in flight sorts as now, a resting one
+   *  by its last activity, and the sort is stable, so rows the read has not placed keep the order
+   *  the boot read served. */
+  const recency = (agent: Agent): number => {
+    const status = statuses[agent.id];
+    if (status === undefined) return 0;
+    if (status.turn === "running" || status.turn === "queued") return Number.MAX_SAFE_INTEGER;
+    return status.last_active_at ? Date.parse(status.last_active_at) : 0;
+  };
+  const ordered = [...agents].sort((a, b) => recency(b) - recency(a));
   // The run lives on the wizard's own store key — busy or spoken before it founds, a forwarding
   // record after — so it survives every unmount of this screen; a reload clears the store, so no
   // phantom row survives one. `wanting` is only the member's last press: it raises the pane ahead
@@ -145,50 +349,18 @@ export function Agents({
               )}
             </li>
           ) : null}
-          {agents.map((agent) => {
-            const open = !building && agent.id === shown?.id;
-            return (
-              /** The whole row is the one control: it opens the app, and nothing else stands on
-               *  it. What acts on the open app is worn by that app's own pane, beside its name. */
-              <li
-                key={agent.id}
-                className={cn(
-                  "flex items-center rounded-row hover:bg-fill",
-                  open && "bg-fill",
-                )}
-              >
-                <button
-                  type="button"
-                  aria-current={open}
-                  onClick={() => {
-                    setWanting(false);
-                    onOpen(agent.id);
-                  }}
-                  className={cn(
-                    "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent",
-                    "px-sm py-xs text-left text-inherit",
-                  )}
-                >
-                  {/* Both facts are read in the row's own ink rather than the soft tone: soft ink
-                      clears the contrast floor over the pane's surface and not over the fill an
-                      open or hovered row draws, and these two words are the smallest text in the
-                      rail. Size and the mono face carry the hierarchy instead. */}
-                  <Avatar>
-                    <AvatarFallback>
-                      <AgentIcon name={agent.icon} />
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="flex min-w-0 flex-1 flex-col gap-2xs">
-                    <span className="flex w-full items-baseline gap-sm">
-                      <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
-                      {agent.main ? <span className="text-small">{MAIN}</span> : null}
-                    </span>
-                    <span className="w-full truncate font-mono text-small">{agent.model}</span>
-                  </span>
-                </button>
-              </li>
-            );
-          })}
+          {ordered.map((agent) => (
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              status={statuses[agent.id]}
+              open={!building && agent.id === shown?.id}
+              onOpen={() => {
+                setWanting(false);
+                onOpen(agent.id);
+              }}
+            />
+          ))}
         </ul>
         {/* Every member is offered the act: the `agent` kind admits a create from any speaking
             member and stamps them the owner, and the wizard rides the main agent's own chat. */}

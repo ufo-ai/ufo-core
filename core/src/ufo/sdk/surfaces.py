@@ -37,6 +37,9 @@ from ufo.ext.surface import (
     AgentSummary as AgentSummary,
 )
 from ufo.ext.surface import (
+    AgentTurnStatus as AgentTurnStatus,
+)
+from ufo.ext.surface import (
     ConnectionView as ConnectionView,
 )
 from ufo.ext.surface import (

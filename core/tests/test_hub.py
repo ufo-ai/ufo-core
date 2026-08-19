@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from ufo.activity import tool_activity
 from ufo.hub import (
+    ACTIVITY_PEEK_FRAMES,
     SUBSCRIBER_QUEUE_FRAMES,
     Absorbed,
     InProcessHub,
@@ -102,6 +103,36 @@ async def test_subscribe_cleans_up_registry_once_the_turn_ends():
 
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done")))
     assert hub._turns == {}
+
+
+async def test_latest_activity_peeks_the_newest_activity_frame():
+    hub = InProcessHub()
+    turn_id = uuid4()
+    assert await hub.latest_activity(turn_id) is None
+    await hub.publish(turn_id, TextDelta(text="thinking"))
+    assert await hub.latest_activity(turn_id) is None
+    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    await hub.publish(turn_id, call)
+    await hub.publish(turn_id, TextDelta(text="more"))
+    assert await hub.latest_activity(turn_id) == call
+    load = SkillLoad(skill="memory")
+    await hub.publish(turn_id, load)
+    assert await hub.latest_activity(turn_id) == load
+
+
+async def test_latest_activity_reads_back_no_further_than_the_peek_bound():
+    """The peek reads the newest ACTIVITY_PEEK_FRAMES and stops: an activity frame that far back is
+    still answered, and one frame more of narration puts it out of reach — so a turn only streaming
+    text costs the poll a bounded walk rather than the whole ten-thousand-frame ring."""
+    hub = InProcessHub()
+    turn_id = uuid4()
+    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    await hub.publish(turn_id, call)
+    for index in range(ACTIVITY_PEEK_FRAMES - 1):
+        await hub.publish(turn_id, TextDelta(text=f"delta {index}"))
+    assert await hub.latest_activity(turn_id) == call
+    await hub.publish(turn_id, TextDelta(text="one narration too many"))
+    assert await hub.latest_activity(turn_id) is None
 
 
 async def test_a_late_subscriber_replays_the_buffered_frames():

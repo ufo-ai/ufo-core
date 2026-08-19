@@ -101,6 +101,8 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--color-edge": String.raw`var\(--bkgd-300\)`,
     "--color-fill": String.raw`var\(--bkgd-200\)`,
     "--color-link": String.raw`color-mix\(in srgb, var\(--accent-primary\) 80%, var\(--text-primary\)\)`,
+    "--color-live": String.raw`var\(--accent-primary\)`,
+    "--color-blocked": String.raw`var\(--accent-secondary\)`,
   };
   for (const [token, step] of Object.entries(basis)) {
     expect(new RegExp(`${token}:\\s*${step}`).test(css)).toBe(true);

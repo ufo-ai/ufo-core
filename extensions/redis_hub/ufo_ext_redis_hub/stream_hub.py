@@ -41,6 +41,7 @@ STREAM_MAXLEN = 10_000
 STREAM_IDLE_TTL_SECONDS = 24 * 3600
 SUBSCRIBE_BATCH = 100
 SUBSCRIBE_BLOCK_MS = 5_000
+ACTIVITY_PEEK_FRAMES = 500
 
 _FRAME_KINDS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("text_delta", TextDelta),
@@ -56,6 +57,7 @@ _FRAME_KINDS: tuple[tuple[str, type[BaseModel]], ...] = (
 )
 _KIND_BY_TYPE = {cls: kind for kind, cls in _FRAME_KINDS}
 _TYPE_BY_KIND = {kind: cls for kind, cls in _FRAME_KINDS}
+_ACTIVITY_KINDS = frozenset({_KIND_BY_TYPE[ToolCall], _KIND_BY_TYPE[SkillLoad]})
 
 
 def frame_payload(frame: LiveFrame) -> dict[str, object]:
@@ -154,3 +156,37 @@ class RedisStreamHub:
         if not first:
             return False
         return _stream_id(str(first[0][0])) <= _stream_id(cursor)
+
+    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
+        """The newest ToolCall or SkillLoad among the turn's last `ACTIVITY_PEEK_FRAMES` stream
+        entries, read newest-first in bounded pages. None when the stream is gone, or none of those
+        entries is an activity frame.
+
+        The bound is the peek's whole point: a turn only streaming text carries no activity frame at
+        all, and paging a ten-thousand-entry stream to learn that is work a four-second poll repeats
+        for every such agent. A turn that has published this many frames since its last tool call or
+        skill load has been narrating prose for thousands of tokens, so that frame no longer names
+        what it is doing and the honest answer is None. An entry's kind is on the wire beside its
+        data, so only the frame this returns is ever decoded."""
+        stream = self._stream(turn_id)
+        newest = "+"
+        remaining = ACTIVITY_PEEK_FRAMES
+        while remaining:
+            entries = await self._client().xrevrange(
+                stream, max=newest, min="-", count=min(remaining, SUBSCRIBE_BATCH)
+            )
+            if not entries:
+                return None
+            oldest = ""
+            for entry_id, fields in entries:
+                if entry_id is None or fields is None:
+                    continue
+                oldest = str(entry_id)
+                remaining -= 1
+                payload = json.loads(fields["frame"])
+                if payload["kind"] in _ACTIVITY_KINDS:
+                    return cast(ToolCall | SkillLoad, frame_from_payload(payload))
+            if not oldest:
+                return None
+            newest = f"({oldest}"
+        return None

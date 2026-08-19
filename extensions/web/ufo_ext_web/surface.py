@@ -772,6 +772,83 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+def _activity_label(frame: ToolCall | SkillLoad | None) -> str | None:
+    match frame:
+        case None:
+            return None
+        case SkillLoad():
+            return f"Loading skill · {frame.skill}"
+        case ToolCall():
+            return frame.description or (
+                f"{frame.tool} {frame.preview}" if frame.preview else frame.tool
+            )
+
+
+async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
+    """Each visible agent's live picture, polled beside the index `agents_index` serves: the
+    liveest non-terminal turn it holds — with what a running one is doing right now, peeked off
+    the hub's newest activity frame — when any turn of its last moved, whether its most recent
+    terminal turn failed, and the soonest unpaused scheduled task on it — read through the task
+    kind's own member gate, the seam the radar names tasks by, never its table.
+
+    An agent is visible workspace-wide; its turns are not. The aggregate is fenced to the
+    conversations this reader reads, so a row reports this member's picture of the agent and never
+    another member's private turn.
+
+    The turn aggregate is one read for every agent at once; the two per-agent reads are taken only
+    where the row is drawn from them. A running turn's hub is peeked for the agents running one,
+    and an agent's tasks are listed only where no turn state stands in front of them — so an agent
+    at work costs the object store nothing, and a screen pays that read only for the agents
+    standing still."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    statuses = await ctx.agent_turn_statuses(
+        tuple(agent.id for agent in audience.agents), member_id
+    )
+    activity: dict[UUID, str] = {}
+    for status in statuses:
+        if status.running_turn_id is None:
+            continue
+        label = _activity_label(await ctx.latest_activity(status.running_turn_id))
+        if label:
+            activity[status.agent_id] = label
+    next_runs: dict[UUID, str] = {}
+    for status in statuses:
+        if status.live is not None or status.last_failed:
+            continue
+        page = await ctx.list_member_objects(
+            SCHEDULED_TASK_KIND,
+            status.agent_id,
+            member_id,
+            admin=audience.admin,
+            query=ObjectListQuery(filters={"paused": False}, order_by="next_run_at"),
+        )
+        if page is None:
+            break
+        if not page.rows:
+            continue
+        soonest = page.rows[0].fields["next_run_at"]
+        if isinstance(soonest, str):
+            next_runs[status.agent_id] = soonest
+    return JSONResponse(
+        {
+            "statuses": [
+                {
+                    "agent_id": str(status.agent_id),
+                    "turn": status.live,
+                    "activity": activity.get(status.agent_id),
+                    "next_run_at": next_runs.get(status.agent_id),
+                    "last_active_at": _iso(status.last_active_at),
+                    "last_failed": status.last_failed,
+                }
+                for status in statuses
+            ]
+        }
+    )
+
+
 def _framed_length(request: Request, limit: int) -> Response | None:
     """The refusal a whole-body parse must answer before it runs, or None when the request frames
     its body honestly. A chunked body carries no length a parse can be bounded by — RFC 7230 makes
@@ -3677,6 +3754,7 @@ ROUTES = (
     SurfaceRoute(method="POST", path="", handler=open_session),
     SurfaceRoute(method="GET", path="static/{asset:path}", handler=static_asset),
     SurfaceRoute(method="GET", path="api/agents", handler=agents_index),
+    SurfaceRoute(method="GET", path="api/agents/status", handler=agents_status),
     SurfaceRoute(method="GET", path="api/chats", handler=chats_index),
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),

@@ -12,8 +12,14 @@ export type PanelState<T> =
 const POLL_MS = 30_000;
 
 /** A read holds its answer until the next one lands. The visible pane re-reads on its own interval,
- *  while a hidden tab does not poll and a failed read waits for the member's next move. Only a
- *  first read, which has nothing to hold, shows the skeleton.
+ *  while a hidden tab does not poll. Only a first read, which has nothing to hold, shows the
+ *  skeleton.
+ *
+ *  A read that has never answered waits for the member's next move once it fails: there is nothing
+ *  on the screen for a retry to correct, and a route that refused the first ask will refuse the
+ *  next. A read that has answered keeps its interval, because what failed there is a refresh of
+ *  something the member is already looking at — the deploy that dropped one poll is over by the
+ *  next one, and a pane that gave up would state the workspace had gone quiet.
  *
  *  A tab that is looked at again reads at once rather than serving what it held until the next
  *  tick: the member left to do something the answer depends on, and coming back is the move that
@@ -29,11 +35,14 @@ export function usePanelRead<T>(
   const [pollTick, setPollTick] = useState(0);
   const reading = useRef(false);
   const failed = useRef(false);
+  const answered = useRef(false);
   useEffect(() => {
     const change = () => {
       const shown = document.visibilityState !== "hidden";
       setVisible(shown);
-      if (shown && !reading.current && !failed.current) setPollTick((tick) => tick + 1);
+      if (shown && !reading.current && (!failed.current || answered.current)) {
+        setPollTick((tick) => tick + 1);
+      }
     };
     document.addEventListener("visibilitychange", change);
     return () => document.removeEventListener("visibilitychange", change);
@@ -41,7 +50,9 @@ export function usePanelRead<T>(
   useEffect(() => {
     if (!visible) return;
     const interval = window.setInterval(() => {
-      if (!reading.current && !failed.current) setPollTick((tick) => tick + 1);
+      if (!reading.current && (!failed.current || answered.current)) {
+        setPollTick((tick) => tick + 1);
+      }
     }, everyMs);
     return () => window.clearInterval(interval);
   }, [visible, everyMs]);
@@ -55,6 +66,7 @@ export function usePanelRead<T>(
       .then((result) => {
         if (!live) return;
         failed.current = !result.ok;
+        answered.current = answered.current || result.ok;
         setState(
           result.ok
             ? { phase: "ready", payload: result.payload }

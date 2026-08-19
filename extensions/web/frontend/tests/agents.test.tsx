@@ -1,7 +1,7 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
@@ -9,6 +9,7 @@ import { AGENT_ICONS } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { chatState } from "@/lib/chatStore";
 import { sendMessage } from "@/lib/turnStream";
+import { WORKING_STATUS_MS, statusLine, type AgentStatus } from "@/views/Agents";
 
 import {
   AGENT,
@@ -699,6 +700,210 @@ test("a member picks another mark, and the pick rides one intent and comes back"
   expect((screen.getByRole("radio", { name: "Propylon" }) as HTMLInputElement).checked).toBe(
     false,
   );
+});
+
+const THIRD_ID = "44444444-4444-4444-8444-444444444444";
+const FOURTH_ID = "66666666-6666-4666-8666-666666666666";
+const SCRIBE = { id: THIRD_ID, name: "scribe", model: "auto", main: false, icon: "kylix" };
+const WATCHER = { id: FOURTH_ID, name: "watcher", model: "auto", main: false, icon: "dingir" };
+
+const HOURS_AGO = new Date(Date.now() - 5 * 3_600_000).toISOString();
+const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
+
+function status(agentId: string, held: Partial<AgentStatus>): AgentStatus {
+  return {
+    agent_id: agentId,
+    turn: null,
+    activity: null,
+    next_run_at: null,
+    last_active_at: null,
+    last_failed: false,
+    ...held,
+  };
+}
+
+test("the index sorts a working app as now, a resting one by its last activity, an unplaced one last", async () => {
+  wire({
+    "/api/agents/status": () =>
+      json({
+        statuses: [
+          status(SECOND_ID, { turn: "running" }),
+          status(AGENT_ID, { last_active_at: HOURS_AGO }),
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents";
+  render(<App agents={[AGENT, RESEARCH, SCRIBE]} member={MEMBER} onAgents={() => {}} />);
+
+  const index = await agentIndex();
+  await waitFor(() => {
+    const rows = within(index).getAllByRole("button", { name: /^(Assistant|Research|Scribe)/ });
+    expect(rows.map((row) => row.querySelector(".text-label")!.textContent)).toEqual([
+      "Research",
+      "Assistant",
+      "Scribe",
+    ]);
+  });
+});
+
+test("a working row prints its work under the name, in plain text and with no tooltip", async () => {
+  wire({
+    "/api/agents/status": () =>
+      json({
+        statuses: [
+          status(SECOND_ID, { turn: "running", activity: "Running bash" }),
+          status(THIRD_ID, { turn: "running" }),
+          status(FOURTH_ID, { turn: "queued" }),
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents";
+  render(
+    <App agents={[AGENT, RESEARCH, SCRIBE, WATCHER]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  const index = await agentIndex();
+  const row = (name: RegExp) => within(index).getByRole("button", { name });
+  // The line is drawn a character at a time, so what a reader is given is the whole line beside
+  // those cells and the cells themselves are hidden — which is what the row is named by.
+  await waitFor(() => expect(row(/^Research Running bash$/)).toBeTruthy());
+  expect(row(/^Scribe Responding$/)).toBeTruthy();
+  expect(row(/^Watcher Queued$/)).toBeTruthy();
+  const said = row(/^Research/).querySelector(".font-mono")!;
+  expect(said.className).toContain("text-small");
+  expect(said.querySelector(".sr-only")!.textContent).toBe("Running bash");
+  expect(said.querySelector("[aria-hidden]")!.textContent).toBe("Running bash");
+  // The line is already on the row, so nothing is held at the pointer over it.
+  fireEvent.focus(row(/^Research/));
+  expect(screen.queryByRole("tooltip")).toBeNull();
+});
+
+test("a resting row holds its status at the pointer, and one without a status triggers no tooltip", async () => {
+  wire({
+    "/api/agents/status": () =>
+      json({ statuses: [status(SECOND_ID, { last_active_at: HOURS_AGO })] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents";
+  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
+
+  const index = await agentIndex();
+  const row = () => within(index).getByRole("button", { name: /^Research/ });
+  await waitFor(() => expect(row().getAttribute("data-state")).toBe("closed"));
+  fireEvent.focus(row());
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Active 5h ago");
+  fireEvent.blur(row());
+
+  // An app the read said nothing about has nothing to hold there, so nothing opens over it.
+  fireEvent.focus(within(index).getByRole("button", { name: /^Assistant/ }));
+  await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+});
+
+test("the avatar dot reads live on work in flight, blocked on parked or failed, and idle wears none", async () => {
+  wire({
+    "/api/agents/status": () =>
+      json({
+        statuses: [
+          status(AGENT_ID, { turn: "running" }),
+          status(SECOND_ID, { turn: "parked" }),
+          status(THIRD_ID, { last_failed: true }),
+          status(FOURTH_ID, { last_active_at: HOURS_AGO }),
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents";
+  render(
+    <App agents={[AGENT, RESEARCH, SCRIBE, WATCHER]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  const index = await agentIndex();
+  const dot = (name: RegExp, tone: string) =>
+    within(index).getByRole("button", { name }).querySelector("." + tone);
+  await waitFor(() => expect(dot(/^Assistant/, "bg-live")).toBeTruthy());
+  expect(dot(/^Research/, "bg-blocked")).toBeTruthy();
+  expect(dot(/^Scribe/, "bg-blocked")).toBeTruthy();
+  expect(dot(/^Watcher/, "bg-live")).toBeNull();
+  expect(dot(/^Watcher/, "bg-blocked")).toBeNull();
+});
+
+test("a row keeps the member's focus as its status gains and loses a tooltip", async () => {
+  let working = true;
+  wire({
+    "/api/agents/status": () =>
+      json({
+        statuses: [
+          working
+            ? status(SECOND_ID, { turn: "running" })
+            : status(SECOND_ID, { last_active_at: HOURS_AGO }),
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents";
+  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
+
+  const index = await agentIndex();
+  const row = () => within(index).getByRole("button", { name: /^Research/ });
+  await waitFor(() => expect(row().querySelector(".bg-live")).toBeTruthy());
+  row().focus();
+  expect(document.activeElement).toBe(row());
+
+  // The work ends, the row loses its line and gains a tooltip: the same element wears both, so
+  // whoever was standing on it still is.
+  working = false;
+  await waitFor(() => expect(row().getAttribute("data-state")).toBe("closed"));
+  expect(document.activeElement).toBe(row());
+});
+
+/** A presence read is nobody's errand: no member action re-runs it, so a poll that gave up on one
+ *  refusal would leave the rail stating the workspace had gone quiet until the screen was left. */
+test("a status read that fails after answering keeps polling and recovers", async () => {
+  let answers = 0;
+  wire({
+    "/api/agents/status": () => {
+      answers += 1;
+      if (answers === 2) return new Response("nope", { status: 502 });
+      return json({ statuses: [status(SECOND_ID, { turn: "running" })] });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents";
+  vi.useFakeTimers();
+  try {
+    render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
+    const settle = async (ms: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+    await settle(0);
+    const row = () => screen.getByRole("button", { name: /^Research/ });
+    expect(row().querySelector(".bg-live")).toBeTruthy();
+
+    await settle(WORKING_STATUS_MS);
+    expect(answers).toBe(2);
+    expect(row().querySelector(".bg-live")).toBeNull();
+
+    await settle(WORKING_STATUS_MS);
+    expect(answers).toBe(3);
+    expect(row().querySelector(".bg-live")).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("statusLine states each resting mark by its own words", () => {
+  expect(statusLine(undefined)).toBeNull();
+  expect(statusLine(status(AGENT_ID, { turn: "parked" }))).toBe("Paused");
+  expect(statusLine(status(AGENT_ID, { last_failed: true }))).toBe("Last run failed");
+  expect(statusLine(status(AGENT_ID, { next_run_at: IN_THREE_HOURS }))).toBe("Next run in 3h");
+  expect(statusLine(status(AGENT_ID, { last_active_at: HOURS_AGO }))).toBe("Active 5h ago");
+  expect(statusLine(status(AGENT_ID, {}))).toBe("Idle");
 });
 
 test("a name is drawn word by word, and only a word written wholly in lowercase is raised", () => {
