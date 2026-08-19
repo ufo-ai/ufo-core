@@ -501,7 +501,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Terminal | `extensions/ufo` | live (held directive stream) | member token | session (private) |
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email/hex (private; a member opens any number of conversations per agent, each behind `conversation=new`; conversations that predate the rail keep bare agent/email keys, reachable by id) + intent/agent/email (the member's prepared-intent lane to that agent) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign. `surface_label` is `#name` off the `conversations.info` the audience decision already fetched (never a call of its own, and never an MPIM's member-naming name), `Direct message` for a DM, else null |
-| iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member (ten-minute YES confirmation requested in signed-in chat and bound to one direct provider conversation) | provider conversation id; DM = member, group = room |
+| iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member (ten-minute per-claim `UFO <code>` requested in signed-in chat and completed by one direct provider message) | provider conversation id; DM = member, group = room |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
@@ -749,14 +749,12 @@ the identity. **Alternative — bring-your-own app** (`slack_connect method="man
 identity with `auth.test`.
 
 iMessage setup is one chat tool. An admin binds the deploy's Spectrum project to the workspace;
-each signed-in member claims an E.164 phone number. Spectrum's shared line refuses every phone that
-has not texted it first, so a refused claim returns the assigned line, an `sms:` opt-in link to that
-line, and one action: text the line once, then claim the number again. The refusal deletes the claim
-it staged, so no dead claim outlives it, and every claim result names the assigned line. A direct
-`YES` from the claimed phone and provider conversation proves that the phone can send to the
-assigned line. It does not prove that the phone received the confirmation, especially when iMessage
-falls back to SMS. That reply links the phone and is not admitted as a turn, and a vCard for the
-assigned line follows it, so the member saves the line as a known contact.
+each signed-in member claims an E.164 phone number. The tool records the claim and returns the
+assigned line with an `sms:` link whose body is the claim's random `UFO <code>`. Only that direct
+message from the claimed phone within ten minutes proves control; a bare `UFO` or another claim's
+code completes nothing. The message links the phone and is not admitted as a turn. The surface
+replies that the phone is connected and sends a vCard for the assigned line, so the member saves it
+as a known contact.
 The listener opens the live stream, buffers it while it replays from its extension-store sequence
 cursor, then drains the buffer; each provider message GUID is the admission idempotency key.
 

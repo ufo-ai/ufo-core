@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ufo.sdk.audience import conversation_audience, room_audience
 from ufo.sdk.context import ScopedStore
@@ -34,15 +34,15 @@ IMESSAGE_EXTENSION = "imessage"
 SURFACE_IMESSAGE = "imessage"
 IMESSAGE_INBOX_DIR = "inbox/imessage"
 CURSOR_KEY = "stream:shared:cursor"
-CLAIM_PREFIX = "claim:"
-CONFIRMATION_REPLY_PREFIX = "confirmation-reply:"
+CLAIM_PREFIX = "opt-in-claim:"
+CONFIRMATION_REPLY_PREFIX = "opt-in-receipt:"
 RECONNECT_SECONDS = 2.0
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 LIVE_BUFFER_FRAMES = 1_000
 CONNECTED_TEXT = "Connected. Send your request."
 CONTACT_CARD_NAME = "ufo"
 CONTACT_CARD_FILENAME = "ufo.vcf"
-CONFIRMATION_REPLY_TEXT = "yes"
+OPT_IN_TEXT = "UFO"
 OPT_OUT_REPLIES = frozenset(
     {"cancel", "end", "optout", "quit", "revoke", "stop", "stopall", "unsubscribe"}
 )
@@ -51,10 +51,9 @@ OPT_OUT_REPLIES = frozenset(
 class PendingClaim(BaseModel):
     member_id: UUID
     phone_number: str
-    conversation_id: str
-    # A claim written before this field existed must still validate for the rest of its 10 minutes.
-    assigned_phone_number: str = ""
-    confirmation_idempotency_key: str
+    conversation_id: str | None
+    assigned_phone_number: str
+    opt_in_code: str = Field(pattern=r"^[0-9A-F]{32}$")
     expires_at: datetime
 
 
@@ -331,14 +330,18 @@ class ImessageSurface:
         if (
             not message.direct
             or claim.phone_number != message.sender
-            or claim.conversation_id != message.conversation_id
+            or (
+                claim.conversation_id is not None
+                and claim.conversation_id != message.conversation_id
+            )
         ):
             return None
         reply = message.text.strip().casefold()
         if receipt is None and reply in OPT_OUT_REPLIES:
             await store.delete(key)
             return None
-        if receipt is None and (reply != CONFIRMATION_REPLY_TEXT or message.attachments):
+        expected_reply = f"{OPT_IN_TEXT} {claim.opt_in_code}".casefold()
+        if receipt is None and (reply != expected_reply or message.attachments):
             return None
         if receipt is None and not await store.put_if(receipt_key, stored, expected=None):
             return None
