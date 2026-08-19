@@ -3074,15 +3074,15 @@ test("a starter says its sentence on the press, and leaves with the start screen
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Message the agent");
-  await userEvent.click(screen.getByRole("button", { name: /Inbox triage/ }));
+  await userEvent.click(screen.getByRole("button", { name: /PR babysitter/ }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(said).toEqual([
-    "I want an application that works my inbox: read new mail, draft a few replies for each one, and send nothing without me.",
+    "I want an application that watches our open pull requests and reports what each one waits on — age, reviewer, checks, conflicts — ordered by what it blocks.",
   ]);
   expect((screen.getByLabelText("Message the agent") as HTMLTextAreaElement).value).toBe("");
   expect(document.activeElement).toBe(screen.getByLabelText("Message the agent"));
-  expect(screen.queryByRole("button", { name: /Inbox triage/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
 });
 
 test("a conversation that has opened fixes its agent, and the picker goes with the start screen", async () => {

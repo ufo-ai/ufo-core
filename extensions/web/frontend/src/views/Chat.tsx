@@ -786,19 +786,19 @@ function Composer({
  *  is being asked, so every start screen carries them. */
 const STARTERS = [
   {
-    title: "Inbox triage",
-    body: "Reads new mail and drafts a few replies for each. You pick one, and nothing sends itself.",
-    ask: "I want an application that works my inbox: read new mail, draft a few replies for each one, and send nothing without me.",
+    title: "PR babysitter",
+    body: "Reports what each open pull request waits on: age, reviewer, checks, conflicts. You decide what moves.",
+    ask: "I want an application that watches our open pull requests and reports what each one waits on — age, reviewer, checks, conflicts — ordered by what it blocks.",
   },
   {
-    title: "Research routing",
-    body: "Reads the sources you name, keeps what matters, and routes each lead to whoever owns it.",
-    ask: "I want an application that reads the sources I name, keeps the findings worth acting on, and routes each one to whoever owns it.",
+    title: "Competitive intel",
+    body: "Tracks the competitors you name and writes up what changed, with a source for each claim.",
+    ask: "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
   },
   {
-    title: "Draft review",
-    body: "Holds drafts against your own voice and publishes nothing until you approve it.",
-    ask: "I want an application that reviews my drafts against how I actually write, and publishes nothing until I approve it.",
+    title: "What we've learned",
+    body: "Reads the week's work and writes down what the team learned, and what it should not repeat.",
+    ask: "I want an application that reads our work each week and writes down what we learned: what worked, what did not, and what we should not repeat.",
   },
 ];
 
