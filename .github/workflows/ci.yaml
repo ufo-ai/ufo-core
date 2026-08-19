@@ -43,7 +43,16 @@ jobs:
           node-version: 24
       # The landing page's behaviour is geometric and frame-timed, so its suite drives a browser.
       - run: npm --prefix infra/modules/edge ci
-      - run: npm --prefix infra/modules/edge exec -- playwright install --with-deps chromium
+      # `--with-deps` runs apt against the runner's mirrors before it fetches the browser. When a
+      # mirror stops answering, apt neither fails nor prints: the step goes silent and burns the
+      # job's whole 15 minutes, taking `test` down with it because it reads this job's conclusion.
+      # The runner image already carries Chromium's shared libraries, so the deps pass is walled
+      # and best-effort; the browser download is the half that must succeed, and it fails loud.
+      - name: Install the browser the landing-page suite drives
+        run: |
+          timeout 300 npm --prefix infra/modules/edge exec -- \
+            playwright install --with-deps chromium \
+            || npm --prefix infra/modules/edge exec -- playwright install chromium
       - run: node --test infra/modules/edge/*.test.mjs
       - run: npm --prefix extensions/debugger/frontend ci
       - run: npm --prefix extensions/debugger/frontend run build
