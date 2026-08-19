@@ -77,6 +77,10 @@ export type ChatState = {
   handoffs: Handoffs;
   fault: ToastState | null;
   founded: Founding | null;
+  /** The pane this key feeds was closed while its founding send was in flight. The landing still
+   *  migrates the live state to the conversation's own key, but leaves no forwarding record, so
+   *  nothing raises the closed run again; a pane that reopens first clears this and joins it. */
+  closed: boolean;
 };
 
 const EMPTY: ChatState = {
@@ -90,6 +94,7 @@ const EMPTY: ChatState = {
   handoffs: {},
   fault: null,
   founded: null,
+  closed: false,
 };
 
 const states = new Map<string, ChatState>();
@@ -122,17 +127,12 @@ export function liveTurn(): LiveTurn {
 export function migrateChat(fromKey: string, toKey: string, title: string): void {
   const state = states.get(fromKey);
   if (!state) return;
-  states.set(toKey, state);
-  states.set(fromKey, { ...EMPTY, founded: { conversationId: toKey, title } });
+  states.set(toKey, { ...state, closed: false });
+  states.set(
+    fromKey,
+    state.closed ? EMPTY : { ...EMPTY, founded: { conversationId: toKey, title } },
+  );
   for (const listener of listeners) listener();
-}
-
-/** Read and clear the key's forwarding record: binding is a one-shot act, and a record left behind
- *  would bind the next run of the same pane to a conversation it never opened. */
-export function consumeFounding(chatKey: string): Founding | null {
-  const record = chatState(chatKey).founded;
-  if (record) updateChat(chatKey, (state) => ({ ...state, founded: null }));
-  return record;
 }
 
 export function clearChat(chatKey: string): void {

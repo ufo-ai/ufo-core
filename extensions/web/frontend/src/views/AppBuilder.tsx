@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { COLUMN } from "@/kernel/pane";
@@ -6,7 +6,7 @@ import { usePanelRead } from "@/kernel/panel";
 import { Chat } from "@/views/Chat";
 import type { TasksSlotPayload } from "@/views/ConversationSlotPane";
 import { cn } from "@/lib/cn";
-import { chatState, consumeFounding, useChat } from "@/lib/chatStore";
+import { chatState, updateChat, useChat } from "@/lib/chatStore";
 import { sendMessage } from "@/lib/turnStream";
 import type { Agent, Member } from "@/lib/types";
 
@@ -20,16 +20,13 @@ export const APP_BUILDER_TITLE = "App Builder";
 /** The wizard's own founding key — not the chat screen's `new:<agentId>`, so neither pane's
  *  founding send can ever hold the other's busy, and a wizard mount finds nothing on the key it
  *  watches but its own run. */
-function wizardKey(agentId: string): string {
+export function wizardKey(agentId: string): string {
   return "wizard:" + agentId;
 }
 
 export type AppBuilderProps = {
   agent: Agent;
   member: Member;
-  /** What the chat route called the conversation the opening message founded. The apps rail labels
-   *  its pending row with it. */
-  onOpened: (title: string) => void;
   /** Every settled turn: the apps read is re-run, so the app the last phase created reaches the
    *  rail with no signal of its own. */
   onSettled: () => void;
@@ -45,33 +42,28 @@ export type AppBuilderProps = {
  *  `New application`, and what they want back is the proposal, not a prompt to type. Which
  *  conversation the run is lives in the store, not in this component: whichever send founds it —
  *  the opening send, or the composer's after that send failed — `migrateChat` leaves the founding
- *  record on the wizard's key, and this pane binds by reading the key it watches. A mount holds no
- *  callback a close can strand, a reopened wizard finds the run still in flight and joins it, and a
- *  second conversation cannot be founded while the key wears the first. */
-export function AppBuilder({ agent, member, onOpened, onSettled, onClose }: AppBuilderProps) {
+ *  record on the wizard's key, and this pane binds by reading the key it watches, so a mount holds
+ *  no state an unmount can lose. A wizard reopened over a run in flight — or reached again after
+ *  any other screen — joins that run where the key says it is, and a second conversation cannot be
+ *  founded while the key wears the first. */
+export function AppBuilder({ agent, member, onSettled, onClose }: AppBuilderProps) {
   const key = wizardKey(agent.id);
-  const founding = useChat(key);
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  const held = useChat(key);
+  const conversationId = held.founded?.conversationId ?? null;
   const [settles, setSettles] = useState(0);
-  const live = useRef(onOpened);
-  live.current = onOpened;
 
   useEffect(() => {
-    if (conversationId !== null) return;
-    const record = consumeFounding(key);
-    if (record) {
-      setConversationId(record.conversationId);
-      live.current(record.title);
-      return;
-    }
     // The store is read here rather than from the render's snapshot: a StrictMode second pass and
     // the sends of other mounts have already marked the key, and only the key's current state says
-    // whether an opening send belongs. Anything already on it — a run in flight, a failed opening
-    // the member should read — means the pane waits or the member speaks next, never a second send.
-    const held = chatState(key);
-    if (held.busy || (held.messages ?? []).length > 0) return;
+    // whether an opening send belongs. Anything already on it — a run in flight, a forwarding
+    // record, a failed opening the member should read — means the pane joins or the member speaks
+    // next, never a second send. A key closed mid-founding is reopened first, so the landing keeps
+    // its forwarding record for the pane now watching it.
+    const current = chatState(key);
+    if (current.closed) updateChat(key, (state) => ({ ...state, closed: false }));
+    if (current.founded || current.busy || (current.messages ?? []).length > 0) return;
     void sendMessage({ key, agentId: agent.id, conversationId: null }, OPENING_MESSAGE, OPENING_MESSAGE);
-  }, [key, agent.id, conversationId, founding]);
+  }, [key, agent.id]);
 
   return (
     <section

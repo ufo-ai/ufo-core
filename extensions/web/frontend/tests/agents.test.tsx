@@ -432,6 +432,63 @@ test("a wizard reopened during its founding send binds to the run the first moun
   expect(within(await agentIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
+/** The run is the key's, not the screen's: leaving for another screen unmounts every pane here,
+ *  and what the member finds on coming back is the same run, not a second opening send. */
+test("the run survives leaving the screen and comes back bound, sending nothing twice", async () => {
+  const sent: string[] = [];
+  wire({
+    "/api/agents": () => boot([AGENT], ADMIN),
+    "/chat": (_url, init) => {
+      sent.push(String(init?.body));
+      return json(OPENED);
+    },
+    "/slots/tasks": NO_BOARD,
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<Portal />);
+
+  await openWizard();
+  await waitFor(() => expect(sent).toEqual([OPENING]));
+
+  await userEvent.click(screen.getByRole("button", { name: "Chat" }));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
+
+  const wizard = await screen.findByRole("region", { name: "App Builder" });
+  expect(await within(wizard).findByText(saying(OPENING))).toBeTruthy();
+  expect(within(await agentIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(sent).toEqual([OPENING]);
+});
+
+/** An app row shows its app without ending the run: the rail keeps naming the run, and its row —
+ *  now a place to go rather than the place the member is — takes them back to it. */
+test("an app row leaves the run standing, and the rail's own row returns to it", async () => {
+  const sent: string[] = [];
+  wire({
+    "/api/agents": () => boot([AGENT, RESEARCH], ADMIN),
+    "/chat": (_url, init) => {
+      sent.push(String(init?.body));
+      return json(OPENED);
+    },
+    "/slots/tasks": NO_BOARD,
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json({ state: "none" }),
+  });
+  render(<Portal />);
+
+  await openWizard();
+  await waitFor(() => expect(sent).toEqual([OPENING]));
+
+  await openAgentRow("Research");
+  await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
+  const index = await agentIndex();
+  const row = await within(index).findByRole("button", { name: /App Builder/ });
+
+  await userEvent.click(row);
+  expect(await screen.findByRole("region", { name: "App Builder" })).toBeTruthy();
+  expect(sent).toEqual([OPENING]);
+});
+
 /** The wizard founds on a key of its own, so a founding send the member has in flight on the chat
  *  screen cannot hold it busy — the failure class three review rounds circled. */
 test("a founding send from the chat screen never blocks the wizard's own", async () => {

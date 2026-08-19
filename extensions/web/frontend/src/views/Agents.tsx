@@ -9,11 +9,12 @@ import { BANDS } from "@/kernel/pane";
 import { TabPanel, TabRow } from "@/kernel/tabs";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
+import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { AgentPane } from "@/views/AgentPane";
 import { AgentSkills } from "@/views/AgentSkills";
-import { APP_BUILDER_TITLE, AppBuilder } from "@/views/AppBuilder";
+import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import { AGENT_TABS, type AgentTab, type PlaceStep, type WorkspacePlace } from "@/lib/route";
@@ -34,11 +35,6 @@ export type AgentsProps = {
 };
 
 const MAIN = "Main";
-
-/** One app-building run, while its wizard holds the pane: what the chat route called the
- *  conversation the opening message founded, absent until that message lands. The run is nothing but
- *  this — client-side state a reload clears, so no phantom row survives one. */
-type Run = { title: string | null };
 
 /** The clock-fired tasks the app holds. Radar reads them across the workspace, beside what they
  *  did; here they are read and written for the one app they run on, which is where a member sets
@@ -74,7 +70,19 @@ export function Agents({
 }: AgentsProps) {
   const mainAgent = useMainAgent();
   const shown = selected ?? mainAgent;
-  const [run, setRun] = useState<Run | null>(null);
+  // The run lives on the wizard's own store key — busy or spoken before it founds, a forwarding
+  // record after — so it survives every unmount of this screen; a reload clears the store, so no
+  // phantom row survives one. `wanting` is only the member's last press: it raises the pane ahead
+  // of the run's first send and brings it back over a selected app.
+  const key = mainAgent ? wizardKey(mainAgent.id) : null;
+  const held = useChat(key ?? "");
+  const running =
+    key !== null &&
+    !held.closed &&
+    (held.busy || (held.messages ?? []).length > 0 || held.founded !== null);
+  const [wanting, setWanting] = useState(false);
+  const building = mainAgent !== null && (wanting || (running && selected === null));
+  const runTitle = held.founded?.title ?? null;
   const [settling, setSettling] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(SETTINGS_TABS[0]);
 
@@ -98,28 +106,52 @@ export function Agents({
               variant="send"
               size="bar"
               className="shrink-0"
-              onClick={() => setRun({ title: null })}
+              onClick={() => setWanting(true)}
             >
               New application
             </Button>
           ) : null}
           <ul className="m-0 flex list-none flex-col gap-px p-0">
-            {/* The run in flight, named the way the wizard's own pane is until the conversation has a
-                title of its own. It is the pane the screen is showing, so the row states where the
-                member already is rather than offering a place to go — and it is not an app: nothing
-                here opens one, and the app's real row arrives from the apps read when it lands. */}
-            {run ? (
-              <li className="flex items-center gap-xs rounded-control bg-fill pr-xs">
-                <div className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs">
-                  <span className="min-w-0 truncate text-label">
-                    {run.title ? APP_BUILDER_TITLE + ": " + run.title : APP_BUILDER_TITLE}
-                  </span>
-                  <span className="w-full truncate font-mono text-small text-ink-soft">Building</span>
-                </div>
+            {/* The run in flight, named the way the wizard's own pane is until the conversation has
+                a title of its own. While the pane shows it states where the member already is;
+                while an app holds the pane instead, the row is the way back to the run. It is not
+                an app: nothing here opens one, and the app's real row arrives from the apps read
+                when it lands. */}
+            {building || running ? (
+              <li className={cn("flex items-center gap-xs rounded-control", building && "bg-fill")}>
+                {building ? (
+                  <div
+                    aria-current
+                    className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
+                  >
+                    <span className="min-w-0 truncate text-label">
+                      {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                    </span>
+                    <span className="w-full truncate font-mono text-small text-ink-soft">
+                      Building
+                    </span>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setWanting(true)}
+                    className={cn(
+                      "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
+                      "rounded-control text-left text-inherit hover:bg-fill",
+                    )}
+                  >
+                    <span className="min-w-0 max-w-full truncate text-label">
+                      {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                    </span>
+                    <span className="w-full truncate font-mono text-small text-ink-soft">
+                      Building
+                    </span>
+                  </button>
+                )}
               </li>
             ) : null}
             {agents.map((agent) => {
-              const open = !run && agent.id === shown?.id;
+              const open = !building && agent.id === shown?.id;
               return (
                 /** The whole row is the one control: it opens the app, and nothing else stands on
                  *  it. What acts on the open app is worn by that app's own pane, beside its name. */
@@ -134,7 +166,7 @@ export function Agents({
                     type="button"
                     aria-current={open}
                     onClick={() => {
-                      setRun(null);
+                      setWanting(false);
                       onOpen(agent.id);
                     }}
                     className={cn(
@@ -165,13 +197,20 @@ export function Agents({
           </ul>
         </nav>
       </div>
-      {run && mainAgent ? (
+      {building && mainAgent ? (
         <AppBuilder
           agent={mainAgent}
           member={member}
-          onOpened={(title) => setRun({ title })}
           onSettled={onAgents}
-          onClose={() => setRun(null)}
+          onClose={() => {
+            // Closing ends the run's presence here. A run whose founding send is still in flight
+            // cannot be cleared out from under that send, so the key wears the close instead and
+            // the landing leaves no forwarding record behind.
+            setWanting(false);
+            if (key === null) return;
+            if (chatState(key).busy) updateChat(key, (state) => ({ ...state, closed: true }));
+            else clearChat(key);
+          }}
         />
       ) : shown ? (
         <AgentPane
@@ -192,7 +231,7 @@ export function Agents({
           No agent is visible to you.
         </div>
       )}
-      {shown && !run ? (
+      {shown && !building ? (
         <Dialog open={settling} onOpenChange={setSettling}>
           <DialogContent className="w-settings" aria-describedby={undefined}>
             {/* A record the dialog raises — a connector's own row — has to stand inside it: the
