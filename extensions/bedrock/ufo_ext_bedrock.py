@@ -5,8 +5,7 @@ Mantle Anthropic endpoint; the OpenAI ids route to core's `OpenAIClient`, which 
 Completions or Responses request from the spec's `api_surface`. This extension carries no request
 translation of its own — only the endpoint and AWS-keyed client each spec builds. The Anthropic ids
 therefore inherit core's 5m and 1h cache breakpoints and their distinct write rates; the
-OpenAI-compatible ids are charged no write premium. Mantle refuses data retention mode 'none', so
-the OpenAI ids declare `retention_none=False` and are called at the gateway's default retention."""
+OpenAI-compatible ids are charged no write premium."""
 
 import os
 from typing import cast
@@ -114,7 +113,6 @@ def _openai(
         api_surface=api_surface,
         key_slot=BEDROCK_KEY_SLOT,
         key_env=BEDROCK_API_KEY_ENV,
-        retention_none=False,
     )
 
 

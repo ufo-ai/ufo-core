@@ -15,7 +15,16 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolSchema, ToolUseBlock
+from ufo.sdk.models import (
+    Message,
+    ReasoningItemBlock,
+    RedactedThinkingBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolSchema,
+    ToolUseBlock,
+)
 from ufo_ext_self_improvement.model import ReplayLeg
 
 REPLAY_ROUND_LIMIT = 6
@@ -40,7 +49,10 @@ def replay_head(messages: tuple[Message, ...]) -> tuple[Message, ...]:
     """The archived conversation with its original final answer stripped — the context the model
     regenerates from. Drop trailing assistant messages that carry no tool_use (the final answer the
     original prompt produced); keep every user turn and every tool round, whose results are the
-    context the counterfactual reuses."""
+    context the counterfactual reuses. Reasoning blocks are dropped too: their signatures and
+    encrypted bodies belong to the model that minted them, and the replay leg runs the deploy's
+    model with reasoning off, so replaying them is a provider rejection on a path built to be
+    side-effect-free."""
     head = list(messages)
     while head and head[-1].role == "assistant":
         content = head[-1].content
@@ -49,7 +61,18 @@ def replay_head(messages: tuple[Message, ...]) -> tuple[Message, ...]:
         ):
             break
         head.pop()
-    return tuple(head)
+    return tuple(_without_reasoning(message) for message in head)
+
+
+def _without_reasoning(message: Message) -> Message:
+    if isinstance(message.content, str):
+        return message
+    content = tuple(
+        block
+        for block in message.content
+        if not isinstance(block, ThinkingBlock | RedactedThinkingBlock | ReasoningItemBlock)
+    )
+    return Message(role=message.role, content=content)
 
 
 def archived_tool_results(

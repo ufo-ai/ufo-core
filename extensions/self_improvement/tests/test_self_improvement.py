@@ -31,7 +31,7 @@ from ufo_ext_self_improvement.gate import (
 )
 from ufo_ext_self_improvement.model import ModelAccessLeg
 from ufo_ext_self_improvement.proposer import PromptProposer
-from ufo_ext_self_improvement.replay import ReplayEvaluation
+from ufo_ext_self_improvement.replay import ReplayEvaluation, replay_head
 
 from ufo.accounting import TOKENS_DIMENSION, Pricing
 from ufo.blob import FilesystemBlobStore
@@ -47,7 +47,11 @@ from ufo.models.interface import (
     ModelClient,
     ModelEvent,
     ModelRequest,
+    ReasoningItemBlock,
+    RedactedThinkingBlock,
+    TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
@@ -407,6 +411,38 @@ async def test_replay_uses_metered_model_access_and_feeds_archived_results(db: N
     assert any(
         isinstance(block, ToolResultBlock) and block.content == "file-a\nfile-b"
         for block in fed.content
+    )
+
+
+def test_replay_head_strips_the_archives_reasoning_blocks() -> None:
+    """The archive's reasoning belongs to the model that minted it; the replay leg runs the deploy's
+    model with reasoning off, so signed thinking and encrypted items must not ride into its
+    requests."""
+    archived = (
+        Message(role="user", content="do the task"),
+        Message(
+            role="assistant",
+            content=(
+                ThinkingBlock(thinking="weigh", signature="sig-foreign"),
+                RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
+                ReasoningItemBlock(id="rs_1", encrypted_content="Z3B0"),
+                TextBlock(text="checking"),
+                ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
+            ),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="t1", content="file-a"),)),
+        Message(role="assistant", content="final answer"),
+    )
+    assert replay_head(archived) == (
+        Message(role="user", content="do the task"),
+        Message(
+            role="assistant",
+            content=(
+                TextBlock(text="checking"),
+                ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
+            ),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="t1", content="file-a"),)),
     )
 
 

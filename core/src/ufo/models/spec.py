@@ -48,10 +48,7 @@ class ModelSpec:
     `client` builds the `ModelClient` from this spec and the api key the registry resolves, once per
     turn. `knowledge_cutoff` is a machine date (`YYYY-MM`) rendered to a human month at the prompt
     seam. `key_slot`/`key_env` name where the registry resolves the api key: the workspace's BYOK
-    secret under `key_slot`, else the platform default in env `key_env`; both empty ⇒ keyless.
-    `retention_none` is whether the responses surface honours the no-retention request —
-    `store=False` and the encrypted-reasoning include stateless replay then needs; a wire that
-    refuses the mode is called at its default retention, with neither parameter sent."""
+    secret under `key_slot`, else the platform default in env `key_env`; both empty ⇒ keyless."""
 
     id: str
     provider: str
@@ -63,7 +60,6 @@ class ModelSpec:
     api_surface: ApiSurface
     key_slot: str = ""
     key_env: str = ""
-    retention_none: bool = True
 
     def __post_init__(self) -> None:
         if not KNOWLEDGE_CUTOFF_RE.match(self.knowledge_cutoff):

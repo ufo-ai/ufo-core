@@ -573,6 +573,21 @@ async def test_anthropic_yields_the_whole_reasoning_sequence_once_the_stream_clo
     ]
 
 
+async def test_anthropic_thinking_block_closing_unsigned_fails_loud() -> None:
+    """The provider signs every thinking block; one that closes unsigned is a malformed stream.
+    Persisted, it would ride the transcript into every later request of the conversation — a block
+    the provider rejects — so the round fails here instead."""
+    start, text_delta, _, stop = anthropic_thinking("half a thought", "never-delivered")
+    create = ScriptedCreate(
+        (
+            [anthropic_message_start(input_tokens=1), start, text_delta, stop, anthropic_output(1)],
+            None,
+        )
+    )
+    with pytest.raises(RuntimeError, match="signature"):
+        await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
+
+
 async def test_anthropic_stream_without_usage_raises() -> None:
     create = ScriptedCreate(([anthropic_message_start(), anthropic_text("x")], None))
     with pytest.raises(RuntimeError, match="model stream produced no usage"):
@@ -1612,13 +1627,13 @@ def test_responses_request_carries_tools_and_reasoning_together() -> None:
             "tools": (ToolSchema(name="t", description="d", input_schema={"type": "object"}),),
         }
     )
-    kwargs = responses_request(request, "high", True)
+    kwargs = responses_request(request, "high")
     assert kwargs["reasoning"] == {"effort": "high"}
     assert [tool["name"] for tool in kwargs["tools"]] == ["t"]
 
 
 def test_responses_request_omits_reasoning_without_an_effort() -> None:
-    kwargs = responses_request(REQUEST.model_copy(update={"model": "gpt-5.6-terra"}), None, True)
+    kwargs = responses_request(REQUEST.model_copy(update={"model": "gpt-5.6-terra"}), None)
     assert "reasoning" not in kwargs
 
 

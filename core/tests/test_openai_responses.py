@@ -419,17 +419,13 @@ def test_responses_input_replays_the_round_reasoning_ahead_of_its_function_calls
     ]
 
 
-def test_responses_request_leaves_retention_to_a_wire_that_refuses_the_none_mode() -> None:
-    request = ModelRequest(
-        model="openai.gpt-5.6-luna",
-        system="be terse",
-        max_tokens=128,
-        conversation_cache_ttl="5m",
-        messages=(Message(role="user", content=(TextBlock(text="look"),)),),
-    )
-    kwargs = responses_request(request, None, False)
-    assert "store" not in kwargs
-    assert "include" not in kwargs
+def test_responses_request_always_disables_retention_and_asks_for_encrypted_reasoning() -> None:
+    """Every Responses request is stateless, whatever wire serves it: `store=False` leaves nothing
+    on the provider, and `include` is what makes the reasoning items it returns replayable — a
+    request without it gets items the fail-loud guard then rejects."""
+    kwargs = responses_request(_request(), None)
+    assert kwargs["store"] is False
+    assert kwargs["include"] == ["reasoning.encrypted_content"]
 
 
 def test_responses_request_preserves_input_controls_and_disables_storage() -> None:
@@ -459,7 +455,7 @@ def test_responses_request_preserves_input_controls_and_disables_storage() -> No
             ),
         ),
     )
-    kwargs = responses_request(request, None, True)
+    kwargs = responses_request(request, None)
     assert kwargs["instructions"] == "be terse"
     assert kwargs["store"] is False
     assert kwargs["include"] == ["reasoning.encrypted_content"]

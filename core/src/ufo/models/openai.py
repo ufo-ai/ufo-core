@@ -299,27 +299,22 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
     return items
 
 
-def responses_request(
-    request: ModelRequest, effort: OpenAIEffort, retention_none: bool
-) -> dict[str, Any]:
+def responses_request(request: ModelRequest, effort: OpenAIEffort) -> dict[str, Any]:
     """The `/v1/responses` request, carrying the `effort` the client resolved against the model's
     spec — None sends no reasoning parameter. `store=False` keeps the conversation ours — nothing
     is left on the provider between rounds — and `include` is what asks for the encrypted reasoning
     body that a kept conversation then has to replay: without it a reasoning item comes back as an
-    id the next request cannot resolve, so the pair travels together. `retention_none` is the
-    spec's word on whether the wire honours that mode: a surface that refuses it (Bedrock Mantle
-    answers 400 "data retention mode 'none' is not available") is called at its default retention,
-    with neither parameter sent."""
+    id the next request cannot resolve, so the pair travels together, on every wire this surface
+    serves."""
     kwargs: dict[str, Any] = {
         "model": request.model,
         "instructions": request.system,
         "input": responses_input(request.messages),
         "max_output_tokens": request.max_tokens,
         "stream": True,
+        "include": [REASONING_ENCRYPTED_CONTENT],
+        "store": False,
     }
-    if retention_none:
-        kwargs["include"] = [REASONING_ENCRYPTED_CONTENT]
-        kwargs["store"] = False
     if effort is not None:
         kwargs["reasoning"] = {"effort": effort}
     if request.tools:
@@ -607,9 +602,7 @@ class OpenAIClient:
             usage: Usage | None = None
             terminal_error: Exception | None = None
             try:
-                stream = await self.client.responses.create(
-                    **responses_request(request, effort, self.spec.retention_none)
-                )
+                stream = await self.client.responses.create(**responses_request(request, effort))
                 stream_started = False
                 async for event in stream:
                     if not stream_started:

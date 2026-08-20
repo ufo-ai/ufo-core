@@ -261,10 +261,15 @@ class AnthropicClient:
                         case anthropic.types.RawContentBlockStopEvent(index=index) if (
                             index in thinking_parts
                         ):
+                            signature = thinking_signatures.pop(index)
+                            if not signature:
+                                raise RuntimeError(
+                                    "Anthropic thinking block closed without a signature"
+                                )
                             reasoning.append(
                                 ThinkingBlock(
                                     thinking="".join(thinking_parts.pop(index)),
-                                    signature=thinking_signatures.pop(index),
+                                    signature=signature,
                                 )
                             )
                         case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
