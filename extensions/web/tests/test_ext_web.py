@@ -9578,6 +9578,52 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     assert grants_left == 0
 
 
+async def test_a_connection_intent_disconnects_one_account_under_the_owner_gate(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The connect screen's per-account remove rides the intent lane against the `connection` kind,
+    named by the account's stable object name: a member who neither owns the account nor
+    administers the workspace is refused — the kind holds a connection private to its owner however
+    the connection itself is shared, so the account is not even theirs to name — and the owner's
+    remove ends that one connection and its grant while every other connected account stays."""
+    client, workspace_id, agent_id = web
+    owner_id, owner_token = await _seed_member(workspace_id, "owner@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
+    await _seed_connection(workspace_id, agent_id, owner_id, "github", shared=True)
+    await _seed_connection(workspace_id, agent_id, owner_id, "notion", shared=True)
+    remove = {
+        "verb": "delete",
+        "kind": "connection",
+        "name": account_object_name("github", "github-account"),
+    }
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=remove,
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False
+    assert "no connection object named" in refused.json()["message"]
+    async with workspace_tx() as connection:
+        held = (await connection.execute(sa.select(tables.connection.c.provider))).scalars().all()
+    assert sorted(held) == ["github", "notion"]
+    removed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=remove,
+        headers={"cookie": f"{SESSION_COOKIE}={owner_token}"},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["applied"] is True
+    async with workspace_tx() as connection:
+        left = (await connection.execute(sa.select(tables.connection.c.provider))).scalars().all()
+        grants_left = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.connector_grant))
+        ).scalar_one()
+    assert list(left) == ["notion"]
+    assert grants_left == 1
+
+
 async def test_a_connect_intent_leaves_the_private_handoff_on_the_turn(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -9788,16 +9834,17 @@ async def test_the_slack_step_mints_an_install_link_for_an_admin_and_no_one_else
 async def test_connect_pairs_with_the_connection_kind_exactly(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """`connect` is the one verb no kind gates, so the model pins its pair both ways: `connect`
-    with any other kind, and any other verb with the `connection` kind, are malformed intents —
-    400 before any turn exists."""
+    """`connect` is the one verb no kind gates, so the model pins its pair: `connect` with any other
+    kind is a malformed intent, and the `connection` kind takes `connect` and the `delete` that
+    disconnects it and nothing else — an account is connected or disconnected, never edited or
+    attached. Each of these is 400 before any turn exists."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com")
     for body in (
         {"verb": "connect", "kind": "connector_grant", "name": "github"},
         {"verb": "connect", "kind": "agent", "name": "assistant"},
         {"verb": "apply", "kind": "connection", "name": "github"},
-        {"verb": "delete", "kind": "connection", "name": "github"},
+        {"verb": "detach", "kind": "connection", "name": "github"},
     ):
         refused = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
@@ -9851,7 +9898,8 @@ def test_the_acts_a_screen_draws_are_the_acts_this_lane_admits() -> None:
             else:
                 validates = True
             assert validates is admitted, f"{verb} {kind}: lane {validates}, screen {admitted}"
-    assert "connection" not in ApplyIntent.deleting_kinds()
+    assert "connection" not in ApplyIntent.applying_kinds()
+    assert "connection" in ApplyIntent.deleting_kinds()
     assert "source_trigger" not in ApplyIntent.applying_kinds()
 
 

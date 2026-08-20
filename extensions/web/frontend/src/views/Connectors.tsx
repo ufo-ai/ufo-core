@@ -2,6 +2,14 @@ import { IconCheck } from "@tabler/icons-react";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Label, Search } from "@/components/ui/field";
 import {
   Item,
@@ -125,8 +133,8 @@ function accountLine(entry: Connection): string {
 }
 
 /** One tool already reachable: a connection this member can see, or a workspace install. An install
- *  carries no connection row, so it holds no grant and opens no record — what it states is already
- *  true, and the acts on a grant belong to the grant. */
+ *  carries no connection row, so it holds no connection and opens no record — what it states is
+ *  already true, and the acts on a connection belong to the connection. */
 type Standing = {
   key: string;
   name: string;
@@ -134,7 +142,7 @@ type Standing = {
   detail: ReactNode;
   said: string;
   group: string;
-  grant: string | null;
+  entry: PoolConnection | null;
 };
 
 /** One tool the catalog still offers. */
@@ -155,7 +163,7 @@ function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
       detail: tiles.get(row.name)?.summary ?? "",
       said: row.label + " " + row.name,
       group: tiles.get(row.name)?.group ?? "",
-      grant: null,
+      entry: null,
     }));
   return [
     ...installs,
@@ -172,7 +180,7 @@ function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
       ),
       said: [entry.provider, entry.account_label ?? "", entry.account_id ?? "", entry.owner_email ?? ""].join(" "),
       group: tiles.get(entry.provider)?.group ?? "",
-      grant: entry.grant,
+      entry,
     })),
   ];
 }
@@ -256,6 +264,7 @@ export function WorkspaceConnectors({
   const [busy, setBusy] = useState<string | null>(null);
   const [watching, setWatching] = useState<string | null>(null);
   const [handoff, setHandoff] = useState<Handoff | null>(null);
+  const [removing, setRemoving] = useState<Standing | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const consent = useRef<Window | null>(null);
   const viewer = useViewer();
@@ -434,33 +443,55 @@ export function WorkspaceConnectors({
               {!mine.length ? null : (
                 <Section title="Connected" note="Accounts the app can use now.">
                   <ItemGroup>
-                    {mine.map((row, index) => (
-                      <Fragment key={row.key}>
-                        {index ? <ItemSeparator /> : null}
-                        <Row
-                          name={row.name}
-                          label={row.label}
-                          detail={row.detail}
-                          open={
-                            row.grant
-                              ? () => setOpened(row.grant as string)
-                              : row.name === GITHUB
-                                ? () => setOpened(COVERAGE)
-                                : null
-                          }
-                          act={
-                            <span className="flex items-center gap-xs text-label text-ink-soft">
-                              <IconCheck
-                                role="img"
-                                aria-label={row.label + " connected"}
-                                className="size-icon"
-                              />
-                              Connected
-                            </span>
-                          }
-                        />
-                      </Fragment>
-                    ))}
+                    {mine.map((row, index) => {
+                      const held = row.entry;
+                      return (
+                        <Fragment key={row.key}>
+                          {index ? <ItemSeparator /> : null}
+                          <Row
+                            name={row.name}
+                            label={row.label}
+                            detail={row.detail}
+                            open={
+                              held
+                                ? () => setOpened(held.grant)
+                                : row.name === GITHUB
+                                  ? () => setOpened(COVERAGE)
+                                  : null
+                            }
+                            act={
+                              <>
+                                {/* The word gives way to the act on a phone: a row under the
+                                    Connected heading already says it is connected, and the
+                                    remove needs the width the chip was taking. */}
+                                <span
+                                  className={cn(
+                                    "flex items-center gap-xs text-label text-ink-soft",
+                                    held?.own && "max-narrow:hidden",
+                                  )}
+                                >
+                                  <IconCheck
+                                    role="img"
+                                    aria-label={row.label + " connected"}
+                                    className="size-icon"
+                                  />
+                                  Connected
+                                </span>
+                                {held?.own ? (
+                                  <Button
+                                    variant="row"
+                                    aria-label={"Remove " + row.label}
+                                    onClick={() => setRemoving(row)}
+                                  >
+                                    Remove
+                                  </Button>
+                                ) : null}
+                              </>
+                            }
+                          />
+                        </Fragment>
+                      );
+                    })}
                   </ItemGroup>
                 </Section>
               )}
@@ -507,7 +538,72 @@ export function WorkspaceConnectors({
         }}
       </Panel>
       {beside}
+      <Dialog open={removing !== null} onOpenChange={(next) => !next && setRemoving(null)}>
+        {removing?.entry && agent ? (
+          <RemoveConnection
+            agentId={agent.id}
+            entry={removing.entry}
+            label={removing.label}
+            onDone={(outcome) => {
+              setRemoving(null);
+              setNotice(outcome);
+              setReloads((count) => count + 1);
+            }}
+          />
+        ) : null}
+      </Dialog>
     </>
+  );
+}
+
+/** What a per-account remove commits, and the step it stands behind. The provider and the account
+ *  are named here rather than on the row, because a row states one line and a member about to
+ *  disconnect an account is owed the whole sentence. The act ends that one connection — every other
+ *  account the workspace holds keeps its own — and a refusal stands in the dialog that asked for it
+ *  rather than behind a closed one, so the member reads the answer where they pressed. */
+function RemoveConnection({
+  agentId,
+  entry,
+  label,
+  onDone,
+}: {
+  agentId: string;
+  entry: PoolConnection;
+  label: string;
+  onDone: (outcome: NoticeState) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
+
+  async function remove() {
+    if (busy) return;
+    setBusy(true);
+    const outcome = await postIntent(agentId, {
+      verb: "delete",
+      kind: "connection",
+      name: entry.grant,
+    });
+    setBusy(false);
+    if (outcome.applied) onDone(outcomeNotice(outcome));
+    else setNotice(outcomeNotice(outcome));
+  }
+
+  return (
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Remove {label}</DialogTitle>
+        <DialogDescription>
+          The {label} account {accountName(entry)} is disconnected from every app that reaches it.
+          Every other connected account stays as it is, and you can connect this one again later.
+        </DialogDescription>
+      </DialogHeader>
+      <OutcomeNotice state={notice} />
+      <DialogFooter>
+        <Button variant="send" size="bar" busy={busy} onClick={remove}>
+          Remove account
+        </Button>
+      </DialogFooter>
+    </DialogContent>
   );
 }
 

@@ -30,7 +30,7 @@ INTENT_MAX_BYTES = 65_536
 INTENT_RESULT_TIMEOUT_SECONDS = 120
 ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
-CONNECT_ONLY_KINDS = frozenset({"connection"})
+CONNECT_KINDS = frozenset({"connection"})
 AGENT_SPEC_REQUIRED = frozenset({"model", "internet_access_allowed", "reasoning"})
 INSTALL_LINK = re.compile(r"https://\S+")
 STATED_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
@@ -46,11 +46,13 @@ class ApplyIntent(BaseModel):
     kind gates: it names the provider and opens the same private OAuth handoff chat's
     `connect_account` leaves — the URL rides the turn's terminal and is minted per speaking member
     at stream time, never in a transcript or an intent response — so it pairs with the `connection`
-    kind exactly, both ways. The `credential` kind pairs the other way: a slot's value is a secret
-    a private prompt collects, so only `delete` (clear) names it here. The `source_trigger` kind
-    pairs that way too: a trigger IS the conversation it wakes, and the lane runs on the member's
-    intent conversation, so the portal can only ever end one. A delete names its object and carries
-    no spec."""
+    kind exactly. That kind's other verb is `delete`, the disconnect the connect screen's
+    per-account remove submits: an account is connected or disconnected and never edited, and the
+    kind's own gate holds the disconnect to the connection's owner or a workspace admin. The
+    `credential` kind pairs the other way: a slot's value is a secret a private prompt collects, so
+    only `delete` (clear) names it here. The `source_trigger` kind pairs that way too: a trigger IS
+    the conversation it wakes, and the lane runs on the member's intent conversation, so the portal
+    can only ever end one. A delete names its object and carries no spec."""
 
     verb: Literal["apply", "delete", "connect", "attach", "detach"]
     kind: Literal[
@@ -78,20 +80,23 @@ class ApplyIntent(BaseModel):
     @classmethod
     def applying_kinds(cls) -> frozenset[str]:
         """The kinds the lane takes an `apply` for."""
-        return cls.kinds().difference(DELETE_ONLY_KINDS | CONNECT_ONLY_KINDS)
+        return cls.kinds().difference(DELETE_ONLY_KINDS | CONNECT_KINDS)
 
     @classmethod
     def deleting_kinds(cls) -> frozenset[str]:
-        """The kinds the lane takes a `delete` for. Read off the same two sets the validator
-        refuses by, so the acts an object screen draws and the acts this lane admits cannot drift:
-        a kind it only ever deletes draws a delete and no create, and one it only ever connects
-        draws neither."""
-        return cls.kinds().difference(CONNECT_ONLY_KINDS)
+        """The kinds the lane takes a `delete` for — every kind it names. A connection is the one
+        kind whose delete is not its own creation undone: connecting goes through the provider, and
+        the delete is the disconnect. Read off the same sets the validator refuses by, so the acts
+        an object screen draws and the acts this lane admits cannot drift: a kind it only ever
+        deletes draws a delete and no create."""
+        return cls.kinds()
 
     @model_validator(mode="after")
     def _verb_pairs_with_its_kind(self) -> "ApplyIntent":
-        if (self.verb == "connect") != (self.kind in CONNECT_ONLY_KINDS):
+        if self.verb == "connect" and self.kind not in CONNECT_KINDS:
             raise ValueError("connect pairs with the connection kind exactly")
+        if self.kind in CONNECT_KINDS and self.verb not in {"connect", "delete"}:
+            raise ValueError("a connection is connected or disconnected, never edited")
         if self.kind == "credential" and self.verb != "delete":
             raise ValueError(
                 "a credential slot's value is set through its private prompt, never a spec"

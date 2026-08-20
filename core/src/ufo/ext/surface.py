@@ -674,11 +674,17 @@ class AttachedAgentView(BaseModel):
 
 
 class ConnectionPoolView(BaseModel):
+    """One connected account as the workspace's connector library lists it, with every agent
+    holding an edge to it. `own` is whether this viewer may manage the account itself — its owner
+    or a workspace admin, the same rule the disconnect gate re-checks — so the library draws a
+    remove control exactly where the act would be admitted."""
+
     provider: str
     account_id: str
     grant: str
     account_label: str | None
     owner_email: str | None
+    own: bool
     shared: bool
     connected_at: datetime
     agents: tuple[AttachedAgentView, ...]
@@ -2378,6 +2384,7 @@ class SurfaceContext:
                         if admin or row.shared or row.owner_member_id == member_id
                         else None
                     ),
+                    own=admin or row.owner_member_id == member_id,
                     shared=row.shared,
                     connected_at=row.created_at,
                     agents=(),

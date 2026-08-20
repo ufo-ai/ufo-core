@@ -537,6 +537,116 @@ const POOLED_NOTION = {
   ],
 };
 
+/** Two accounts already connected, so a removal has to be one row's act: the account the member
+ *  named goes and the account beside it stays. */
+const POOLED_PAIR = {
+  connections: [POOLED_NOTION.connections[0], grant("gmail", true, "g2")],
+};
+
+/** The row's own remove, named for the tool it stands on so two rows never offer one word. */
+function removes(label: string): HTMLElement {
+  return within(row(label)).getByRole("button", { name: "Remove " + label });
+}
+
+test("a connected row removes that one account behind a confirmation naming it", async () => {
+  const posted: { url: string; body: unknown }[] = [];
+  let pool: unknown = POOLED_PAIR;
+  location.hash = workspaceHash("connectors");
+  library({
+    "/connections": () => json(pool),
+    "/intents": (url, init) => {
+      posted.push({ url, body: JSON.parse(String(init?.body)) });
+      pool = { connections: [POOLED_PAIR.connections[1]] };
+      return json({ applied: true, message: "Saved." });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  await userEvent.click(removes("Notion"));
+
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByRole("heading", { name: "Remove Notion" })).toBeTruthy();
+  expect(within(dialog).getByText(/Notion account Notion team/)).toBeTruthy();
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove account" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0].url).toContain("/agents/" + AGENT_ID + "/intents");
+  expect(posted[0].body).toEqual({ verb: "delete", kind: "connection", name: "g1" });
+
+  // The list re-reads itself, so the row goes without the member reloading the page.
+  await waitFor(() => expect(screen.queryByLabelText("Notion connected")).toBeNull());
+  expect(screen.getByLabelText("Gmail connected")).toBeTruthy();
+});
+
+test("the confirmation cancels and nothing is disconnected", async () => {
+  const posted: unknown[] = [];
+  location.hash = workspaceHash("connectors");
+  library({
+    "/connections": () => json(POOLED_PAIR),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  await userEvent.click(removes("Notion"));
+  const dialog = await screen.findByRole("dialog");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(posted.length).toBe(0);
+  expect(screen.getByLabelText("Notion connected")).toBeTruthy();
+});
+
+/** The gate is the kind's, not the button's: a member the disconnect refuses reads that refusal
+ *  where they pressed, and the account is still there behind it. */
+test("a refused removal states itself in the confirmation and the account stays", async () => {
+  const refusal = "only the connection owner or a workspace admin may disconnect an account";
+  location.hash = workspaceHash("connectors");
+  library({
+    "/connections": () => json(POOLED_PAIR),
+    "/intents": () => json({ applied: false, message: refusal }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  await userEvent.click(removes("Notion"));
+  await userEvent.click(
+    within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove account" }),
+  );
+
+  expect(await screen.findByText(refusal)).toBeTruthy();
+  expect(screen.getByLabelText("Notion connected")).toBeTruthy();
+});
+
+/** Where the act would be refused it is not drawn: another member's shared account, and a workspace
+ *  install, which carries no connection to disconnect. */
+test("a row the member holds no claim on draws no remove", async () => {
+  location.hash = workspaceHash("connectors");
+  library({
+    "/connections": () =>
+      json({
+        connections: [
+          {
+            ...POOLED_NOTION.connections[0],
+            own: false,
+            shared: true,
+            owner_email: "other@example.com",
+          },
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  expect(within(row("Notion")).queryByRole("button", { name: "Remove Notion" })).toBeNull();
+  expect(within(row("GitHub")).queryByRole("button", { name: "Remove GitHub" })).toBeNull();
+});
+
 test("the library offers every catalog tool and hoists the connected ones", async () => {
   location.hash = workspaceHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
