@@ -37,6 +37,7 @@ def manifest() -> Manifest:
         surfaces=(
             SurfaceSpec(
                 name=SURFACE_IMESSAGE,
+                addressed=True,
                 listen=surface.listen,
                 post=surface.post,
                 attach=surface.attach,

@@ -31,6 +31,12 @@ from ufo.ext.surface import (
     OPERATOR_EMAIL_DOMAIN as OPERATOR_EMAIL_DOMAIN,
 )
 from ufo.ext.surface import (
+    AddressClaim as AddressClaim,
+)
+from ufo.ext.surface import (
+    AddressClaimState as AddressClaimState,
+)
+from ufo.ext.surface import (
     Admitted as Admitted,
 )
 from ufo.ext.surface import (

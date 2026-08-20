@@ -3021,6 +3021,7 @@ async def test_workspace_surfaces_names_each_installed_surface_inside_the_audien
         ):
             await connection.execute(
                 sa.insert(tables.surface_installation).values(
+                    routes_ingress=True,
                     workspace_id=workspace_id,
                     surface=surface,
                     installation_id=installation,
@@ -3078,6 +3079,7 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.surface_installation).values(
+                routes_ingress=True,
                 workspace_id=workspace_id,
                 surface="slack",
                 installation_id="team:T42",
@@ -5641,6 +5643,7 @@ async def test_admin_view_reads_the_workspace_shape(
         )
         await connection.execute(
             sa.insert(tables.surface_installation).values(
+                routes_ingress=True,
                 workspace_id=workspace_id,
                 surface="slack",
                 installation_id="team:T42",
@@ -9508,6 +9511,7 @@ async def test_settings_projects_spec_schema_ceiling_and_admin_audience(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.surface_installation).values(
+                routes_ingress=True,
                 workspace_id=workspace_id,
                 surface="slack",
                 installation_id="T123",

@@ -397,6 +397,7 @@ async def test_rotated_secret_seed_refuses_every_foreign_slack_state(db: None, t
                         async with workspace_tx() as connection:
                             await connection.execute(
                                 sa.insert(tables.surface_installation).values(
+                                    routes_ingress=True,
                                     workspace_id=workspace_id,
                                     surface=SURFACE_SLACK,
                                     installation_id=slack_installation_id(

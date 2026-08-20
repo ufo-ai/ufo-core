@@ -66,14 +66,48 @@ surface_installation = sa.Table(
     sa.Column("surface", sa.Text, primary_key=True),
     sa.Column("installation_id", sa.Text, nullable=False),
     sa.Column("agent_id", sa.Uuid, sa.ForeignKey("agent.id"), nullable=False),
+    sa.Column("routes_ingress", sa.Boolean, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.UniqueConstraint(
+    sa.Index(
+        "surface_installation_surface_installation_id_key",
         "surface",
         "installation_id",
-        name="surface_installation_surface_installation_id_key",
+        unique=True,
+        postgresql_where=sa.text("routes_ingress"),
+        sqlite_where=sa.text("routes_ingress"),
     ),
     sa.CheckConstraint("installation_id <> ''", name="surface_installation_id_nonempty"),
+)
+
+surface_address = sa.Table(
+    "surface_address",
+    metadata,
+    sa.Column("surface", sa.Text, primary_key=True),
+    sa.Column("address", sa.Text, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False, index=True),
+    sa.Column("member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=False),
+    sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("proved_by", sa.Text, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("address <> ''", name="surface_address_address_nonempty"),
+    sa.CheckConstraint(
+        "claim_expires_at is null or proved_by is null",
+        name="surface_address_claim_or_proof",
+    ),
+)
+
+surface_stream_cursor = sa.Table(
+    "surface_stream_cursor",
+    metadata,
+    sa.Column("surface", sa.Text, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=True),
+    sa.Column("installation_id", sa.Text, nullable=False),
+    sa.Column("sequence", sa.BigInteger, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("installation_id <> ''", name="surface_stream_cursor_id_nonempty"),
 )
 
 agent = sa.Table(

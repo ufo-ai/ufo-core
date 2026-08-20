@@ -450,6 +450,9 @@ def turn_tools(
             embed,
             blob=blob,
             surfaces=frozenset(surface.name for surface in manifest.surfaces),
+            addressed_surfaces=frozenset(
+                surface.name for surface in manifest.surfaces if surface.addressed
+            ),
             credential_sources=tuple(
                 (slot.name, slot.source) for slot in manifest.credentials if slot.source is not None
             ),
@@ -501,6 +504,9 @@ def member_object_registry(
             index,
             embed,
             surfaces=frozenset(surface.name for surface in manifest.surfaces),
+            addressed_surfaces=frozenset(
+                surface.name for surface in manifest.surfaces if surface.addressed
+            ),
             public_base_url=public_base_url,
             artifact_token_secret=artifact_token_secret,
         )

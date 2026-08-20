@@ -36,6 +36,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from secrets import token_hex
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
@@ -1037,15 +1038,17 @@ async def _main_agent(workspace_id: UUID) -> UUID:
 
 
 async def _bind_surface_installation(
-    workspace_id: UUID, surface: str, installation_id: str
+    workspace_id: UUID, surface: str, installation_id: str, *, routes_ingress: bool
 ) -> None:
     """Upsert one surface's installation binding for a workspace, replacing any prior binding for
     that (workspace, surface). A new binding lands on the workspace's main agent; rebinding
-    replaces the installation identity and keeps the binding's agent. The fleet-wide uniqueness on
-    (surface, installation_id) raises `SurfaceInstallationConflict` when the installation already
-    belongs to another workspace. The one place the binding is written — a tool
-    (`SurfaceInstallationAccess.bind`) and a surface's own OAuth callback
-    (`SurfaceContext.bind_installation`) both land it here."""
+    replaces the installation identity and keeps the binding's agent. `routes_ingress` says the
+    installation is what selects the tenant — a customer's own account, so the partial unique index
+    on (surface, installation_id) raises `SurfaceInstallationConflict` when another workspace holds
+    it. An addressed surface's installation is the deploy's own and routes nothing, so every
+    workspace binds the same one and its members are told apart by `surface_address`. The one place
+    the binding is written — a tool (`SurfaceInstallationAccess.bind`) and a surface's own OAuth
+    callback (`SurfaceContext.bind_installation`) both land it here."""
     if not installation_id:
         raise ValueError("surface installation id is empty")
     agent_id = await _main_agent(workspace_id)
@@ -1059,16 +1062,32 @@ async def _bind_surface_installation(
                     surface=surface,
                     installation_id=installation_id,
                     agent_id=agent_id,
+                    routes_ingress=routes_ingress,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
                 .on_conflict_do_update(
                     index_elements=("workspace_id", "surface"),
-                    set_={"installation_id": installation_id, "updated_at": sa.func.now()},
+                    set_={
+                        "installation_id": installation_id,
+                        "routes_ingress": routes_ingress,
+                        "updated_at": sa.func.now(),
+                    },
                 )
             )
     except sa.exc.IntegrityError as error:
         raise SurfaceInstallationConflict(surface) from error
+
+
+@dataclass(frozen=True)
+class AddressClaim:
+    """One address an addressed surface routes to a member. `claim_expires_at` is set while the
+    sender has not proved the address yet and cleared once they have, and `proved_by` is the inbound
+    message that proved it."""
+
+    member_id: UUID
+    claim_expires_at: datetime | None
+    proved_by: str | None
 
 
 @dataclass(frozen=True)
@@ -1243,7 +1262,62 @@ class SurfaceContext:
         install at a callback records the team→workspace mapping shared ingress later resolves by;
         the fleet-wide uniqueness on (surface, installation_id) rejects a team already bound to
         another workspace with `SurfaceInstallationConflict`."""
-        await _bind_surface_installation(self.workspace_id, self.surface, installation_id)
+        await _bind_surface_installation(
+            self.workspace_id, self.surface, installation_id, routes_ingress=True
+        )
+
+    async def address_claim(self, address: str) -> AddressClaim | None:
+        """This workspace's claim on one address the surface routes by, or None when it holds
+        none. A claim still carrying `claim_expires_at` is a reservation the sender has not proved
+        yet; a proved one names the message that proved it."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.surface_address.c.member_id,
+                        tables.surface_address.c.claim_expires_at,
+                        tables.surface_address.c.proved_by,
+                    ).where(
+                        tables.surface_address.c.surface == self.surface,
+                        tables.surface_address.c.address == address,
+                        tables.surface_address.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        expires_at = row.claim_expires_at
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        return AddressClaim(
+            member_id=row.member_id, claim_expires_at=expires_at, proved_by=row.proved_by
+        )
+
+    async def confirm_address(self, address: str, proved_by: str) -> None:
+        """Link one address this surface routes by, against the inbound message that proved it. The
+        reservation stops lapsing and the proof id is what a replayed stream recognises, so the
+        proving message links the address once and is never admitted as a turn."""
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.surface_address)
+                .where(
+                    tables.surface_address.c.surface == self.surface,
+                    tables.surface_address.c.address == address,
+                    tables.surface_address.c.workspace_id == self.workspace_id,
+                )
+                .values(claim_expires_at=None, proved_by=proved_by, updated_at=sa.func.now())
+            )
+
+    async def release_address(self, address: str) -> None:
+        """Drop one address's claim, so the phone is free to be claimed again."""
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.surface_address).where(
+                    tables.surface_address.c.surface == self.surface,
+                    tables.surface_address.c.address == address,
+                    tables.surface_address.c.workspace_id == self.workspace_id,
+                )
+            )
 
     @property
     def public_base_url(self) -> str | None:
@@ -3879,31 +3953,84 @@ class UndeclaredSurface(KeyError):
     """A tool tried to register an installation for a surface its manifest does not declare."""
 
 
+class AddressClaimState(StrEnum):
+    """What a workspace member's claim on one address came to."""
+
+    RESERVED = "reserved"
+    LINKED = "linked"
+    TAKEN = "taken"
+
+
 @dataclass(frozen=True)
 class SurfaceInstallationAccess:
     """A tool's manifest-scoped view of its declared surfaces under the ambient workspace: the
-    installation this workspace is bound to, and the member a surface already knows an external id
-    by."""
+    installation this workspace is bound to, and the addresses an addressed surface routes to its
+    members."""
 
     declared: frozenset[str]
+    addressed: frozenset[str] = frozenset()
 
-    async def linked_member(self, surface: str, external_id: str) -> UUID | None:
-        """The member one declared surface's external id is linked to, or None. A setup tool reads
-        this to answer a member the surface already knows, instead of staging a claim that the
-        member has nothing left to complete."""
-        if surface not in self.declared:
+    async def reserve_address(
+        self, surface: str, address: str, member_id: UUID, claim_expires_at: datetime
+    ) -> AddressClaimState:
+        """Claim one address for this workspace's member until `claim_expires_at`, so the surface's
+        shared ingress routes it here once the sender proves it. The claim is fleet-wide because the
+        address is the identity: `RESERVED` is this member's to prove, `LINKED` is already proved,
+        and `TAKEN` is another member's — whichever workspace holds it, which is why the answer
+        names no more than that. A lapsed reservation nobody proved is taken over."""
+        if surface not in self.addressed:
             raise UndeclaredSurface(surface)
-        async with workspace_tx() as connection:
-            row = (
+        workspace_id = ws_current().workspace_id
+        now = datetime.now(UTC)
+        async with owner_tx() as connection:
+            insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            reserved = await connection.scalar(
+                insert(tables.surface_address)
+                .values(
+                    surface=surface,
+                    address=address,
+                    workspace_id=workspace_id,
+                    member_id=member_id,
+                    claim_expires_at=claim_expires_at,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_update(
+                    index_elements=("surface", "address"),
+                    set_={
+                        "workspace_id": workspace_id,
+                        "member_id": member_id,
+                        "claim_expires_at": claim_expires_at,
+                        "proved_by": None,
+                        "updated_at": sa.func.now(),
+                    },
+                    where=sa.or_(
+                        tables.surface_address.c.claim_expires_at <= now,
+                        sa.and_(
+                            tables.surface_address.c.workspace_id == workspace_id,
+                            tables.surface_address.c.member_id == member_id,
+                            tables.surface_address.c.claim_expires_at.is_not(None),
+                        ),
+                    ),
+                )
+                .returning(tables.surface_address.c.member_id)
+            )
+            if reserved is not None:
+                return AddressClaimState.RESERVED
+            held = (
                 await connection.execute(
-                    sa.select(tables.surface_identity.c.member_id).where(
-                        tables.surface_identity.c.workspace_id == ws_current().workspace_id,
-                        tables.surface_identity.c.surface == surface,
-                        tables.surface_identity.c.external_id == external_id,
+                    sa.select(
+                        tables.surface_address.c.workspace_id,
+                        tables.surface_address.c.member_id,
+                    ).where(
+                        tables.surface_address.c.surface == surface,
+                        tables.surface_address.c.address == address,
                     )
                 )
-            ).one_or_none()
-        return None if row is None else row.member_id
+            ).one()
+        if held.workspace_id == workspace_id and held.member_id == member_id:
+            return AddressClaimState.LINKED
+        return AddressClaimState.TAKEN
 
     async def installation(self, surface: str) -> str | None:
         """Return this workspace's installation identity for one declared surface."""
@@ -3922,10 +4049,17 @@ class SurfaceInstallationAccess:
 
     async def bind(self, surface: str, installation_id: str) -> None:
         """Bind one declared surface's installation to this workspace. Reconfiguration replaces
-        this workspace's binding; the fleet-wide identity constraint rejects another workspace."""
+        this workspace's binding. An installation that routes ingress belongs to one workspace, so
+        the fleet-wide identity constraint rejects another; an addressed surface's installation is
+        the deploy's own and every workspace binds it."""
         if surface not in self.declared:
             raise UndeclaredSurface(surface)
-        await _bind_surface_installation(ws_current().workspace_id, surface, installation_id)
+        await _bind_surface_installation(
+            ws_current().workspace_id,
+            surface,
+            installation_id,
+            routes_ingress=surface not in self.addressed,
+        )
 
 
 @dataclass(frozen=True)
@@ -3944,6 +4078,22 @@ class SurfaceAuth:
                     sa.select(tables.surface_installation.c.workspace_id).where(
                         tables.surface_installation.c.surface == self._surface,
                         tables.surface_installation.c.installation_id == installation_id,
+                        tables.surface_installation.c.routes_ingress,
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else row.workspace_id
+
+    async def addressed_workspace(self, address: str) -> UUID | None:
+        """The workspace one address reaches, or None when no workspace claims it. The fleet lookup
+        an addressed surface resolves by, in place of an installation identity: the address is
+        unique across the fleet, so one row answers it."""
+        async with owner_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.surface_address.c.workspace_id).where(
+                        tables.surface_address.c.surface == self._surface,
+                        tables.surface_address.c.address == address,
                     )
                 )
             ).one_or_none()
@@ -4024,6 +4174,71 @@ class SurfaceListenerContext:
             return
         with ws(workspace_id):
             yield self._context_for(workspace_id, self.surface)
+
+    @asynccontextmanager
+    async def addressed(self, address: str) -> AsyncIterator[SurfaceContext | None]:
+        """Bind the workspace one sender's address reaches, or yield None when no workspace claims
+        it. One shared provider serves the whole fleet, so the address is what selects the tenant —
+        every workspace binds the same installation and none of them owns the stream."""
+        if not await self._owned():
+            raise RuntimeError(f"surface listener {self.surface!r} lost fleet ownership")
+        workspace_id = await self._auth.addressed_workspace(address)
+        if workspace_id is None:
+            yield None
+            return
+        with ws(workspace_id):
+            yield self._context_for(workspace_id, self.surface)
+
+    async def cursor(self, installation_id: str) -> int | None:
+        """Where this listener's stream stands, or None when it has never read one — and when the
+        stored position belongs to a different installation, since a deploy pointed at a new
+        provider project starts from that project's own head."""
+        async with owner_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.surface_stream_cursor.c.installation_id,
+                        tables.surface_stream_cursor.c.sequence,
+                    ).where(tables.surface_stream_cursor.c.surface == self.surface)
+                )
+            ).one_or_none()
+        if row is None or row.installation_id != installation_id:
+            return None
+        return row.sequence
+
+    async def store_cursor(self, installation_id: str, sequence: int) -> None:
+        """Record where the stream stands. One position serves one stream, so it lives beside the
+        listener rather than in any workspace the stream happens to deliver to."""
+        async with owner_tx() as connection:
+            insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.surface_stream_cursor)
+                .values(
+                    surface=self.surface,
+                    workspace_id=None,
+                    installation_id=installation_id,
+                    sequence=sequence,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_update(
+                    index_elements=("surface",),
+                    set_={
+                        "installation_id": installation_id,
+                        "sequence": sequence,
+                        "updated_at": sa.func.now(),
+                    },
+                )
+            )
+
+    async def clear_cursor(self) -> None:
+        """Forget the stream position, so the next read starts from the provider's head."""
+        async with owner_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.surface_stream_cursor).where(
+                    tables.surface_stream_cursor.c.surface == self.surface
+                )
+            )
 
 
 SurfaceListener = Callable[[SurfaceListenerContext], Awaitable[None]]
@@ -4233,6 +4448,12 @@ class SurfaceSpec:
     """A persistent provider stream owned by this surface. Core starts it with the app and cancels
     it during app shutdown because only core owns the process lifecycle and privileged workspace
     binding. HTTP-only surfaces leave it unset."""
+    addressed: bool = False
+    """Whether inbound traffic names its member by the sender's own address rather than by an
+    installation. A shared provider the deploy owns — one iMessage project, one line — serves every
+    workspace, so `surface_address` resolves the tenant and the installation identity routes
+    nothing; an installation-routed surface's identity is one customer's account and stays unique
+    across the fleet."""
     home: bool = False
     """Whether a browser arriving at the deploy's root belongs on this surface. Core answers `GET /`
     with a redirect to `/surface/<name>`, so the bare host is a door rather than a 404. At most one

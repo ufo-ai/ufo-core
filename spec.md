@@ -501,7 +501,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Terminal | `extensions/ufo` | live (held directive stream) | member token | session (private) |
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email/hex (private; a member opens any number of conversations per agent, each behind `conversation=new`; conversations that predate the rail keep bare agent/email keys, reachable by id) + intent/agent/email (the member's prepared-intent lane to that agent) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign. `surface_label` is `#name` off the `conversations.info` the audience decision already fetched (never a call of its own, and never an MPIM's member-naming name), `Direct message` for a DM, else null |
-| iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member (half-hour per-claim `UFO <code>` requested in signed-in chat and completed by one direct provider message) | provider conversation id; DM = member, group = room |
+| iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member, fleet-wide (half-hour per-claim `UFO <code>` requested in signed-in chat and completed by one direct provider message) | provider conversation id; DM = member, group = room |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
@@ -771,12 +771,25 @@ and an `sms:` link carrying it; a phone the surface already knows answers `conne
 phone another member holds or is claiming is refused. Only a direct message from the claimed phone
 within half an hour proves control, read past case, spacing and punctuation; a bare `UFO`, another
 claim's code, or a late one completes nothing and is answered with what to do next, and an opt-out
-word cancels the claim. The proving message links the phone and is not admitted as a turn. The
-surface replies that the phone is connected and sends a vCard for the assigned line, so the member
-saves it as a known contact. A shared line cannot open a conversation with a phone that has not
-texted it, so the member's own message is what opens one — setup makes no outbound call.
-The listener opens the live stream, buffers it while it replays from its extension-store sequence
-cursor, then drains the buffer; each provider message GUID is the admission idempotency key.
+word cancels the claim. The proving message links the phone and is not admitted as a turn — the
+claim records the message that proved it, so a replayed stream recognises it. The surface replies
+that the phone is connected and sends a vCard for the assigned line, so the member saves it as a
+known contact; a provider that refuses the card leaves the phone connected, logged under its own
+name. A shared line cannot open a conversation with a phone that has not texted it, so the member's
+own message is what opens one — setup makes no outbound call.
+The listener opens the live stream, buffers it while it replays from its sequence cursor, then
+drains the buffer; each provider message GUID is the admission idempotency key. One stream serves
+every workspace, so the cursor is the listener's own row and advances on a processed event, never on
+one that failed.
+
+**An addressed surface resolves its tenant by the sender, not by the installation.** iMessage's
+provider is the deploy's — one project, one line, many registered phones — so the installation
+identity selects no workspace: every workspace binds the same one and `routes_ingress` is false, the
+`surface_installation` identity index narrowing to the installations that do route (a Slack team,
+which belongs to one workspace). What selects the workspace is `surface_address`: one fleet-unique
+row per (surface, address) naming the workspace and member that phone reaches, staged by the setup
+tool with the claim's expiry and cleared against the proving message. So a phone belongs to one
+member across the fleet, and one line serves every workspace and every member on it.
 
 Shared surface requests authenticate their workspace before core binds it. The untrusted team id
 selects one unique `surface_installation`, and that workspace's signing secret — its own slot (a

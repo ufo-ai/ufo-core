@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import threading
 from collections.abc import AsyncGenerator
@@ -33,7 +32,6 @@ from ufo_ext_imessage.provider import (
 from ufo_ext_imessage.surface import (
     CODE_EXPIRED_TEXT,
     CODE_UNKNOWN_TEXT,
-    CONFIRMATION_REPLY_PREFIX,
     CONNECTED_TEXT,
     CONTACT_CARD_FILENAME,
     IMESSAGE_EXTENSION,
@@ -45,9 +43,9 @@ from ufo_ext_imessage.surface import (
     ImessageSurface,
     MessageStreamDisconnected,
     PendingClaim,
+    claim_key,
     contact_card,
     conversation_from_queue,
-    phone_key,
     queue_key,
 )
 from ufo_ext_imessage.tools import (
@@ -69,7 +67,13 @@ from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.surface import SurfaceContext, Writeback, member_message_text
+from ufo.ext.surface import (
+    SurfaceAuth,
+    SurfaceContext,
+    SurfaceListenerContext,
+    Writeback,
+    member_message_text,
+)
 from ufo.hub import InProcessHub
 from ufo.models.interface import ModelRequest
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -269,13 +273,93 @@ def _tool_context(workspace_id: UUID, member_id: UUID) -> ToolContext:
             IMESSAGE_EXTENSION,
             frozenset(),
             surfaces=frozenset({SURFACE_IMESSAGE}),
+            addressed_surfaces=frozenset({SURFACE_IMESSAGE}),
         ),
     )
 
 
+async def _owned() -> bool:
+    return True
+
+
+async def _claim(
+    workspace_id: UUID,
+    member_id: UUID,
+    phone: str,
+    *,
+    expires_in: timedelta = timedelta(minutes=PHONE_CLAIM_MINUTES),
+    code: str = CLAIM_CODE,
+    line: str = "+14085550123",
+) -> None:
+    """One member's unproved claim on a phone: the fleet row that routes it, and the store row
+    holding the code and the line they were given."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_address).values(
+                surface=SURFACE_IMESSAGE,
+                address=phone,
+                workspace_id=workspace_id,
+                member_id=member_id,
+                claim_expires_at=datetime.now(UTC) + expires_in,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        await ScopedStore(IMESSAGE_EXTENSION).put(
+            claim_key(member_id, phone),
+            PendingClaim(assigned_phone_number=line, opt_in_code=code).model_dump(mode="json"),
+        )
+
+
+async def _linked(workspace_id: UUID, member_id: UUID, phone: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_address).values(
+                surface=SURFACE_IMESSAGE,
+                address=phone,
+                workspace_id=workspace_id,
+                member_id=member_id,
+                proved_by="earlier-message",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def _claimed_phones() -> list[tuple[str, UUID, str | None]]:
+    async with workspace_tx() as connection:
+        return [
+            (row.address, row.member_id, row.proved_by)
+            for row in await connection.execute(
+                sa.select(
+                    tables.surface_address.c.address,
+                    tables.surface_address.c.member_id,
+                    tables.surface_address.c.proved_by,
+                ).where(tables.surface_address.c.surface == SURFACE_IMESSAGE)
+            )
+        ]
+
+
+async def _member(workspace_id: UUID, email: str) -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=email,
+                is_admin=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
+
+
 async def test_a_project_change_requires_an_admin_then_rebinds(db: None) -> None:
     workspace_id, admin_id = await _seed()
-    member_id = uuid4()
+    member_id = await _member(workspace_id, "other@example.com")
 
     class NewProjectProvider(RecordingProvider):
         @property
@@ -285,17 +369,6 @@ async def test_a_project_change_requires_an_admin_then_rebinds(db: None) -> None
     provider = NewProjectProvider()
     admin = _tool_context(workspace_id, admin_id)
     member = _tool_context(workspace_id, member_id)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=member_id,
-                workspace_id=workspace_id,
-                email="other@example.com",
-                is_admin=False,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
     with ws(workspace_id):
         assert admin.ext is not None
         await admin.ext.installations.bind(SURFACE_IMESSAGE, "project:old")
@@ -323,6 +396,7 @@ def test_manifest_declares_complete_durable_surface() -> None:
     assert loaded.deploy_keys == ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET")
     assert tuple(tool.name for tool in loaded.tools) == ("imessage_connect",)
     surface = loaded.surfaces[0]
+    assert surface.addressed
     assert surface.listen is not None
     assert surface.post is not None
     assert surface.attach is not None
@@ -706,7 +780,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     with ws(workspace_id):
         first = await tool.run(tool_context, args)
         second = await tool.run(tool_context, args)
-        stored = await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone))
+        stored = await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone))
     claim = PendingClaim.model_validate(stored)
     opt_in_text = f"UFO {claim.opt_in_code}"
     assert json.loads(first.content[0].text) == {
@@ -720,8 +794,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
         "opt_in_link": f"sms:+14085550123?&body=UFO%20{claim.opt_in_code}",
     }
     assert second == first
-    assert claim.member_id == member_id
-    assert claim.phone_number == phone
+    assert await _claimed_phones() == [(phone, member_id, None)]
     assert claim.assigned_phone_number == "+14085550123"
     assert len(claim.opt_in_code) == OPT_IN_CODE_LENGTH
     assert set(claim.opt_in_code) <= set(OPT_IN_CODE_ALPHABET)
@@ -738,7 +811,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
             provider,
             _message(phone, opt_in_text, message_id="opt-in"),
         )
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
         await surface._admit_message(
             context,
             provider,
@@ -757,14 +830,6 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
             ),
         )
     async with workspace_tx() as connection:
-        identity = (
-            await connection.execute(
-                sa.select(tables.surface_identity.c.member_id).where(
-                    tables.surface_identity.c.surface == SURFACE_IMESSAGE,
-                    tables.surface_identity.c.external_id == phone,
-                )
-            )
-        ).one()
         conversation = (
             await connection.execute(
                 sa.select(
@@ -786,7 +851,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
         writebacks = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.writeback))
         ).scalar_one()
-    assert identity.member_id == member_id
+    assert await _claimed_phones() == [(phone, member_id, "opt-in")]
     assert conversation.member_id == member_id
     assert conversation.queue_key == queue_key(f"iMessage;-;{phone}", direct=True)
     assert conversation.surface_label == "Direct message"
@@ -812,37 +877,19 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
 
 async def test_an_expired_claim_can_move_to_another_member(db: None) -> None:
     workspace_id, first_member_id = await _seed()
-    second_member_id = uuid4()
+    second_member_id = await _member(workspace_id, "second@example.com")
     phone = "+14155550123"
     provider = RecordingProvider()
     tool_context = _tool_context(workspace_id, second_member_id)
-    claim = PendingClaim(
-        member_id=first_member_id,
-        phone_number=phone,
-        assigned_phone_number="+14085550123",
-        opt_in_code=CLAIM_CODE,
-        expires_at=datetime.now(UTC) - timedelta(minutes=1),
-    )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=second_member_id,
-                workspace_id=workspace_id,
-                email="second@example.com",
-                is_admin=False,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+    await _claim(workspace_id, first_member_id, phone, expires_in=timedelta(minutes=-1))
     with ws(workspace_id):
         assert tool_context.ext is not None
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        await tool_context.ext.store.put(phone_key(phone), claim.model_dump(mode="json"))
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
             ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
         )
-        stored = await tool_context.ext.store.get(phone_key(phone))
+        stored = await tool_context.ext.store.get(claim_key(second_member_id, phone))
     replaced = PendingClaim.model_validate(stored)
     opt_in_text = f"UFO {replaced.opt_in_code}"
     assert json.loads(result.content[0].text) == {
@@ -855,101 +902,56 @@ async def test_an_expired_claim_can_move_to_another_member(db: None) -> None:
         "opt_in_text": opt_in_text,
         "opt_in_link": f"sms:+14085550123?&body=UFO%20{replaced.opt_in_code}",
     }
-    assert replaced.member_id == second_member_id
+    assert await _claimed_phones() == [(phone, second_member_id, None)]
     assert replaced.opt_in_code != CLAIM_CODE
-    assert replaced.expires_at > datetime.now(UTC)
     assert len(provider.lines) == 1
     assert provider.lines[0][0] == phone
     assert provider.lines[0][1].startswith("imessage-line:")
     assert provider.sends == []
 
 
-async def test_an_expired_claim_takeover_cannot_overwrite_a_concurrent_claim(db: None) -> None:
-    workspace_id, first_member_id = await _seed()
-    second_member_id = uuid4()
-    third_member_id = uuid4()
+async def test_a_concurrent_claim_write_is_not_overwritten(db: None) -> None:
+    """The fleet row admits one claimant, so the remaining race is this member's own second run.
+    The store write is conditional on what it read, so the code the member was already given
+    stands and the loser says to ask again rather than handing out a code that proves nothing."""
+    workspace_id, member_id = await _seed()
     phone = "+14155550123"
-    old_claim = PendingClaim(
-        member_id=first_member_id,
-        phone_number=phone,
-        assigned_phone_number="+14085550123",
-        opt_in_code=CLAIM_CODE,
-        expires_at=datetime.now(UTC) - timedelta(minutes=1),
-    )
-    concurrent_claim = PendingClaim(
-        member_id=third_member_id,
-        phone_number=phone,
-        assigned_phone_number="+14085550123",
-        opt_in_code="BCD345",
-        expires_at=datetime.now(UTC) + timedelta(minutes=PHONE_CLAIM_MINUTES),
-    )
+    concurrent = PendingClaim(assigned_phone_number="+14085550123", opt_in_code="BCD345")
 
     class RacingProvider(RecordingProvider):
         async def assign_line(self, phone_number: str, idempotency_key: str) -> str:
             await ScopedStore(IMESSAGE_EXTENSION).put(
-                phone_key(phone_number), concurrent_claim.model_dump(mode="json")
+                claim_key(member_id, phone_number), concurrent.model_dump(mode="json")
             )
             return await super().assign_line(phone_number, idempotency_key)
 
     provider = RacingProvider()
-    tool_context = _tool_context(workspace_id, second_member_id)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=second_member_id,
-                workspace_id=workspace_id,
-                email="second@example.com",
-                is_admin=False,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+    tool_context = _tool_context(workspace_id, member_id)
     with ws(workspace_id):
         assert tool_context.ext is not None
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        await tool_context.ext.store.put(phone_key(phone), old_claim.model_dump(mode="json"))
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
             ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
         )
-        stored = await tool_context.ext.store.get(phone_key(phone))
+        stored = await tool_context.ext.store.get(claim_key(member_id, phone))
     assert json.loads(result.content[0].text) == {
         "state": "not_connected",
         "instruction": "The phone connection changed. Ask again.",
     }
-    assert PendingClaim.model_validate(stored) == concurrent_claim
+    assert PendingClaim.model_validate(stored) == concurrent
     assert provider.sends == []
 
 
 async def test_connect_answers_a_phone_the_surface_already_knows(db: None) -> None:
     workspace_id, member_id = await _seed()
-    other_member_id = uuid4()
+    other_member_id = await _member(workspace_id, "second@example.com")
     phone = "+14155550123"
     other_phone = "+16505550123"
     provider = RecordingProvider()
     tool_context = _tool_context(workspace_id, member_id)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=other_member_id,
-                workspace_id=workspace_id,
-                email="second@example.com",
-                is_admin=False,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        for external_id, owner in ((phone, member_id), (other_phone, other_member_id)):
-            await connection.execute(
-                sa.insert(tables.surface_identity).values(
-                    workspace_id=workspace_id,
-                    member_id=owner,
-                    surface=SURFACE_IMESSAGE,
-                    external_id=external_id,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
+    await _linked(workspace_id, member_id, phone)
+    await _linked(workspace_id, other_member_id, other_phone)
     tool = ImessageConnect(provider=lambda: provider)
     with ws(workspace_id):
         assert tool_context.ext is not None
@@ -962,7 +964,7 @@ async def test_connect_answers_a_phone_the_surface_already_knows(db: None) -> No
             tool_context,
             ImessageConnectInput(phone_number=other_phone, user_description="Connect my phone."),
         )
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
     assert json.loads(mine.content[0].text) == {
         "state": "connected",
         "instruction": "That phone is connected. Text +14085550123 from it.",
@@ -970,49 +972,32 @@ async def test_connect_answers_a_phone_the_surface_already_knows(db: None) -> No
     }
     assert json.loads(theirs.content[0].text) == {
         "state": "not_connected",
-        "instruction": "That phone belongs to another workspace member.",
+        "instruction": "That phone belongs to another member.",
     }
     assert provider.sends == []
 
 
 async def test_connect_refuses_a_phone_another_member_is_connecting(db: None) -> None:
     workspace_id, first_member_id = await _seed()
-    second_member_id = uuid4()
+    second_member_id = await _member(workspace_id, "second@example.com")
     phone = "+14155550123"
     provider = RecordingProvider()
     tool_context = _tool_context(workspace_id, second_member_id)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=second_member_id,
-                workspace_id=workspace_id,
-                email="second@example.com",
-                is_admin=False,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    claim = PendingClaim(
-        member_id=first_member_id,
-        phone_number=phone,
-        assigned_phone_number="+14085550123",
-        opt_in_code=CLAIM_CODE,
-        expires_at=datetime.now(UTC) + timedelta(minutes=PHONE_CLAIM_MINUTES),
-    )
+    await _claim(workspace_id, first_member_id, phone)
     with ws(workspace_id):
         assert tool_context.ext is not None
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        await tool_context.ext.store.put(phone_key(phone), claim.model_dump(mode="json"))
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
             ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
         )
-        stored = await tool_context.ext.store.get(phone_key(phone))
+        stored = await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(first_member_id, phone))
     assert json.loads(result.content[0].text) == {
         "state": "not_connected",
-        "instruction": "Another workspace member is connecting that phone.",
+        "instruction": "That phone belongs to another member.",
     }
-    assert PendingClaim.model_validate(stored) == claim
+    assert PendingClaim.model_validate(stored).opt_in_code == CLAIM_CODE
+    assert await _claimed_phones() == [(phone, first_member_id, None)]
     assert provider.lines == []
 
 
@@ -1025,61 +1010,66 @@ async def test_an_unreadable_row_is_dropped_and_never_parks_the_surface(
     tool_context = _tool_context(workspace_id, member_id)
     context = _context(workspace_id, tmp_path, StubDbos())
     surface = ImessageSurface(provider=lambda: provider)
-    receipt_key = f"{CONFIRMATION_REPLY_PREFIX}{hashlib.sha256(b'receipt-replay').hexdigest()}"
     unreadable = {"member_id": str(member_id)}
+    await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
         store = ScopedStore(IMESSAGE_EXTENSION)
-        await store.put(phone_key(phone), unreadable)
-        await store.put(receipt_key, unreadable)
-        assert (
-            await surface._admit_message(
-                context, provider, _message(phone, CLAIM_CODE, message_id="receipt-replay")
-            )
-            is None
+        await store.put(claim_key(member_id, phone), unreadable)
+        await surface._admit_message(
+            context, provider, _message(phone, CLAIM_CODE, message_id="unreadable")
         )
-        assert await store.get(receipt_key) is None
-        assert (
-            await surface._admit_message(
-                context, provider, _message(phone, CLAIM_CODE, message_id="fresh")
-            )
-            is None
-        )
-        assert await store.get(phone_key(phone)) is None
         assert tool_context.ext is not None
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        await store.put(phone_key(phone), unreadable)
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
             ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
         )
-        stored = await store.get(phone_key(phone))
+        stored = await store.get(claim_key(member_id, phone))
     assert json.loads(result.content[0].text)["state"] == "pending"
-    assert PendingClaim.model_validate(stored).member_id == member_id
+    assert PendingClaim.model_validate(stored).opt_in_code != CLAIM_CODE
+    assert await _claimed_phones() == [(phone, member_id, None)]
     assert provider.sends == []
 
 
-async def test_other_store_names_cannot_enter_the_opt_in_flow(db: None, tmp_path: Path) -> None:
-    workspace_id, _ = await _seed()
+async def test_a_code_stored_under_another_member_completes_nothing(
+    db: None, tmp_path: Path
+) -> None:
+    """The fleet row names the member the phone reaches, and the code is read from that member's own
+    row. A code sitting under anyone else's name is not the claim being proved."""
+    workspace_id, member_id = await _seed()
+    other_member_id = await _member(workspace_id, "second@example.com")
     phone = "+14155550123"
-    message = _message(phone, f"UFO {CLAIM_CODE}", message_id="unmatched-opt-in")
-    claim_key = f"claim:{hashlib.sha256(phone.encode()).hexdigest()}"
-    receipt_key = f"confirmation-reply:{hashlib.sha256(message.id.encode()).hexdigest()}"
     provider = RecordingProvider()
     context = _context(workspace_id, tmp_path, StubDbos())
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_address).values(
+                surface=SURFACE_IMESSAGE,
+                address=phone,
+                workspace_id=workspace_id,
+                member_id=member_id,
+                claim_expires_at=datetime.now(UTC) + timedelta(minutes=PHONE_CLAIM_MINUTES),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     with ws(workspace_id):
         store = ScopedStore(IMESSAGE_EXTENSION)
-        await store.put(claim_key, {"value": "claim"})
-        await store.put(receipt_key, {"value": "receipt"})
-        await ImessageSurface(provider=lambda: provider)._admit_message(context, provider, message)
-        assert await store.get(claim_key) == {"value": "claim"}
-        assert await store.get(receipt_key) == {"value": "receipt"}
+        await store.put(
+            claim_key(other_member_id, phone),
+            PendingClaim(assigned_phone_number="+14085550123", opt_in_code=CLAIM_CODE).model_dump(
+                mode="json"
+            ),
+        )
+        await ImessageSurface(provider=lambda: provider)._admit_message(
+            context, provider, _message(phone, f"UFO {CLAIM_CODE}", message_id="unmatched-opt-in")
+        )
+    assert await _claimed_phones() == [(phone, member_id, None)]
     async with workspace_tx() as connection:
-        identities = (
-            await connection.execute(
-                sa.select(sa.func.count()).select_from(tables.surface_identity)
-            )
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
         ).scalar_one()
-    assert identities == 0
+    assert turns == 0
     assert provider.sends == []
 
 
@@ -1101,17 +1091,8 @@ async def test_the_code_reads_through_case_spacing_and_punctuation(
     phone = "+14155550123"
     provider = RecordingProvider()
     context = _context(workspace_id, tmp_path, StubDbos())
+    await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
-        await ScopedStore(IMESSAGE_EXTENSION).put(
-            phone_key(phone),
-            PendingClaim(
-                member_id=member_id,
-                phone_number=phone,
-                assigned_phone_number="+14085550123",
-                opt_in_code=CLAIM_CODE,
-                expires_at=datetime.now(UTC) + timedelta(minutes=PHONE_CLAIM_MINUTES),
-            ).model_dump(mode="json"),
-        )
         await ImessageSurface(provider=lambda: provider)._admit_message(
             context,
             provider,
@@ -1124,20 +1105,12 @@ async def test_the_code_reads_through_case_spacing_and_punctuation(
                 ),
             ),
         )
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
     async with workspace_tx() as connection:
-        linked_member_id = (
-            await connection.execute(
-                sa.select(tables.surface_identity.c.member_id).where(
-                    tables.surface_identity.c.surface == SURFACE_IMESSAGE,
-                    tables.surface_identity.c.external_id == phone,
-                )
-            )
-        ).scalar_one()
         turns = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
         ).scalar_one()
-    assert linked_member_id == member_id
+    assert await _claimed_phones() == [(phone, member_id, "opt-in")]
     assert turns == 0
     assert provider.delivered == [(f"iMessage;-;{phone}", CONNECTED_TEXT)]
 
@@ -1150,19 +1123,8 @@ async def test_a_wrong_code_is_answered_and_an_expired_claim_says_so(
     provider = RecordingProvider()
     context = _context(workspace_id, tmp_path, StubDbos())
     surface = ImessageSurface(provider=lambda: provider)
-
-    def claim(expires_in: timedelta) -> dict[str, object]:
-        return PendingClaim(
-            member_id=member_id,
-            phone_number=phone,
-            assigned_phone_number="+14085550123",
-            opt_in_code=CLAIM_CODE,
-            expires_at=datetime.now(UTC) + expires_in,
-        ).model_dump(mode="json")
-
+    await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
-        store = ScopedStore(IMESSAGE_EXTENSION)
-        await store.put(phone_key(phone), claim(timedelta(minutes=PHONE_CLAIM_MINUTES)))
         for text, message_id in (
             ("UFO", "bare-ufo"),
             ("UFO BCD345", "other-code"),
@@ -1171,22 +1133,24 @@ async def test_a_wrong_code_is_answered_and_an_expired_claim_says_so(
             await surface._admit_message(
                 context, provider, _message(phone, text, message_id=message_id)
             )
-        assert await store.get(phone_key(phone)) is not None
-        await store.put(phone_key(phone), claim(timedelta(minutes=-1)))
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is not None
+    assert await _claimed_phones() == [(phone, member_id, None)]
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.surface_address)
+            .where(tables.surface_address.c.address == phone)
+            .values(claim_expires_at=datetime.now(UTC) - timedelta(minutes=1))
+        )
+    with ws(workspace_id):
         await surface._admit_message(
             context, provider, _message(phone, f"UFO {CLAIM_CODE}", message_id="late")
         )
-        assert await store.get(phone_key(phone)) is None
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
     async with workspace_tx() as connection:
-        identities = (
-            await connection.execute(
-                sa.select(sa.func.count()).select_from(tables.surface_identity)
-            )
-        ).scalar_one()
         turns = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
         ).scalar_one()
-    assert identities == 0
+    assert await _claimed_phones() == []
     assert turns == 0
     assert provider.delivered == [
         (f"iMessage;-;{phone}", CODE_UNKNOWN_TEXT),
@@ -1210,28 +1174,13 @@ async def test_an_opt_out_reply_cancels_the_claim_in_silence(db: None, tmp_path:
     phone = "+14155550123"
     provider = RecordingProvider()
     context = _context(workspace_id, tmp_path, StubDbos())
+    await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
-        await ScopedStore(IMESSAGE_EXTENSION).put(
-            phone_key(phone),
-            PendingClaim(
-                member_id=member_id,
-                phone_number=phone,
-                assigned_phone_number="+14085550123",
-                opt_in_code=CLAIM_CODE,
-                expires_at=datetime.now(UTC) + timedelta(minutes=PHONE_CLAIM_MINUTES),
-            ).model_dump(mode="json"),
-        )
         await ImessageSurface(provider=lambda: provider)._admit_message(
             context, provider, _message(phone, " STOP ", message_id="stop")
         )
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
-    async with workspace_tx() as connection:
-        identities = (
-            await connection.execute(
-                sa.select(sa.func.count()).select_from(tables.surface_identity)
-            )
-        ).scalar_one()
-    assert identities == 0
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
+    assert await _claimed_phones() == []
     assert provider.sends == []
 
 
@@ -1251,29 +1200,15 @@ async def test_only_a_direct_message_from_the_claimed_phone_completes_the_claim(
     provider = RecordingProvider()
     context = _context(workspace_id, tmp_path, StubDbos())
     surface = ImessageSurface(provider=lambda: provider)
+    await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
-        await ScopedStore(IMESSAGE_EXTENSION).put(
-            phone_key(phone),
-            PendingClaim(
-                member_id=member_id,
-                phone_number=phone,
-                assigned_phone_number="+14085550123",
-                opt_in_code=CLAIM_CODE,
-                expires_at=datetime.now(UTC) + timedelta(minutes=PHONE_CLAIM_MINUTES),
-            ).model_dump(mode="json"),
-        )
         await surface._admit_message(context, provider, message)
-        stored = await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone))
+        stored = await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone))
     async with workspace_tx() as connection:
-        identities = (
-            await connection.execute(
-                sa.select(sa.func.count()).select_from(tables.surface_identity)
-            )
-        ).scalar_one()
         turns = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
         ).scalar_one()
-    assert identities == 0
+    assert await _claimed_phones() == [(phone, member_id, None)]
     assert turns == 0
     assert provider.sends == []
     assert stored is not None
@@ -1294,8 +1229,8 @@ async def test_group_message_uses_the_ambient_reply_gate(
     decision = DecisionModel("NO_REPLY")
     context = dataclass_replace(context, _ambient_reply=AmbientReplyClassifier(model=decision))
     surface = ImessageSurface(provider=lambda: provider)
+    await _linked(workspace_id, member_id, phone)
     with ws(workspace_id):
-        assert await context.link_member_id(phone, member_id) == member_id
         await surface._admit_message(
             context,
             provider,
@@ -1336,8 +1271,8 @@ async def test_bad_attachments_do_not_block_the_inbound_message(
         MessageAttachment(id="oversize", filename="large.txt", size_bytes=0),
         MessageAttachment(id="missing", filename="gone.txt", size_bytes=0),
     )
+    await _linked(workspace_id, member_id, phone)
     with ws(workspace_id):
-        assert await context.link_member_id(phone, member_id) == member_id
         await surface._admit_message(
             context,
             provider,
@@ -1352,6 +1287,9 @@ async def test_bad_attachments_do_not_block_the_inbound_message(
 async def test_connection_acknowledgement_replays_without_admitting_the_opt_in(
     db: None, tmp_path: Path
 ) -> None:
+    """The acknowledgement is sent before the link lands, so a refused send replays the whole proof
+    and the provider's idempotency key keeps one message. Once the link lands, the message that
+    proved it is recognised on replay and founds no turn."""
     workspace_id, member_id = await _seed()
     phone = "+14155550123"
     message = _message(phone, f"UFO {CLAIM_CODE}", message_id="opt-in")
@@ -1359,63 +1297,141 @@ async def test_connection_acknowledgement_replays_without_admitting_the_opt_in(
     provider = RecordingProvider(fail_once={acknowledgement_key})
     context = _context(workspace_id, tmp_path, StubDbos())
     surface = ImessageSurface(provider=lambda: provider)
+    await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
-        await ScopedStore(IMESSAGE_EXTENSION).put(
-            phone_key(phone),
-            PendingClaim(
-                member_id=member_id,
-                phone_number=phone,
-                assigned_phone_number="+14085550123",
-                opt_in_code=CLAIM_CODE,
-                expires_at=datetime.now(UTC) + timedelta(minutes=PHONE_CLAIM_MINUTES),
-            ).model_dump(mode="json"),
-        )
         with pytest.raises(httpx.ConnectError, match="send failed"):
             await surface._admit_message(context, provider, message)
+        assert await _claimed_phones() == [(phone, member_id, None)]
         await surface._admit_message(context, provider, message)
         await surface._admit_message(context, provider, message)
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
+        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
         ).scalar_one()
+    assert await _claimed_phones() == [(phone, member_id, "opt-in")]
     assert turns == 0
     assert provider.delivered == [(message.conversation_id, CONNECTED_TEXT)]
-    assert [key for _, _, key in provider.sends] == [acknowledgement_key] * 3
+    assert [key for _, _, key in provider.sends] == [acknowledgement_key] * 2
 
 
-async def test_opt_in_for_a_removed_member_is_discarded(db: None, tmp_path: Path) -> None:
+async def test_a_refused_contact_card_leaves_the_phone_connected(db: None, tmp_path: Path) -> None:
+    """The card drops the Report Junk banner; it carries no member traffic. A provider that refuses
+    it is logged under its own name, and the stream neither drops nor replays the proof."""
     workspace_id, member_id = await _seed()
     phone = "+14155550123"
-    message = _message(phone, f"UFO {CLAIM_CODE}", message_id="removed-member-opt-in")
-    receipt_key = f"{CONFIRMATION_REPLY_PREFIX}{hashlib.sha256(message.id.encode()).hexdigest()}"
-    provider = RecordingProvider()
+    message = _message(phone, f"UFO {CLAIM_CODE}", message_id="opt-in")
+    provider = RecordingProvider(fail_once={"imessage-contact-card:opt-in"})
     context = _context(workspace_id, tmp_path, StubDbos())
-    surface = ImessageSurface(provider=lambda: provider)
+    await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
-        await ScopedStore(IMESSAGE_EXTENSION).put(
-            phone_key(phone),
-            PendingClaim(
-                member_id=member_id,
-                phone_number=phone,
-                assigned_phone_number="+14085550123",
-                opt_in_code=CLAIM_CODE,
-                expires_at=datetime.now(UTC) + timedelta(minutes=PHONE_CLAIM_MINUTES),
-            ).model_dump(mode="json"),
+        await ImessageSurface(provider=lambda: provider)._admit_message(context, provider, message)
+        await ImessageSurface(provider=lambda: provider)._admit_message(
+            context, provider, _message(phone, message_id="request-1")
         )
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.delete(tables.member).where(tables.member.c.id == member_id)
-            )
-        await surface._admit_message(context, provider, message)
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(phone_key(phone)) is None
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(receipt_key) is None
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
         ).scalar_one()
-    assert turns == 0
-    assert provider.sends == []
+    assert await _claimed_phones() == [(phone, member_id, "opt-in")]
+    assert turns == 1
+    assert provider.delivered == [(message.conversation_id, CONNECTED_TEXT)]
+
+
+async def test_one_shared_line_serves_every_workspace_and_member(db: None, tmp_path: Path) -> None:
+    """The provider is the deploy's, so one project and one line serve the whole fleet. Each
+    inbound message reaches the workspace and member its sender's phone names, and the stream
+    position belongs to the listener rather than to whichever workspace it last delivered to."""
+    first_workspace, first_member = await _seed()
+    second_workspace, second_member = await _seed()
+    first_colleague = await _member(first_workspace, "colleague@example.com")
+    provider = RecordingProvider()
+    dbos = StubDbos()
+    listener = SurfaceListenerContext(
+        surface=SURFACE_IMESSAGE,
+        _auth=SurfaceAuth(
+            _credentials=None, _declared=frozenset({SURFACE_IMESSAGE}), _surface=SURFACE_IMESSAGE
+        ),
+        _context_for=lambda workspace_id, _surface: _context(workspace_id, tmp_path, dbos),
+        _owned=_owned,
+    )
+    phones = {
+        "+14155550001": (first_workspace, first_member),
+        "+14155550002": (first_workspace, first_colleague),
+        "+14155550003": (second_workspace, second_member),
+    }
+    for phone, (workspace_id, member_id) in phones.items():
+        await _linked(workspace_id, member_id, phone)
+    surface = ImessageSurface(provider=lambda: provider)
+    for sequence, phone in enumerate(phones, start=1):
+        await surface._process_event(
+            listener,
+            provider,
+            provider.installation_id,
+            sequence,
+            _message(phone, "Please summarize this.", message_id=f"message-{sequence}"),
+        )
+    await surface._process_event(
+        listener, provider, provider.installation_id, 4, _message("+16505559999")
+    )
+    async with workspace_tx() as connection:
+        turns = [
+            (row.workspace_id, row.speaker_member_id)
+            for row in await connection.execute(
+                sa.select(tables.turn.c.workspace_id, tables.turn.c.speaker_member_id).order_by(
+                    tables.turn.c.created_at, tables.turn.c.id
+                )
+            )
+        ]
+        cursors = [
+            (row.surface, row.installation_id, row.sequence, row.workspace_id)
+            for row in await connection.execute(sa.select(tables.surface_stream_cursor))
+        ]
+    assert sorted(turns) == sorted(phones.values())
+    assert cursors == [(SURFACE_IMESSAGE, provider.installation_id, 4, None)]
+    assert await listener.cursor(provider.installation_id) == 4
+    assert await listener.cursor("project:other") is None
+
+
+async def test_a_second_workspace_connects_on_the_same_project(db: None) -> None:
+    """One project per deploy is not one workspace per deploy: the installation the workspaces share
+    routes nobody, so each admin binds it and each member claims their own phone."""
+    first_workspace, first_admin = await _seed()
+    second_workspace, second_admin = await _seed()
+    provider = RecordingProvider()
+    tool = ImessageConnect(provider=lambda: provider)
+    results = []
+    for workspace_id, admin_id, phone in (
+        (first_workspace, first_admin, "+14155550001"),
+        (second_workspace, second_admin, "+14155550002"),
+    ):
+        with ws(workspace_id):
+            results.append(
+                json.loads(
+                    (
+                        await tool.run(
+                            _tool_context(workspace_id, admin_id),
+                            ImessageConnectInput(
+                                phone_number=phone, user_description="Connect my phone."
+                            ),
+                        )
+                    )
+                    .content[0]
+                    .text
+                )["state"]
+            )
+    async with workspace_tx() as connection:
+        bound = [
+            (row.workspace_id, row.installation_id, row.routes_ingress)
+            for row in await connection.execute(sa.select(tables.surface_installation))
+        ]
+    assert results == ["pending", "pending"]
+    assert sorted(bound) == sorted(
+        [
+            (first_workspace, provider.installation_id, False),
+            (second_workspace, provider.installation_id, False),
+        ]
+    )
 
 
 async def test_inbound_message_from_an_unclaimed_phone_is_ignored(db: None, tmp_path: Path) -> None:

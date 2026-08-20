@@ -341,6 +341,7 @@ async def test_workspace_meta_carries_the_slack_team(debug) -> None:
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.surface_installation).values(
+                routes_ingress=True,
                 workspace_id=workspace_id,
                 surface="slack",
                 installation_id="team:T042",

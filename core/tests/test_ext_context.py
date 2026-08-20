@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -38,6 +38,7 @@ from ufo.ext.context import (
 )
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.ext.surface import (
+    AddressClaimState,
     SurfaceInstallationConflict,
     UndeclaredSurface,
     retitle_conversation,
@@ -603,39 +604,106 @@ async def test_installation_access_rejects_operations_for_an_undeclared_surface(
         with pytest.raises(UndeclaredSurface, match="slack"):
             await context.installations.bind("slack", "team-a")
         with pytest.raises(UndeclaredSurface, match="slack"):
-            await context.installations.linked_member("slack", "U1")
+            await context.installations.reserve_address(
+                "slack", "+14155550123", uuid4(), datetime.now(UTC) + timedelta(minutes=30)
+            )
 
 
-async def test_installation_access_reads_the_member_a_declared_surface_knows(db: None) -> None:
-    first, second = await _workspace(), await _workspace()
+PHONE_SURFACE = "imessage"
+SURFACES = frozenset({PHONE_SURFACE})
+
+
+async def _member(workspace_id: UUID) -> UUID:
     member_id = uuid4()
-    context = context_for("slack", frozenset(), surfaces=frozenset({"slack"}))
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.member).values(
                 id=member_id,
-                workspace_id=first,
-                email="member@example.com",
+                workspace_id=workspace_id,
+                email=f"{member_id}@example.com",
                 is_admin=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
+    return member_id
+
+
+async def test_reserve_address_holds_one_phone_for_one_member_across_the_fleet(db: None) -> None:
+    """The address is the identity a shared line routes by, so a claim on it is fleet-wide: the
+    member who staged it may restage it, another member is told it is taken whichever workspace
+    they are in, and a lapsed claim nobody proved is taken over."""
+    first, second = await _workspace(), await _workspace()
+    mine, theirs, elsewhere = (
+        await _member(first),
+        await _member(first),
+        await _member(second),
+    )
+    context = context_for("imessage", frozenset(), surfaces=SURFACES, addressed_surfaces=SURFACES)
+    phone = "+14155550123"
+    live = datetime.now(UTC) + timedelta(minutes=30)
+    with ws(first):
+        assert await context.installations.reserve_address(PHONE_SURFACE, phone, mine, live) == (
+            AddressClaimState.RESERVED
+        )
+        assert await context.installations.reserve_address(PHONE_SURFACE, phone, mine, live) == (
+            AddressClaimState.RESERVED
+        )
+        assert await context.installations.reserve_address(PHONE_SURFACE, phone, theirs, live) == (
+            AddressClaimState.TAKEN
+        )
+    with ws(second):
+        assert (
+            await context.installations.reserve_address(PHONE_SURFACE, phone, elsewhere, live)
+            == AddressClaimState.TAKEN
+        )
+    lapsed = datetime.now(UTC) - timedelta(seconds=1)
+    with ws(first):
+        await context.installations.reserve_address(PHONE_SURFACE, phone, mine, lapsed)
+    with ws(second):
+        assert (
+            await context.installations.reserve_address(PHONE_SURFACE, phone, elsewhere, live)
+            == AddressClaimState.RESERVED
+        )
+
+
+async def test_a_proved_address_answers_linked_and_stays_its_member_s(db: None) -> None:
+    first, second = await _workspace(), await _workspace()
+    mine, elsewhere = await _member(first), await _member(second)
+    context = context_for("imessage", frozenset(), surfaces=SURFACES, addressed_surfaces=SURFACES)
+    phone = "+14155550124"
+    live = datetime.now(UTC) + timedelta(minutes=30)
+    with ws(first):
+        await context.installations.reserve_address(PHONE_SURFACE, phone, mine, live)
+    async with workspace_tx() as connection:
         await connection.execute(
-            sa.insert(tables.surface_identity).values(
-                workspace_id=first,
-                member_id=member_id,
-                surface="slack",
-                external_id="U1",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
+            sa.update(tables.surface_address)
+            .where(tables.surface_address.c.address == phone)
+            .values(claim_expires_at=None, proved_by="message-1")
         )
     with ws(first):
-        assert await context.installations.linked_member("slack", "U1") == member_id
-        assert await context.installations.linked_member("slack", "U2") is None
+        assert await context.installations.reserve_address(PHONE_SURFACE, phone, mine, live) == (
+            AddressClaimState.LINKED
+        )
     with ws(second):
-        assert await context.installations.linked_member("slack", "U1") is None
+        assert (
+            await context.installations.reserve_address(PHONE_SURFACE, phone, elsewhere, live)
+            == AddressClaimState.TAKEN
+        )
+
+
+async def test_an_addressed_surface_binds_the_same_installation_in_every_workspace(
+    db: None,
+) -> None:
+    """The provider belongs to the deploy, so its installation identity routes no tenant and every
+    workspace binds it. An installation-routed surface's identity stays one workspace's."""
+    first, second = await _workspace(), await _workspace()
+    context = context_for("imessage", frozenset(), surfaces=SURFACES, addressed_surfaces=SURFACES)
+    with ws(first):
+        await context.installations.bind(PHONE_SURFACE, "project:one")
+    with ws(second):
+        await context.installations.bind(PHONE_SURFACE, "project:one")
+        assert await context.installations.installation(PHONE_SURFACE) == "project:one"
 
 
 async def test_installation_access_preserves_fleet_wide_uniqueness(db: None) -> None:

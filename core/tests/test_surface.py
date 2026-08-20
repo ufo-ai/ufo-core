@@ -1038,6 +1038,7 @@ async def test_list_installations_orders_by_surface(db: None, tmp_path) -> None:
         for surface, installation_id in (("slack", "team:T123"), ("chime", "room:R9")):
             await connection.execute(
                 sa.insert(tables.surface_installation).values(
+                    routes_ingress=True,
                     workspace_id=workspace_id,
                     surface=surface,
                     installation_id=installation_id,
@@ -3043,6 +3044,7 @@ async def test_installation_reads_the_peer_surface_identity(db: None, tmp_path) 
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.surface_installation).values(
+                routes_ingress=True,
                 workspace_id=workspace_id,
                 surface="slack",
                 installation_id="team:T042",

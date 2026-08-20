@@ -12,6 +12,7 @@ from ufo.sdk.audience import conversation_audience, room_audience
 from ufo.sdk.context import ScopedStore
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
+    AddressClaim,
     AmbientMessage,
     MidTurnReply,
     SurfaceContext,
@@ -33,9 +34,7 @@ from ufo_ext_imessage.provider import (
 IMESSAGE_EXTENSION = "imessage"
 SURFACE_IMESSAGE = "imessage"
 IMESSAGE_INBOX_DIR = "inbox/imessage"
-CURSOR_KEY = "stream:shared:cursor"
 CLAIM_PREFIX = "phone-claim:"
-CONFIRMATION_REPLY_PREFIX = "phone-receipt:"
 RECONNECT_SECONDS = 2.0
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 LIVE_BUFFER_FRAMES = 1_000
@@ -53,11 +52,12 @@ OPT_OUT_REPLIES = frozenset(
 
 
 class PendingClaim(BaseModel):
-    member_id: UUID
-    phone_number: str
+    """The line and the code one member was given for one phone. Who holds the claim and until when
+    is the fleet's row, since only that row can be unique across every workspace the shared line
+    serves."""
+
     assigned_phone_number: str
     opt_in_code: str = Field(pattern=rf"^[{OPT_IN_CODE_ALPHABET}]{{{OPT_IN_CODE_LENGTH}}}$")
-    expires_at: datetime
 
 
 def read_claim(stored: object) -> PendingClaim | None:
@@ -71,12 +71,6 @@ def read_claim(stored: object) -> PendingClaim | None:
     except ValidationError:
         log("imessage.claim.unreadable")
         return None
-
-
-@dataclass(frozen=True)
-class MemberLink:
-    member_id: UUID
-    confirmation_receipt_key: str | None
 
 
 @dataclass(frozen=True)
@@ -121,8 +115,8 @@ def contact_card(assigned_phone_number: str) -> bytes:
     return "\r\n".join(lines).encode()
 
 
-def phone_key(phone_number: str) -> str:
-    return f"{CLAIM_PREFIX}{hashlib.sha256(phone_number.encode()).hexdigest()}"
+def claim_key(member_id: UUID, phone_number: str) -> str:
+    return f"{CLAIM_PREFIX}{hashlib.sha256(f'{member_id}:{phone_number}'.encode()).hexdigest()}"
 
 
 def queue_key(conversation_id: str, *, direct: bool) -> str:
@@ -156,16 +150,16 @@ class ImessageSurface:
             log("imessage.listener.inactive", reason=str(error))
             await asyncio.Event().wait()
             return
-        cursor = await self._read_cursor(context, provider.installation_id)
+        cursor = await context.cursor(provider.installation_id)
         while True:
             try:
                 await self._consume_connected(context, provider, provider.installation_id, cursor)
             except MessageStreamDisconnected as disconnected:
-                stored = await self._read_cursor(context, provider.installation_id)
+                stored = await context.cursor(provider.installation_id)
                 cursor = stored if stored is not None else disconnected.cursor
                 if provider.invalid_cursor(disconnected.error) and cursor is not None:
                     cursor = None
-                    await self._clear_cursor(context, provider.installation_id)
+                    await context.clear_cursor()
                 await provider.invalidate()
                 log(
                     "imessage.stream.disconnected",
@@ -206,10 +200,9 @@ class ImessageSurface:
                             cursor is not None and frame.sequence <= cursor
                         ):
                             continue
-                        cursor = frame.sequence
                         try:
                             await self._process_event(
-                                context, provider, installation_id, cursor, frame.message
+                                context, provider, installation_id, frame.sequence, frame.message
                             )
                         except Exception as process_error:
                             if not provider.external_error(process_error):
@@ -217,6 +210,7 @@ class ImessageSurface:
                             raise MessageStreamDisconnected(
                                 cursor, process_error
                             ) from process_error
+                        cursor = frame.sequence
         finally:
             pump.cancel()
             await asyncio.gather(pump, return_exceptions=True)
@@ -259,7 +253,7 @@ class ImessageSurface:
             await self._process_event(
                 context, provider, installation_id, frame.sequence, frame.message
             )
-        await self._store_cursor(context, installation_id, head)
+        await context.store_cursor(installation_id, head)
         return head
 
     async def _process_event(
@@ -270,23 +264,26 @@ class ImessageSurface:
         sequence: int,
         message: InboundMessage | None,
     ) -> None:
-        async with context.workspace(installation_id) as ctx:
-            if ctx is not None:
-                confirmation_receipt_key = None
-                if message is not None:
-                    confirmation_receipt_key = await self._admit_message(ctx, provider, message)
-                await ScopedStore(IMESSAGE_EXTENSION).put(CURSOR_KEY, sequence)
-                if confirmation_receipt_key is not None:
-                    await ScopedStore(IMESSAGE_EXTENSION).delete(confirmation_receipt_key)
+        """Deliver one event to the workspace its sender reaches, then record the stream position.
+        One line serves every workspace, so a message from a phone no workspace claims advances the
+        stream and reaches nobody."""
+        if message is not None:
+            async with context.addressed(message.sender) as ctx:
+                if ctx is not None:
+                    await self._admit_message(ctx, provider, message)
+        await context.store_cursor(installation_id, sequence)
 
     async def _admit_message(
         self, ctx: SurfaceContext, provider: MessageProvider, message: InboundMessage
-    ) -> str | None:
-        link = await self._linked_member(ctx, provider, message)
-        if link is None:
-            return None
-        if link.confirmation_receipt_key is not None:
-            return link.confirmation_receipt_key
+    ) -> None:
+        claim = await ctx.address_claim(message.sender)
+        if claim is None:
+            return
+        if claim.claim_expires_at is not None:
+            await self._prove(ctx, provider, message, claim)
+            return
+        if claim.proved_by == message.id:
+            return
         ambient_text = message.text
         if message.attachments:
             names = ", ".join(attachment.filename for attachment in message.attachments)
@@ -294,9 +291,9 @@ class ImessageSurface:
         if not message.direct and not await ctx.ambient_reply_wanted(
             AmbientMessage(speaker=message.sender, text=ambient_text), ()
         ):
-            return None
+            return
         audience = (
-            conversation_audience(link.member_id)
+            conversation_audience(claim.member_id)
             if message.direct
             else room_audience(
                 SURFACE_IMESSAGE,
@@ -319,74 +316,72 @@ class ImessageSurface:
             body,
             idempotency_key=message.id,
             context=TurnContext(sender=message.sender, source=f"iMessage from {message.sender}"),
-            speaker_member_id=link.member_id,
+            speaker_member_id=claim.member_id,
         )
-        return None
 
-    async def _linked_member(
-        self, ctx: SurfaceContext, provider: MessageProvider, message: InboundMessage
-    ) -> MemberLink | None:
+    async def _prove(
+        self,
+        ctx: SurfaceContext,
+        provider: MessageProvider,
+        message: InboundMessage,
+        claim: AddressClaim,
+    ) -> None:
+        """Read one message against the claim its sender is proving. The proving message links the
+        phone and founds no turn, so every path here returns without admitting: a message carrying
+        no live code is answered with what to do next."""
+        if not message.direct or claim.claim_expires_at is None:
+            return
         store = ScopedStore(IMESSAGE_EXTENSION)
-        receipt_key = (
-            f"{CONFIRMATION_REPLY_PREFIX}{hashlib.sha256(message.id.encode()).hexdigest()}"
-        )
-        receipt = await store.get(receipt_key)
-        linked = await ctx.linked_member(message.sender)
-        key = phone_key(message.sender)
-        if receipt is None and linked is not None:
+        key = claim_key(claim.member_id, message.sender)
+        if claim.claim_expires_at <= datetime.now(UTC):
+            await ctx.release_address(message.sender)
             await store.delete(key)
-            return MemberLink(member_id=linked, confirmation_receipt_key=None)
-        source_key = receipt_key if receipt is not None else key
-        stored = receipt if receipt is not None else await store.get(key)
-        if stored is None:
-            return None
-        claim = read_claim(stored)
-        if claim is None:
-            await store.delete(source_key)
-            return None
-        if not message.direct or claim.phone_number != message.sender:
-            return None
-        if receipt is None:
-            if claim.expires_at <= datetime.now(UTC):
-                await store.delete(key)
-                await provider.send_text(
-                    message.conversation_id,
-                    CODE_EXPIRED_TEXT,
-                    f"imessage-code-expired:{message.id}",
-                )
-                return None
-            if message.text.strip().casefold() in OPT_OUT_REPLIES:
-                await store.delete(key)
-                return None
-            typed = "".join(character for character in message.text.upper() if character.isalnum())
-            if claim.opt_in_code not in typed:
-                await provider.send_text(
-                    message.conversation_id,
-                    CODE_UNKNOWN_TEXT,
-                    f"imessage-code-unknown:{message.id}",
-                )
-                return None
-            if not await store.put_if(receipt_key, stored, expected=None):
-                return None
-        if linked is None:
-            linked = await ctx.link_member_id(message.sender, claim.member_id)
-        if linked is None:
+            await provider.send_text(
+                message.conversation_id, CODE_EXPIRED_TEXT, f"imessage-code-expired:{message.id}"
+            )
+            return
+        if message.text.strip().casefold() in OPT_OUT_REPLIES:
+            await ctx.release_address(message.sender)
             await store.delete(key)
-            await store.delete(receipt_key)
-            return None
+            return
+        pending = read_claim(await store.get(key))
+        if pending is None:
+            return
+        typed = "".join(character for character in message.text.upper() if character.isalnum())
+        if pending.opt_in_code not in typed:
+            await provider.send_text(
+                message.conversation_id, CODE_UNKNOWN_TEXT, f"imessage-code-unknown:{message.id}"
+            )
+            return
         await provider.send_text(
-            message.conversation_id,
-            CONNECTED_TEXT,
-            f"imessage-connected:{message.id}",
+            message.conversation_id, CONNECTED_TEXT, f"imessage-connected:{message.id}"
         )
-        await provider.send_attachment(
-            message.conversation_id,
-            CONTACT_CARD_FILENAME,
-            contact_card(claim.assigned_phone_number),
-            f"imessage-contact-card:{message.id}",
-        )
+        await self._send_contact_card(provider, message, pending.assigned_phone_number)
+        await ctx.confirm_address(message.sender, message.id)
         await store.delete(key)
-        return MemberLink(member_id=linked, confirmation_receipt_key=receipt_key)
+
+    async def _send_contact_card(
+        self, provider: MessageProvider, message: InboundMessage, assigned_phone_number: str
+    ) -> None:
+        """Send the vCard for the assigned line. A provider that refuses the card leaves the phone
+        connected: the card is what drops the Report Junk banner, not what carries a member's
+        traffic, so its own failure is logged under its own name and never reported as the stream
+        dropping."""
+        try:
+            await provider.send_attachment(
+                message.conversation_id,
+                CONTACT_CARD_FILENAME,
+                contact_card(assigned_phone_number),
+                f"imessage-contact-card:{message.id}",
+            )
+        except Exception as error:
+            if not provider.external_error(error):
+                raise
+            log(
+                "imessage.contact_card.refused",
+                provider=type(provider).__name__,
+                code=provider.error_code(error),
+            )
 
     async def _downloaded_files(
         self,
@@ -438,27 +433,6 @@ class ImessageSurface:
             files = ", ".join(unavailable)
             notes.append(f"Skipped files, unavailable to download: {files}")
         return "\n".join(notes)
-
-    async def _store_cursor(
-        self, context: SurfaceListenerContext, installation_id: str, cursor: int
-    ) -> None:
-        async with context.workspace(installation_id) as ctx:
-            if ctx is not None:
-                await ScopedStore(IMESSAGE_EXTENSION).put(CURSOR_KEY, cursor)
-
-    async def _read_cursor(
-        self, context: SurfaceListenerContext, installation_id: str
-    ) -> int | None:
-        async with context.workspace(installation_id) as ctx:
-            if ctx is None:
-                return None
-            value = await ScopedStore(IMESSAGE_EXTENSION).get(CURSOR_KEY)
-        return value if isinstance(value, int) and value >= 0 else None
-
-    async def _clear_cursor(self, context: SurfaceListenerContext, installation_id: str) -> None:
-        async with context.workspace(installation_id) as ctx:
-            if ctx is not None:
-                await ScopedStore(IMESSAGE_EXTENSION).delete(CURSOR_KEY)
 
     async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str:
         """Send one terminal turn reply to its iMessage chat."""

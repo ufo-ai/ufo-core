@@ -284,6 +284,7 @@ async def test_surface_auth_resolves_only_the_exact_installation_to_a_workspace(
         for workspace_id, team in ((first, "team-a"), (second, "team-b")):
             await connection.execute(
                 sa.insert(tables.surface_installation).values(
+                    routes_ingress=True,
                     workspace_id=workspace_id,
                     surface="slack",
                     installation_id=team,
