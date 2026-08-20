@@ -27,7 +27,7 @@ type ProviderTile = { name: string; label: string };
 
 type Connector = ProviderTile & { installed: boolean };
 
-type FirstRunPayload = {
+export type FirstRunPayload = {
   providers: ProviderTile[];
   connectors: Connector[];
 };
@@ -48,19 +48,22 @@ function opening(labels: string[]): string {
   return labels.length ? "We use " + labels.join(", ") + ". " + ask : ask;
 }
 
-/** The first run's own read. The page reads it for the steps it draws, and a connect step waiting
- *  on an install reads the same one again for the single fact it is waiting on. */
-const FIRST_RUN_READ = "/workspace/first-run";
+/** The connector catalog and the workspace's two installs — the read behind both selectors. The
+ *  first run reads it for the steps it draws, a connect step waiting on an install reads it again
+ *  for the single fact it is waiting on, and the Connect page reads it for the tiles it offers. */
+export const FIRST_RUN_READ = "/workspace/first-run";
 
-/** How often a standing connect step re-reads while it waits. The install happens on the provider's
- *  own pages, so nothing on this page can say when it lands — the wait is the member's, and it is
- *  measured in the seconds they spend over there rather than in the half-minute a pane showing
- *  records can hold a stale answer for. */
-const WATCH_MS = 3_000;
+/** How often a waiting selector re-reads. The install happens on the provider's own pages, so
+ *  nothing here can say when it lands — the wait is the member's, and it is measured in the
+ *  seconds they spend over there rather than in the half-minute a pane showing records can hold a
+ *  stale answer for. */
+export const WATCH_MS = 3_000;
 
-/** The intent each connect step submits. The named tool mints the install link inside the turn and
- *  the outcome carries it back, so installing takes no message the member has to send. */
-const CONNECT_VERB: Record<string, string> = {
+/** The intent a workspace install dispatches, keyed by the connector that takes one. The named
+ *  tool mints the install link inside the turn and the outcome carries it back, so installing
+ *  takes no message the member has to send. Every provider outside this map connects a member's
+ *  own account through the broker verb instead. */
+export const CONNECT_VERB: Record<string, string> = {
   slack: "connect_slack",
   github: "connect_github",
 };

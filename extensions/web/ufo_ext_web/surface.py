@@ -2892,8 +2892,9 @@ class ConnectStep(BaseModel):
 
 
 async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response:
-    """The first run's projection: the tools a team can say it uses, and the two of them the page
-    installs itself beside whether the workspace holds them. Each step reads the leg its own Connect
+    """The connector catalog, read by the first run's selector and the Connect page: the tools a
+    team can say it uses, and the two of them the pages install themselves, beside whether the
+    workspace holds them. Each step reads the leg its own Connect
     act writes: Slack's is the surface installation `slack_connect` binds, GitHub's the `git_push`
     credential leg `github/coverage` reports — what `connect_github` fills by installing the App,
     and what a stored token fills where no organization installed it — never the `api` leg, a broker

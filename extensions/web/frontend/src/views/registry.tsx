@@ -4,6 +4,7 @@ import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
 import { Artifacts } from "@/views/Artifacts";
+import { Connect } from "@/views/Connect";
 import { Radar } from "@/views/Radar";
 import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
@@ -77,6 +78,11 @@ export const SECTION_VIEWS: Record<Section, PaneView> = {
     remountOnPlace: false,
     search: "Search artifacts",
     render: (place, onPlace) => <Artifacts place={place} onPlace={onPlace} />,
+  },
+  connect: {
+    label: "Connect",
+    remountOnPlace: false,
+    render: () => <Connect />,
   },
 };
 

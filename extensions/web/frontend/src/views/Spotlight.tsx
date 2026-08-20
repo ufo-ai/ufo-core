@@ -3,6 +3,7 @@ import {
   IconApps,
   IconFile,
   IconMessage,
+  IconPlug,
   IconPlus,
   IconRadar,
   IconSearch,
@@ -46,7 +47,11 @@ const WORKING = "Searching…";
  *  `ctrl+k` is kill-line in every readline-shaped field, so it is not a chord to take away. */
 const CHORD = "k";
 
-const SECTION_ICONS: Record<Section, TablerIcon> = { artifacts: IconFile, radar: IconRadar };
+const SECTION_ICONS: Record<Section, TablerIcon> = {
+  artifacts: IconFile,
+  radar: IconRadar,
+  connect: IconPlug,
+};
 
 /** Where the bar reaches, in the order it lists them. These rows are the same destinations as the
  *  buttons beside the search glyph — the palette adds no place the nav does not already carry —
