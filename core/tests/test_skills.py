@@ -10,6 +10,7 @@ from ufo.skills.runtime import (
     CORE_SKILL_NAMES,
     CORE_SKILL_REGISTRY,
     CORE_SKILLS,
+    SUGGESTION_LIMIT,
     LoadedSkill,
     LoadedSkills,
     RuntimeSkill,
@@ -61,8 +62,22 @@ def test_create_application_reaches_the_skill_index_as_a_routing_trigger() -> No
     assert len(description.split()) <= 50
 
 
-def test_skill_named_unknown_fails_loud_and_lists_the_available() -> None:
-    with pytest.raises(ValueError, match="unknown skill 'ghost'"):
+def test_skill_named_unknown_fails_loud_and_suggests_only_the_closest() -> None:
+    """The message is bounded by what is close, never by how many skills exist: a member-authored
+    set runs to hundreds, and every name in the error is context spent on one typo — the model
+    already carries the whole index in its system prompt."""
+    registry = SkillRegistry(
+        {
+            name: RuntimeSkill(name=name, description="d", instructions="i")
+            for name in (f"ghost-{index}" for index in range(200))
+        }
+    )
+    with pytest.raises(ValueError, match="unknown skill 'ghost'") as raised:
+        registry.named("ghost")
+    suggested = str(raised.value).partition("closest: ")[2].rstrip(")").split(", ")
+    assert len(suggested) == SUGGESTION_LIMIT
+    assert set(suggested) <= set(registry.by_name)
+    with pytest.raises(ValueError, match=r"unknown skill 'ghost'$"):
         CORE_SKILL_REGISTRY.named("ghost")
 
 

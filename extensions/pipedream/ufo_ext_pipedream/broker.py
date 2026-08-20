@@ -20,6 +20,7 @@ share_file download URL."""
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from difflib import get_close_matches
 from pathlib import PurePosixPath
 from uuid import UUID
 
@@ -39,6 +40,7 @@ from ufo_ext_pipedream.client import APP_PROP_TYPE, ConnectorSpec, PipedreamErro
 from ufo_ext_pipedream.proxy import PipedreamProxyTransport
 
 NOT_FOUND = 404
+SUGGESTION_LIMIT = 5
 _INTERNAL_PROP_TYPES = frozenset({APP_PROP_TYPE, "dir"})
 _PROP_TYPE_TO_JSON = {
     "string": "string",
@@ -178,18 +180,23 @@ class PipedreamBroker:
     async def _key_miss(
         self, client: pipedream.PipedreamClient, provider: str, slug: str
     ) -> PipedreamError:
-        """An unknown action key on execute, augmented with the app's real keys so the model's next
-        attempt is informed instead of another blind guess. Augmentation is best-effort: if the
-        catalog lookup fails, a plain not-found stands."""
+        """An unknown action key on execute, answered with the app's closest real keys so the
+        model's next attempt is informed instead of another blind guess. Closest, never every key:
+        an app's catalog runs to hundreds of actions, so the whole list would cost more context than
+        the miss and is what `describe_external_tools` is for — which is what the error names when
+        the catalog lookup fails or nothing is close enough to suggest."""
         app = _spec(provider).app
         try:
             tools = _listed_tools(await client.list_actions(app, ""))
         except PipedreamError:
-            return PipedreamError(NOT_FOUND, f"no action {slug!r} on {app!r}")
-        names = ", ".join(tool.slug for tool in tools)
-        return PipedreamError(
-            NOT_FOUND, f"no action {slug!r} on {app!r} — actions available: {names}"
+            tools = ()
+        close = get_close_matches(slug, [tool.slug for tool in tools], n=SUGGESTION_LIMIT)
+        hint = (
+            f"closest: {', '.join(close)}"
+            if close
+            else "search the app's actions with describe_external_tools"
         )
+        return PipedreamError(NOT_FOUND, f"no action {slug!r} on {app!r} — {hint}")
 
 
 def _stale_account(error: PipedreamError, account_id: str) -> bool:

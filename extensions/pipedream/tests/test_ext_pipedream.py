@@ -67,6 +67,7 @@ CONNECT_LINK = "https://pipedream.com/_static/connect.html?token=ctok_abc&connec
 PIPEDREAM_ACCOUNT = "apn_test123"
 GMAIL_ACTION = "gmail-send-email"
 UNKNOWN_ACTION = "gmail-definitely-not-an-action"
+TYPO_ACTION = "gmail-send-emails"
 ACTION_DESCRIPTION = "Send an email from your Gmail account."
 ACTION_PROPS: list[dict[str, object]] = [
     {"name": "gmail", "type": "app", "app": "gmail"},
@@ -800,9 +801,12 @@ def test_manifest_declares_the_broker_file_transfer_hosts() -> None:
     assert hosts.default == ()
 
 
-async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
+async def test_call_external_tool_answers_an_unknown_key_with_the_closest_actions(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A near-miss key is answered with the app's closest real keys; a key nothing resembles is
+    routed to the discovery verb rather than the catalog — a live app lists hundreds of actions, so
+    the whole list costs more context than the miss."""
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
@@ -822,20 +826,28 @@ async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
         _pipedream_handler(pipedream.connection_user_id(workspace_id, "unknown-key")),
     )
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
-    with (
-        ws(workspace_id),
-        agent(agent_id),
-        pytest.raises(pipedream.PipedreamError, match=f"actions available: {GMAIL_ACTION}"),
-    ):
-        await call_external_tool(
-            ctx,
-            CallExternalToolInput(
-                user_description=TOOL_NARRATION,
-                tool_name=UNKNOWN_ACTION,
-                source_id=PROVIDER,
-                arguments={},
-            ),
-        )
+
+    async def _call(tool_name: str) -> str:
+        with (
+            ws(workspace_id),
+            agent(agent_id),
+            pytest.raises(pipedream.PipedreamError) as raised,
+        ):
+            await call_external_tool(
+                ctx,
+                CallExternalToolInput(
+                    user_description=TOOL_NARRATION,
+                    tool_name=tool_name,
+                    source_id=PROVIDER,
+                    arguments={},
+                ),
+            )
+        return str(raised.value)
+
+    assert f"closest: {GMAIL_ACTION}" in await _call(TYPO_ACTION)
+    unresembled = await _call(UNKNOWN_ACTION)
+    assert "describe_external_tools" in unresembled
+    assert GMAIL_ACTION not in unresembled
 
 
 async def test_call_external_tool_with_a_stale_grant_says_reconnect(

@@ -21,6 +21,7 @@ the skill in one line instead of paying for its instructions again."""
 
 from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass, field
+from difflib import get_close_matches
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -39,6 +40,7 @@ SKILL_HEADER_PREFIX = "# Skill: "
 DEPENDENCY_SUFFIX = " (dependency of {puller})"
 SKILL_BLOCK_SEPARATOR = "\n\n---\n\n"
 ALREADY_LOADED_NOTE = "Already in context above, not repeated: {names}"
+SUGGESTION_LIMIT = 5
 
 
 def skill_mount_root(name: str) -> str:
@@ -250,8 +252,9 @@ class SkillRegistry:
         try:
             return self.by_name[name]
         except KeyError as error:
-            available = ", ".join(sorted(self.by_name)) or "none"
-            raise ValueError(f"unknown skill {name!r} (available: {available})") from error
+            close = get_close_matches(name, self.by_name, n=SUGGESTION_LIMIT)
+            suggestion = f" (closest: {', '.join(close)})" if close else ""
+            raise ValueError(f"unknown skill {name!r}{suggestion}") from error
 
     def closure(self, *names: str) -> tuple[LoadedSkill, ...]:
         """One load of the named skills: every name first in the order given, then the transitive
