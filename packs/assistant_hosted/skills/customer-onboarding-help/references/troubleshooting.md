@@ -36,7 +36,7 @@ second-hand, from an admin asking about someone else.
 
 | Symptom | What to say and do |
 | --- | --- |
-| "It has been going a long time — stop it" | A turn that is running finishes; it cannot be cancelled from chat. Say what it is working on and that you will report when it lands. Never say you stopped it. |
+| "It has been going a long time — stop it" | On the web portal, the stop button ends it; in the terminal, Esc does. Both cancel it for good — it will not resume, and a message already sent before the stop starts a new turn. On Slack there is no way to stop it: say what it is working on and that you will report when it lands. |
 | "You said you would do something and nothing arrived" | Do not insist it worked. Say plainly that it did not land, do it again, and pass it to the team if the second attempt fails too. |
 
 ## Connections and credentials

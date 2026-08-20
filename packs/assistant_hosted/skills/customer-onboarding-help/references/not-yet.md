@@ -10,8 +10,6 @@ describe them as coming soon in a way a customer could hold the team to.
 - **A second workspace on the same email domain.** One workspace exists per email domain, and a
   colleague signing in with the same domain joins the existing one rather than creating another. A
   genuinely separate second workspace is not something a customer can create today.
-- **Cancelling a running turn.** A turn that is already running cannot be cancelled by the customer
-  and will run to completion. It stays resumable.
 - **A one-time reminder.** Every scheduled task repeats; there is no one-shot scheduling. A schedule
   that should stop can carry an expiry instead.
 

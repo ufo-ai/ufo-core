@@ -39,6 +39,9 @@ SLACK_SURFACE = "extensions/slack/ufo_ext_slack/surface.py"
 BUILTIN_TOOLS_SOURCE = "core/src/ufo/tools/builtins.py"
 SITES_TOOLS = "extensions/sites/ufo_ext_sites/tools.py"
 TOOLS_CONTEXT = "core/src/ufo/tools/context.py"
+STOP = "core/src/ufo/surfaces/stop.py"
+WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
+TERMINAL_SURFACE = "extensions/ufo/ufo_ext_ufo/surface.py"
 
 
 @dataclass(frozen=True)
@@ -362,6 +365,31 @@ CLAIMS = (
             r"\s+sa\.delete\(scheduled_task\)"
         ),
     ),
+    Claim(
+        claim="the web portal's stop button ends a running turn",
+        corpus="references/capabilities.md",
+        phrase="The web portal's stop button and the terminal client's Esc key both end a running"
+        " turn",
+        source=WEB_SURFACE,
+        pattern=r'STOP_TURN_HEADER = "x-ufo-stop-turn"',
+    ),
+    Claim(
+        claim="the terminal client's Esc key ends a running turn",
+        corpus="references/capabilities.md",
+        phrase="The web portal's stop button and the terminal client's Esc key both end a running"
+        " turn",
+        source=TERMINAL_SURFACE,
+        pattern=r"A stop \(`x-ufo-stop`, the member's Esc\) admits nothing",
+    ),
+    Claim(
+        claim="a stopped turn does not resume, and a message already sent before the stop founds"
+        " a new turn",
+        corpus="references/capabilities.md",
+        phrase="it does not resume. A message the member already sent before stopping starts a"
+        " new turn instead",
+        source=STOP,
+        pattern=r"founded = await self\.admission\.redispatch\(workspace_id, conversation_id\)",
+    ),
 )
 
 
@@ -404,10 +432,10 @@ def test_the_corpus_names_exactly_the_install_states_slack_reports() -> None:
     )
 
 
-def test_no_member_facing_cancel_contradicts_the_corpus() -> None:
-    """The corpus tells a customer a running turn cannot be cancelled and will finish. The only
-    cancel a turn can reach is a parent cancelling its own subagent; a member-facing one would make
-    that a lie."""
+def test_no_agent_tool_cancels_a_turn() -> None:
+    """The corpus tells a customer a running turn is stopped through the surface — a button, an Esc
+    key — never by asking the agent to do it. The only cancel a turn can reach through a tool is a
+    parent cancelling its own subagent; a member-facing one would make that a lie."""
     cancels = {tool.name for tool in BUILTIN_TOOLS if "cancel" in tool.name}
 
     assert cancels == {"cancel_spawn"}, f"unexpected cancel tool(s): {cancels}"
