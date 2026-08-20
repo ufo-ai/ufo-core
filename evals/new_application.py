@@ -13,6 +13,8 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 import yaml
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from evals.harness.capability import CapabilityOutput, CapabilityVerdict, DescribedGrader
 from evals.harness.memory_fence import forget_workspace_memory
@@ -73,12 +75,14 @@ def _seeded(*existing: str) -> EvalSeed:
     """Clear the applications an earlier trial created, then seed the ones this case starts with.
     Only a member-owned application with no conversation is cleared, so a provisioned agent the
     deploy shipped and anything a member has actually talked to both survive — except a row
-    bearing the suite's own fixture name, which the seed takes back to fixture state by name
-    rather than colliding on the insert: an application's first homepage turn soon gives it a
-    conversation the spare-clear rightly spares. A leftover it cannot clear it leaves standing —
-    deleting would chase every table that references a talked-to agent, and disowning changes the
-    workspace the next case routes in — so the graders read this conversation's own applies
-    instead of counting the workspace."""
+    bearing the suite's own fixture name, which the seed takes back to fixture state in one
+    upsert. One statement, because the name is not this seed's alone: A02's member asks for an
+    invoice-reading application and the assistant picks the name, so a row called invoice-intake
+    can commit between any two statements this seed runs — a reclaim-then-insert leaves exactly
+    that window, and the unique-key raise it ends in discards the whole run's records. A leftover
+    it cannot clear it leaves standing — deleting would chase every table that references a
+    talked-to agent, and disowning changes the workspace the next case routes in — so the graders
+    read this conversation's own applies instead of counting the workspace."""
 
     async def seed(workspace_id: UUID, _agent_id: UUID) -> None:
         await forget_workspace_memory()
@@ -122,6 +126,7 @@ def _seeded(*existing: str) -> EvalSeed:
                     .limit(1)
                 )
             ).scalar_one()
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             for name in existing:
                 fixture = {
                     "prompt": EXISTING_PROMPT,
@@ -132,19 +137,9 @@ def _seeded(*existing: str) -> EvalSeed:
                     "sandbox_size": "small",
                     "owner_member_id": owner,
                 }
-                reclaimed = await connection.execute(
-                    sa.update(tables.agent)
-                    .values(updated_at=sa.func.now(), **fixture)
-                    .where(
-                        tables.agent.c.workspace_id == workspace_id,
-                        tables.agent.c.name == name,
-                        tables.agent.c.is_main.is_(False),
-                    )
-                )
-                if reclaimed.rowcount:
-                    continue
                 await connection.execute(
-                    sa.insert(tables.agent).values(
+                    insert(tables.agent)
+                    .values(
                         id=uuid4(),
                         workspace_id=workspace_id,
                         name=name,
@@ -153,6 +148,11 @@ def _seeded(*existing: str) -> EvalSeed:
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                         **fixture,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[tables.agent.c.workspace_id, tables.agent.c.name],
+                        set_={"updated_at": sa.func.now(), **fixture},
+                        where=tables.agent.c.is_main.is_(False),
                     )
                 )
 

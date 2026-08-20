@@ -1,5 +1,9 @@
+import asyncio
+import time
+from contextlib import AsyncExitStack
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 
 from evals import new_application
@@ -143,6 +147,72 @@ async def test_the_fixture_seed_reclaims_the_application_a_homepage_turn_talked_
             )
         ).scalar_one()
     assert held == stale_id
+
+
+async def _seed_awaits_the_held_index_entry() -> None:
+    deadline = time.monotonic() + 30
+    while True:
+        async with workspace_tx() as connection:
+            blocked = (
+                await connection.execute(
+                    sa.text(
+                        "select 1 from pg_stat_activity where wait_event_type = 'Lock' "
+                        "and query ilike 'insert into agent%'"
+                    )
+                )
+            ).first()
+        if blocked:
+            return
+        if time.monotonic() > deadline:
+            raise AssertionError("the seed never reached the held unique-index entry")
+        await asyncio.sleep(0.05)
+
+
+async def test_the_fixture_seed_reclaims_a_name_committed_while_it_runs(
+    db: None, database_url: str
+) -> None:
+    """A02's member asks for an invoice-reading application and the assistant picks its name, so a
+    row named invoice-intake can commit while A03's seed is mid-flight — invisible to any earlier
+    read, standing by the time the seed writes. The seed must resolve that arrival to a reclaim;
+    the unique-key raise it once ended in escaped the case and discarded the whole run's records
+    (nightly 2026-08-19, shard 4)."""
+    if database_url.startswith("sqlite"):
+        pytest.skip("the interleave needs a second concurrent writer; sqlite admits one")
+    workspace_id, agent_id, member_id = await _workspace()
+    late_id = uuid4()
+    holder = AsyncExitStack()
+    connection = await holder.enter_async_context(workspace_tx())
+    await connection.execute(
+        sa.insert(tables.agent).values(
+            id=late_id,
+            workspace_id=workspace_id,
+            name=new_application.EXISTING_APPLICATION,
+            prompt=REWRITTEN_PROMPT,
+            model="claude-opus-4-8",
+            reasoning="high",
+            is_main=False,
+            visibility="workspace",
+            owner_member_id=member_id,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    with ws(workspace_id):
+        seeding = asyncio.ensure_future(
+            new_application._seeded(new_application.EXISTING_APPLICATION)(workspace_id, agent_id)
+        )
+    try:
+        await _seed_awaits_the_held_index_entry()
+    finally:
+        await holder.aclose()
+    await seeding
+
+    rows = await _applications(workspace_id)
+    assert [row.name for row in rows] == [new_application.EXISTING_APPLICATION]
+    assert rows[0].id == late_id
+    assert rows[0].prompt == new_application.EXISTING_PROMPT
+    assert rows[0].visibility == "private"
+    assert rows[0].owner_member_id == member_id
 
 
 async def test_the_fixture_seed_clears_an_untalked_leftover_and_seeds_its_own(db: None) -> None:
