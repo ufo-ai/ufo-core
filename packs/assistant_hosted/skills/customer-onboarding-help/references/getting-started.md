@@ -22,8 +22,9 @@ terminal install command.
    works once per domain, and lapses if it goes unused for a couple of weeks.
 4. **Joining an existing workspace needs no invitation.** A teammate whose email domain already has a
    workspace signs in and joins it directly. An admin can also add someone ahead of their first
-   sign-in — by asking the agent, or from the portal's Team view — optionally as an admin, and at any
-   email domain, so a contractor or an advisor is added the same way as a colleague. The person is
+   sign-in, by their work email — by asking the agent, optionally making them an admin at the same
+   time, or from the portal's Team view. Someone may be added at any email domain, so a contractor
+   or an advisor is added the same way as a colleague. The person is
    emailed that they were added, with a link to the ordinary sign-in page — there is no invite code
    and nothing for the admin to pass on, and the verification code arrives when they sign in with
    that work email. An admin asking the agent can ask for no message; the portal's Team view always
@@ -41,11 +42,11 @@ terminal install command.
 
 "Your invitation covers your company's email domain, so there is nothing to type in. Your teammates
 do not need one at all: they sign in with their work email and join the workspace you already have.
-If you want someone set up before they sign in, ask me to add them by their email — or add them
-yourself from the portal's Team view — and I will, optionally as an admin, at any domain, so an
-outside contractor works too. They are emailed that they were added, with a link to sign in, and
-there is no code for you to pass on. After they verify that address, they choose the workspace when
-they can enter more than one."
+If you want someone set up before they sign in, ask me to add them by their work email — I can make
+them an admin at the same time, and add them quietly if you prefer — or add them yourself from the
+portal's Team view; any domain works, so an outside contractor too. They are emailed that they were
+added, with a link to sign in, and there is no code for you to pass on — they choose the workspace
+when that address can enter more than one."
 
 ## Boundaries
 

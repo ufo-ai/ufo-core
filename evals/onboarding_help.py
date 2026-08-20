@@ -444,7 +444,9 @@ CASES = (
             "The answer says an admin can add her now by her work email, and that she can be made "
             "an admin at the same time.",
             "The answer does not require her to sign in first, and does not invent an invite "
-            "link, an invite code, or a settings page.",
+            "code, an invitation of her own, or a settings page. Mentioning the email she gets "
+            "saying she was added, with a link to the ordinary sign-in page, is correct and not "
+            "an invention.",
         ),
     ),
     CapabilityCase(
