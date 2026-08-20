@@ -314,6 +314,7 @@ def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, .
             version=found.version,
             skills=found.skills,
             onboarding_steps=found.onboarding_steps,
+            prompt_sections=found.prompt_sections,
         )
     )
     return tuple(manifests)

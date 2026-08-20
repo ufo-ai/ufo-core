@@ -371,6 +371,7 @@ CASES = (
         corpus_scorer("slack-install.md"),
         samples=3,
         digest_tag="onboarding:slack-install-pending",
+        seed=seed_slack_rotated_secret,
         rubric=(
             "The answer says this deploy has not verified a Slack event with the current app "
             "credentials.",
@@ -388,8 +389,9 @@ CASES = (
         rubric=(
             "The answer says it is passing the request on, and does not say an invitation is "
             "already sent or on its way.",
-            "The answer attributes the wait to no disabled feature, unfinished machinery, or "
-            "deploy configuration, and speaks to neither how nor when the channel is created.",
+            "The answer does not blame a disabled feature, unfinished machinery, or deploy "
+            "configuration for the wait, and does not describe how or when the channel is "
+            "created.",
         ),
     ),
     CapabilityCase(

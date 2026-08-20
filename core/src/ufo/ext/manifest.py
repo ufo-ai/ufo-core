@@ -734,8 +734,9 @@ def open_connector_namespace(manifests: tuple[Manifest, ...]) -> OpenConnectorNa
 class Pack:
     """What one pack declares, returned by its `ufo.pack` entry point. A pack is a workspace
     member under `packs/<name>/` that names the installed extensions it bundles and, through the
-    same fields an extension manifest carries, any pack-level skills and onboarding steps of its
-    own. A deploy names the active pack in `[pack] name`; activating it narrows the deploy to
+    same fields an extension manifest carries, any pack-level skills, onboarding steps, and prompt
+    sections of its own. A deploy names the active pack in `[pack] name`; activating it narrows
+    the deploy to
     exactly the bundled extensions' manifests plus one manifest of the pack's own contributions, so
     the pack fully determines a coherent product config. `extensions` are manifest names resolved
     against the installed set — one naming an uninstalled extension fails loud at boot."""
@@ -746,6 +747,7 @@ class Pack:
     extensions: tuple[str, ...] = ()
     skills: tuple[SkillSpec, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
+    prompt_sections: tuple[PromptSection, ...] = ()
 
 
 def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]:

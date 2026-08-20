@@ -25,6 +25,7 @@ GATEWAY = "control/src/gateway.rs"
 GATEWAY_WEB = "control/src/login.html"
 ONBOARD_CONTROL = "core/src/ufo/onboard_control.py"
 INVITES = "control/src/invite.rs"
+INVITE_DELIVERY = "control/src/invite_delivery.rs"
 SLACK_CONNECT = "control/src/slack_connect.rs"
 AUDIENCE = "core/src/ufo/audience.py"
 MEMBERS = "core/src/ufo/members.py"
@@ -258,6 +259,20 @@ CLAIMS = (
         phrase="add someone ahead of their first",
         source=MEMBERS,
         pattern=r'ADD_MEMBER_TOOL = "add_member"',
+    ),
+    Claim(
+        claim="adding someone writes to them unless the admin asks for no message",
+        corpus="references/getting-started.md",
+        phrase="An admin asking the agent can ask for no message",
+        source=MEMBERS,
+        pattern=r"notify: bool = Field\(\n\s+default=True,",
+    ),
+    Claim(
+        claim="that message carries a link to the sign-in page, and no invite code",
+        corpus="references/getting-started.md",
+        phrase="emailed that they were added, with a link to the ordinary sign-in page",
+        source=INVITE_DELIVERY,
+        pattern=r"Sign in as \{email\} at https://\{apex_host\}/login",
     ),
     Claim(
         claim="an added address may be at any email domain",

@@ -190,6 +190,13 @@ def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() 
     assert parsed == {*assistant_hosted.SKILL_NAMES, *assistant.SKILL_NAMES}
 
 
+def test_the_hosted_pack_manifest_carries_its_customers_section() -> None:
+    manifests = load_manifests(assistant_hosted.NAME)
+    own = manifests[-1]
+    assert own.prompt_sections == (assistant_hosted.CUSTOMERS_SECTION,)
+    assert "customer-onboarding-help" in assistant_hosted.CUSTOMERS_SECTION.body
+
+
 def test_the_hosted_onboarding_corpus_ships_its_reference_files() -> None:
     """The corpus routes to one reference file per question, so a bundle that shipped only SKILL.md
     would answer every onboarding question from a table of contents pointing at nothing."""

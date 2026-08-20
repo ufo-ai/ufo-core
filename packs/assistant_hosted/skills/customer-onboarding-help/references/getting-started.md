@@ -21,9 +21,13 @@ terminal install command.
 4. **Joining an existing workspace needs no invitation.** A teammate whose email domain already has a
    workspace signs in and joins it directly. An admin can also add someone ahead of their first
    sign-in — by asking the agent, or from the portal's Team view — optionally as an admin, and at any
-   email domain, so a contractor or an advisor is added the same way as a colleague. Signing in
-   opens the one workspace their verified address can enter, or asks them to choose when an exact
-   membership and their email domain name different workspaces. An exact membership needs no invite.
+   email domain, so a contractor or an advisor is added the same way as a colleague. The person is
+   emailed that they were added, with a link to the ordinary sign-in page — there is no invite code
+   and nothing for the admin to pass on, and the verification code arrives when they sign in with
+   that work email. An admin asking the agent can ask for no message; the portal's Team view always
+   sends it. Signing in opens the one workspace their verified address can enter, or asks them to
+   choose when an exact membership and their email domain name different workspaces. An exact
+   membership needs no invite.
 5. **A workspace admin is offered connecting Slack, then billing setup at the end.** In the terminal
    the admin gets a choice on the concluding screen; picking one starts a chat with the agent, which
    returns either an "Add to Slack" link or a link for saving a payment method. A joined teammate
@@ -35,9 +39,11 @@ terminal install command.
 
 "Your invitation covers your company's email domain, so there is nothing to type in. Your teammates
 do not need one at all: they sign in with their work email and join the workspace you already have.
-If you want someone set up before they sign in, ask me to add them by their email and I will — any
-domain, so an outside contractor works too. After they verify that address, they choose the workspace
-when they can enter more than one."
+If you want someone set up before they sign in, ask me to add them by their email — or add them
+yourself from the portal's Team view — and I will, optionally as an admin, at any domain, so an
+outside contractor works too. They are emailed that they were added, with a link to sign in, and
+there is no code for you to pass on. After they verify that address, they choose the workspace when
+they can enter more than one."
 
 ## Boundaries
 

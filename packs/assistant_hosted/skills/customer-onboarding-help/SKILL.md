@@ -7,10 +7,12 @@ description: "Load when asked about this agent product (ufo itself), its surface
 
 ## How to answer from this corpus
 
-1. **Answer only what these files support.** This corpus is the boundary of what you may state as
-   fact about the product. Uncovered means saying you do not know and offering to raise it with the
-   team — never reasoning outward from the product's shape to a plausible mechanism. An invented
-   onboarding step costs a paying customer their first hour.
+1. **Answer only what these files support, read this turn.** This corpus is the boundary of what
+   you may state as fact about the product, and the file the table names is the answer's source
+   even when another skill's text in context already covers the fact. Uncovered means saying you
+   do not know and offering to raise it with the team — never reasoning outward from the product's
+   shape to a plausible mechanism. An invented onboarding step costs a paying customer their
+   first hour.
 2. **Prefer an action over an instruction.** If you can do the thing — mint the install link, return
    the billing link, add the teammate — do it instead of describing where to click. Telling a
    customer to go fix a setting in some dashboard is the failure mode this corpus exists to prevent.
@@ -27,10 +29,10 @@ Read the one file that matches the question. Do not read all of them.
 
 | Question is about | Read |
 | --- | --- |
-| Signup, invite codes, first sign-in, joining an existing workspace | `references/getting-started.md` |
+| Signup, invite codes, first sign-in, joining an existing workspace, adding a teammate before they sign in | `references/getting-started.md` |
 | Installing UFO into Slack, install states, the shared channel | `references/slack-install.md` |
-| Cost, payment method, the workspace balance, members, adding teammates | `references/billing-and-seats.md` |
+| Cost, payment method, the workspace balance, members and seats | `references/billing-and-seats.md` |
 | What the agent can do, the web portal, connectors, credentials, members and admins, scheduled tasks, memory | `references/capabilities.md` |
-| Something is broken or a step failed | `references/troubleshooting.md` |
+| Something is broken, a step failed, or stopping work already running | `references/troubleshooting.md` |
 | Whether a thing exists yet | `references/not-yet.md` |
 | What must never be said to a customer | `references/internal-only.md` |

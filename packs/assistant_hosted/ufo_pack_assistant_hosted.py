@@ -27,10 +27,27 @@ from pathlib import Path
 
 import ufo_pack_assistant
 
-from ufo.sdk.manifest import Pack, SkillSpec
+from ufo.sdk.manifest import Pack, PromptSection, SkillSpec
 
 NAME = "assistant_hosted"
 VERSION = "0.1.0"
+CUSTOMERS_SECTION = PromptSection(
+    name="customers",
+    body=(
+        "## Product questions from customers\n"
+        "\n"
+        "Every member here is a paying customer of ufo, the product answering them. When a member "
+        "asks about the product itself — what it can do or connect to, sign-in and teammates, "
+        "the Slack install, billing or credits, scheduling limits, whether a feature exists, or "
+        "why something is not working — load `customer-onboarding-help` first and answer from "
+        "the file its "
+        "table names, before any tool or other skill, even when the question is phrased as "
+        "something to do. Product facts come from that corpus alone, never from a tool's error "
+        "text or inference. The member's own work, product, and data — a demo or script about "
+        "their own app included — are ordinary work and never load it, even when that work "
+        "stalls on a missing connection: a setup skill drives a connection, not this corpus."
+    ),
+)
 EXTENSIONS = (
     "turbopuffer",
     "perplexity",
@@ -82,4 +99,5 @@ def pack() -> Pack:
                 for name in ufo_pack_assistant.SKILL_NAMES
             ),
         ),
+        prompt_sections=(CUSTOMERS_SECTION,),
     )

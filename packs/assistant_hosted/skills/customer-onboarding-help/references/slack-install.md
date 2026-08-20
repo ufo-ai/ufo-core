@@ -16,7 +16,7 @@ Checking Slack's status returns one of four states. Translate them plainly:
 | --- | --- | --- |
 | `not_configured` | Install cannot proceed as asked, for one of several reasons: no one-click app on this deploy, this Slack workspace already belongs to another UFO workspace, an app of their own still missing its two secrets, or a bot token Slack would not accept. The state arrives with a hint naming which. | Translate the hint, never the state. Only the first reason means "we will use the manual app path"; a workspace already taken is one to confirm and raise, and a rejected token is one to collect again. |
 | `not_installed` | Nothing installed yet. For an admin the link is ready; for a non-admin it also covers not being allowed to mint one. | To an admin: "Here is your Add to Slack link." To anyone else: "Ask a workspace admin to connect Slack and I will confirm once it lands." |
-| `pending` | An app identity exists, but this deploy has not verified a Slack event with the current app credentials. A new install, a manifest setup, or a signing-secret rotation can all land here. | "Slack has not reached this deploy with the current app credentials. Invite the bot to a channel and @mention it, or send it a DM. If it stays pending, ask a workspace admin to raise it with the team." |
+| `pending` | An app identity exists, but this deploy has not verified a Slack event with the current app credentials. A new install, a manifest setup, or a signing-secret rotation can all land here. | "Slack has not reached this deploy with the current app credentials — a new install, a manifest setup, or a signing-secret rotation can all land here. Invite the bot to a channel and @mention it, or send it a DM. If it stays pending, ask a workspace admin to raise it with the team." |
 | `connected` | Installed and working. | "Slack is connected." |
 
 ## The unverified-app warning
@@ -27,13 +27,14 @@ error.
 
 ## The shared channel with the UFO team
 
+Asked where theirs is, the whole reply is that you are passing the request on — and never promise
+them an automatic email, never say one has been sent, and never say anything about how or when the
+channel is created. The paragraph below is your grounding, not material for the reply.
+
 Separately from the customer's own install, the UFO team shares a Slack Connect channel with each new
 customer so the team is reachable. The person who created the workspace is the one who gets the Slack
 Connect invitation — one channel and one invitation per customer, never to teammates who join later
 and never a second time.
-
-Asked where theirs is, say you are passing the request on, and never promise them an automatic
-email, never say one has been sent, and never say anything about how or when the channel is created.
 
 ## Failure modes
 
