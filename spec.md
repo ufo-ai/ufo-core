@@ -584,6 +584,19 @@ terminal turn failed, and the soonest unpaused scheduled task where no turn stat
 of it — with every turn fact on that row computed only from conversations the reader reads, so a
 workspace-visible agent tells each member their own picture of it and never a colleague's private
 turn.
+`workspace/starters` answers the start screen what this member can ask for before they have asked
+anything: two applications, one check-in drawn from their own memory, and one unlock. A batch job
+ranks the unlock catalog — each row an application and the connector classes it takes — against the
+memory that member's audience reads and the applications the workspace already has, and stores the
+ranking under their own subject; no other member's read touches it. Whether a ranked row is an
+application to build now or an unlock still short of an account is not stored, because access is
+not the ranking's to claim: the read decides it against the connectors the workspace holds at that
+moment, so connecting an account moves a row with no tick in between and a connected connector is
+never offered again. An unlock is offered as the accounts it would take and pressed like every
+other row — the member says the build, the agent asks for what it finds it does not hold, and the
+connect control rides its reply. A slot the read cannot fill is drawn from the screen's own
+constants, so a workspace whose memory says nothing yet still reads as a screen.
+
 `api/chats` lists the conversations this member is in across their audience agents — bound to them
 or holding a turn they spoke — and, under a bound of its own, the readable ones a colleague is in
 and they are not: the rail's projection, each row titled the way the title job named it, flagged

@@ -510,6 +510,7 @@ def _launch_jobs(
         registry=runtime.registry,
         probes=probes,
         background_model=runtime.config.models.background_jobs_model,
+        memory=runtime.memory,
     ).launch()
 
 

@@ -88,3 +88,9 @@ from ufo.objects import (
 from ufo.objects import (
     owner_emails as owner_emails,
 )
+from ufo.schema.records import (
+    AGENT_ICONS as AGENT_ICONS,
+)
+from ufo.schema.records import (
+    TablerIcon as TablerIcon,
+)

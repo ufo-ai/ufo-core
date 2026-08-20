@@ -123,10 +123,12 @@ from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
 from ufo_ext_web.panels import (
     FIRST_RUN_PROVIDERS,
+    UNLOCKS_BY_NAME,
     ApplyIntent,
     agent_settings,
     submit_intent,
 )
+from ufo_ext_web.starters import Slate, starters_key
 
 SURFACE_WEB = "web"
 SOURCE = "ufo web"
@@ -3003,6 +3005,139 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     )
 
 
+STARTER_APP_SLOTS = 2
+UNLOCK_MAX_MISSING = 2
+PROVIDER_LABELS = {tile.name: tile.label for tile in FIRST_RUN_PROVIDERS}
+
+
+class MissingTile(BaseModel):
+    name: str
+    label: str
+
+
+class StarterRow(BaseModel):
+    """One row the start screen presses. `ask` is what the member says by pressing it — the whole
+    act, in their own voice. `mark` is the app icon an application row wears; a check-in founds no
+    application, so it carries none and the page draws it a plain glyph."""
+
+    kind: Literal["app", "check_in"]
+    mark: str | None
+    title: str
+    body: str
+    ask: str
+
+
+class UnlockRow(BaseModel):
+    """The start screen's fourth row: an application this member is one or two accounts short of,
+    stated as the accounts it would take. `providers` is what is still missing, in catalog order,
+    and pressing the row says the same build ask an owned row says — the agent asks for the
+    accounts it finds it does not hold, and its reply carries the connect control."""
+
+    title: str
+    ask: str
+    providers: tuple[MissingTile, ...]
+
+
+async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) -> frozenset[str]:
+    """The connectors this workspace already reaches, in the catalog's own vocabulary: the broker
+    connections the reader's audience holds, the Slack the workspace installed, and the GitHub
+    `github/coverage` reports. Read live, on every start screen, so an account connected a moment
+    ago is never offered again."""
+    connections = await ctx.list_connections(member_id, admin=admin)
+    held = {view.provider for view in connections}
+    if SLACK_SURFACE in {entry.surface for entry in await ctx.list_installations()}:
+        held.add(SLACK_SURFACE)
+    if (await ctx.github_coverage(member_id, admin=admin)).git_push:
+        held.add(GITHUB_PROVIDER)
+    return frozenset(held)
+
+
+def fill_starters(
+    slate: Slate, held: frozenset[str], taken: frozenset[str]
+) -> tuple[tuple[StarterRow, ...], UnlockRow | None]:
+    """Which ranked rows the start screen draws, decided against what the workspace holds right now.
+
+    The ranking states relevance and nothing else; access is answered here. A row whose accounts are
+    all held is an application the member can build today, and the first two fill the screen's
+    application slots. A row short of one or two accounts is the unlock, and the first such row
+    takes that slot — short of more than two, the row is a project rather than an offer and is
+    passed over. A row whose name an application already carries is dropped either way. The
+    check-in closes the list, because it asks after work rather than founding any."""
+    apps: list[StarterRow] = []
+    unlock: UnlockRow | None = None
+    for entry in slate.ranked:
+        row = UNLOCKS_BY_NAME.get(entry.unlock)
+        if row is None or row.name in taken or entry.title.strip().lower() in taken:
+            continue
+        missing = row.missing(held)
+        if not missing:
+            if len(apps) < STARTER_APP_SLOTS:
+                apps.append(
+                    StarterRow(
+                        kind="app",
+                        mark=row.mark,
+                        title=entry.title,
+                        body=entry.body,
+                        ask=entry.ask,
+                    )
+                )
+        elif unlock is None and len(missing) <= UNLOCK_MAX_MISSING:
+            unlock = UnlockRow(
+                title=entry.title,
+                ask=entry.ask,
+                providers=tuple(
+                    MissingTile(name=name, label=PROVIDER_LABELS[name]) for name in missing
+                ),
+            )
+        if len(apps) == STARTER_APP_SLOTS and unlock is not None:
+            break
+    if slate.check_in is not None:
+        apps.append(
+            StarterRow(
+                kind="check_in",
+                mark=None,
+                title=slate.check_in.title,
+                body=slate.check_in.body,
+                ask=slate.check_in.ask,
+            )
+        )
+    return tuple(apps), unlock
+
+
+async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
+    """What this member reads before they have asked anything: two applications they can build now,
+    one check-in drawn from their own memory, and one unlock naming what an account would buy them.
+
+    The ranking is the starters job's, stored under this member's own subject and read by nobody
+    else. Which ranked row is an application and which is an unlock is decided here instead, against
+    the connectors the workspace holds right now, so the job never stores a claim about access that
+    a connect made stale. A row whose name an application already carries is dropped for the same
+    reason: the screen offers work to do, never work already done.
+
+    An empty answer is ordinary — a workspace whose memory says nothing yet has nothing ranked — and
+    the page draws its own rows for every slot this read does not fill."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    stored = await web_extension().store.get(starters_key(member_id))
+    if not isinstance(stored, dict):
+        return JSONResponse({"starters": [], "unlock": None})
+    try:
+        slate = Slate.model_validate(stored)
+    except ValidationError:
+        return JSONResponse({"starters": [], "unlock": None})
+    held = await _held_providers(ctx, member_id, admin=audience.admin)
+    taken = frozenset(agent.name.strip().lower() for agent in audience.agents)
+    starters, unlock = fill_starters(slate, held, taken)
+    return JSONResponse(
+        {
+            "starters": [row.model_dump(mode="json") for row in starters],
+            "unlock": None if unlock is None else unlock.model_dump(mode="json"),
+        }
+    )
+
+
 async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response:
     """One searchable, filterable keyset page of the files turns have shared with this member."""
     resolved = await _audience_for(ctx, request)
@@ -4023,6 +4158,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
     SurfaceRoute(method="GET", path="workspace/first-run", handler=workspace_first_run),
+    SurfaceRoute(method="GET", path="workspace/starters", handler=workspace_starters),
     SurfaceRoute(method="GET", path="workspace/radar", handler=workspace_radar),
     SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),

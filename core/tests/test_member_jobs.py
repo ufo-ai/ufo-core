@@ -9,7 +9,11 @@ from ufo_ext_memory.store import memory_item
 from ufo_ext_objectives.store import objective, objective_event, objective_step
 
 from ufo.agent_scope import agent
-from ufo.audience import conversation_audience, foreign_room_audience
+from ufo.audience import (
+    audience_subjects,
+    conversation_audience,
+    foreign_room_audience,
+)
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import _member_blob_text, context_for
@@ -171,6 +175,18 @@ async def test_member_reads_are_gated_on_member_context(db: None) -> None:
             scheduled_member_id=member_id,
         )
         assert await bound.scheduled_member_timezone() == "America/New_York"
+
+
+async def test_recent_memory_is_gated_and_needs_a_provider(db: None) -> None:
+    workspace_id, member_id, _other_member_id, _brief_id = await _seed()
+    subjects = audience_subjects(conversation_audience(member_id))
+    with ws(workspace_id):
+        ungated = context_for("web", frozenset())
+        with pytest.raises(PermissionError):
+            await ungated.recent_memory(subjects, 10)
+        providerless = context_for("web", frozenset(), member_context_read=True)
+        with pytest.raises(RuntimeError, match="memory-search provider"):
+            await providerless.recent_memory(subjects, 10)
 
 
 async def test_earliest_seated_admin_is_deterministic(db: None) -> None:

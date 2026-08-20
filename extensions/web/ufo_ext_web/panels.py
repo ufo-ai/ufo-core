@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, JsonValue, ValidationError, model_validat
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, Terminal
-from ufo.sdk.objects import AgentSpec
+from ufo.sdk.objects import AGENT_ICONS, AgentSpec, TablerIcon
 from ufo.sdk.surfaces import CredentialSlotView, SurfaceContext, TerminalFrame, ToolIntent
 from ufo_ext_web.audience import granted_emails, web_extension
 
@@ -302,9 +302,197 @@ FIRST_RUN_PROVIDERS = (
         summary="Read and update records.",
         group="Customers and revenue",
     ),
+    ProviderTile(
+        name="hubspot",
+        label="HubSpot",
+        summary="Read and update deals and contacts.",
+        group="Customers and revenue",
+    ),
+    ProviderTile(
+        name="salesforce",
+        label="Salesforce",
+        summary="Read and update accounts and opportunities.",
+        group="Customers and revenue",
+    ),
+    ProviderTile(
+        name="zendesk",
+        label="Zendesk",
+        summary="Read tickets and draft replies.",
+        group="Customers and revenue",
+    ),
+    ProviderTile(
+        name="quickbooks",
+        label="QuickBooks",
+        summary="Read invoices, expenses, and reports.",
+        group="Customers and revenue",
+    ),
 )
 
 FIRST_RUN_PROVIDER_NAMES = frozenset(tile.name for tile in FIRST_RUN_PROVIDERS)
+
+TRACKERS = ("linear", "jira", "asana")
+SUPPORT = ("intercom", "zendesk")
+CRM = ("hubspot", "salesforce", "attio")
+DOCS = ("notion", "googledrive")
+BOOKS = ("stripe", "quickbooks")
+
+
+class Unlock(BaseModel):
+    """One application the start screen can offer, and the accounts it takes to run.
+
+    `needs` is a conjunction of alternatives: every group must be met, and any one name in a group
+    meets that group — so two single-name groups read as `all of`, one many-name group as `any of`,
+    and an empty `needs` is work that reaches nothing and is always ready. A row whose groups the
+    member already holds is an application they can build now; a row short of one or two accounts
+    is an unlock, offered as the accounts it would take. The names are the offered tiles, checked
+    at import, because the row the portal draws is labelled from the tile's own label and a name no
+    tile carries would draw no glyph and no words."""
+
+    name: str
+    mark: TablerIcon
+    does: str
+    needs: tuple[tuple[str, ...], ...] = ()
+
+    @model_validator(mode="after")
+    def _names_offered_tiles_and_a_drawn_mark(self) -> "Unlock":
+        if self.mark not in AGENT_ICONS:
+            raise ValueError(f"unlock {self.name!r} wears no drawn mark {self.mark!r}")
+        for group in self.needs:
+            if not group:
+                raise ValueError(f"unlock {self.name!r} states an empty alternative")
+            unoffered = sorted(set(group) - FIRST_RUN_PROVIDER_NAMES)
+            if unoffered:
+                raise ValueError(f"unlock {self.name!r} needs no tile named {unoffered[0]!r}")
+        return self
+
+    def missing(self, held: frozenset[str]) -> tuple[str, ...]:
+        """The tiles still to connect before this row can run, in catalog order — empty where the
+        member already holds every group. A group met by one held name costs nothing; a group met
+        by none contributes its first name, the catalog's own preference for that class."""
+        return tuple(group[0] for group in self.needs if not held.intersection(group))
+
+
+UNLOCKS = (
+    Unlock(
+        name="pr-babysitter",
+        mark="gnomon",
+        does="Reports what each open pull request waits on: age, reviewer, checks.",
+        needs=(("github",),),
+    ),
+    Unlock(
+        name="release-notes",
+        mark="triglyph",
+        does="Posts what shipped since the last release, in plain sentences.",
+        needs=(("github",), ("slack",)),
+    ),
+    Unlock(
+        name="issue-assigner",
+        mark="deltoton",
+        does="Routes each new issue to one owner, and states the evidence.",
+        needs=(("github",), TRACKERS),
+    ),
+    Unlock(
+        name="doc-drift",
+        mark="ostrakon",
+        does="Flags the documents a merged change made wrong, quoting the line.",
+        needs=(("github",), DOCS),
+    ),
+    Unlock(
+        name="sprint-reporter",
+        mark="stele",
+        does="Reports what moved, what stalled, and what nobody owns.",
+        needs=(TRACKERS,),
+    ),
+    Unlock(
+        name="meeting-scribe",
+        mark="lekythos",
+        does="Writes a note per meeting — decided, owed, open — and files it.",
+        needs=(("googlecalendar",), DOCS),
+    ),
+    Unlock(
+        name="meeting-to-issues",
+        mark="denticulus",
+        does="Files the next steps a meeting agreed, once they are confirmed.",
+        needs=(("googlecalendar",), TRACKERS),
+    ),
+    Unlock(
+        name="day-ahead",
+        mark="akhet",
+        does="Posts the day's meetings and what to read before each one.",
+        needs=(("googlecalendar",), ("slack",)),
+    ),
+    Unlock(
+        name="inbox-triage",
+        mark="hydria",
+        does="Groups unread mail by what it asks, and drafts the replies it needs.",
+        needs=(("gmail",),),
+    ),
+    Unlock(
+        name="invoice-chaser",
+        mark="kylix",
+        does="Drafts the chase for every invoice past its terms.",
+        needs=(("gmail",), BOOKS),
+    ),
+    Unlock(
+        name="runway-report",
+        mark="omphalos",
+        does="Reports cash, burn, and the months of runway left.",
+        needs=(("stripe",), ("quickbooks",)),
+    ),
+    Unlock(
+        name="payment-watch",
+        mark="patera",
+        does="Posts failed payments and cancellations as they land.",
+        needs=(("stripe",), ("slack",)),
+    ),
+    Unlock(
+        name="ticket-themes",
+        mark="anthemion",
+        does="Groups the week's tickets by underlying problem, and quotes each.",
+        needs=(SUPPORT,),
+    ),
+    Unlock(
+        name="support-to-issues",
+        mark="nirah",
+        does="Files the problems support keeps answering, one issue each.",
+        needs=(SUPPORT, TRACKERS),
+    ),
+    Unlock(
+        name="pipeline-reviewer",
+        mark="carnyx",
+        does="Names the deals gone quiet and what each one needs next.",
+        needs=(CRM,),
+    ),
+    Unlock(
+        name="account-brief",
+        mark="adyton",
+        does="Keeps a one-page brief per account current from the record.",
+        needs=(CRM, DOCS),
+    ),
+    Unlock(
+        name="thread-summarizer",
+        mark="osculum",
+        does="Writes a long channel or thread down to what was decided.",
+        needs=(("slack",),),
+    ),
+    Unlock(
+        name="competitor-watch",
+        mark="wedjat",
+        does="Tracks the competitors you name, with a source for every claim.",
+    ),
+    Unlock(
+        name="market-researcher",
+        mark="nephele",
+        does="Researches a market, a company, or a person on request.",
+    ),
+    Unlock(
+        name="writing-desk",
+        mark="kalyx",
+        does="Drafts the recurring note: the update, the announcement, the post.",
+    ),
+)
+
+UNLOCKS_BY_NAME = {unlock.name: unlock for unlock in UNLOCKS}
 
 
 class ToolingIntent(BaseModel):

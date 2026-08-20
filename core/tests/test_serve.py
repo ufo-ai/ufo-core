@@ -171,6 +171,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
         index=object(),
         embed=object(),
         blob=object(),
+        memory=object(),
         registry=registry,
         sandboxes=object(),
         subagents=object(),
@@ -205,6 +206,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["page"]["manifests"] is manifests
     assert captured["page"]["registry"] is registry
     assert captured["jobs"]["registry"] is registry
+    assert captured["jobs"]["memory"] is runtime.memory
     assert captured["launched"] is True
     assert captured["page"]["probes"] is captured["jobs"]["probes"]
 
@@ -223,6 +225,7 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
         index=object(),
         embed=object(),
         blob=object(),
+        memory=object(),
         registry=registry,
         sandboxes=object(),
         subagents=object(),

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { IconArrowRight, IconCheck, IconPlug } from "@tabler/icons-react";
+import { IconArrowRight, IconCheck, IconMessage, IconPlug } from "@tabler/icons-react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { AgentPicker } from "@/kernel/agentpick";
@@ -40,7 +40,9 @@ import {
   useTakeMeToTheFoot,
 } from "@/kernel/messages";
 import { COLUMN } from "@/kernel/pane";
+import { usePanelRead } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
+import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import {
@@ -782,10 +784,28 @@ function Composer({
   );
 }
 
+type StarterRow = {
+  kind: "app" | "check_in";
+  mark: string | null;
+  title: string;
+  body: string;
+  ask: string;
+};
+type MissingTile = { name: string; label: string };
+type UnlockRow = { title: string; ask: string; providers: MissingTile[] };
+type StartersPayload = { starters: StarterRow[]; unlock: UnlockRow | null };
+
+const STARTERS_READ = "/workspace/starters";
+
 /** What a member can ask for before they have asked for anything: three applications named for the
  *  job each does and the decision each leaves with them. Creating one is the same act whichever app
  *  is being asked, so every start screen carries them. The body states that decision in the measure
- *  a row leaves beside the name, which is one line. */
+ *  a row leaves beside the name, which is one line.
+ *
+ *  These are what the screen says where the read has nothing to say — before it lands, where it
+ *  fails, and in a workspace whose memory has yet to name any work of its own. A member is never
+ *  shown an empty screen or a spinner where their own work will stand: the rows are one height, so
+ *  what lands replaces words and moves nothing. */
 const STARTERS: { mark: string; title: string; body: string; ask: string }[] = [
   {
     mark: "gnomon",
@@ -818,13 +838,18 @@ const STARTERS: { mark: string; title: string; body: string; ask: string }[] = [
  *  measure cannot hold is cut, never wrapped, so three starters cost three lines whatever they
  *  say.
  *
- *  Each starter wears the avatar an app wears everywhere else, because that is what a press
- *  founds: the row states the shape of the thing, not a category glyph standing in for it.
+ *  An application row wears the avatar an app wears everywhere else, because that is what a press
+ *  founds: the row states the shape of the thing, not a category glyph standing in for it. A
+ *  check-in founds no app — it asks after work already under way — so it wears a glyph in the width
+ *  an avatar takes, and every row's words still start on one edge.
  *
- *  The connectors row closes the stack, and is the one row that is not an ask: it leaves for the
- *  screen where accounts are connected. It wears a glyph rather than an avatar — no app stands
- *  behind it — held in the width an avatar takes, so every row's words start on one edge. It keeps
- *  the same rule and the same arrow, because it is reached the same way.
+ *  The connectors row closes the stack. Where the read names an unlock it is an ask like the three
+ *  above it: the member says what they want built, and the agent asks for the accounts it turns out
+ *  not to hold — the connect control rides its reply, so the row orchestrates nothing and its words
+ *  state the price rather than a destination. It wears the brand mark of the first account it
+ *  names. Where the read names none, it falls back to the link to the screen where accounts are
+ *  connected, the one row that is not an ask. Either way it keeps the same rule and the same
+ *  arrow.
  *
  *  The arrow is drawn under the pointer or the focus outline rather than at rest: arrows standing on
  *  an idle screen say a row leads somewhere once per row. It holds its place while hidden, so the
@@ -840,37 +865,81 @@ const STARTER_ARROW = cn(
   "motion-reduce:transition-none",
 );
 
+const FALLBACK_ROWS: StarterRow[] = STARTERS.map((starter) => ({ kind: "app", ...starter }));
+
+/** The accounts an unlock names, said the way a person says them. */
+function namedTiles(providers: MissingTile[]): string {
+  const labels = providers.map((tile) => tile.label);
+  return labels.length < 2
+    ? labels.join("")
+    : labels.slice(0, -1).join(", ") + " and " + labels.at(-1);
+}
+
+function StarterMark({ row }: { row: StarterRow }) {
+  if (row.kind === "check_in" || !row.mark) {
+    return (
+      <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
+        <IconMessage className="size-(--size-glyph) text-ink-soft" aria-hidden />
+      </span>
+    );
+  }
+  return (
+    <Avatar>
+      <AvatarFallback>
+        <AgentIcon name={row.mark} />
+      </AvatarFallback>
+    </Avatar>
+  );
+}
+
 function Starters({ agentId }: { agentId: string }) {
+  const read = usePanelRead<StartersPayload>(STARTERS_READ);
+  const answered = read.phase === "ready" ? read.payload : null;
+  const rows = answered?.starters?.length ? answered.starters : FALLBACK_ROWS;
+  const unlock = answered?.unlock?.providers?.length ? answered.unlock : null;
   return (
     <div className="mt-2xl flex flex-col">
-      {STARTERS.map(({ mark, title, body, ask }) => (
+      {rows.map((row) => (
         <button
-          key={title}
+          key={row.title}
           type="button"
-          onClick={() => setPendingAsk(agentId, ask, true)}
+          onClick={() => setPendingAsk(agentId, row.ask, true)}
           className={STARTER_ROW}
         >
-          <Avatar>
-            <AvatarFallback>
-              <AgentIcon name={mark} />
-            </AvatarFallback>
-          </Avatar>
+          <StarterMark row={row} />
           <span className="min-w-0 flex-1 truncate">
-            <span className="font-medium">{title}</span>
-            <span className="text-ink-soft"> {body}</span>
+            <span className="font-medium">{row.title}</span>
+            <span className="text-ink-soft"> {row.body}</span>
           </span>
           <IconArrowRight className={STARTER_ARROW} aria-hidden />
         </button>
       ))}
-      <a href={workspaceHash("connectors")} className={STARTER_ROW}>
-        <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
-          <IconPlug className="size-(--size-glyph) text-ink-soft" aria-hidden />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-ink-soft">
-          Connect more accounts for better suggestions.
-        </span>
-        <IconArrowRight className={STARTER_ARROW} aria-hidden />
-      </a>
+      {unlock ? (
+        <button
+          type="button"
+          onClick={() => setPendingAsk(agentId, unlock.ask, true)}
+          className={STARTER_ROW}
+        >
+          <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
+            <BrandMark provider={unlock.providers[0].name} />
+          </span>
+          <span className="min-w-0 flex-1 truncate">
+            <span className="font-medium">{unlock.title}</span>
+            <span className="text-ink-soft"> Connect {namedTiles(unlock.providers)}.</span>
+          </span>
+          <IconArrowRight className={STARTER_ARROW} aria-hidden />
+        </button>
+      ) : (
+        <a href={workspaceHash("connectors")} className={STARTER_ROW}>
+          <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
+            <IconPlug className="size-(--size-glyph) text-ink-soft" aria-hidden />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-ink-soft">
+            Connect more accounts for better suggestions.
+          </span>
+          <IconArrowRight className={STARTER_ARROW} aria-hidden />
+        </a>
+      )}
     </div>
   );
 }

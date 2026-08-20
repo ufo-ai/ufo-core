@@ -8,10 +8,20 @@ token, not a bot secret) and no config knob — installed means mounted, like Sl
 admits without writeback and tails the hub in its own stream route, and claims the browser home, so
 the deploy's bare host opens the portal."""
 
-from ufo.sdk.jobs import JobSpec, unseeded_agent_workspaces, untitled_conversation_workspaces
+from ufo.sdk.jobs import (
+    JobSpec,
+    seated_member_workspaces,
+    unseeded_agent_workspaces,
+    untitled_conversation_workspaces,
+)
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo_ext_web.audience import EXTENSION_WEB, WEB_ACCESS_TOOLS
+from ufo_ext_web.starters import (
+    STARTERS_JOB_NAME,
+    STARTERS_JOB_SCHEDULE,
+    rank_starters,
+)
 from ufo_ext_web.surface import (
     ARTIFACTS_SLOT,
     CHANGES_SLOT,
@@ -52,6 +62,12 @@ def manifest() -> Manifest:
                 schedule=SEED_JOB_SCHEDULE,
                 handler=seed_homepages,
                 candidates=unseeded_agent_workspaces(EXTENSION_WEB, HOMEPAGE_SEED_PREFIX),
+            ),
+            JobSpec(
+                name=STARTERS_JOB_NAME,
+                schedule=STARTERS_JOB_SCHEDULE,
+                handler=rank_starters,
+                candidates=seated_member_workspaces(),
             ),
         ),
         member_context_read=True,

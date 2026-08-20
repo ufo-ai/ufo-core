@@ -3085,6 +3085,125 @@ test("a starter says its sentence on the press, and leaves with the start screen
   expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
 });
 
+const SLATE = {
+  starters: [
+    {
+      kind: "app",
+      mark: "omphalos",
+      title: "Runway report",
+      body: "Reports cash, burn, and the months of runway left.",
+      ask: "I want an application that reports our cash, burn, and months of runway.",
+    },
+    {
+      kind: "app",
+      mark: "hydria",
+      title: "Invoice chaser",
+      body: "Drafts the chase for every invoice past its terms.",
+      ask: "I want an application that drafts the chase for every overdue invoice.",
+    },
+    {
+      kind: "check_in",
+      mark: null,
+      title: "Acme renewal",
+      body: "The renewal was waiting on legal last week.",
+      ask: "Where did the Acme renewal land?",
+    },
+  ],
+  unlock: {
+    title: "Account brief",
+    ask: "I want an application that keeps a one-page brief per account current.",
+    providers: [
+      { name: "hubspot", label: "HubSpot" },
+      { name: "notion", label: "Notion" },
+    ],
+  },
+};
+
+test("a workspace with nothing ranked reads the rows the screen ships with", async () => {
+  wire({
+    ...transcript(),
+    "/workspace/starters": () => json({ starters: [], unlock: null }),
+  });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("button", { name: /PR babysitter/ });
+  expect(
+    screen.getByRole("button", { name: /Competitive intel/ }),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: /Connect more accounts/ }),
+  ).toBeTruthy();
+});
+
+test("a ranked slate replaces every row the screen ships with", async () => {
+  wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("button", { name: /Runway report/ });
+  expect(screen.getByRole("button", { name: /Invoice chaser/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Acme renewal/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
+});
+
+test("a ranked starter says its own sentence, and a check-in asks after work", async () => {
+  const said: string[] = [];
+  wire({
+    ...transcript(),
+    "/workspace/starters": () => json(SLATE),
+    "/chat": (_url, init) => {
+      said.push(String(init?.body));
+      return json({
+        turn_id: TURN_ID,
+        conversation_id: CONVO_ID,
+        title: "hello",
+      });
+    },
+  });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /Acme renewal/ }),
+  );
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(said).toEqual(["Where did the Acme renewal land?"]);
+});
+
+test("an unlock is an ask, not a departure: it names its accounts and says the build", async () => {
+  const said: string[] = [];
+  wire({
+    ...transcript(),
+    "/workspace/starters": () => json(SLATE),
+    "/chat": (_url, init) => {
+      said.push(String(init?.body));
+      return json({
+        turn_id: TURN_ID,
+        conversation_id: CONVO_ID,
+        title: "hello",
+      });
+    },
+  });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const row = await screen.findByRole("button", { name: /Account brief/ });
+  expect(row.textContent).toContain("Connect HubSpot and Notion.");
+  expect(
+    screen.queryByRole("link", { name: /Connect more accounts/ }),
+  ).toBeNull();
+
+  // The press says the build, never a connect: the agent asks for what it turns out not to hold,
+  // and the connect control rides its reply.
+  await userEvent.click(row);
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(said).toEqual([
+    "I want an application that keeps a one-page brief per account current.",
+  ]);
+});
+
 test("a landed connect states the account it made, and presses nothing", async () => {
   wire(
     transcript({

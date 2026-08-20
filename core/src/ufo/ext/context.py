@@ -16,7 +16,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -94,6 +94,10 @@ from ufo.sources.sync import PageFeed, SourceRowConfig, source_row_id
 from ufo.subjects import SHARED_SUBJECT
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.workspace import ws_current
+
+if TYPE_CHECKING:
+    from ufo.listings import ListingCursor, ListingPage
+    from ufo.memory import MemoryMatch, MemorySearch
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
@@ -1032,6 +1036,7 @@ class ExtensionContext:
     member_context_read_allowed: bool = False
     scheduled_member_id: UUID | None = None
     member_context_blob: WorkspaceBlobStore | None = None
+    memory: "MemorySearch | None" = None
     artifact_token_secret: str = ""
 
     @property
@@ -1144,6 +1149,26 @@ class ExtensionContext:
         if row is None:
             raise PermissionError("the scheduled member does not exist")
         return row.timezone or "UTC"
+
+    async def recent_memory(
+        self,
+        subjects: frozenset[str],
+        limit: int,
+        kinds: "frozenset[str] | None" = None,
+        cursor: "ListingCursor | None" = None,
+    ) -> "ListingPage[MemoryMatch]":
+        """One page of the live memory items the subjects may read, newest first — the browse half
+        of the memory seam a background job reaches, the same `list_recent` the portal's memory view
+        reads through its surface. Gated with the rest of the member-privileged reads, because a
+        subject set naming a member reads that member's private items and the loader admits the
+        declaration only to a first-party extension.
+
+        Browse only. Search takes a `SourceReader` bound to an agent, and a job holds no agent."""
+        if not self.member_context_read_allowed:
+            raise PermissionError("this extension cannot read member memory")
+        if self.memory is None:
+            raise RuntimeError("no memory-search provider is installed")
+        return await self.memory.list_recent(subjects, limit, kinds, cursor)
 
     async def member_context(
         self,
@@ -2557,6 +2582,7 @@ def context_for(
     member_context_read: bool = False,
     scheduled_member_id: UUID | None = None,
     member_context_blob: WorkspaceBlobStore | None = None,
+    memory: "MemorySearch | None" = None,
     *,
     audience: Audience = SHARED_AUDIENCE,
     public_base_url: str | None = None,
@@ -2607,5 +2633,6 @@ def context_for(
         member_context_read_allowed=member_context_read,
         scheduled_member_id=scheduled_member_id,
         member_context_blob=member_context_blob if member_context_read else None,
+        memory=memory if member_context_read else None,
         artifact_token_secret=artifact_token_secret,
     )
