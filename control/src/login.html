@@ -133,6 +133,11 @@ const target = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.
 const artifactRaw = new URLSearchParams(location.search).get('a') || '';
 const artifact = artifactRaw.startsWith('/artifacts/') ? artifactRaw : null;
 const firstRun = location.hash === '#/first-run' || params.get('first') === '1';
+/* The operator debug surface is asked for by name, exactly as a conversation or an artifact is: a
+   bearer-less GET of an operator page bounces back here carrying the ask, so the member who clicked
+   that link returns to it. A sign-in that asked for nothing lands in the portal, whatever the
+   member's email domain is. */
+const debug = params.get('debug') === '1';
 let token = null;
 let workspace = null;
 let debuggerUrl = null;
@@ -273,7 +278,7 @@ function complete() {
   const portalUrl = workspace + '/surface/web' +
     (target ? '?c=' + target[0] : artifact ? '?a=' + encodeURIComponent(artifact)
       : founding || firstRun ? '?first=1' : '');
-  portal.action = target || artifact || firstRun ? portalUrl : debuggerUrl || portalUrl;
+  portal.action = debug && debuggerUrl ? debuggerUrl : portalUrl;
   const credential = document.createElement('input');
   credential.type = 'hidden';
   credential.name = 'token';
@@ -345,6 +350,7 @@ const gq = new URLSearchParams();
 if (target) gq.set('c', target[0]);
 if (artifact) gq.set('a', artifact);
 if (firstRun) gq.set('first', '1');
+if (debug) gq.set('debug', '1');
 google.href = START + (gq.size ? '?' + gq : '');
 
 if (fault) {

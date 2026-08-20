@@ -291,7 +291,7 @@ async def test_query_tokens_are_never_accepted(debug) -> None:
     assert read.status_code == 401
     bind = await client.get("/surface/debug", params={"token": token}, follow_redirects=False)
     assert bind.status_code == 303
-    assert bind.headers["location"] == "/login"
+    assert bind.headers["location"] == "/login?debug=1"
     assert "set-cookie" not in bind.headers
     tokenless_post = await client.post("/surface/debug", follow_redirects=False)
     assert tokenless_post.status_code == 401
@@ -300,8 +300,10 @@ async def test_query_tokens_are_never_accepted(debug) -> None:
 async def test_an_unresolved_page_get_lands_on_the_sign_in_page(debug) -> None:
     """The Slack turn's `debug` link is a plain GET carrying no bearer: an operator whose cookie
     outlived its bearer reaches the card that mints a new one instead of a bare `unauthorized`,
-    which is the only recoverable answer for a cookie they cannot read or delete. The API routes
-    still reject, so the page's own fetches fail loudly."""
+    which is the only recoverable answer for a cookie they cannot read or delete. The bounce carries
+    `?debug=1`, the ask that sends the minted bearer back to this surface: without it the sign-in
+    page posts the session to the member portal, so the click that wanted the debugger would land
+    there and never come back. The API routes still reject, so the page's fetches fail loudly."""
     client, _, _ = debug
     workspace_id, _ = await _seed_workspace()
     conversation_id = await _seed_conversation(workspace_id)
@@ -313,12 +315,12 @@ async def test_an_unresolved_page_get_lands_on_the_sign_in_page(debug) -> None:
         follow_redirects=False,
     )
     assert linked.status_code == 303
-    assert linked.headers["location"] == "/login"
+    assert linked.headers["location"] == "/login?debug=1"
 
     client.cookies.set("ufo_debug", _mint(SECRET, workspace_id, operator, ttl_seconds=-1))
     expired = await client.get("/surface/debug", follow_redirects=False)
     assert expired.status_code == 303
-    assert expired.headers["location"] == "/login"
+    assert expired.headers["location"] == "/login?debug=1"
     assert (await client.get("/surface/debug/api/conversations")).status_code == 401
 
 

@@ -18,7 +18,9 @@ use ufo_control::gateway::{
 use ufo_control::invite::InviteCodes;
 use ufo_control::shared::SharedWorkspaces;
 use ufo_control::store::OnboardStore;
-use ufo_control::web::{LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE};
+use ufo_control::web::{
+    LOGIN_PAGE, LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE,
+};
 use ufo_control::workos::{Verifier, WorkosVerifier, CONSOLE_CODE};
 
 const SECRET: &str = "local-dev-token-secret";
@@ -463,7 +465,7 @@ fn base64_decode(value: &str) -> String {
 }
 
 #[tokio::test]
-async fn an_operator_address_opens_the_debugger() {
+async fn an_operator_address_is_handed_the_debug_surface() {
     let operator = format!("staff@{OPERATOR_EMAIL_DOMAIN}");
     let rig = rig(
         vec![
@@ -486,6 +488,43 @@ async fn an_operator_address_opens_the_debugger() {
     assert!(
         screen.contains("debugger\thttps://app.flyingobject.ai/surface/debug"),
         "{screen}"
+    );
+}
+
+#[tokio::test]
+async fn an_admin_domain_claim_lands_on_the_web_portal() {
+    // The debug surface used to be the destination of every sign-in that carried no `?c=`, no `?a=`
+    // and no first-run mark, so a member on the admin email domain could never reach the portal at
+    // all. The claim hands the page a workspace and the operator capability; the portal is where
+    // the page posts the session, and the debug surface is reached only by a member who asked.
+    let operator = format!("staff@{OPERATOR_EMAIL_DOMAIN}");
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, format!(r#"{{"user":{{"email":"{operator}"}}}}"#)),
+        ],
+        vec![
+            (200, r#"{"choices":[]}"#.to_string()),
+            (
+                200,
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":false}"#
+                    .to_string(),
+            ),
+        ],
+        false,
+    )
+    .await;
+    turn(&rig, "session-1", &operator).await;
+    let screen = turn(&rig, "session-1", "123456").await;
+    assert!(
+        screen.contains("workspace\thttps://app.flyingobject.ai"),
+        "{screen}"
+    );
+    assert!(LOGIN_PAGE.contains("const portalUrl = workspace + '/surface/web' +"));
+    assert!(LOGIN_PAGE.contains("portal.action = debug && debuggerUrl ? debuggerUrl : portalUrl;"));
+    assert!(
+        !LOGIN_PAGE.contains("debuggerUrl || portalUrl"),
+        "a sign-in that asked for nothing must never fall back to the debug surface"
     );
 }
 

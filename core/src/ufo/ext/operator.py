@@ -22,6 +22,10 @@ from ufo.seats import email_domain
 OPERATOR_COOKIE = "ufo_debug"
 TOKEN_FIELD = "token"
 OPERATOR_PAGE_PATH = re.compile(r"/surface/[^/]+/?")
+# The sign-in page posts the minted bearer to the member portal unless it is asked for the operator
+# surfaces by name, so the bounce below carries the ask: the click that wanted one comes back to it,
+# and an ordinary sign-in on the same page is never diverted there.
+OPERATOR_LOGIN_PATH = f"{LOGIN_PATH}?debug=1"
 
 
 async def operator_claims(request: Request) -> tuple[str, str] | None:
@@ -60,13 +64,16 @@ async def resolve_operator_workspace(
     bearer's own workspace claim is the scope.
 
     A GET of the surface page carrying no credential that resolves redirects to the deploy's one
-    sign-in page, so a link into an operator surface — the `debug` footer of a Slack turn, a
-    bookmark — leads to the card that mints a bearer instead of dead-ending on `unauthorized`. The
-    surface's own API routes still reject, so a fetch fails loudly rather than reading a page."""
+    sign-in page under the ask that sends the minted bearer back here, so a link into an operator
+    surface — the `debug` footer of a Slack turn, a bookmark — leads to the card that mints one
+    instead of dead-ending on `unauthorized`, and reaches this surface rather than the member
+    portal. One cookie serves every operator surface, so the session a bounce from any of them
+    opens is the session all of them read. The surface's own API routes still reject, so a fetch
+    fails loudly rather than reading a page."""
     claims = await operator_claims(request)
     if claims is None:
         if request.method == "GET" and OPERATOR_PAGE_PATH.fullmatch(request.url.path):
-            return RedirectResponse(LOGIN_PATH, status_code=303)
+            return RedirectResponse(OPERATOR_LOGIN_PATH, status_code=303)
         return None
     claimed_workspace, email = claims
     if email_domain(email) != OPERATOR_EMAIL_DOMAIN:

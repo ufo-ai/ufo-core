@@ -350,10 +350,12 @@ impl Onboarding {
     }
 
     /// The signed-in cap: token and workspace for every member, plus the operator debugger target
-    /// only when the verified email domain is the operator's. A terminal owner caps on `choose`
-    /// rather than `ask`, so setting up billing costs one selection. A joined teammate caps on the
-    /// ordinary prompt. The web renderer posts the token to its target as soon as both values
-    /// arrive, so it is never handed a menu it cannot drive.
+    /// only when the verified email domain is the operator's. That target states a capability, not
+    /// a destination: the page posts the token to the member portal unless it was asked for the
+    /// debug surface by name. A terminal owner caps on `choose` rather than `ask`, so setting up
+    /// billing costs one selection. A joined teammate caps on the ordinary prompt. The web renderer
+    /// posts the token to its target as soon as both values arrive, so it is never handed a menu it
+    /// cannot drive.
     fn signed_in(
         &self,
         claim: &OnboardClaim,
@@ -582,6 +584,7 @@ async fn auth_start(
         conversation: query.get("c").cloned(),
         artifact: query.get("a").cloned(),
         first_run: query.get("first").is_some_and(|value| value == "1"),
+        debug: query.get("debug").is_some_and(|value| value == "1"),
     };
     let honored = match unpack_state(&pack_state(&carry, secret), secret) {
         Ok(honored) => honored,
@@ -637,6 +640,9 @@ async fn auth_callback(
     }
     if carry.first_run {
         landing.push(("first".to_string(), "1".to_string()));
+    }
+    if carry.debug {
+        landing.push(("debug".to_string(), "1".to_string()));
     }
     let bound = onboard_session(&headers, secret);
     let refusal = match bound {

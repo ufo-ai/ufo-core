@@ -365,11 +365,16 @@ logs its code the same way. The route is mounted only under `WORKOS_MODE=console
 `workos` mode requires the three `WORKOS_*` values at boot and serves no such door.
 
 When the claim's channel-verified email domain equals `OPERATOR_EMAIL_DOMAIN`, `_signed_in` adds
-one extra machine-consumed directive — `debugger <workspace-url>/surface/debug`. The automatic form
-POSTs the token to that target instead of the member portal; the debug surface exchanges it for its
-`ufo_debug` cookie and redirects. The bearer never rides a URL into the debugger, so no access log
-captures it — `spec.md` "Surfaces" covers that surface. The directive is emitted channel-blind, and
-the terminal client drops unknown verbs. The gate is the server's; the page uses the target it gets.
+one extra machine-consumed directive — `debugger <workspace-url>/surface/debug`. It states a
+capability, not a destination: the automatic form POSTs the token to the member portal for every
+member, and to that target only when the page was asked for the debug surface by name, with
+`/login?debug=1`. The ask reaches the page the way `?c=` and `?a=` do — an operator surface bounces
+a bearer-less page GET to `/login?debug=1`, and the signed Google state carries the ask back — so
+the click that wanted the debugger returns to it and every other sign-in opens the portal. The debug
+surface exchanges the posted token for its `ufo_debug` cookie and redirects. The bearer never rides
+a URL into the debugger, so no access log captures it — `spec.md` "Surfaces" covers that surface.
+The directive is emitted channel-blind, and the terminal client drops unknown verbs. The gate is the
+server's; the page uses the target it gets.
 
 ## Connecting Slack
 

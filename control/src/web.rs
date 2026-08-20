@@ -217,9 +217,19 @@ mod tests {
     }
 
     #[test]
-    fn a_requested_portal_route_precedes_the_operator_debugger() {
-        assert!(LOGIN_PAGE.contains(
-            "portal.action = target || artifact || firstRun ? portalUrl : debuggerUrl || portalUrl;"
-        ));
+    fn the_portal_is_the_destination_unless_the_debug_surface_was_asked_for() {
+        // The debugger directive says an operator MAY read the debug surface, never that this
+        // sign-in is for it: an operator who asked for nothing lands in the portal like every other
+        // member. The ask is a query parameter the operator surfaces bounce back here, so the click
+        // that wanted the debug surface is the only thing that reaches it.
+        assert!(LOGIN_PAGE.contains("const debug = params.get('debug') === '1';"));
+        assert!(
+            LOGIN_PAGE.contains("portal.action = debug && debuggerUrl ? debuggerUrl : portalUrl;")
+        );
+        assert!(
+            !LOGIN_PAGE.contains("debuggerUrl || portalUrl"),
+            "the debugger must never be the destination a sign-in falls back to"
+        );
+        assert!(LOGIN_PAGE.contains("if (debug) gq.set('debug', '1');"));
     }
 }
