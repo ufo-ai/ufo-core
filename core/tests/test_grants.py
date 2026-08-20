@@ -219,6 +219,7 @@ def test_derive_admits_and_meters_the_granted_host_without_injecting() -> None:
         account_id="acct-42",
         host=GRANTED_HOST,
         owner_member_id=uuid4(),
+        owner_email="owner@x.test",
         connection_shared=False,
     )
     rules = derive_grant_rules((grant,))
@@ -245,6 +246,7 @@ def test_derive_admits_the_providers_transfer_hosts_with_the_grant() -> None:
         account_id="acct-42",
         host=GRANTED_HOST,
         owner_member_id=uuid4(),
+        owner_email="owner@x.test",
         connection_shared=False,
     )
     rules = derive_grant_rules((grant,), ConnectorTransferHosts({"stub": (TRANSFER_HOST,)}))
@@ -262,6 +264,7 @@ def test_derive_ignores_another_providers_transfer_hosts() -> None:
         account_id="acct-42",
         host=GRANTED_HOST,
         owner_member_id=uuid4(),
+        owner_email="owner@x.test",
         connection_shared=False,
     )
     rules = derive_grant_rules((grant,), ConnectorTransferHosts({"other": (TRANSFER_HOST,)}))
@@ -321,6 +324,7 @@ async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
             account_id="acct-42",
             host=GRANTED_HOST,
             owner_member_id=member_id,
+            owner_email=f"{member_id.hex[:8]}@x.test",
             connection_shared=False,
         ),
     )

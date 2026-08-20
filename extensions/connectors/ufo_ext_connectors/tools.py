@@ -253,7 +253,8 @@ class SearchConnectorToolsInput(BaseModel):
 
 async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) -> ToolResult:
     registry = _registry(ctx)
-    matches: list[dict[str, str]] = []
+    accounts = await _connected_accounts(ctx)
+    matches: list[dict[str, JsonValue]] = []
     seen: set[str] = set()
     targets = list(dict.fromkeys(q.removeprefix("select:").strip().lower() for q in args.queries))
     for target in targets:
@@ -264,7 +265,13 @@ async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) ->
             if target and target not in haystack:
                 continue
             seen.add(provider)
-            matches.append({"source_id": provider, "label": entry.label})
+            matches.append(
+                {
+                    "source_id": provider,
+                    "label": entry.label,
+                    "connected_accounts": accounts.get(provider, []),
+                }
+            )
     catalogs = await asyncio.gather(
         *(registry.search_catalog(target, CATALOG_SEARCH_LIMIT) for target in targets)
     )
@@ -273,8 +280,31 @@ async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) ->
             if row.provider in seen:
                 continue
             seen.add(row.provider)
-            matches.append({"source_id": row.provider, "label": row.label})
+            matches.append(
+                {
+                    "source_id": row.provider,
+                    "label": row.label,
+                    "connected_accounts": accounts.get(row.provider, []),
+                }
+            )
     return _json_result({"connectors": matches})
+
+
+async def _connected_accounts(ctx: ToolContext) -> dict[str, list[JsonValue]]:
+    """Each provider's accounts this agent can already use — owner and sharing included, so a
+    listing answers what is connected and whose it is without further lookups."""
+    if ctx.grants is None:
+        return {}
+    accounts: dict[str, list[JsonValue]] = {}
+    for grant in await ctx.grants.active_grants():
+        accounts.setdefault(grant.provider, []).append(
+            {
+                "account_id": grant.account_id,
+                "owner": grant.owner_email,
+                "shared": grant.connection_shared,
+            }
+        )
+    return accounts
 
 
 async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsInput) -> ToolResult:
@@ -969,10 +999,12 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
             "Search available external connectors (github, slack, notion, ...), not their tools. "
             "The broker brokers hundreds of services, so always search by keyword rather than "
             "assuming — queries match the live catalog. Returns connector catalog rows: source_id, "
-            "label. Call this before claiming you can't access something — there is very likely a "
-            "connector available. Use 'select:<source_id>' syntax to fetch a specific connector by "
-            "exact source ID. To find a connector's real tools, call "
-            "describe_external_tools(source_id, query=...)."
+            "label, and connected_accounts — each account already usable here with its owner and "
+            "whether it is shared, so one call answers what is connected and whose it is. Call "
+            "this before claiming you can't access something — there is very likely a connector "
+            "available. Use 'select:<source_id>' syntax to fetch a specific connector by exact "
+            "source ID. To find a connector's real tools, call describe_external_tools(source_id, "
+            "query=...)."
         ),
         input_model=ListExternalToolsInput,
         handler=list_external_tools,

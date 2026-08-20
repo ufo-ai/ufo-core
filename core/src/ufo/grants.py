@@ -126,6 +126,7 @@ class Grant:
     account_id: str
     host: str
     owner_member_id: UUID
+    owner_email: str
     connection_shared: bool
 
 
@@ -139,6 +140,7 @@ class GrantSummary:
     account_id: str
     host: str
     owner_member_id: UUID
+    owner_email: str
     conversation_id: UUID
     granted_at: datetime
     updated_at: datetime
@@ -154,6 +156,8 @@ class ConnectionSummary:
     account_id: str
     host: str
     owner_member_id: UUID
+    owner_email: str
+    shared: bool
     conversation_id: UUID
     connected_at: datetime
     updated_at: datetime
@@ -389,12 +393,19 @@ class GrantStore:
                         tables.connection.c.account_id,
                         tables.connection.c.host,
                         tables.connection.c.owner_member_id,
+                        tables.member.c.email.label("owner_email"),
                         tables.connection.c.shared,
                     )
                     .select_from(
                         tables.connector_grant.join(
                             tables.connection,
                             tables.connector_grant.c.connection_id == tables.connection.c.id,
+                        ).join(
+                            tables.member,
+                            sa.and_(
+                                tables.connection.c.workspace_id == tables.member.c.workspace_id,
+                                tables.connection.c.owner_member_id == tables.member.c.id,
+                            ),
                         )
                     )
                     .where(
@@ -411,6 +422,7 @@ class GrantStore:
                 account_id=row.account_id,
                 host=row.host,
                 owner_member_id=row.owner_member_id,
+                owner_email=row.owner_email,
                 connection_shared=row.shared,
             )
             for row in rows
@@ -966,6 +978,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
                     tables.connection.c.account_id,
                     tables.connection.c.host,
                     tables.connection.c.owner_member_id,
+                    tables.member.c.email.label("owner_email"),
                     tables.connector_grant.c.conversation_id,
                     tables.connector_grant.c.created_at,
                     tables.connector_grant.c.updated_at,
@@ -975,7 +988,15 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
                     tables.connector_grant.join(
                         tables.connection,
                         tables.connector_grant.c.connection_id == tables.connection.c.id,
-                    ).join(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
+                    )
+                    .join(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
+                    .join(
+                        tables.member,
+                        sa.and_(
+                            tables.connection.c.workspace_id == tables.member.c.workspace_id,
+                            tables.connection.c.owner_member_id == tables.member.c.id,
+                        ),
+                    )
                 )
                 .where(scope)
                 .order_by(tables.connection.c.provider, tables.agent.c.name)
@@ -989,6 +1010,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
             account_id=row.account_id,
             host=row.host,
             owner_member_id=row.owner_member_id,
+            owner_email=row.owner_email,
             conversation_id=row.conversation_id,
             granted_at=row.created_at,
             updated_at=row.updated_at,
@@ -1009,16 +1031,26 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
                     tables.connection.c.account_id,
                     tables.connection.c.host,
                     tables.connection.c.owner_member_id,
+                    tables.member.c.email.label("owner_email"),
+                    tables.connection.c.shared,
                     tables.connection.c.conversation_id,
                     tables.connection.c.created_at,
                     tables.connection.c.updated_at,
                     tables.agent.c.name,
                 )
                 .select_from(
-                    tables.connection.outerjoin(
+                    tables.connection.join(
+                        tables.member,
+                        sa.and_(
+                            tables.connection.c.workspace_id == tables.member.c.workspace_id,
+                            tables.connection.c.owner_member_id == tables.member.c.id,
+                        ),
+                    )
+                    .outerjoin(
                         tables.connector_grant,
                         tables.connector_grant.c.connection_id == tables.connection.c.id,
-                    ).outerjoin(
+                    )
+                    .outerjoin(
                         tables.agent,
                         tables.connector_grant.c.agent_id == tables.agent.c.id,
                     )
@@ -1039,6 +1071,8 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
                 account_id=row.account_id,
                 host=row.host,
                 owner_member_id=row.owner_member_id,
+                owner_email=row.owner_email,
+                shared=row.shared,
                 conversation_id=row.conversation_id,
                 connected_at=row.created_at,
                 updated_at=row.updated_at,
@@ -1054,6 +1088,8 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
             account_id=summary.account_id,
             host=summary.host,
             owner_member_id=summary.owner_member_id,
+            owner_email=summary.owner_email,
+            shared=summary.shared,
             conversation_id=summary.conversation_id,
             connected_at=summary.connected_at,
             updated_at=summary.updated_at,

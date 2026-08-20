@@ -72,7 +72,10 @@ class ConnectionObjects(MemberReadableObjects[ConnectionSpec, GeneratedObjectOwn
         return tuple(
             OwnedRow(
                 name=name,
-                summary=f"{row.provider} account {row.account_id}",
+                summary=(
+                    f"{row.provider} account {row.account_id} "
+                    f"({row.owner_email}, {'shared' if row.shared else 'private'})"
+                ),
                 owner=GeneratedObjectOwner(
                     member_id=row.owner_member_id,
                     shared=False,
@@ -113,6 +116,8 @@ class ConnectionObjects(MemberReadableObjects[ConnectionSpec, GeneratedObjectOwn
             return None
         return {
             "owner_member_id": str(row.owner_member_id),
+            "owner": row.owner_email,
+            "shared": row.shared,
             "host": row.host,
             "agents": list(row.agents),
         }
@@ -159,7 +164,7 @@ class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedO
                 name=name,
                 summary=(
                     f"{row.provider} account {row.account_id} "
-                    f"({'shared' if row.shared else 'private'})"
+                    f"({row.owner_email}, {'shared' if row.shared else 'private'})"
                 ),
                 owner=GeneratedObjectOwner(
                     member_id=row.owner_member_id,
@@ -224,6 +229,7 @@ class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedO
             return None
         return {
             "owner_member_id": str(row.owner_member_id),
+            "owner": row.owner_email,
             "host": row.host,
             "agent": row.agent,
             "shared": row.shared,
@@ -322,8 +328,7 @@ CONNECTOR_GRANT_OBJECT = ObjectKind(
         "make it private. Its owner or an admin may delete it, revoking only this agent's edge "
         "while leaving the connection and other agents' edges intact. Its `scoped_to` link names "
         "the agent holding the edge; while it is private its `access_to` link names the "
-        "connection the edge opens — object_get that for the account's owner and every agent "
-        "holding it."
+        "connection the edge opens — object_get that for every agent holding it."
     ),
     spec_model=ConnectorGrantSpec,
     store=ConnectorGrantObjects(),

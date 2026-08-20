@@ -66,7 +66,7 @@ from ufo.sandbox.conversation import (
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
-from ufo.schema.records import ReasoningEffort, TerminalFrame, Turn, Usage
+from ufo.schema.records import ReasoningEffort, TerminalFrame, Turn, TurnContext, Usage
 from ufo.surfaces import hub_tail
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import TextContent, ToolContext, ToolResult
@@ -1288,6 +1288,19 @@ async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(
                 )
             )
         ).all()
+        speaker_email = (
+            await connection.execute(
+                sa.select(tables.member.c.email)
+                .join(tables.turn, tables.turn.c.speaker_member_id == tables.member.c.id)
+                .where(tables.turn.c.id == evaluated.turn_id)
+            )
+        ).scalar_one()
+        admitted_context = (
+            await connection.execute(
+                sa.select(tables.turn.c.context).where(tables.turn.c.id == evaluated.turn_id)
+            )
+        ).scalar_one()
+    assert TurnContext.model_validate(admitted_context).sender == speaker_email
     spend = {row.id: TerminalFrame.model_validate(row.terminal) for row in rows}
     assert spend.keys() == {evaluated.turn_id, child.turn_id}
     assert spend[child.turn_id].tokens > 0

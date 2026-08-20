@@ -1270,8 +1270,9 @@ async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> N
             await apply_tool.handler(_tool_context(workspace_id, agent_id, grantor_id), create)
 
 
-async def test_list_summary_tags_private_and_shared_accounts(db: None) -> None:
+async def test_list_summary_names_the_owner_and_sharing(db: None) -> None:
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
+    grantor_email = f"{grantor_id.hex[:8]}@x.test"
     with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
@@ -1280,7 +1281,11 @@ async def test_list_summary_tags_private_and_shared_accounts(db: None) -> None:
         listing = json.loads(
             await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_GRANT_KIND)
         )
-        assert "(private)" in listing["objects"][0]["summary"]
+        assert f"({grantor_email}, private)" in listing["objects"][0]["summary"]
+        connection_listing = json.loads(
+            await _text(_object_tool("object_list"), ctx, kind=CONNECTION_KIND)
+        )
+        assert f"({grantor_email}, private)" in connection_listing["objects"][0]["summary"]
 
         await _text(
             _object_tool("object_apply"),
@@ -1290,7 +1295,7 @@ async def test_list_summary_tags_private_and_shared_accounts(db: None) -> None:
         listing = json.loads(
             await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_GRANT_KIND)
         )
-        assert "(shared)" in listing["objects"][0]["summary"]
+        assert f"({grantor_email}, shared)" in listing["objects"][0]["summary"]
 
 
 async def test_read_verbs_hide_other_members_private_connectors(db: None) -> None:

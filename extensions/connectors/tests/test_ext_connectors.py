@@ -78,6 +78,9 @@ SLACK_BODY_BLOCKS: list[JsonValue] = [
 SLACK_ACCOUNT = "slack-acct"
 
 
+GRANT_OWNER_EMAIL = "owner@x.test"
+
+
 @dataclass(frozen=True)
 class _Grants(GrantStore):
     accounts: tuple[str, ...]
@@ -92,6 +95,7 @@ class _Grants(GrantStore):
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
                 owner_member_id=uuid4(),
+                owner_email=GRANT_OWNER_EMAIL,
                 connection_shared=True,
             )
             for account in self.accounts
@@ -207,7 +211,7 @@ async def test_list_external_tools_filters_the_registry() -> None:
         ListExternalToolsInput(queries=("widgets",), user_description="find widgets"),
     )
     rows = _payload(result)["connectors"]
-    assert rows == [{"source_id": OTHER_PROVIDER, "label": OTHER_LABEL}]
+    assert rows == [{"source_id": OTHER_PROVIDER, "label": OTHER_LABEL, "connected_accounts": []}]
 
 
 async def test_list_external_tools_select_prefix_fetches_one_by_exact_id() -> None:
@@ -219,6 +223,20 @@ async def test_list_external_tools_select_prefix_fetches_one_by_exact_id() -> No
     )
     rows = _payload(result)["connectors"]
     assert [row["source_id"] for row in rows] == [sample.CONNECTOR_PROVIDER]
+
+
+async def test_list_external_tools_names_each_connected_account_owner_and_sharing() -> None:
+    result = await list_external_tools(
+        _ctx(_registry(), accounts=("acct-1", "acct-2")),
+        ListExternalToolsInput(
+            queries=(f"select:{sample.CONNECTOR_PROVIDER}",), user_description="the sample"
+        ),
+    )
+    (row,) = _payload(result)["connectors"]
+    assert row["connected_accounts"] == [
+        {"account_id": "acct-1", "owner": GRANT_OWNER_EMAIL, "shared": True},
+        {"account_id": "acct-2", "owner": GRANT_OWNER_EMAIL, "shared": True},
+    ]
 
 
 async def test_describe_external_tools_fetches_schemas_from_the_broker() -> None:

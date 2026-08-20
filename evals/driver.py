@@ -31,7 +31,7 @@ from ufo.governance import prompt_digest
 from ufo.loop.engine import DispatchResult
 from ufo.object_name import validate_object_name
 from ufo.schema import tables
-from ufo.schema.records import PENDING, ReasoningEffort
+from ufo.schema.records import PENDING, ReasoningEffort, TurnContext
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
@@ -328,12 +328,25 @@ class WorkspaceDriver:
                 if speaker_key is not None
                 else self._owner(connection, conversation_id)
             )
+            sender = (
+                None
+                if speaker is None
+                else (
+                    await connection.execute(
+                        sa.select(tables.member.c.email).where(tables.member.c.id == speaker)
+                    )
+                ).scalar_one()
+            )
         admitter = MemberAdmission(
             admission=Admission(dbos=self.dbos, durable_surfaces=frozenset()),
             workspace_id=self.workspace_id,
         )
         admitted = await admitter.admit(
-            conversation_id, message, idempotency_key, speaker_member_id=speaker
+            conversation_id,
+            message,
+            idempotency_key,
+            context=None if sender is None else TurnContext(sender=sender),
+            speaker_member_id=speaker,
         )
         return admitted.turn_id
 
