@@ -207,6 +207,7 @@ ASSET_MEDIA_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
     ".otf": "font/otf",
+    ".png": "image/png",
     ".svg": "image/svg+xml",
     ".ttf": "font/ttf",
     ".woff2": "font/woff2",

@@ -320,11 +320,14 @@
    every other takes its glyph. */
 :root {
   --brand-asana: url("./assets/brands/asana.svg");
+  --brand-attio: url("./assets/brands/attio.png");
+  --brand-discord: url("./assets/brands/discord.svg");
   --brand-figma: url("./assets/brands/figma.svg");
   --brand-github: url("./assets/brands/github.svg");
   --brand-gmail: url("./assets/brands/gmail.svg");
   --brand-googlecalendar: url("./assets/brands/googlecalendar.svg");
   --brand-googledrive: url("./assets/brands/googledrive.svg");
+  --brand-googlesheets: url("./assets/brands/googlesheets.svg");
   --brand-linear: url("./assets/brands/linear.svg");
   --brand-notion: url("./assets/brands/notion.svg");
   --brand-slack: url("./assets/brands/slack.svg");

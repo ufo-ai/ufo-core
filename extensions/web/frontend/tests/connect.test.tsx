@@ -98,12 +98,14 @@ test("a tile draws its provider's own mark, never the plug", async () => {
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
+  const vendored = (tile: HTMLElement) =>
+    tile.querySelector("[style*=background-image]")?.getAttribute("style") ?? "";
   const sheets = await screen.findByRole("button", { name: "Google Sheets" });
-  expect(sheets.querySelector(".tabler-icon-table")).toBeTruthy();
-  const attio = screen.getByRole("button", { name: "Attio" });
-  expect(attio.querySelector(".tabler-icon-address-book")).toBeTruthy();
+  expect(vendored(sheets)).toContain("--brand-googlesheets");
   const discord = screen.getByRole("button", { name: "Discord" });
-  expect(discord.querySelector(".tabler-icon-brand-discord")).toBeTruthy();
+  expect(vendored(discord)).toContain("--brand-discord");
+  const attio = screen.getByRole("button", { name: "Attio" });
+  expect(vendored(attio)).toContain("--brand-attio");
 });
 
 test("Connect stands current in the bar on its own page", async () => {

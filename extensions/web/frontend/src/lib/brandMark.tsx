@@ -6,11 +6,14 @@ import { ProviderGlyph } from "@/lib/providerGlyph";
  *  stylesheet can answer. */
 export const BRAND_MARKS: ReadonlySet<string> = new Set([
   "asana",
+  "attio",
+  "discord",
   "figma",
   "github",
   "gmail",
   "googlecalendar",
   "googledrive",
+  "googlesheets",
   "linear",
   "notion",
   "slack",
