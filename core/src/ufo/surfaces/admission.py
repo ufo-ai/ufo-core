@@ -106,6 +106,7 @@ class Admission:
     dbos: DBOSClient
     durable_surfaces: frozenset[str]
     key_slot_for: Callable[[str], str | None] | None = None
+    billing_url: str | None = None
 
     async def admit_member(
         self,
@@ -489,7 +490,7 @@ class Admission:
                 fold_balance = (
                     None
                     if fold_decision is None or fold_decision.outcome != ALLOW
-                    else await BalanceGate(workspace_id).admits(
+                    else await BalanceGate(workspace_id, self.billing_url).admits(
                         connection, agent_id, self.key_slot_for
                     )
                 )
@@ -602,7 +603,7 @@ class Admission:
                     balance = (
                         SpendDecision(outcome=ALLOW, message="")
                         if intent is not None and intent.tool == BILLING_INTENT_TOOL
-                        else await BalanceGate(workspace_id).admits(
+                        else await BalanceGate(workspace_id, self.billing_url).admits(
                             connection, agent_id, self.key_slot_for
                         )
                     )

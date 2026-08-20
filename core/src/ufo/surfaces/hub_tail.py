@@ -15,7 +15,7 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from ufo.accounting import ALLOW, SpendEvaluator, applicable_caps_absent
-from ufo.balance import BALANCE_REFUSAL_MESSAGE, read_headroom
+from ufo.balance import balance_refusal_message, read_headroom
 from ufo.db import workspace_tx
 from ufo.hub import Hub, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.o11y import log
@@ -28,7 +28,7 @@ PARK_NOTICE = "This turn is paused. It resumes on its own."
 
 
 async def tail_frames(
-    hub: Hub, turn_id: UUID, since: str = ""
+    hub: Hub, turn_id: UUID, since: str = "", billing_url: str | None = None
 ) -> AsyncGenerator[tuple[str, LiveFrame]]:
     """Yield a turn's live frames, each with its cursor, until it ends — a Terminal, or a Parked
     hold — whether the turn is still running or already committed when the caller attaches. A
@@ -44,9 +44,9 @@ async def tail_frames(
     frames: asyncio.Queue[tuple[str, LiveFrame]] = asyncio.Queue()
     start = since if since and await hub.covers(turn_id, since) else ""
     pump = asyncio.ensure_future(_pump(hub, turn_id, start, frames))
-    poll = asyncio.ensure_future(_poll_status(turn_id, frames))
+    poll = asyncio.ensure_future(_poll_status(turn_id, frames, billing_url))
     try:
-        stored = await turn_status_frame(turn_id)
+        stored = await turn_status_frame(turn_id, billing_url)
         if stored is not None:
             yield "", stored
             return
@@ -71,11 +71,13 @@ async def _pump(
         log("hub_tail.pump_failed", turn=str(turn_id), error=repr(error))
 
 
-async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None:
+async def _poll_status(
+    turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]], billing_url: str | None
+) -> None:
     try:
         while True:
             await asyncio.sleep(TERMINAL_POLL_SECONDS)
-            frame = await turn_status_frame(turn_id)
+            frame = await turn_status_frame(turn_id, billing_url)
             if frame is not None:
                 await frames.put(("", frame))
                 return
@@ -83,7 +85,7 @@ async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame
         log("hub_tail.poll_failed", turn=str(turn_id), error=repr(error))
 
 
-async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
+async def turn_status_frame(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:
     """The frame that ends a turn's stream: its committed Terminal, or a Parked hold when the turn
     is parked. None while it is still queued or running.
 
@@ -126,7 +128,7 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
             headroom is not None
             and headroom.balance_micro_usd <= headroom.reserve_micro_usd - headroom.grace_micro_usd
         ):
-            return Parked(message=BALANCE_REFUSAL_MESSAGE)
+            return Parked(message=balance_refusal_message(billing_url))
         member_id = (
             await connection.execute(
                 sa.select(tables.conversation.c.member_id).where(
@@ -151,11 +153,12 @@ class HubTailer:
     tails a turn without importing the hub or this role package."""
 
     hub: Hub
+    billing_url: str | None = None
 
     def tail(
         self, turn_id: UUID, since: str = ""
     ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
-        return aclosing(tail_frames(self.hub, turn_id, since))
+        return aclosing(tail_frames(self.hub, turn_id, since, self.billing_url))
 
     async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
         return await self.hub.latest_activity(turn_id)

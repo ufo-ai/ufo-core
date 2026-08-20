@@ -6574,6 +6574,28 @@ async def test_a_depleted_balance_parks_the_running_turn(db: None, tmp_path: Pat
         await engine._enforce_spend([Usage(input_tokens=1_000_000)], {})
 
 
+async def test_a_balance_park_sends_the_member_to_the_billing_screen(
+    db: None, tmp_path: Path
+) -> None:
+    """The hold the member reads mid-turn names where an admin adds credit. The screen is a deploy
+    fact, so the engine carries it from boot into the gate that writes the sentence."""
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await credit(connection, turn.workspace_id, 1_000_000, 1_000_000, "seed")
+        await debit(connection, turn.workspace_id, 1_000_000)
+        await set_reserve(connection, turn.workspace_id, 10_000_000)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        billing_url="https://ufo.example.com/surface/web#/workspace/billing",
+    )
+    with pytest.raises(TurnParked) as parked:
+        await engine._enforce_spend([Usage(input_tokens=1_000_000)], {})
+    assert str(parked.value) == (
+        "This workspace is out of credit. An admin can add credit at "
+        "https://ufo.example.com/surface/web#/workspace/billing"
+    )
+
+
 async def test_a_funded_balance_does_not_park_the_running_turn(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None)
     async with workspace_tx() as connection:

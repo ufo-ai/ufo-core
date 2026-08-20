@@ -2571,9 +2571,14 @@ async def test_a_fan_out_stops_at_the_first_child_an_exhausted_balance_cannot_co
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
         audience=conversation_audience(None),
+        billing_url="https://ufo.example.com/surface/web#/workspace/billing",
     )
-    with pytest.raises(BalanceExhausted):
+    with pytest.raises(BalanceExhausted) as exhausted:
         await subagents.spawn("research", {"task": "a"}, background=True)
+    assert str(exhausted.value) == (
+        "This workspace is out of credit. An admin can add credit at "
+        "https://ufo.example.com/surface/web#/workspace/billing"
+    )
     async with workspace_tx() as connection:
         children = (
             await connection.execute(

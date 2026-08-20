@@ -6808,7 +6808,9 @@ async def test_a_dead_tail_kills_the_status_follower_and_still_clears(
     caplog.set_level(logging.INFO, logger="ufo")
     workspace_id, _ = await _seed()
 
-    async def failing_status_read(turn_id: UUID) -> LiveFrame | None:
+    async def failing_status_read(
+        turn_id: UUID, billing_url: str | None = None
+    ) -> LiveFrame | None:
         raise RuntimeError("turn status read failed")
 
     monkeypatch.setattr(hub_tail, "turn_status_frame", failing_status_read)
@@ -8588,7 +8590,9 @@ async def test_a_dead_tail_abandons_the_progress_task_and_says_which(
     caplog.set_level(logging.INFO, logger="ufo")
     workspace_id, _ = await _seed()
 
-    async def failing_status_read(turn_id: UUID) -> LiveFrame | None:
+    async def failing_status_read(
+        turn_id: UUID, billing_url: str | None = None
+    ) -> LiveFrame | None:
         raise RuntimeError("turn status read failed")
 
     monkeypatch.setattr(hub_tail, "turn_status_frame", failing_status_read)

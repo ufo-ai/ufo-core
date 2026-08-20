@@ -13,8 +13,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.balance import (
-    BALANCE_REFUSAL_MESSAGE,
     _forget_absent_balance,
+    balance_refusal_message,
     debit,
     read_headroom,
 )
@@ -1428,9 +1428,14 @@ class BalanceGate:
     of the two: were the grace applied only to entry, a turn would be admitted below the line that
     stops it and be parked on its first round.
 
-    A workspace with no balance row allows both, which is the self-host path."""
+    A workspace with no balance row allows both, which is the self-host path.
+
+    `billing_url` is the deploy's billing screen, threaded from boot, which the refusal names as
+    where an admin adds credit. None on a deploy that has no such screen — the refusal then names
+    the act without a screen."""
 
     workspace_id: UUID
+    billing_url: str | None = None
 
     async def admits(
         self,
@@ -1465,12 +1470,12 @@ class BalanceGate:
         if headroom.balance_micro_usd > headroom.reserve_micro_usd - headroom.grace_micro_usd:
             return SpendDecision(outcome=ALLOW, message="")
         if turn_id is not None and await self._turn_has_debited(connection, turn_id):
-            return SpendDecision(outcome=REJECT, message=BALANCE_REFUSAL_MESSAGE)
+            return SpendDecision(outcome=REJECT, message=balance_refusal_message(self.billing_url))
         if headroom.balance_micro_usd > 0 and await self._workspace_serves_itself(
             connection, agent_id, key_slot_for, model
         ):
             return SpendDecision(outcome=ALLOW, message="")
-        return SpendDecision(outcome=REJECT, message=BALANCE_REFUSAL_MESSAGE)
+        return SpendDecision(outcome=REJECT, message=balance_refusal_message(self.billing_url))
 
     async def _workspace_serves_itself(
         self,
@@ -1516,7 +1521,7 @@ class BalanceGate:
         if headroom.balance_micro_usd - pending_micro_usd > -headroom.grace_micro_usd:
             return SpendDecision(outcome=ALLOW, message="")
         if pending_micro_usd > 0 or await self._turn_has_debited(connection, turn_id):
-            return SpendDecision(outcome=REJECT, message=BALANCE_REFUSAL_MESSAGE)
+            return SpendDecision(outcome=REJECT, message=balance_refusal_message(self.billing_url))
         return SpendDecision(outcome=ALLOW, message="")
 
     async def _turn_has_debited(self, connection: AsyncConnection, turn_id: UUID | None) -> bool:

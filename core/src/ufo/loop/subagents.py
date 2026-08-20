@@ -213,6 +213,7 @@ class Subagents:
     parent: Turn
     audience: Audience
     key_slot_for: Callable[[str], str | None] | None = None
+    billing_url: str | None = None
     requester_member_id: UUID | None = None
 
     def authorize(self, requester_member_id: UUID | None) -> "Subagents":
@@ -703,7 +704,7 @@ class Subagents:
         and not this parent's. A profile may pin a different provider, and a spawned agent may carry
         a different model; weighing either under the parent's would exempt a call the platform pays
         for in full."""
-        admits = await BalanceGate(self.parent.workspace_id).admits(
+        admits = await BalanceGate(self.parent.workspace_id, self.billing_url).admits(
             connection, agent_id or self.parent.agent_id, self.key_slot_for, model=model
         )
         if admits.outcome == REJECT:

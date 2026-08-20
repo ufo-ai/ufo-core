@@ -184,7 +184,9 @@ async def test_a_failing_poll_logs_and_the_live_leg_still_ends_the_tail(
     monkeypatch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.01)
     reads = {"count": 0}
 
-    async def wedged_after_precheck(turn_id: UUID) -> LiveFrame | None:
+    async def wedged_after_precheck(
+        turn_id: UUID, billing_url: str | None = None
+    ) -> LiveFrame | None:
         reads["count"] += 1
         if reads["count"] == 1:
             return None

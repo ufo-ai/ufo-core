@@ -306,6 +306,7 @@ class Runtime:
     index: IndexBackend
     embed: EmbedClient
     artifact_token_secret: str
+    billing_url: str | None = None
     tailer: TurnTailer | None = None
     memory: MemorySearch | None = None
 
@@ -491,6 +492,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             parent=turn,
             audience=audience,
             key_slot_for=runtime.registry.key_slot_for,
+            billing_url=runtime.billing_url,
         )
 
         def subagents_for(
@@ -683,6 +685,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             model_specs=runtime.registry.specs,
             auto_model=runtime.registry.auto_model,
             public_base_url=runtime.config.connect.public_base_url,
+            billing_url=runtime.billing_url,
             hooks=hooks,
             blob=runtime.blob,
             spawn=subagents.spawn,

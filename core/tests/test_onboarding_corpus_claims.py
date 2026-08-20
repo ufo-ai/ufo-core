@@ -245,7 +245,7 @@ CLAIMS = (
         corpus="references/billing-and-seats.md",
         phrase="a turn is refused once the balance reaches",
         source=BALANCE,
-        pattern=r"BALANCE_REFUSAL_MESSAGE = ",
+        pattern=r"def balance_refusal_message\(billing_url: str \| None\) -> str:",
     ),
     Claim(
         claim="only an admin can reach billing",

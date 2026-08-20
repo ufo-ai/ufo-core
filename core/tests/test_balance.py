@@ -4,7 +4,15 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.balance import balance_absent, credit, read_balance, recent_purchases, set_reserve
+from ufo.balance import (
+    balance_absent,
+    balance_refusal_message,
+    billing_screen_url,
+    credit,
+    read_balance,
+    recent_purchases,
+    set_reserve,
+)
 from ufo.db import workspace_tx
 from ufo.schema import tables
 
@@ -104,6 +112,36 @@ async def test_a_later_credit_leaves_the_reserve_alone(db: None) -> None:
     assert current is not None
     assert current.balance_micro_usd == 20_000_000
     assert current.reserve_micro_usd == 2_000_000
+
+
+def test_the_billing_screen_url_is_the_home_surface_path_plus_the_billing_route() -> None:
+    assert (
+        billing_screen_url("https://ufo.example.com/", "web")
+        == "https://ufo.example.com/surface/web#/workspace/billing"
+    )
+
+
+def test_a_deploy_missing_either_half_has_no_billing_screen() -> None:
+    """A self-host or dev node has no public base, and a deploy installing no browser surface has no
+    screen at all — either way there is nowhere to send an admin."""
+    assert billing_screen_url(None, "web") is None
+    assert billing_screen_url("", "web") is None
+    assert billing_screen_url("https://ufo.example.com", None) is None
+
+
+def test_the_refusal_sends_an_admin_to_the_billing_screen() -> None:
+    assert balance_refusal_message("https://ufo.example.com/surface/web#/workspace/billing") == (
+        "This workspace is out of credit. An admin can add credit at "
+        "https://ufo.example.com/surface/web#/workspace/billing"
+    )
+
+
+def test_a_refusal_with_no_screen_names_the_act_and_trails_off_at_nothing() -> None:
+    """The fallback every self-host deploy reads. A message built by appending a link would end at
+    "at" here, so the sentence without a screen is written out rather than derived."""
+    message = balance_refusal_message(None)
+    assert message == "This workspace is out of credit. An admin can set up automatic refills."
+    assert " at" not in message
 
 
 async def _dated_credit(

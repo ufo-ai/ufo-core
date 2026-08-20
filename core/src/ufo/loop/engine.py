@@ -948,6 +948,7 @@ class TurnEngine:
     requestable_credentials: CredentialRequests | None = None
     memory: MemorySearch | None = None
     public_base_url: str | None = None
+    billing_url: str | None = None
     models: tuple[str, ...] = ()
     """The model ids this deploy serves, handed to every tool call so a write that stores a
     model can refuse an id the registry cannot answer."""
@@ -2005,7 +2006,7 @@ class TurnEngine:
         )
         if not balance_absent(self.turn.workspace_id):
             async with workspace_tx() as connection:
-                sustained = await BalanceGate(self.turn.workspace_id).sustains(
+                sustained = await BalanceGate(self.turn.workspace_id, self.billing_url).sustains(
                     connection, pending, self.turn.id
                 )
             if sustained.outcome != ALLOW:

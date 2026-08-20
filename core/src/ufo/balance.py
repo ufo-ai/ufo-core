@@ -70,7 +70,31 @@ class Balance:
     last_purchase_at: datetime | None
 
 
-BALANCE_REFUSAL_MESSAGE = "This workspace is out of credit. An admin can set up automatic refills."
+BILLING_SCREEN_FRAGMENT = "#/workspace/billing"
+
+
+def billing_screen_url(public_base_url: str | None, home_surface: str | None) -> str | None:
+    """The deploy's billing screen, or None where it has no public base or installs no browser
+    surface — a self-host or dev node, which has no screen to send anyone to.
+
+    Core owns both halves of the path: `/surface/<name>` is its own mount and `home_surface` is the
+    manifest flag naming the one surface a browser belongs on. Composed once at boot and threaded
+    down, so a gate deciding before a model round reads a string it already holds."""
+    if not public_base_url or home_surface is None:
+        return None
+    return f"{public_base_url.rstrip('/')}/surface/{home_surface}{BILLING_SCREEN_FRAGMENT}"
+
+
+def balance_refusal_message(billing_url: str | None) -> str:
+    """What a member reads when the balance refuses their turn: the fact, and where an admin fixes
+    it. A deploy with no billing screen states the fact and the act alone, because a sentence that
+    trailed off at "at" would be worse than one that names no screen.
+
+    The admin is named either way. Billing reads answer an admin only, so a non-admin following the
+    link is told so by the screen — which is the same fact this sentence carries, one step later."""
+    if billing_url is None:
+        return "This workspace is out of credit. An admin can set up automatic refills."
+    return f"This workspace is out of credit. An admin can add credit at {billing_url}"
 
 
 @dataclass(frozen=True, slots=True)

@@ -861,7 +861,10 @@ workspace that has spent past its floor owes for that work and is refused like a
 credited; what it owes is real money, not the model rounds its own key paid for.
 
 A workspace whose balance is spent is refused at admission with a line the member reads, and a
-running turn parks rather than spending past its floor. The two lines are deliberately different:
+running turn parks rather than spending past its floor. That line names the billing screen an admin
+adds credit on — composed at boot from the deploy's public base and the surface claiming the browser
+home, threaded into every gate that writes the refusal, and left unsaid where the deploy has neither,
+since a self-host node has no screen to send anyone to. The two lines are deliberately different:
 `reserve_micro_usd` is the headroom a turn needs to **begin**, tested at admission, at a fold, and
 when the dispatcher resumes a parked turn; a running turn stops at **zero**. Were they one line, a
 balance just above the reserve would admit a turn the first round's spend pushed straight back

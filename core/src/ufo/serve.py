@@ -26,6 +26,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ufo.ambient_reply import AMBIENT_REPLY_JOB, AmbientReplyClassifier
+from ufo.balance import billing_screen_url
 from ufo.bearer import LOGIN_PATH
 from ufo.blob import (
     BlobStore,
@@ -241,10 +242,12 @@ def run() -> None:
     skills = skill_registry(manifests, (model_catalog_skill(registry),))
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
+    billing_url = billing_screen_url(config.connect.public_base_url, home_surface(manifests))
     admission = Admission(
         dbos=dbos_client,
         durable_surfaces=durable_surfaces(manifests),
         key_slot_for=registry.key_slot_for,
+        billing_url=billing_url,
     )
 
     def invoker_for(workspace_id: UUID) -> AdmissionInvoker:
@@ -282,7 +285,8 @@ def run() -> None:
         embed=embed,
         memory=memory,
         artifact_token_secret=artifact_secret,
-        tailer=HubTailer(hub=hub),
+        billing_url=billing_url,
+        tailer=HubTailer(hub=hub, billing_url=billing_url),
     )
     init_runtime(runtime)
     install_connect_flow(
@@ -957,12 +961,14 @@ def _mount_shared_surfaces(
     then every claim, build, credential read, post, and attachment runs under that workspace's
     binding."""
     app.add_middleware(WorkspaceScopeBoundary)
+    billing_url = billing_screen_url(public_base_url, home_surface(manifests))
     admission = Admission(
         dbos=dbos_client,
         durable_surfaces=durable_surfaces(manifests),
         key_slot_for=key_slot_for,
+        billing_url=billing_url,
     )
-    tailer = HubTailer(hub=hub)
+    tailer = HubTailer(hub=hub, billing_url=billing_url)
     stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
     registered: dict[str, SurfaceSpec] = {}
     listeners = []
