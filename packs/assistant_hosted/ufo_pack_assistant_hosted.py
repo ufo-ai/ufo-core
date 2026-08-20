@@ -42,8 +42,7 @@ CUSTOMERS_SECTION = PromptSection(
         "why something is not working — load `customer-onboarding-help` first and answer from "
         "the file its "
         "table names, before any tool or other skill, even when the question is phrased as "
-        "something to do. Product facts come from that corpus alone, never from a tool's error "
-        "text or inference. The member's own work, product, and data — a demo or script about "
+        "something to do. The member's own work, product, and data — a demo or script about "
         "their own app included — are ordinary work and never load it, even when that work "
         "stalls on a missing connection: a setup skill drives a connection, not this corpus."
     ),

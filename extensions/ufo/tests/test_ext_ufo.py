@@ -34,6 +34,7 @@ from ufo_ext_ufo.surface import (
     stream_directives,
 )
 from ufo_testsupport.invoker import invoker_factory
+from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
@@ -78,9 +79,11 @@ from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFram
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth
 from ufo.serve import _mount_shared_surfaces
+from ufo.surfaces import hub_tail
 
 SECRET = "ufo-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
+STREAM_GATE = StreamGate()
 
 
 def _mint(secret: str, workspace_id: UUID, email: str, exp: int) -> str:
@@ -690,7 +693,7 @@ def runtime(
             config=config,
             blob=blob,
             sandboxes=sandboxes,
-            hub=hub,
+            hub=GatingHub(hub, STREAM_GATE),
             cdp_provider=None,
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
@@ -714,8 +717,20 @@ def runtime(
 
 
 @pytest.fixture
+def stream_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disarm the delta gate for this test and wire the release its consumers fire. A test that
+    asserts on a live frame the engine publishes `arm`s the gate itself; every other test leaves it
+    open, so the stand-in model never waits."""
+    STREAM_GATE.reset()
+    monkeypatch.setattr(
+        hub_tail, "turn_status_frame", release_when_running(STREAM_GATE, hub_tail.turn_status_frame)
+    )
+
+
+@pytest.fixture
 async def ufo(
     db: None,
+    stream_gate: None,
     runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AsyncClient, UUID]]:
@@ -748,6 +763,7 @@ async def ufo(
 @pytest.fixture
 async def shared_ufo(
     db: None,
+    stream_gate: None,
     runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AsyncClient]:
@@ -1072,12 +1088,16 @@ async def test_a_stop_founds_the_next_turn_on_the_message_already_sent(
     arrival, so the row the client held as pending settles as the new turn's own message, ahead of
     the answer the turn goes on to give. The reconnect rides the turn to that answer: a terminal
     published over the engine's shoulder would race the turn's own, and whichever landed second
-    would be the one the assertion happened to miss."""
+    would be the one the assertion happened to miss. The gate holds the founded turn at its first
+    delta, so the stand-in model cannot answer and drop the ring before the reconnect subscribes to
+    it — the arrival is already folded by then, and the frame naming it is what the reconnect
+    reads first."""
     client, workspace_id = ufo
     member_id = await _seed_member(workspace_id, "owner@example.com")
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     conversation_id = await _linked_conversation(client, workspace_id, token)
     turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+    STREAM_GATE.arm()
     sent = await _post_send(client, token, b"do this instead", uuid4())
     arrival = UUID(_lines(sent.content)[0][3])
 
@@ -1495,6 +1515,7 @@ ARTIFACT_BASE_URL = "https://ufo.example.test"
 @pytest.fixture
 async def ufo_delivering_artifacts(
     db: None,
+    stream_gate: None,
     runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AsyncClient, UUID]]:
@@ -1739,6 +1760,7 @@ async def test_email_matching_no_member_gets_an_unlinked_conversation(
 
 async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
     db: None,
+    stream_gate: None,
     runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
