@@ -594,8 +594,9 @@ SCENARIOS = (
     ScenarioCase(
         "S04-scoped-delete",
         ScenarioUser(
-            reason_for_call="You want the assistant to stop checking your inbox for investor "
-            "replies; the competitor watch must keep running.",
+            reason_for_call="You want the inbox-checking investor digest deleted for good — you "
+            "will not need it again, so pausing is not enough; the competitor watch must keep "
+            "running.",
             task_instructions=SATISFIED_INSTRUCTION,
         ),
         DescribedGrader(
@@ -611,7 +612,8 @@ SCENARIOS = (
             reason_for_call="You want your investor digest — the task that summarizes replies "
             "from your inbox — moved to 10am. Nothing else should change.",
             known_info="There is also a separate task that drafts investor outreach emails; it "
-            "must stay exactly as it is.",
+            "must stay exactly as it is. Times you give are UTC — say so if asked about a "
+            "timezone.",
             task_instructions=SATISFIED_INSTRUCTION,
         ),
         DescribedGrader(
