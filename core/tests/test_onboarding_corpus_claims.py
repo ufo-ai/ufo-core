@@ -44,6 +44,9 @@ STOP = "core/src/ufo/surfaces/stop.py"
 WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
 TERMINAL_SURFACE = "extensions/ufo/ufo_ext_ufo/surface.py"
 SPEC = "spec.md"
+TASK_SCHEDULING_SKILL_MD = (
+    "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/skills/task-scheduling/SKILL.md"
+)
 
 
 @dataclass(frozen=True)
@@ -341,6 +344,13 @@ CLAIMS = (
             r"if validated_schedule is None or spec\.prompt is None:\n"
             r'\s+raise ValueError\("creating a scheduled task requires schedule and prompt"\)'
         ),
+    ),
+    Claim(
+        claim="a scheduled run posts only when it finds something worth reporting",
+        corpus="references/capabilities.md",
+        phrase="a run posts only when it finds something worth reporting",
+        source=TASK_SCHEDULING_SKILL_MD,
+        pattern=r"Nothing new happened since the last check — end the run without posting",
     ),
     Claim(
         claim="the agent answers a channel message only when addressed, never passing top-level"
