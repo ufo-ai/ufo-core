@@ -1,11 +1,21 @@
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemSeparator,
+  ItemTitle,
+} from "@/components/ui/item";
 import { rowControl } from "@/kernel/row";
 import { cn } from "@/lib/cn";
 
-/** A list of records whose one sentence is scanned past rather than read: the name on its own
- *  line, the short fields and the prose under it as one truncated meta line, the moment held to
- *  the right.
+/** A list of records read as one card of ruled rows: the name on its own line, the short fields
+ *  and the prose under it as one truncated meta line, the moment and the row's own acts held to
+ *  the right. It is the shape every index of records takes, so a directory of connectors and a
+ *  directory of credential slots read as one surface rather than as two designs.
  *
  *  `open` hands the row to `rowControl`, the one thing in the portal that makes a record's row
  *  the control that opens it — an index the member came to open has one target per row, and a
@@ -21,6 +31,7 @@ export function RowLines<Row>({
   when,
   open,
   action,
+  whole,
 }: {
   rows: Row[];
   rowKey: (row: Row) => string;
@@ -29,55 +40,50 @@ export function RowLines<Row>({
   when?: (row: Row) => ReactNode;
   open?: (row: Row) => (() => void) | null;
   action?: (row: Row) => ReactNode;
+  whole?: boolean;
 }) {
   return (
-    <ul className="m-0 list-none p-0">
-      {rows.map((row) => {
+    <ItemGroup>
+      {rows.map((row, index) => {
         const press = open?.(row) ?? null;
         const control = press ? rowControl(press) : null;
+        const acts = action?.(row);
         return (
-          <li
-            key={rowKey(row)}
-            {...control}
-            className={cn(
-              "flex items-baseline gap-md border-b border-edge py-md last:border-b-0",
-              control?.className,
-              press && "hover:bg-fill",
-            )}
-          >
-            <div className="min-w-0 flex-1">
-              <div data-part="primary" className="truncate text-body">
-                {primary(row)}
-              </div>
-              <MetaLine parts={meta(row)} />
-            </div>
-            {when ? (
-              <div
-                data-part="when"
-                className="whitespace-nowrap font-mono text-small tabular-nums text-ink-soft"
-              >
-                {when(row)}
-              </div>
-            ) : null}
-            {action ? <div>{action(row)}</div> : null}
-          </li>
+          <Fragment key={rowKey(row)}>
+            {index ? <ItemSeparator /> : null}
+            <Item {...control} className={cn(control?.className, press && "hover:bg-fill")}>
+              <ItemContent>
+                <ItemTitle>{primary(row)}</ItemTitle>
+                <MetaLine parts={meta(row)} whole={whole} />
+              </ItemContent>
+              {when ? (
+                <div
+                  data-part="when"
+                  className="whitespace-nowrap font-mono text-small tabular-nums text-ink-soft"
+                >
+                  {when(row)}
+                </div>
+              ) : null}
+              {acts ? <ItemActions>{acts}</ItemActions> : null}
+            </Item>
+          </Fragment>
         );
       })}
-    </ul>
+    </ItemGroup>
   );
 }
 
-function MetaLine({ parts }: { parts: ReactNode[] }) {
+function MetaLine({ parts, whole }: { parts: ReactNode[]; whole?: boolean }) {
   const shown = parts.filter((entry) => entry !== null && entry !== undefined && entry !== "");
   if (!shown.length) return null;
   return (
-    <div data-part="meta" className="truncate text-small text-ink-soft">
+    <ItemDescription whole={whole}>
       {shown.map((entry, index) => (
         <span key={index}>
           {index ? " · " : ""}
           {entry}
         </span>
       ))}
-    </div>
+    </ItemDescription>
   );
 }

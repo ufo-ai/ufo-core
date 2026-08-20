@@ -39,9 +39,21 @@ export function ItemTitle({ children }: { children: ReactNode }) {
   );
 }
 
-export function ItemDescription({ children }: { children: ReactNode }) {
+/** The row's one line of prose. It is cut at the row's width by default, because a column of rows
+ *  holds its rhythm only while every row is one line deep. A record with no screen of its own takes
+ *  `whole`: the row is all there is to read it on, so its sentence runs to the end. */
+export function ItemDescription({
+  children,
+  whole,
+}: {
+  children: ReactNode;
+  whole?: boolean;
+}) {
   return (
-    <p data-part="body" className="m-0 truncate text-small text-ink-soft">
+    <p
+      data-part="body"
+      className={cn("m-0 text-small text-ink-soft", whole ? "text-pretty" : "truncate")}
+    >
       {children}
     </p>
   );

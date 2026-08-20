@@ -48,6 +48,9 @@ export type RowLine<Row> = {
   primary: Part<Row>;
   meta: Part<Row>[];
   when?: Part<Row>;
+  /** A record with no screen of its own: its sentence runs to the end rather than to the row's
+   *  width, because the row is all there is to read it on. */
+  whole?: true;
 };
 
 export type CardFace<Row> = {
@@ -331,10 +334,11 @@ function RowList<Payload, Row>({
   rows: Row[];
   context: RowContext<Row>;
 }) {
-  const { when } = line;
+  const { when, whole } = line;
   const { actions } = spec;
   return (
     <RowLines
+      whole={whole}
       rows={rows}
       rowKey={spec.rowKey}
       primary={(row) => part(line.primary, row, context)}

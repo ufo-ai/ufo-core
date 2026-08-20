@@ -1,3 +1,4 @@
+import { IconCheck } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
@@ -97,21 +98,25 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     { label: "Filled", has: (row) => row.filled },
     { label: "Not set", has: (row) => !row.filled },
   ],
-  cards: {
-    mark: { shape: "square" },
+  /* A slot has no screen of its own: the row is the whole record, and the description is what says
+     which value belongs in it. */
+  list: {
     primary: { field: "slot" },
-    status: {
-      field: "filled",
-      render: (filled) => (filled ? "Filled" : "Not set"),
-    },
-    body: { field: "description", render: (description) => codeSpans(description) },
-    /* A slot has no screen of its own: the card is the whole record, and the description is what
-       says which value belongs in it. */
+    meta: [{ field: "description", render: (description) => codeSpans(description) }],
     whole: true,
   },
   empty: "No credential slots are declared.",
   actions: (row, { act, busy }) => (
     <div className={ACTS}>
+      {row.filled ? (
+        <span
+          data-part="status"
+          className="flex items-center gap-xs text-label text-ink-soft"
+        >
+          <IconCheck role="img" aria-label={row.slot + " filled"} className="size-icon" />
+          Filled
+        </span>
+      ) : null}
       <Button
         variant="row"
         disabled={busy}

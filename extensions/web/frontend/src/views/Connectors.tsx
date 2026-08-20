@@ -378,7 +378,7 @@ export function WorkspaceConnectors({ place }: { place: Placement }) {
             );
           }
           return (
-            <div className="flex flex-col gap-6xl">
+            <div className="flex flex-col gap-8xl">
               {!mine.length ? null : (
                 <Section title="Connected" note="Accounts the app can use now.">
                   <ItemGroup>

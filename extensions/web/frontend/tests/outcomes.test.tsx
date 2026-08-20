@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -124,7 +124,9 @@ test("credentials group, sort, and render slot state and literals", async () => 
     "Model providers",
     "Service keys",
   ]);
-  expect(screen.getAllByText("Not set").length).toBeGreaterThanOrEqual(2);
+  const unset = screen.getByText("DATADOG_API_KEY").closest("li")!;
+  expect(within(unset).getByRole("button", { name: "Set" })).toBeTruthy();
+  expect(within(unset).queryByText("Filled")).toBeNull();
   expect(await screen.findByRole("tab", { name: "Not set" })).toBeTruthy();
   const code = screen.getByText("api.datadoghq.com");
   expect(code.tagName).toBe("CODE");
