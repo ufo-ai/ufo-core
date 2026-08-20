@@ -5,6 +5,7 @@ DEBUGGER := extensions/debugger/frontend
 EMAIL ?= $(shell git config user.email)
 T ?=
 FILE ?=
+WT ?=
 STACK ?= 1
 STACKS := 1 2 3 4 5
 
@@ -71,8 +72,15 @@ setup: ## Set up local developer env
 		echo "Created .env. Set API keys, then run make stack."; \
 	fi
 
-stack: ## Bring up stack 1-5 in Docker (STACK=1)
+stack: ## Bring up stack 1-5 in Docker (STACK=1); WT=<worktree> copies .env there and runs in it
 	@test -f .env || { echo ".env is required: configure it before running make stack, with 'make setup'" >&2; exit 1; }
+ifneq ($(WT),)
+	@set -e; \
+		wt_path="$$(git worktree list --porcelain | sed -n 's/^worktree //p' | grep -Fxv -- "$$(pwd)" | grep -m1 -- "$(WT)" || true)"; \
+		test -n "$$wt_path" || { echo "no other git worktree matches '$(WT)': see git worktree list" >&2; exit 1; }; \
+		cp .env "$$wt_path/.env"; \
+		exec $(MAKE) -C "$$wt_path" stack STACK=$(STACK) WT=
+else
 	@set -e; \
 		names="$$(cut -d= -f1 .env.template)"; \
 		for name in $$names; do unset "$$name"; done; \
@@ -84,6 +92,7 @@ stack: ## Bring up stack 1-5 in Docker (STACK=1)
 		$(MAKE) build; \
 		echo "Gateway: http://$(STACK_HOST):$(UFO_GATEWAY_PORT_HOST)/login"; \
 		$(COMPOSE) up --build
+endif
 
 stack-down: ## Stop stack 1-5 (STACK=1)
 	$(COMPOSE) down
