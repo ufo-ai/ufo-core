@@ -9,6 +9,7 @@ under test and what the tools said to it is not the contract — the registry ro
 the rendered frame are. The ingress URL the frame embeds is really minted, and its token really
 verifies."""
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
@@ -258,7 +259,7 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
 
     async with mounted(INGRESS_BASE_URL) as client, mounted(None) as unhosted:
         yield Deployment(workspace=workspace, client=client, unhosted=unhosted)
-    dbos_client.destroy()
+    await asyncio.to_thread(dbos_client.destroy)
 
 
 async def _seed_workspace() -> Workspace:

@@ -512,6 +512,25 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("task-scheduling",),
     ),
     SkillLoadCase(
+        "daily-brief-application",
+        "Create a private Daily Brief app that reviews my work each morning, publishes the brief "
+        "in Radar, and keeps its homepage current.",
+        expected="create-application",
+        forbidden=("task-scheduling",),
+    ),
+    SkillLoadCase(
+        "daily-brief-existing-app-schedule",
+        "In this Daily Brief app, schedule the morning brief for 8:00 every weekday.",
+        expected="task-scheduling",
+        forbidden=("create-application",),
+    ),
+    SkillLoadCase(
+        "daily-brief-generic-report",
+        "Write a one-time project status report from these notes and share it as Markdown.",
+        expected="research-report",
+        forbidden=("daily-brief", "task-scheduling"),
+    ),
+    SkillLoadCase(
         "coding-trace-webhook",
         "Trace how an incoming webhook event reaches the dispatcher in the code under repo/ and "
         "explain where retries are handled.",

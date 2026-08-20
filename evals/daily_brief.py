@@ -1,7 +1,13 @@
 """Daily Brief Skill behavior over an already-collected bounded newspaper."""
 
 from evals.harness.capability import CapabilityCase
-from evals.harness.scorers import combine, predicate_scorer, restraint_scorer, skill_scorer
+from evals.harness.scorers import (
+    combine,
+    predicate_scorer,
+    restraint_scorer,
+    shared_artifact_scorer,
+    skill_scorer,
+)
 
 HEADINGS = (
     "Work to finish",
@@ -26,8 +32,9 @@ def _valid_sections(text: str) -> bool:
 CASES = (
     CapabilityCase(
         "daily-brief-bounded-review",
-        "Format this already-collected private newspaper as a daily brief for my review. Do not "
-        "collect it again and do not create tasks or memories.\n\n"
+        "This scheduled Daily Brief run already collected its private newspaper. Format and "
+        "publish it as Markdown for my review. Do not collect it again, create tasks or memories, "
+        "or change a homepage binding.\n\n"
         "Work finding: Renew the production certificate before Friday. It blocks the release. "
         "Information date 2026-08-14. Reference conversation/renewal.\n"
         "Missed item: The launch review moved to Thursday. The old Friday assumption is stale. "
@@ -43,7 +50,10 @@ CASES = (
                     ("report is at most 6,000 characters", lambda text: len(text) <= 6_000),
                 )
             ),
-            restraint_scorer(("sweep_newspaper", "update_todo_list", "memory_update")),
+            shared_artifact_scorer(".md"),
+            restraint_scorer(
+                ("sweep_newspaper", "update_todo_list", "memory_update", "set_homepage")
+            ),
         ),
         digest_tag="skill:daily-brief-bounded-review",
         rubric=(

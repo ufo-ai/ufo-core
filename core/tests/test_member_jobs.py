@@ -1,5 +1,4 @@
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -18,33 +17,9 @@ from ufo.schema import tables
 from ufo.workspace import ws
 
 
-@dataclass
-class Invoker:
-    calls: list[dict[str, object]] = field(default_factory=list)
-
-    async def invoke(
-        self,
-        conversation_id: UUID,
-        agent_id: UUID,
-        message: str,
-        idempotency_key: str,
-        **kwargs: object,
-    ) -> UUID:
-        self.calls.append(
-            {
-                "conversation_id": conversation_id,
-                "agent_id": agent_id,
-                "message": message,
-                "idempotency_key": idempotency_key,
-                **kwargs,
-            }
-        )
-        return uuid4()
-
-
 async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
     workspace_id, member_id, other_member_id = uuid4(), uuid4(), uuid4()
-    main_id, conflicting_id, sweep_id = uuid4(), uuid4(), uuid4()
+    main_id, notes_id, brief_id = uuid4(), uuid4(), uuid4()
     now = datetime.now(UTC)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -88,10 +63,10 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
                     "updated_at": now,
                 },
                 {
-                    "id": conflicting_id,
+                    "id": notes_id,
                     "workspace_id": workspace_id,
-                    "name": "daily-brief",
-                    "prompt": "Member agent.",
+                    "name": "notes",
+                    "prompt": "Handle notes.",
                     "model": "auto",
                     "is_main": False,
                     "provisioned_by": None,
@@ -101,21 +76,21 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
                     "updated_at": now,
                 },
                 {
-                    "id": sweep_id,
+                    "id": brief_id,
                     "workspace_id": workspace_id,
-                    "name": "daily-brief-sweep",
+                    "name": "daily-brief",
                     "prompt": "Brief.",
-                    "model": "claude-sonnet-5",
+                    "model": "auto",
                     "is_main": False,
-                    "provisioned_by": "sweep",
-                    "provisioned_name": "daily-brief",
-                    "provisioned_version": "0.1.0",
+                    "provisioned_by": None,
+                    "provisioned_name": None,
+                    "provisioned_version": None,
                     "created_at": now,
                     "updated_at": now,
                 },
             ),
         )
-    return workspace_id, member_id, other_member_id, sweep_id
+    return workspace_id, member_id, other_member_id, brief_id
 
 
 async def test_member_blob_read_closes_a_bounded_stream(
@@ -139,69 +114,67 @@ async def test_member_blob_read_closes_a_bounded_stream(
     assert closed
 
 
-async def test_seated_members_are_paged_with_utc_fallback(db: None) -> None:
-    workspace_id, _member_id, _other_member_id, _sweep_id = await _seed()
-    with ws(workspace_id):
-        context = context_for("sweep", frozenset(), member_context_read=True)
-        first = await context.seated_members(limit=1)
-        second = await context.seated_members(cursor=first.next_cursor, limit=1)
-    assert len(first.members) == len(second.members) == 1
-    assert {first.members[0].timezone, second.members[0].timezone} == {
-        "America/New_York",
-        "UTC",
-    }
-    assert second.next_cursor is None
-
-
 async def test_workspace_agents_carry_the_roster_with_owners(db: None) -> None:
-    workspace_id, member_id, _other_member_id, sweep_id = await _seed()
+    workspace_id, member_id, _other_member_id, brief_id = await _seed()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.agent)
-            .where(tables.agent.c.id == sweep_id)
+            .where(tables.agent.c.id == brief_id)
             .values(owner_member_id=member_id, tools=["load_skill", "sweep_newspaper"])
         )
     with ws(workspace_id):
         context = context_for("sweep", frozenset(), member_context_read=True)
         agents = await context.workspace_agents()
-    assert {a.name for a in agents} == {"assistant", "daily-brief", "daily-brief-sweep"}
+    assert {a.name for a in agents} == {"assistant", "notes", "daily-brief"}
     owners = {a.id: a.owner_member_id for a in agents}
-    assert owners[sweep_id] == member_id
-    assert [owner for agent_id, owner in owners.items() if agent_id != sweep_id] == [None, None]
+    assert owners[brief_id] == member_id
+    assert [owner for agent_id, owner in owners.items() if agent_id != brief_id] == [None, None]
     allowlists = {a.id: a.tools for a in agents}
-    assert allowlists[sweep_id] == ("load_skill", "sweep_newspaper")
-    assert [tools for agent_id, tools in allowlists.items() if agent_id != sweep_id] == [None, None]
+    assert allowlists[brief_id] == ("load_skill", "sweep_newspaper")
+    assert [tools for agent_id, tools in allowlists.items() if agent_id != brief_id] == [None, None]
 
 
 async def test_agent_visibilities_answer_by_id_without_member_context(db: None) -> None:
-    workspace_id, _member_id, _other_member_id, sweep_id = await _seed()
+    workspace_id, _member_id, _other_member_id, brief_id = await _seed()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.agent)
-            .where(tables.agent.c.id == sweep_id)
+            .where(tables.agent.c.id == brief_id)
             .values(visibility="workspace")
         )
     with ws(workspace_id):
         context = context_for("sweep", frozenset())
         visibilities = await context.agent_visibilities()
-    assert visibilities[sweep_id] == "workspace"
-    assert {level for agent_id, level in visibilities.items() if agent_id != sweep_id} == {
+    assert visibilities[brief_id] == "workspace"
+    assert {level for agent_id, level in visibilities.items() if agent_id != brief_id} == {
         "private"
     }
 
 
-async def test_agent_roster_reads_are_gated_on_member_context(db: None) -> None:
-    workspace_id, _member_id, _other_member_id, _sweep_id = await _seed()
+async def test_member_reads_are_gated_on_member_context(db: None) -> None:
+    workspace_id, member_id, _other_member_id, _brief_id = await _seed()
     with ws(workspace_id):
         context = context_for("sweep", frozenset())
         with pytest.raises(PermissionError):
             await context.workspace_agents()
         with pytest.raises(PermissionError):
             await context.earliest_seated_admin()
+        with pytest.raises(PermissionError):
+            await context.scheduled_member_timezone()
+        unbound = context_for("sweep", frozenset(), member_context_read=True)
+        with pytest.raises(PermissionError):
+            await unbound.scheduled_member_timezone()
+        bound = context_for(
+            "sweep",
+            frozenset(),
+            member_context_read=True,
+            scheduled_member_id=member_id,
+        )
+        assert await bound.scheduled_member_timezone() == "America/New_York"
 
 
 async def test_earliest_seated_admin_is_deterministic(db: None) -> None:
-    workspace_id, member_id, other_member_id, _sweep_id = await _seed()
+    workspace_id, member_id, other_member_id, _brief_id = await _seed()
     early = datetime(2026, 1, 1, tzinfo=UTC)
     late = datetime(2026, 2, 1, tzinfo=UTC)
     async with workspace_tx() as connection:
@@ -227,64 +200,10 @@ async def test_earliest_seated_admin_is_deterministic(db: None) -> None:
         assert await context.earliest_seated_admin() is None
 
 
-async def test_scheduled_member_turn_uses_a_private_stable_conversation(db: None) -> None:
-    workspace_id, member_id, _other_member_id, sweep_id = await _seed()
-    invoker = Invoker()
-    with ws(workspace_id):
-        context = context_for("sweep", frozenset(), invoker=invoker, member_context_read=True)
-        result = await context.invoke_agent_for_member(
-            agent_name="daily-brief",
-            member_id=member_id,
-            conversation_key=f"daily-brief:{member_id}:2026-08-14",
-            message="Call sweep_newspaper once.",
-            idempotency_key=f"daily-brief:{member_id}:2026-08-14",
-        )
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(tables.conversation).where(
-                        tables.conversation.c.id == result.conversation_id
-                    )
-                )
-            ).one()
-    assert row.agent_id == sweep_id
-    assert row.member_id == member_id
-    assert row.audience == str(conversation_audience(member_id))
-    assert invoker.calls[0]["on_behalf_of_member_id"] == member_id
-    assert invoker.calls[0]["as_scheduled"] is True
-
-
-async def test_scheduled_member_turn_refuses_a_foreign_conversation_key(db: None) -> None:
-    workspace_id, member_id, other_member_id, _sweep_id = await _seed()
-    invoker = Invoker()
-    with ws(workspace_id):
-        context = context_for("sweep", frozenset(), invoker=invoker, member_context_read=True)
-        await context.invoke_agent_for_member(
-            agent_name="daily-brief",
-            member_id=member_id,
-            conversation_key="shared-key",
-            message="Prepare the brief.",
-            idempotency_key="first",
-        )
-        try:
-            await context.invoke_agent_for_member(
-                agent_name="daily-brief",
-                member_id=other_member_id,
-                conversation_key="shared-key",
-                message="Prepare the brief.",
-                idempotency_key="second",
-            )
-        except PermissionError as error:
-            assert str(error) == "scheduled conversation belongs to another principal"
-        else:
-            raise AssertionError("foreign conversation key was accepted")
-    assert len(invoker.calls) == 1
-
-
-async def test_member_context_excludes_foreign_other_member_and_sweep_data(
+async def test_member_context_excludes_foreign_other_member_and_current_conversation(
     db: None, tmp_path: Path
 ) -> None:
-    workspace_id, member_id, other_member_id, sweep_id = await _seed()
+    workspace_id, member_id, other_member_id, brief_id = await _seed()
     now = datetime.now(UTC)
     source_id, page_id, missing_page_id, invalid_page_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -315,8 +234,8 @@ async def test_member_context_excludes_foreign_other_member_and_sweep_data(
                 "self",
                 member_id,
                 str(conversation_audience(member_id)),
-                sweep_id,
-                "extension:sweep",
+                brief_id,
+                "web",
             ),
         )
         conversation_ids: dict[str, UUID] = {}
@@ -560,7 +479,7 @@ async def test_member_context_excludes_foreign_other_member_and_sweep_data(
                 created_at=old,
             )
         )
-    with ws(workspace_id), agent(sweep_id):
+    with ws(workspace_id), agent(brief_id):
         blob = WorkspaceBlobStore(FilesystemBlobStore(tmp_path))
         await blob.put("artifacts/notes.txt", b"Private file text.")
         await blob.put("artifacts/invalid.txt", b"\x96")
@@ -573,7 +492,10 @@ async def test_member_context_excludes_foreign_other_member_and_sweep_data(
             member_context_read=True,
             scheduled_member_id=member_id,
         )
-        records = await context.member_context(since=now - timedelta(days=1))
+        records = await context.member_context(
+            since=now - timedelta(days=1),
+            exclude_conversation_id=conversation_ids["self"],
+        )
     assert {record.title for record in records} == {
         "shared",
         "mine",

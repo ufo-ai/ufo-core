@@ -51,8 +51,6 @@ from ufo_ext_slack.surface import (
 )
 from ufo_ext_sources.manifest import manifest as sources_manifest
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT
-from ufo_ext_sweep.manifest import AGENT_NAME as SWEEP_AGENT_NAME
-from ufo_ext_sweep.manifest import manifest as sweep_manifest
 from ufo_ext_web import community as web_community
 from ufo_ext_web import panels as web_panels
 from ufo_ext_web import surface as web_surface
@@ -157,7 +155,6 @@ from ufo.models.interface import (
 from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef
 from ufo.objects import OBJECT_LIST_PAGE
-from ufo.provisioning import AgentProvisioning
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
@@ -1377,7 +1374,7 @@ async def test_chat_titles_name_every_surface_s_conversations_and_summarize_each
         queue_key="errand/1",
         audience="shared",
         member_id=None,
-        surface="extension:sweep",
+        surface="extension:sample",
     )
     await _seed_listed_turn(
         workspace_id,
@@ -5010,13 +5007,13 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
         timedelta(hours=1),
     )
     _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
-    daily_agent = uuid4()
+    review_agent = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.agent).values(
-                id=daily_agent,
+                id=review_agent,
                 workspace_id=workspace_id,
-                name="daily-brief",
+                name="code-review",
                 prompt="Answer briefly.",
                 model="claude-opus-4-8",
                 is_main=False,
@@ -5026,40 +5023,40 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
         )
     conversation_id = await _seed_agent_conversation(
         workspace_id,
-        daily_agent,
-        queue_key=f"daily-brief:{member_id}:2026-08-15",
+        review_agent,
+        queue_key=f"code-review:{member_id}:42",
         audience=str(conversation_audience(member_id)),
         member_id=member_id,
-        surface="extension:sweep",
+        surface="extension:coding",
     )
     await _seed_listed_turn(
         workspace_id,
         conversation_id,
-        daily_agent,
+        review_agent,
         seq=1,
-        inbound="Prepare today's private daily brief.",
+        inbound="Review pull request 42.",
     )
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     rail = await client.get("/surface/web/api/chats", headers=cookie)
     assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(conversation_id)]
     index = await client.get("/surface/web/api/agents", headers=cookie)
-    assert str(daily_agent) not in {agent["id"] for agent in index.json()["agents"]}
-    settings = await client.get(f"/surface/web/agents/{daily_agent}/settings", headers=cookie)
+    assert str(review_agent) not in {agent["id"] for agent in index.json()["agents"]}
+    settings = await client.get(f"/surface/web/agents/{review_agent}/settings", headers=cookie)
     assert settings.status_code == 404
     new_chat = await client.post(
-        f"/surface/web/agents/{daily_agent}/chat?conversation=new",
+        f"/surface/web/agents/{review_agent}/chat?conversation=new",
         content=b"Open another chat.",
         headers=cookie,
     )
     assert new_chat.status_code == 404
     transcript = await client.get(
-        f"/surface/web/agents/{daily_agent}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{review_agent}/transcript?conversation={conversation_id}",
         headers=cookie,
     )
     assert transcript.status_code == 200
     reply = await client.post(
-        f"/surface/web/agents/{daily_agent}/chat?conversation={conversation_id}",
-        content=b"Approve the task draft.",
+        f"/surface/web/agents/{review_agent}/chat?conversation={conversation_id}",
+        content=b"Apply the first review suggestion.",
         headers=cookie,
     )
     assert reply.status_code == 200
@@ -5073,7 +5070,7 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
         ).scalar_one()
     assert speaker == member_id
     foreign = await client.get(
-        f"/surface/web/agents/{daily_agent}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{review_agent}/transcript?conversation={conversation_id}",
         headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     assert foreign.status_code == 404
@@ -9243,49 +9240,6 @@ async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools
         assert list(seeded) == [main_agent]
 
 
-async def test_homepage_seed_skips_the_daily_brief_agent(db: None) -> None:
-    workspace_id, main_agent = await _seed_workspace()
-    await _seed_member(workspace_id, "seed-brief-admin@example.com", admin=True)
-    await AgentProvisioning((sweep_manifest(),)).apply(workspace_id)
-    async with workspace_tx() as connection:
-        daily_brief = (
-            await connection.execute(
-                sa.select(
-                    tables.agent.c.id,
-                    tables.agent.c.tools,
-                    tables.agent.c.visibility,
-                ).where(
-                    tables.agent.c.workspace_id == workspace_id,
-                    tables.agent.c.provisioned_by == "sweep",
-                    tables.agent.c.provisioned_name == SWEEP_AGENT_NAME,
-                )
-            )
-        ).one()
-    assert "set_homepage" in daily_brief.tools
-    assert "deploy_website" not in daily_brief.tools
-    assert daily_brief.visibility == "workspace"
-
-    dbos = _SeedDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id):
-        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
-        await web_surface.seed_homepages(ctx)
-        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
-    assert markers[f"{web_surface.HOMEPAGE_SEED_PREFIX}{daily_brief.id}"] == "withheld-tools"
-    assert len(dbos.enqueued) == 1
-    async with workspace_tx() as connection:
-        seeded = (
-            await connection.execute(
-                sa.select(tables.conversation.c.agent_id).where(
-                    tables.conversation.c.queue_key.startswith("homepage/")
-                )
-            )
-        ).scalars()
-        assert list(seeded) == [main_agent]
-
-
 async def test_homepage_seed_leaves_a_refused_agent_unmarked_and_retries(db: None) -> None:
     workspace_id, main_agent = await _seed_workspace()
     unseated = uuid4()
@@ -11528,14 +11482,14 @@ async def test_history_pages_answer_at_the_chat_reach(
     member_id, token = await _seed_member(workspace_id, "m@example.com")
     _other_id, other_token = await _seed_member(workspace_id, "n@example.com")
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-    sweep_agent = uuid4()
+    review_agent = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.agent).values(
-                id=sweep_agent,
+                id=review_agent,
                 workspace_id=workspace_id,
-                name="sweep",
-                prompt="brief daily",
+                name="code-review",
+                prompt="review code",
                 model="claude-opus-4-8",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -11543,21 +11497,21 @@ async def test_history_pages_answer_at_the_chat_reach(
         )
     conversation_id = await _seed_agent_conversation(
         workspace_id,
-        sweep_agent,
-        queue_key=f"daily-brief:{member_id}",
+        review_agent,
+        queue_key=f"code-review:{member_id}:42",
         audience=str(conversation_audience(member_id)),
         member_id=member_id,
-        surface="extension:sweep",
+        surface="extension:coding",
     )
     older = await _seed_listed_turn(
-        workspace_id, conversation_id, sweep_agent, seq=1, inbound="older ask"
+        workspace_id, conversation_id, review_agent, seq=1, inbound="older ask"
     )
     briefed = await _seed_listed_turn(
-        workspace_id, conversation_id, sweep_agent, seq=2, inbound="brief me"
+        workspace_id, conversation_id, review_agent, seq=2, inbound="review this"
     )
     tail = (
-        Message(role="user", content=f"<context>\nmessage_ref: {briefed}\n</context>\nbrief me"),
-        Message(role="assistant", content="today's brief"),
+        Message(role="user", content=f"<context>\nmessage_ref: {briefed}\n</context>\nreview this"),
+        Message(role="assistant", content="review result"),
     )
     summary = Message(role="user", content="Compacted context:\nolder briefs")
     await _write_compaction(
@@ -11573,13 +11527,13 @@ async def test_history_pages_answer_at_the_chat_reach(
     await _write_transcript(blob, conversation_id, Conversation(seq=2, messages=(summary, *tail)))
 
     own = await client.get(
-        f"/surface/web/agents/{sweep_agent}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{review_agent}/transcript?conversation={conversation_id}",
         headers=headers,
     )
     assert own.status_code == 200
     assert own.json()["earlier"] == 1
 
-    path = f"/surface/web/agents/{sweep_agent}/conversations/{conversation_id}/transcript/1"
+    path = f"/surface/web/agents/{review_agent}/conversations/{conversation_id}/transcript/1"
     page = await client.get(path, headers=headers)
     assert page.status_code == 200
     assert page.json() == {"messages": [{"role": "user", "text": "older ask"}]}
@@ -11589,8 +11543,8 @@ async def test_history_pages_answer_at_the_chat_reach(
 
     shared = await _seed_agent_conversation(
         workspace_id,
-        sweep_agent,
-        queue_key="sweep-room",
+        review_agent,
+        queue_key="review-room",
         audience="shared",
         member_id=None,
     )
@@ -11603,7 +11557,7 @@ async def test_history_pages_answer_at_the_chat_reach(
     )
     for tail_route in ("/transcript", "/transcript/1"):
         parity = await client.get(
-            f"/surface/web/agents/{sweep_agent}/conversations/{shared}{tail_route}",
+            f"/surface/web/agents/{review_agent}/conversations/{shared}{tail_route}",
             headers=headers,
         )
         assert parity.status_code == 404

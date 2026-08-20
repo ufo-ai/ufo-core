@@ -3,7 +3,7 @@ import hashlib
 import ipaddress
 import json
 import re
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
@@ -12,11 +12,9 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import ExtensionContext, MemberContextRecord
-from ufo.sdk.jobs import JobSpec, seated_member_workspaces
 from ufo.sdk.manifest import (
-    AgentProvision,
-    AgentSpec,
     Deny,
     HookContext,
     HookOutcome,
@@ -31,20 +29,14 @@ from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "sweep"
 VERSION = "0.1.0"
-AGENT_NAME = "daily-brief"
 TOOL_NAME = "sweep_newspaper"
+CONFIGURE_TOOL_NAME = "configure_daily_brief"
 TASK_TOOL_NAME = "update_todo_list"
 MEMORY_TOOL_NAME = "memory_update"
 HOMEPAGE_TOOL_NAME = "set_homepage"
-JOB_NAME = "daily_brief"
-JOB_SCHEDULE = "0 0 * * * *"
-FINAL_MODEL = "claude-sonnet-5"
 SCOUT_MODEL = "gpt-5.6-luna"
 SKILL_NAME = "daily-brief"
 SKILL_DIR = Path(__file__).parent / "skills" / SKILL_NAME
-AGENT_PROMPT = (
-    "Load the daily-brief skill for scheduled briefs and member follow-up. Follow it exactly."
-)
 FIRST_RANGE = timedelta(days=7)
 OPEN_REPEAT = timedelta(days=7)
 LEDGER_RETENTION = timedelta(days=30)
@@ -54,7 +46,6 @@ MAX_FINDINGS = 5
 MAX_REFERENCES = 3
 MAX_COVERAGE_CHARS = 300
 MAX_PUBLIC_SOURCES = 8
-MAX_EDITION_ATTEMPTS = 3
 REFERENCE_COVERAGE = (
     "Some references or findings were omitted because they were outside the supplied input."
 )
@@ -69,8 +60,6 @@ edition = sa.Table(
     sa.Column("local_date", sa.Text, nullable=False),
     sa.Column("timezone", sa.Text, nullable=False),
     sa.Column("status", sa.Text, nullable=False),
-    sa.Column("attempt", sa.Integer, nullable=False),
-    sa.Column("conversation_id", sa.Uuid, nullable=True),
     sa.Column("turn_id", sa.Uuid, nullable=True),
     sa.Column("candidate_cursor", sa.DateTime(timezone=True), nullable=True),
     sa.Column("candidate_input_keys", sa.JSON, nullable=True),
@@ -79,6 +68,17 @@ edition = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.PrimaryKeyConstraint("workspace_id", "member_id", "local_date"),
+)
+application = sa.Table(
+    "sweep_application",
+    _metadata,
+    sa.Column("workspace_id", sa.Uuid, nullable=False),
+    sa.Column("conversation_id", sa.Uuid, nullable=False),
+    sa.Column("member_id", sa.Uuid, nullable=False),
+    sa.Column("agent_id", sa.Uuid, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint("workspace_id", "conversation_id"),
 )
 
 turn = sa.table(
@@ -91,6 +91,11 @@ turn = sa.table(
 class SweepInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_description: str = Field(description="State that you are preparing the daily brief.")
+
+
+class ConfigureDailyBriefInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_description: str = Field(description="State that you are configuring this Daily Brief.")
 
 
 class ContextRecord(BaseModel):
@@ -123,9 +128,61 @@ class ScoutOutput(BaseModel):
 SCOUTS = ("work", "missed-items", "pages-artifacts", "public-context")
 
 
-def local_edition_date(now: datetime, timezone: str) -> date | None:
-    local = now.astimezone(ZoneInfo(timezone))
-    return local.date() if local.timetz().replace(tzinfo=None) >= time(8) else None
+async def _configure_daily_brief(ctx: ToolContext, _args: ConfigureDailyBriefInput) -> ToolResult:
+    member_id = ctx.speaker_member_id
+    if (
+        ctx.ext is None
+        or member_id is None
+        or ctx.audience != conversation_audience(member_id)
+        or ctx.turn.admission_source != "member"
+    ):
+        raise RuntimeError("configure_daily_brief requires the owner's private member turn")
+    agent_row = next(
+        (row for row in await ctx.ext.workspace_agents() if row.id == ctx.turn.agent_id),
+        None,
+    )
+    visibilities = await ctx.ext.agent_visibilities()
+    if (
+        agent_row is None
+        or agent_row.owner_member_id != member_id
+        or visibilities.get(ctx.turn.agent_id) != "private"
+    ):
+        raise RuntimeError("configure_daily_brief requires a member-owned private application")
+    now = datetime.now(UTC)
+    async with ctx.ext.transaction() as connection:
+        row = (
+            await connection.execute(
+                sa.select(application).where(
+                    application.c.workspace_id == ctx.ext.workspace_id,
+                    sa.or_(
+                        application.c.conversation_id == ctx.turn.conversation_id,
+                        application.c.agent_id == ctx.turn.agent_id,
+                    ),
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            await connection.execute(
+                sa.insert(application).values(
+                    workspace_id=ctx.ext.workspace_id,
+                    conversation_id=ctx.turn.conversation_id,
+                    member_id=member_id,
+                    agent_id=ctx.turn.agent_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        elif (
+            row.conversation_id != ctx.turn.conversation_id
+            or row.member_id != member_id
+            or row.agent_id != ctx.turn.agent_id
+        ):
+            raise RuntimeError("this Daily Brief application is registered in another conversation")
+    return ToolResult(content=(TextContent(text="Daily Brief configured."),))
+
+
+def local_edition_date(now: datetime, timezone: str) -> date:
+    return now.astimezone(ZoneInfo(timezone)).date()
 
 
 def _profile(name: str) -> SubagentProfile:
@@ -260,22 +317,99 @@ async def _public_records(
     )
 
 
-async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
-    if ctx.ext is None or ctx.acting_member_id is None:
-        raise RuntimeError("sweep_newspaper requires a scheduled member")
-    ext = ctx.ext
-    member_id = ctx.acting_member_id
-    now = datetime.now(UTC)
+async def _register_edition(
+    ext: ExtensionContext, member_id: UUID, turn_id: UUID, now: datetime
+) -> sa.Row:
+    timezone = await ext.scheduled_member_timezone()
+    local_date = local_edition_date(now, timezone).isoformat()
     async with ext.transaction() as connection:
         row = (
             await connection.execute(
                 sa.select(edition).where(
                     edition.c.workspace_id == ext.workspace_id,
                     edition.c.member_id == member_id,
-                    edition.c.turn_id == ctx.turn.id,
+                    edition.c.local_date == local_date,
                 )
             )
         ).one_or_none()
+        if row is not None and row.turn_id == turn_id:
+            return row
+        if row is not None and row.status == "completed":
+            raise RuntimeError("the member already has a completed Daily Brief for this date")
+        if row is not None and row.status == "pending":
+            raise RuntimeError("the member already has a Daily Brief in progress for this date")
+        values = {
+            "timezone": timezone,
+            "status": "pending",
+            "turn_id": turn_id,
+            "candidate_cursor": None,
+            "candidate_input_keys": None,
+            "candidate_finding_keys": None,
+            "completed_at": None,
+            "updated_at": now,
+        }
+        if row is None:
+            await connection.execute(
+                sa.insert(edition).values(
+                    workspace_id=ext.workspace_id,
+                    member_id=member_id,
+                    local_date=local_date,
+                    created_at=now,
+                    **values,
+                )
+            )
+        else:
+            await connection.execute(
+                sa.update(edition)
+                .where(
+                    edition.c.workspace_id == ext.workspace_id,
+                    edition.c.member_id == member_id,
+                    edition.c.local_date == local_date,
+                )
+                .values(**values)
+            )
+        return (
+            await connection.execute(
+                sa.select(edition).where(
+                    edition.c.workspace_id == ext.workspace_id,
+                    edition.c.member_id == member_id,
+                    edition.c.local_date == local_date,
+                )
+            )
+        ).one()
+
+
+async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
+    if (
+        ctx.ext is None
+        or ctx.acting_member_id is None
+        or ctx.turn.admission_source != "scheduled"
+        or ctx.audience != conversation_audience(ctx.acting_member_id)
+    ):
+        raise RuntimeError(
+            "sweep_newspaper requires a registered private scheduled Daily Brief turn"
+        )
+    ext = ctx.ext
+    member_id = ctx.acting_member_id
+    async with ext.transaction() as connection:
+        registered = (
+            await connection.execute(
+                sa.select(application.c.conversation_id).where(
+                    application.c.workspace_id == ext.workspace_id,
+                    application.c.conversation_id == ctx.turn.conversation_id,
+                    application.c.member_id == member_id,
+                    application.c.agent_id == ctx.turn.agent_id,
+                )
+            )
+        ).one_or_none()
+    if registered is None:
+        raise RuntimeError(
+            "sweep_newspaper requires a registered private scheduled Daily Brief turn"
+        )
+    now = datetime.now(UTC)
+    await _finalize(ext, now)
+    row = await _register_edition(ext, member_id, ctx.turn.id, now)
+    async with ext.transaction() as connection:
         completed_cursor = (
             await connection.execute(
                 sa.select(sa.func.max(edition.c.candidate_cursor)).where(
@@ -285,10 +419,12 @@ async def _sweep(ctx: ToolContext, _args: SweepInput) -> ToolResult:
                 )
             )
         ).scalar_one()
-    if row is None:
-        raise RuntimeError("the scheduled edition is not registered")
     since = completed_cursor or now - FIRST_RANGE
-    records = await ext.member_context(since=since, limit=MAX_CONTEXT_RECORDS)
+    records = await ext.member_context(
+        since=since,
+        limit=MAX_CONTEXT_RECORDS,
+        exclude_conversation_id=ctx.turn.conversation_id,
+    )
     prior_inputs, prior_findings = await _prior_ledgers(ext, member_id, now)
     changed = _changed_records(tuple(records), prior_inputs, now)
     public = await _public_records(ctx, changed, now)
@@ -461,14 +597,19 @@ async def _finalize(ctx: ExtensionContext, now: datetime) -> None:
 
 
 async def _draft_only(ctx: HookContext) -> HookOutcome:
-    if ctx.turn is None or not isinstance(ctx.payload, PreToolUse):
+    if (
+        ctx.turn is None
+        or ctx.turn.admission_source != "scheduled"
+        or not isinstance(ctx.payload, PreToolUse)
+    ):
         return None
     async with ctx.ext.transaction() as connection:
         scheduled = (
             await connection.execute(
-                sa.select(edition.c.turn_id).where(
-                    edition.c.workspace_id == ctx.ext.workspace_id,
-                    edition.c.turn_id == ctx.turn.id,
+                sa.select(application.c.conversation_id).where(
+                    application.c.workspace_id == ctx.ext.workspace_id,
+                    application.c.conversation_id == ctx.turn.conversation_id,
+                    application.c.agent_id == ctx.turn.agent_id,
                 )
             )
         ).one_or_none()
@@ -484,131 +625,22 @@ async def _draft_only(ctx: HookContext) -> HookOutcome:
     return Deny(reason="A scheduled daily brief can only propose drafts for member approval.")
 
 
-async def _tick(ctx: ExtensionContext, now: datetime | None = None) -> None:
-    now = now or datetime.now(UTC)
-    await _finalize(ctx, now)
-    cursor: UUID | None = None
-    while True:
-        page = await ctx.seated_members(cursor=cursor)
-        for member in page.members:
-            local_date = local_edition_date(now, member.timezone)
-            if local_date is None:
-                continue
-            key = f"daily-brief:{member.id}:{local_date.isoformat()}"
-            async with ctx.transaction() as connection:
-                row = (
-                    await connection.execute(
-                        sa.select(edition.c.status, edition.c.turn_id, edition.c.attempt).where(
-                            edition.c.workspace_id == ctx.workspace_id,
-                            edition.c.member_id == member.id,
-                            edition.c.local_date == local_date.isoformat(),
-                        )
-                    )
-                ).one_or_none()
-                if row is not None and (
-                    row.status == "completed"
-                    or (row.status == "pending" and row.turn_id is not None)
-                    or (row.status == "failed" and row.attempt >= MAX_EDITION_ATTEMPTS)
-                ):
-                    continue
-                values = {
-                    "timezone": member.timezone,
-                    "status": "pending",
-                    "turn_id": None,
-                    "candidate_cursor": None,
-                    "candidate_input_keys": None,
-                    "candidate_finding_keys": None,
-                    "completed_at": None,
-                    "updated_at": now,
-                }
-                if row is None:
-                    await connection.execute(
-                        sa.insert(edition).values(
-                            workspace_id=ctx.workspace_id,
-                            member_id=member.id,
-                            local_date=local_date.isoformat(),
-                            attempt=1,
-                            conversation_id=None,
-                            created_at=now,
-                            **values,
-                        )
-                    )
-                else:
-                    attempt = row.attempt + 1 if row.status == "failed" else row.attempt
-                    await connection.execute(
-                        sa.update(edition)
-                        .where(
-                            edition.c.workspace_id == ctx.workspace_id,
-                            edition.c.member_id == member.id,
-                            edition.c.local_date == local_date.isoformat(),
-                        )
-                        .values(attempt=attempt, **values)
-                    )
-            attempt = 1 if row is None else attempt
-            try:
-                scheduled = await ctx.invoke_agent_for_member(
-                    agent_name=AGENT_NAME,
-                    member_id=member.id,
-                    conversation_key=key,
-                    message="Prepare today's private daily brief.",
-                    idempotency_key=f"{key}:{attempt}",
-                )
-            except (PermissionError, ValueError):
-                async with ctx.transaction() as connection:
-                    await connection.execute(
-                        sa.update(edition)
-                        .where(
-                            edition.c.workspace_id == ctx.workspace_id,
-                            edition.c.member_id == member.id,
-                            edition.c.local_date == local_date.isoformat(),
-                        )
-                        .values(status="failed", updated_at=now)
-                    )
-                continue
-            async with ctx.transaction() as connection:
-                await connection.execute(
-                    sa.update(edition)
-                    .where(
-                        edition.c.workspace_id == ctx.workspace_id,
-                        edition.c.member_id == member.id,
-                        edition.c.local_date == local_date.isoformat(),
-                    )
-                    .values(
-                        conversation_id=scheduled.conversation_id,
-                        turn_id=scheduled.turn_id,
-                        updated_at=now,
-                    )
-                )
-        if page.next_cursor is None:
-            return
-        cursor = page.next_cursor
-
-
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        agents=(
-            AgentProvision(
-                name=AGENT_NAME,
-                spec=AgentSpec(
-                    model=FINAL_MODEL,
-                    reasoning="high",
-                    internet_access_allowed=False,
-                    sandbox_size="small",
-                    visibility="workspace",
-                    prompt=AGENT_PROMPT,
-                ),
-                tools=(
-                    "load_skill",
-                    TOOL_NAME,
-                    TASK_TOOL_NAME,
-                    MEMORY_TOOL_NAME,
-                    HOMEPAGE_TOOL_NAME,
-                ),
-            ),
-        ),
         tools=(
+            ToolDef(
+                name=CONFIGURE_TOOL_NAME,
+                description=(
+                    "Register this member-owned private application conversation as the Daily "
+                    "Brief before creating its recurring task. Call once during setup."
+                ),
+                input_model=ConfigureDailyBriefInput,
+                handler=_configure_daily_brief,
+                side_effecting=True,
+                parallel_safe=False,
+            ),
             ToolDef(
                 name=TOOL_NAME,
                 description=(
@@ -618,14 +650,6 @@ def manifest() -> Manifest:
                 input_model=SweepInput,
                 handler=_sweep,
                 parallel_safe=False,
-            ),
-        ),
-        jobs=(
-            JobSpec(
-                name=JOB_NAME,
-                schedule=JOB_SCHEDULE,
-                handler=_tick,
-                candidates=seated_member_workspaces(),
             ),
         ),
         hooks=(

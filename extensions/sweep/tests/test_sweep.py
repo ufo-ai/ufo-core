@@ -4,27 +4,27 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_memory.store import memory_item
 from ufo_ext_sweep.manifest import (
-    AGENT_NAME,
-    AGENT_PROMPT,
-    FINAL_MODEL,
+    CONFIGURE_TOOL_NAME,
     HOMEPAGE_TOOL_NAME,
     MAX_COVERAGE_CHARS,
-    MAX_EDITION_ATTEMPTS,
     REFERENCE_COVERAGE,
     SCOUT_MODEL,
+    ConfigureDailyBriefInput,
     Finding,
     MemberContextRecord,
     ScoutOutput,
     SweepInput,
     _changed_records,
+    _configure_daily_brief,
     _finalize,
     _public_records,
     _sweep,
-    _tick,
+    application,
     edition,
     local_edition_date,
     manifest,
@@ -46,12 +46,12 @@ from ufo.workspace import ws
 
 
 def test_local_edition_date_uses_the_members_zone_and_dst_rules() -> None:
-    assert local_edition_date(datetime(2026, 3, 8, 11, 59, tzinfo=UTC), "America/New_York") is None
-    assert (
-        str(local_edition_date(datetime(2026, 3, 8, 12, 0, tzinfo=UTC), "America/New_York"))
-        == "2026-03-08"
+    assert str(local_edition_date(datetime(2026, 3, 8, 4, 59, tzinfo=UTC), "America/New_York")) == (
+        "2026-03-07"
     )
-    assert str(local_edition_date(datetime(2026, 8, 14, 8, 0, tzinfo=UTC), "UTC")) == ("2026-08-14")
+    assert str(local_edition_date(datetime(2026, 3, 8, 5, 0, tzinfo=UTC), "America/New_York")) == (
+        "2026-03-08"
+    )
 
 
 def test_changed_records_deduplicates_and_repeats_open_work_after_seven_days() -> None:
@@ -75,21 +75,8 @@ def test_changed_records_deduplicates_and_repeats_open_work_after_seven_days() -
 
 def test_manifest_pins_four_luna_scouts() -> None:
     declared = manifest()
-    (provision,) = declared.agents
-    assert provision.name == AGENT_NAME
-    assert provision.spec.model == FINAL_MODEL
-    assert provision.spec.prompt == AGENT_PROMPT
-    assert provision.spec.reasoning == "high"
-    assert not provision.spec.internet_access_allowed
-    assert provision.spec.sandbox_size == "small"
-    assert provision.spec.visibility == "workspace"
-    assert provision.tools == (
-        "load_skill",
-        "sweep_newspaper",
-        "update_todo_list",
-        "memory_update",
-        "set_homepage",
-    )
+    assert declared.agents == ()
+    assert declared.jobs == ()
     assert len(declared.subagents) == 4
     assert {profile.model for profile in declared.subagents} == {SCOUT_MODEL}
     assert all(profile.max_rounds == 1 for profile in declared.subagents)
@@ -98,6 +85,8 @@ def test_manifest_pins_four_luna_scouts() -> None:
         for profile in declared.subagents
     )
     assert declared.member_context_read
+    assert [tool.name for tool in declared.tools] == [CONFIGURE_TOOL_NAME, "sweep_newspaper"]
+    assert declared.tools[0].side_effecting
     assert [(hook.event, hook.tools) for hook in declared.hooks] == [
         ("pre_tool_use", ("update_todo_list", "memory_update", "set_homepage"))
     ]
@@ -110,6 +99,9 @@ def test_manifest_pins_four_luna_scouts() -> None:
         " only member approval in a later turn does." in instructions
     )
     assert "no `sweep_newspaper`, no `update_todo_list`, no `memory_update`" in instructions
+    assert "write" in instructions
+    assert "share_file" in instructions
+    assert "`configure_daily_brief`" in instructions
 
 
 def test_turn_context_wires_member_blobs_without_a_trajectory_corpus(tmp_path: Path) -> None:
@@ -120,9 +112,10 @@ def test_turn_context_wires_member_blobs_without_a_trajectory_corpus(tmp_path: P
         audience=conversation_audience(uuid4()),
         member_context_blob=blob,
     )
-    context = contexts["sweep_newspaper"]
-    assert context.member_context_blob is blob
-    assert context.corpus is None
+    assert set(contexts) >= {"configure_daily_brief", "sweep_newspaper"}
+    for context in contexts.values():
+        assert context.member_context_blob is blob
+        assert context.corpus is None
 
 
 async def test_public_collection_sends_only_literal_public_urls() -> None:
@@ -161,7 +154,7 @@ async def test_public_collection_sends_only_literal_public_urls() -> None:
 
 
 async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_path: Path) -> None:
-    workspace_id, member_id, agent_id, turn_id = await _seed()
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed()
     now = datetime.now(UTC)
     memory_ids = tuple(uuid4() for _ in range(30))
     async with workspace_tx() as connection:
@@ -229,7 +222,13 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
         ctx = SimpleNamespace(
             ext=ext,
             acting_member_id=member_id,
-            turn=SimpleNamespace(id=turn_id),
+            audience=conversation_audience(member_id),
+            turn=SimpleNamespace(
+                id=turn_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                admission_source="scheduled",
+            ),
             search_provider=None,
             spawn=spawn,
         )
@@ -250,28 +249,20 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
                 .values(status="done", terminal={"status": "done", "text": "Brief."})
             )
         await _finalize(ext, now)
-        second_conversation_id, second_turn_id = uuid4(), uuid4()
+        second_turn_id = uuid4()
         async with ext.transaction() as connection:
             await connection.execute(
-                sa.insert(tables.conversation).values(
-                    id=second_conversation_id,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    surface="extension:sweep",
-                    queue_key=f"daily-brief:{member_id}:2026-08-15",
-                    member_id=member_id,
-                    audience=str(conversation_audience(member_id)),
-                    created_at=now,
-                    updated_at=now,
-                )
+                sa.update(edition)
+                .where(edition.c.turn_id == turn_id)
+                .values(local_date=(datetime.now(UTC).date() - timedelta(days=1)).isoformat())
             )
             await connection.execute(
                 sa.insert(tables.turn).values(
                     id=second_turn_id,
                     workspace_id=workspace_id,
-                    conversation_id=second_conversation_id,
+                    conversation_id=conversation_id,
                     agent_id=agent_id,
-                    seq=1,
+                    seq=2,
                     status="running",
                     inbound="Prepare the brief.",
                     admission_source="scheduled",
@@ -280,25 +271,17 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
                     updated_at=now,
                 )
             )
-            await connection.execute(
-                sa.insert(edition).values(
-                    workspace_id=workspace_id,
-                    member_id=member_id,
-                    local_date="2026-08-15",
-                    timezone="UTC",
-                    status="pending",
-                    attempt=1,
-                    conversation_id=second_conversation_id,
-                    turn_id=second_turn_id,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
         repeated = await _sweep(
             SimpleNamespace(
                 ext=ext,
                 acting_member_id=member_id,
-                turn=SimpleNamespace(id=second_turn_id),
+                audience=conversation_audience(member_id),
+                turn=SimpleNamespace(
+                    id=second_turn_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    admission_source="scheduled",
+                ),
                 search_provider=None,
                 spawn=spawn,
             ),
@@ -310,6 +293,10 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
     work = next(finding for finding in payload["findings"] if finding["section"] == "work")
     assert len(work["references"]) == 1
     assert work["references"][0] in supplied_by_profile["profile:sweep-work"]
+    assert all(
+        f"conversation/{conversation_id}" not in supplied
+        for supplied in supplied_by_profile.values()
+    )
     unsupported = next(
         finding for finding in payload["findings"] if finding["stable_subject_key"] == "unsupported"
     )
@@ -325,7 +312,7 @@ async def test_sweep_removes_a_scout_reference_outside_its_input(db: None, tmp_p
 async def test_sweep_ledgers_only_bounded_scout_input_and_keeps_the_cursor_open(
     db: None, tmp_path: Path
 ) -> None:
-    workspace_id, member_id, agent_id, turn_id = await _seed()
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed()
     now = datetime.now(UTC)
     memory_ids = tuple(uuid4() for _ in range(30))
     async with workspace_tx() as connection:
@@ -366,7 +353,13 @@ async def test_sweep_ledgers_only_bounded_scout_input_and_keeps_the_cursor_open(
             SimpleNamespace(
                 ext=ext,
                 acting_member_id=member_id,
-                turn=SimpleNamespace(id=turn_id),
+                audience=conversation_audience(member_id),
+                turn=SimpleNamespace(
+                    id=turn_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    admission_source="scheduled",
+                ),
                 search_provider=None,
                 spawn=spawn,
             ),
@@ -388,7 +381,7 @@ async def test_sweep_ledgers_only_bounded_scout_input_and_keeps_the_cursor_open(
     assert cursor < now - timedelta(days=6)
 
 
-async def _seed() -> tuple:
+async def _seed(*, registered: bool = True) -> tuple[UUID, UUID, UUID, UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (
         uuid4(),
         uuid4(),
@@ -406,6 +399,8 @@ async def _seed() -> tuple:
                 id=member_id,
                 workspace_id=workspace_id,
                 email="member@example.com",
+                timezone="UTC",
+                seated_at=now,
                 created_at=now,
                 updated_at=now,
             )
@@ -414,12 +409,11 @@ async def _seed() -> tuple:
             sa.insert(tables.agent).values(
                 id=agent_id,
                 workspace_id=workspace_id,
-                name=AGENT_NAME,
+                name="daily-brief",
                 prompt="Brief.",
-                model="claude-sonnet-5",
-                provisioned_by="sweep",
-                provisioned_name="daily-brief",
-                provisioned_version="0.1.0",
+                model="auto",
+                visibility="private",
+                owner_member_id=member_id,
                 created_at=now,
                 updated_at=now,
             )
@@ -429,8 +423,8 @@ async def _seed() -> tuple:
                 id=conversation_id,
                 workspace_id=workspace_id,
                 agent_id=agent_id,
-                surface="extension:sweep",
-                queue_key=f"daily-brief:{member_id}:2026-08-14",
+                surface="web",
+                queue_key=f"daily-brief:{member_id}",
                 member_id=member_id,
                 audience=str(conversation_audience(member_id)),
                 created_at=now,
@@ -452,101 +446,218 @@ async def _seed() -> tuple:
                 updated_at=now,
             )
         )
+        if registered:
+            await connection.execute(
+                sa.insert(application).values(
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    member_id=member_id,
+                    agent_id=agent_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return workspace_id, member_id, agent_id, conversation_id, turn_id
+
+
+async def _insert_edition(workspace_id: UUID, member_id: UUID, turn_id: UUID) -> None:
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(edition).values(
                 workspace_id=workspace_id,
                 member_id=member_id,
-                local_date="2026-08-14",
+                local_date=now.date().isoformat(),
                 timezone="UTC",
                 status="pending",
-                attempt=1,
-                conversation_id=conversation_id,
                 turn_id=turn_id,
                 created_at=now,
                 updated_at=now,
             )
         )
-    return workspace_id, member_id, agent_id, turn_id
 
 
-async def test_tick_reuses_a_pending_admission_key_and_advances_a_failed_attempt(db: None) -> None:
-    workspace_id, member_id, _agent_id, _turn_id = await _seed()
-    calls: list[str] = []
-    turns: dict[str, UUID] = {}
-
-    class Invoker:
-        async def invoke(self, *args: object, **kwargs: object) -> UUID:
-            key = str(args[3])
-            calls.append(key)
-            if key in turns:
-                return turns[key]
-            turn_id = uuid4()
-            turns[key] = turn_id
-            async with workspace_tx() as connection:
-                seq = (
-                    await connection.execute(
-                        sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0) + 1).where(
-                            tables.turn.c.conversation_id == args[0]
-                        )
-                    )
-                ).scalar_one()
+async def test_owner_registers_one_private_daily_brief_conversation(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed(registered=False)
+    with ws(workspace_id), agent(agent_id):
+        ext = context_for("sweep", frozenset(), member_context_read=True)
+        ctx = SimpleNamespace(
+            ext=ext,
+            speaker_member_id=member_id,
+            audience=conversation_audience(member_id),
+            turn=SimpleNamespace(
+                id=turn_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                admission_source="member",
+            ),
+        )
+        first = await _configure_daily_brief(
+            ctx, ConfigureDailyBriefInput(user_description="Configure this Daily Brief.")
+        )
+        second = await _configure_daily_brief(
+            ctx, ConfigureDailyBriefInput(user_description="Configure this Daily Brief.")
+        )
+        async with ext.transaction() as connection:
+            rows = (
                 await connection.execute(
-                    sa.insert(tables.turn).values(
-                        id=turn_id,
-                        workspace_id=workspace_id,
-                        conversation_id=args[0],
-                        agent_id=args[1],
-                        seq=seq,
-                        status="queued",
-                        inbound=args[2],
-                        admission_source="scheduled",
-                        on_behalf_of_member_id=member_id,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
+                    sa.select(
+                        application.c.conversation_id,
+                        application.c.member_id,
+                        application.c.agent_id,
+                    ).where(application.c.workspace_id == workspace_id)
                 )
-            return turn_id
-
-    with ws(workspace_id):
-        ext = context_for("sweep", frozenset(), invoker=Invoker(), member_context_read=True)
-        tick_at = datetime(2026, 8, 15, 12, tzinfo=UTC)
-        await _tick(ext, tick_at)
-        local_date = tick_at.date().isoformat()
-        async with ext.transaction() as connection:
-            await connection.execute(
-                sa.update(edition)
-                .where(edition.c.member_id == member_id, edition.c.local_date == local_date)
-                .values(turn_id=None)
-            )
-        await _tick(ext, tick_at)
-        async with ext.transaction() as connection:
-            await connection.execute(
-                sa.update(edition)
-                .where(edition.c.member_id == member_id, edition.c.local_date == local_date)
-                .values(status="failed", turn_id=None)
-            )
-        await _tick(ext, tick_at)
-        async with ext.transaction() as connection:
-            await connection.execute(
-                sa.update(edition)
-                .where(edition.c.member_id == member_id, edition.c.local_date == local_date)
-                .values(status="failed", turn_id=None)
-            )
-        await _tick(ext, tick_at)
-        async with ext.transaction() as connection:
-            await connection.execute(
-                sa.update(edition)
-                .where(edition.c.member_id == member_id, edition.c.local_date == local_date)
-                .values(status="failed", turn_id=None)
-            )
-        await _tick(ext, tick_at)
-    key = f"daily-brief:{member_id}:{local_date}"
-    assert calls == [f"{key}:1", f"{key}:1", f"{key}:2", f"{key}:3"]
-    assert len({call for call in calls if call.endswith(f":{MAX_EDITION_ATTEMPTS}")}) == 1
+            ).all()
+    assert first.content[0].text == "Daily Brief configured."
+    assert second.content[0].text == "Daily Brief configured."
+    assert rows == [(conversation_id, member_id, agent_id)]
 
 
-async def test_only_the_scheduled_edition_turn_is_refused_mutation_tools(db: None) -> None:
-    workspace_id, member_id, agent_id, turn_id = await _seed()
+async def test_daily_brief_registration_refuses_a_shared_conversation(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed(registered=False)
+    with ws(workspace_id), agent(agent_id):
+        ext = context_for("sweep", frozenset(), member_context_read=True)
+        with pytest.raises(RuntimeError, match="owner's private member turn"):
+            await _configure_daily_brief(
+                SimpleNamespace(
+                    ext=ext,
+                    speaker_member_id=member_id,
+                    audience="shared",
+                    turn=SimpleNamespace(
+                        id=turn_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        admission_source="member",
+                    ),
+                ),
+                ConfigureDailyBriefInput(user_description="Configure this Daily Brief."),
+            )
+        async with ext.transaction() as connection:
+            rows = (await connection.execute(sa.select(application.c.agent_id))).all()
+    assert rows == []
+
+
+async def test_daily_brief_registration_refuses_a_workspace_application(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed(registered=False)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == agent_id)
+            .values(visibility="workspace")
+        )
+    with ws(workspace_id), agent(agent_id):
+        ext = context_for("sweep", frozenset(), member_context_read=True)
+        with pytest.raises(RuntimeError, match="member-owned private application"):
+            await _configure_daily_brief(
+                SimpleNamespace(
+                    ext=ext,
+                    speaker_member_id=member_id,
+                    audience=conversation_audience(member_id),
+                    turn=SimpleNamespace(
+                        id=turn_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        admission_source="member",
+                    ),
+                ),
+                ConfigureDailyBriefInput(user_description="Configure this Daily Brief."),
+            )
+
+
+async def test_sweep_refuses_a_shared_scheduled_conversation(db: None, tmp_path: Path) -> None:
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        ext = context_for(
+            "sweep",
+            frozenset(),
+            member_context_blob=WorkspaceBlobStore(FilesystemBlobStore(tmp_path)),
+            member_context_read=True,
+            scheduled_member_id=member_id,
+        )
+        with pytest.raises(RuntimeError, match="registered private scheduled Daily Brief turn"):
+            await _sweep(
+                SimpleNamespace(
+                    ext=ext,
+                    acting_member_id=member_id,
+                    audience="shared",
+                    turn=SimpleNamespace(
+                        id=turn_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        admission_source="scheduled",
+                    ),
+                ),
+                SweepInput(user_description="Preparing the brief."),
+            )
+        async with ext.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(edition.c.turn_id).where(edition.c.workspace_id == workspace_id)
+                )
+            ).all()
+    assert rows == []
+
+
+async def test_sweep_refuses_an_unregistered_private_application(db: None, tmp_path: Path) -> None:
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed(registered=False)
+    with ws(workspace_id), agent(agent_id):
+        ext = context_for(
+            "sweep",
+            frozenset(),
+            member_context_blob=WorkspaceBlobStore(FilesystemBlobStore(tmp_path)),
+            member_context_read=True,
+            scheduled_member_id=member_id,
+        )
+        with pytest.raises(RuntimeError, match="registered private scheduled Daily Brief turn"):
+            await _sweep(
+                SimpleNamespace(
+                    ext=ext,
+                    acting_member_id=member_id,
+                    audience=conversation_audience(member_id),
+                    turn=SimpleNamespace(
+                        id=turn_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        admission_source="scheduled",
+                    ),
+                ),
+                SweepInput(user_description="Preparing the brief."),
+            )
+
+
+async def test_sweep_refuses_a_member_turn_without_registering_an_edition(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        ext = context_for(
+            "sweep",
+            frozenset(),
+            member_context_blob=WorkspaceBlobStore(FilesystemBlobStore(tmp_path)),
+            member_context_read=True,
+        )
+        with pytest.raises(RuntimeError, match="registered private scheduled Daily Brief turn"):
+            await _sweep(
+                SimpleNamespace(
+                    ext=ext,
+                    acting_member_id=member_id,
+                    audience=conversation_audience(member_id),
+                    turn=SimpleNamespace(
+                        id=turn_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        admission_source="member",
+                    ),
+                ),
+                SweepInput(user_description="Preparing the brief."),
+            )
+        async with ext.transaction() as connection:
+            rows = (await connection.execute(sa.select(edition.c.turn_id))).all()
+    assert rows == []
+
+
+async def test_registered_scheduled_turn_is_draft_only_before_collection(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed()
     with ws(workspace_id):
         chain = turn_hooks(
             (manifest(),),
@@ -556,7 +667,7 @@ async def test_only_the_scheduled_edition_turn_is_refused_mutation_tools(db: Non
         scheduled = Turn(
             id=turn_id,
             workspace_id=workspace_id,
-            conversation_id=uuid4(),
+            conversation_id=conversation_id,
             agent_id=agent_id,
             seq=1,
             status="running",
@@ -565,8 +676,21 @@ async def test_only_the_scheduled_edition_turn_is_refused_mutation_tools(db: Non
             on_behalf_of_member_id=member_id,
             created_at=datetime.now(UTC),
         )
-        ordinary = scheduled.model_copy(update={"id": uuid4()})
-        agent_record = AgentRecord(prompt="Brief.", model=FINAL_MODEL)
+        member_facing = scheduled.model_copy(
+            update={
+                "id": uuid4(),
+                "admission_source": "member",
+                "speaker_member_id": member_id,
+            }
+        )
+        unrelated = scheduled.model_copy(
+            update={
+                "id": uuid4(),
+                "conversation_id": uuid4(),
+                "agent_id": uuid4(),
+            }
+        )
+        agent_record = AgentRecord(prompt="Brief.", model="auto")
         for tool_name in ("update_todo_list", "memory_update"):
             refused = await chain.fire(
                 "pre_tool_use",
@@ -585,15 +709,26 @@ async def test_only_the_scheduled_edition_turn_is_refused_mutation_tools(db: Non
                 tool_name="memory_update",
                 tool_input=SweepInput(user_description="Saving an approved memory."),
             ),
-            ordinary,
+            member_facing,
+            agent_record,
+            member_id,
+        )
+        unaffected = await chain.fire(
+            "pre_tool_use",
+            PreToolUse(
+                tool_name="memory_update",
+                tool_input=SweepInput(user_description="Saving another application's memory."),
+            ),
+            unrelated,
             agent_record,
             member_id,
         )
     assert approved.denied is None
+    assert unaffected.denied is None
 
 
 async def test_the_scheduled_edition_cannot_bind_a_homepage(db: None) -> None:
-    workspace_id, member_id, agent_id, turn_id = await _seed()
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed()
     with ws(workspace_id):
         chain = turn_hooks(
             (manifest(),),
@@ -603,7 +738,7 @@ async def test_the_scheduled_edition_cannot_bind_a_homepage(db: None) -> None:
         scheduled = Turn(
             id=turn_id,
             workspace_id=workspace_id,
-            conversation_id=uuid4(),
+            conversation_id=conversation_id,
             agent_id=agent_id,
             seq=1,
             status="running",
@@ -620,7 +755,7 @@ async def test_the_scheduled_edition_cannot_bind_a_homepage(db: None) -> None:
                 "speaker_member_id": member_id,
             }
         )
-        agent_record = AgentRecord(prompt="Brief.", model=FINAL_MODEL)
+        agent_record = AgentRecord(prompt="Brief.", model="auto")
         call = PreToolUse(
             tool_name=HOMEPAGE_TOOL_NAME,
             tool_input=SweepInput(user_description="Binding the brief page."),
@@ -631,73 +766,10 @@ async def test_the_scheduled_edition_cannot_bind_a_homepage(db: None) -> None:
     assert allowed.denied is None
 
 
-async def test_one_member_admission_refusal_does_not_stop_later_members(db: None) -> None:
-    workspace_id, _member_id, _agent_id, _turn_id = await _seed()
-    second_member = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=second_member,
-                workspace_id=workspace_id,
-                email="second@example.com",
-                timezone="UTC",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-
-    class Invoker:
-        def __init__(self) -> None:
-            self.members: list[UUID] = []
-
-        async def invoke(self, *args: object, **kwargs: object) -> UUID:
-            member_id = kwargs["on_behalf_of_member_id"]
-            assert isinstance(member_id, UUID)
-            self.members.append(member_id)
-            if len(self.members) == 1:
-                raise PermissionError("seat changed")
-            turn_id = uuid4()
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.insert(tables.turn).values(
-                        id=turn_id,
-                        workspace_id=workspace_id,
-                        conversation_id=args[0],
-                        agent_id=args[1],
-                        seq=1,
-                        status="queued",
-                        inbound=args[2],
-                        admission_source="scheduled",
-                        on_behalf_of_member_id=member_id,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-            return turn_id
-
-    invoker = Invoker()
-    with ws(workspace_id):
-        tick_at = datetime(2026, 8, 15, 12, tzinfo=UTC)
-        await _tick(
-            context_for("sweep", frozenset(), invoker=invoker, member_context_read=True),
-            tick_at,
-        )
-        async with workspace_tx() as connection:
-            states = (
-                await connection.execute(
-                    sa.select(edition.c.member_id, edition.c.status).where(
-                        edition.c.local_date == tick_at.date().isoformat()
-                    )
-                )
-            ).all()
-    assert len(invoker.members) == 2
-    assert {row.status for row in states} == {"failed", "pending"}
-
-
 async def test_sweep_continues_with_one_failed_scout_and_uses_stable_child_keys(
     db: None, tmp_path: Path
 ) -> None:
-    workspace_id, member_id, agent_id, turn_id = await _seed()
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed()
     calls: list[tuple[str, str | None]] = []
 
     async def spawn(profile: str, payload: dict, **kwargs: object) -> SimpleNamespace:
@@ -724,7 +796,13 @@ async def test_sweep_continues_with_one_failed_scout_and_uses_stable_child_keys(
         ctx = SimpleNamespace(
             ext=ext,
             acting_member_id=member_id,
-            turn=SimpleNamespace(id=turn_id),
+            audience=conversation_audience(member_id),
+            turn=SimpleNamespace(
+                id=turn_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                admission_source="scheduled",
+            ),
             search_provider=None,
             spawn=spawn,
         )
@@ -739,14 +817,16 @@ async def test_sweep_continues_with_one_failed_scout_and_uses_stable_child_keys(
     assert not result.is_error
     assert payload["missing"] == ["public-context"]
     assert stored is not None
+    local_date = datetime.now(UTC).date().isoformat()
     assert {key for _profile, key in calls} == {
-        f"daily-brief:{member_id}:2026-08-14/{name}"
+        f"daily-brief:{member_id}:{local_date}/{name}"
         for name in ("work", "missed-items", "pages-artifacts", "public-context")
     }
 
 
 async def test_finalizer_commits_only_a_done_answer_with_candidates(db: None) -> None:
-    workspace_id, member_id, _agent_id, turn_id = await _seed()
+    workspace_id, member_id, _agent_id, _conversation_id, turn_id = await _seed()
+    await _insert_edition(workspace_id, member_id, turn_id)
     now = datetime.now(UTC)
     with ws(workspace_id):
         ext = context_for("sweep", frozenset(), member_context_read=True)
@@ -775,7 +855,7 @@ async def test_finalizer_commits_only_a_done_answer_with_candidates(db: None) ->
 
 
 async def test_sweep_fails_when_fewer_than_three_scouts_finish(db: None, tmp_path: Path) -> None:
-    workspace_id, member_id, agent_id, turn_id = await _seed()
+    workspace_id, member_id, agent_id, conversation_id, turn_id = await _seed()
 
     async def spawn(profile: str, payload: dict, **kwargs: object) -> SimpleNamespace:
         if profile in {"profile:sweep-work", "profile:sweep-missed-items"}:
@@ -793,7 +873,13 @@ async def test_sweep_fails_when_fewer_than_three_scouts_finish(db: None, tmp_pat
         ctx = SimpleNamespace(
             ext=ext,
             acting_member_id=member_id,
-            turn=SimpleNamespace(id=turn_id),
+            audience=conversation_audience(member_id),
+            turn=SimpleNamespace(
+                id=turn_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                admission_source="scheduled",
+            ),
             search_provider=None,
             spawn=spawn,
         )

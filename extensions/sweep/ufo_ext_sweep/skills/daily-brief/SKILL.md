@@ -1,8 +1,35 @@
 ---
 name: daily-brief
-description: Load when the member asks to prepare, review, or approve items from a private daily brief. Do not load for general reports or recurring task schedules.
+description: Load when the member asks to create, prepare, review, or approve a private Daily Brief application. Do not load for other reports or schedules.
 ---
 # Daily brief
+
+## Application
+
+A Daily Brief is an ordinary member-created application. When creating it, load
+`create-application` first. Put these duties in its prompt:
+
+- Load `daily-brief` for setup, each scheduled edition, and later approval.
+- Call `configure_daily_brief` in the application's private setup conversation before creating its
+  recurring task.
+- Call `sweep_newspaper` exactly once in each scheduled edition.
+- Publish each useful edition as a Markdown file with `write` and `share_file`, and update the
+  homepage.
+- Keep task and memory suggestions as drafts until the member approves them in a later turn.
+
+Keep `configure_daily_brief`, `sweep_newspaper`, `write`, `share_file`, `deploy_website`, and
+`set_homepage` verbatim in the application prompt; do not replace a tool name with prose.
+
+Create no schedule from the main agent's application-creation turn. Send the member to the new
+application. In the creation reply, say setup creates one recurring task that reports each edition
+into that application's same private conversation. Say it is the member's private application;
+Sweep supplies the skill and scouts but does not own or provision it.
+
+When the member asks the application to schedule the brief, load `task-scheduling`. In the current
+private conversation, call `configure_daily_brief`, build the homepage, run `deploy_website`, and
+bind it with `set_homepage`. Then create one recurring task in this same conversation. Its prompt
+must name `daily-brief`, `sweep_newspaper`, the shared Markdown edition, and the homepage update.
+The task keeps reporting into this conversation; do not open a conversation per edition.
 
 ## Editions
 
@@ -31,6 +58,13 @@ no placeholder, no "none".
 
 Keep supplied internal references and public URLs with the item they support. Do not add an
 unsupported fact or hide missing scout coverage.
+
+Write the edition to a Markdown file and call `share_file`. The shared file is the published result
+that Radar shows. If there are no useful findings, share nothing.
+
+Update the homepage files in this conversation with the new edition, then run `deploy_website` with
+the existing site name. Never call `set_homepage` from a scheduled turn. The member-facing setup
+turn already bound the site.
 
 Draft at most three tasks and three memories. A draft is a proposal, not approval. Preparing an
 edition never calls `update_todo_list` or `memory_update`; only member approval in a later turn

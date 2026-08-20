@@ -31,16 +31,7 @@ from ufo.ext.context import (
     PageState as PageState,
 )
 from ufo.ext.context import (
-    ScheduledMemberTurn as ScheduledMemberTurn,
-)
-from ufo.ext.context import (
     ScopedStore as ScopedStore,
-)
-from ufo.ext.context import (
-    SeatedMember as SeatedMember,
-)
-from ufo.ext.context import (
-    SeatedMemberPage as SeatedMemberPage,
 )
 from ufo.ext.context import (
     SourceReader as SourceReader,

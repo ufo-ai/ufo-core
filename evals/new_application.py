@@ -263,6 +263,30 @@ async def _graded_existing_untouched(outcome: ScenarioOutcome) -> CapabilityVerd
     return CapabilityVerdict(True, f"{EXISTING_APPLICATION} survived unchanged")
 
 
+async def _graded_daily_brief(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    failure = await _creation_failure(outcome, "private")
+    if failure is not None:
+        return failure
+    apply = _agent_applies(outcome.output)[0]
+    row = await _application(apply[1])
+    if row is None:
+        return CapabilityVerdict(False, "the applied Daily Brief application is missing")
+    prompt = row.prompt.lower()
+    required = (
+        "daily-brief",
+        "configure_daily_brief",
+        "sweep_newspaper",
+        "scheduled",
+        "markdown",
+        "share_file",
+        "homepage",
+    )
+    missing = tuple(value for value in required if value not in prompt)
+    if missing:
+        return CapabilityVerdict(False, f"application prompt omits {', '.join(missing)}")
+    return CapabilityVerdict(True, "one private Daily Brief application holds the complete job")
+
+
 SCENARIOS = (
     ScenarioCase(
         "A01-support-desk",
@@ -334,5 +358,32 @@ SCENARIOS = (
             "one.",
         ),
         digest_tag="new-application:existing-application",
+    ),
+    ScenarioCase(
+        "A04-daily-brief",
+        ScenarioUser(
+            reason_for_call="You want a private Daily Brief application that reviews your work "
+            "each weekday morning, publishes each edition in Radar, and keeps its homepage "
+            "current.",
+            known_info="Only you use it. Sweep is installed.",
+            task_instructions=SATISFIED_INSTRUCTION,
+        ),
+        DescribedGrader(
+            "one private application prompt carries the Daily Brief skill, Sweep tool, scheduled "
+            "Markdown publication, and homepage job",
+            _graded_daily_brief,
+        ),
+        seed=_seeded(),
+        rubric=(
+            "The assistant creates an ordinary member-owned application, not an extension-owned "
+            "or provisioned agent.",
+            "The application registers its private conversation before it creates the recurring "
+            "task.",
+            "The assistant says scheduling happens in the new application's own conversation, "
+            "where one recurring task keeps reporting.",
+            "The application prompt keeps task and memory suggestions as drafts until the member "
+            "approves them in a later turn.",
+        ),
+        digest_tag="new-application:daily-brief",
     ),
 )

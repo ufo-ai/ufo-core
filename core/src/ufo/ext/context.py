@@ -964,26 +964,11 @@ class TurnOutcome:
     text: str | None
 
 
-class SeatedMember(BaseModel):
-    id: UUID
-    timezone: str = "UTC"
-
-
 class WorkspaceAgent(BaseModel):
     id: UUID
     name: str
     owner_member_id: UUID | None = None
     tools: tuple[str, ...] | None = None
-
-
-class SeatedMemberPage(BaseModel):
-    members: tuple[SeatedMember, ...]
-    next_cursor: UUID | None = None
-
-
-class ScheduledMemberTurn(BaseModel):
-    conversation_id: UUID
-    turn_id: UUID | None
 
 
 class MemberContextRecord(BaseModel):
@@ -1082,36 +1067,8 @@ class ExtensionContext:
         base = self.public_base_url.rstrip("/")
         return f"{base}/surface/{self.home_surface}{fragment}"
 
-    async def seated_members(
-        self, *, cursor: UUID | None = None, limit: int = 100
-    ) -> SeatedMemberPage:
-        """Read one page of seated members for a first-party member job."""
-        if not self.member_context_read_allowed:
-            raise PermissionError("this extension cannot read seated members")
-        if limit < 1 or limit > 100:
-            raise ValueError("member page limit must be from 1 through 100")
-        query = (
-            sa.select(tables.member.c.id, tables.member.c.timezone)
-            .where(
-                tables.member.c.workspace_id == self.workspace_id,
-                tables.member.c.seated_at.is_not(None),
-            )
-            .order_by(tables.member.c.id)
-            .limit(limit + 1)
-        )
-        if cursor is not None:
-            query = query.where(tables.member.c.id > cursor)
-        async with workspace_tx() as connection:
-            rows = (await connection.execute(query)).all()
-        page = rows[:limit]
-        return SeatedMemberPage(
-            members=tuple(SeatedMember(id=row.id, timezone=row.timezone or "UTC") for row in page),
-            next_cursor=page[-1].id if len(rows) > limit else None,
-        )
-
     async def workspace_agents(self) -> tuple[WorkspaceAgent, ...]:
-        """Every agent of the workspace with its owner, oldest first, for a first-party sweep
-        job."""
+        """Every agent of the workspace with its owner, oldest first, for a first-party job."""
         if not self.member_context_read_allowed:
             raise PermissionError("this extension cannot read the agent roster")
         async with workspace_tx() as connection:
@@ -1171,100 +1128,29 @@ class ExtensionContext:
             ).one_or_none()
         return None if row is None else row.id
 
-    async def invoke_agent_for_member(
-        self,
-        *,
-        agent_name: str,
-        member_id: UUID,
-        conversation_key: str,
-        message: str,
-        idempotency_key: str,
-    ) -> ScheduledMemberTurn:
-        """Resolve this extension's agent, open its private member conversation, and schedule
-        one turn."""
-        if not self.member_context_read_allowed:
-            raise PermissionError("this extension cannot schedule member turns")
-        surface = f"extension:{self.store.extension}"
+    async def scheduled_member_timezone(self) -> str:
+        """The scheduled member's IANA timezone, or UTC when the member has not reported one."""
+        if not self.member_context_read_allowed or self.scheduled_member_id is None:
+            raise PermissionError("member context is not bound to a scheduled member")
         async with workspace_tx() as connection:
-            await connection.execute(
-                sa.select(tables.workspace.c.id)
-                .where(tables.workspace.c.id == self.workspace_id)
-                .with_for_update()
-            )
-            member = (
+            row = (
                 await connection.execute(
-                    sa.select(tables.member.c.id).where(
+                    sa.select(tables.member.c.timezone).where(
                         tables.member.c.workspace_id == self.workspace_id,
-                        tables.member.c.id == member_id,
-                        tables.member.c.seated_at.is_not(None),
+                        tables.member.c.id == self.scheduled_member_id,
                     )
                 )
             ).one_or_none()
-            if member is None:
-                raise PermissionError("scheduled member does not hold a seat")
-            agent_row = (
-                await connection.execute(
-                    sa.select(tables.agent.c.id).where(
-                        tables.agent.c.workspace_id == self.workspace_id,
-                        tables.agent.c.provisioned_by == self.store.extension,
-                        tables.agent.c.provisioned_name == agent_name,
-                    )
-                )
-            ).one_or_none()
-            if agent_row is None:
-                raise ValueError(
-                    f"extension agent {self.store.extension!r}/{agent_name!r} does not exist"
-                )
-            conversation = (
-                await connection.execute(
-                    sa.select(
-                        tables.conversation.c.id,
-                        tables.conversation.c.agent_id,
-                        tables.conversation.c.member_id,
-                        tables.conversation.c.audience,
-                    ).where(
-                        tables.conversation.c.workspace_id == self.workspace_id,
-                        tables.conversation.c.surface == surface,
-                        tables.conversation.c.queue_key == conversation_key,
-                    )
-                )
-            ).one_or_none()
-            if conversation is not None and (
-                conversation.agent_id != agent_row.id
-                or conversation.member_id != member_id
-                or conversation.audience != str(conversation_audience(member_id))
-            ):
-                raise PermissionError("scheduled conversation belongs to another principal")
-            if conversation is None:
-                conversation_id = uuid4()
-                await connection.execute(
-                    sa.insert(tables.conversation).values(
-                        id=conversation_id,
-                        workspace_id=self.workspace_id,
-                        agent_id=agent_row.id,
-                        surface=surface,
-                        queue_key=conversation_key,
-                        title="Daily brief",
-                        member_id=member_id,
-                        audience=str(conversation_audience(member_id)),
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-            else:
-                conversation_id = conversation.id
-        turn_id = await self.invoke(
-            conversation_id,
-            agent_row.id,
-            message,
-            idempotency_key,
-            on_behalf_of_member_id=member_id,
-            as_scheduled=True,
-        )
-        return ScheduledMemberTurn(conversation_id=conversation_id, turn_id=turn_id)
+        if row is None:
+            raise PermissionError("the scheduled member does not exist")
+        return row.timezone or "UTC"
 
     async def member_context(
-        self, *, since: datetime, limit: int = 200
+        self,
+        *,
+        since: datetime,
+        limit: int = 200,
+        exclude_conversation_id: UUID | None = None,
     ) -> tuple[MemberContextRecord, ...]:
         """Read bounded cross-agent context visible to the scheduled member."""
         if not self.member_context_read_allowed or self.scheduled_member_id is None:
@@ -1275,6 +1161,15 @@ class ExtensionContext:
         if self.member_context_blob is None:
             raise RuntimeError("member context requires workspace blob storage")
         audiences = tuple(str(value) for value in readable_audiences(member_id))
+        conversation_scope = (
+            tables.conversation.c.audience.in_(audiences),
+            tables.conversation.c.surface != SUBAGENT_SURFACE,
+            *(
+                ()
+                if exclude_conversation_id is None
+                else (tables.conversation.c.id != exclude_conversation_id,)
+            ),
+        )
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -1290,9 +1185,7 @@ class ExtensionContext:
                     .where(
                         tables.turn.c.workspace_id == self.workspace_id,
                         tables.turn.c.updated_at >= since,
-                        tables.conversation.c.audience.in_(audiences),
-                        tables.conversation.c.surface != f"extension:{self.store.extension}",
-                        tables.conversation.c.surface != SUBAGENT_SURFACE,
+                        *conversation_scope,
                     )
                     .order_by(tables.turn.c.updated_at.desc())
                     .limit(limit)
@@ -1332,9 +1225,7 @@ class ExtensionContext:
                     .where(
                         tables.shared_artifact.c.workspace_id == self.workspace_id,
                         tables.shared_artifact.c.updated_at >= since,
-                        tables.conversation.c.audience.in_(audiences),
-                        tables.conversation.c.surface != f"extension:{self.store.extension}",
-                        tables.conversation.c.surface != SUBAGENT_SURFACE,
+                        *conversation_scope,
                     )
                     .order_by(tables.shared_artifact.c.updated_at.desc())
                     .limit(limit)
@@ -1405,11 +1296,20 @@ class ExtensionContext:
                     stable_subject_key=f"page:{page.id}:{page.digest}",
                 )
             )
-        records.extend(await self._member_extension_records(member_id, audiences, since, limit))
+        records.extend(
+            await self._member_extension_records(
+                member_id, audiences, since, limit, exclude_conversation_id
+            )
+        )
         return tuple(sorted(records, key=lambda item: item.information_date, reverse=True)[:limit])
 
     async def _member_extension_records(
-        self, member_id: UUID, audiences: tuple[str, ...], since: datetime, limit: int
+        self,
+        member_id: UUID,
+        audiences: tuple[str, ...],
+        since: datetime,
+        limit: int,
+        exclude_conversation_id: UUID | None,
     ) -> tuple[MemberContextRecord, ...]:
         memory_item = sa.table(
             "memory_item",
@@ -1449,6 +1349,15 @@ class ExtensionContext:
             sa.column("verdicts", sa.JSON),
             sa.column("created_at", sa.DateTime(timezone=True)),
         )
+        objective_scope = (
+            tables.conversation.c.audience.in_(audiences),
+            tables.conversation.c.surface != SUBAGENT_SURFACE,
+            *(
+                ()
+                if exclude_conversation_id is None
+                else (tables.conversation.c.id != exclude_conversation_id,)
+            ),
+        )
         async with workspace_tx() as connection:
             memories = (
                 await connection.execute(
@@ -1485,9 +1394,7 @@ class ExtensionContext:
                     )
                     .where(
                         objective.c.workspace_id == self.workspace_id,
-                        tables.conversation.c.audience.in_(audiences),
-                        tables.conversation.c.surface != f"extension:{self.store.extension}",
-                        tables.conversation.c.surface != SUBAGENT_SURFACE,
+                        *objective_scope,
                     )
                     .order_by(objective.c.updated_at.desc())
                     .limit(limit)

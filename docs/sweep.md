@@ -1,13 +1,12 @@
-# Daily brief setup
+# Daily Brief setup
 
-The `sweep` extension creates one private daily brief for each seated member at or after 8:00 AM
-in that member's timezone. The member reads the brief in the portal. The extension is active for
-all seated members when it is installed.
+The `sweep` extension supplies the `daily-brief` Skill, `configure_daily_brief`,
+`sweep_newspaper`, and four bounded scouts. It creates no application, schedule, or conversation.
 
 ## Install
 
-The `assistant` and `assistant_hosted` packs include `sweep`, `memory`, `objectives`, `todos`,
-`research`, and `perplexity`. Select one pack in `ufo.toml`:
+The `assistant` and `assistant_hosted` packs include Sweep and its dependencies. Select one pack in
+`ufo.toml`:
 
 ```toml
 [pack]
@@ -24,7 +23,7 @@ export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
 ```
 
-Set the Perplexity credential through the hidden credential prompt:
+Set the search-provider credential through its hidden credential prompt:
 
 ```bash
 ufoctl credential set perplexity_api_key
@@ -38,6 +37,7 @@ ufoctl ext install memory
 ufoctl ext install objectives
 ufoctl ext install todos
 ufoctl ext install scheduled_tasks
+ufoctl ext install sites
 ufoctl ext install research
 ufoctl ext install perplexity
 ufoctl ext install index_default
@@ -45,73 +45,41 @@ ufoctl ext install embed_openai
 ufoctl migrate
 ```
 
-Restart `ufoctl serve`. The extension registers the `daily-brief` agent and its Skill. New
-workspaces receive the agent during onboarding. An existing workspace receives it before its first
-extension job or member turn after the restart.
+## Create the application
 
-## Agent settings
+Ask the main agent:
 
-Do not create the agent or paste a prompt. The extension declares these settings:
+> Create a private Daily Brief application that reviews my work each weekday morning, publishes
+> each edition in Radar, and keeps its homepage current.
 
-| Setting | Value |
-|---|---|
-| Name | `daily-brief` |
-| Prompt | `Load the daily-brief skill for scheduled briefs and member follow-up. Follow it exactly.` |
-| Final model | `claude-sonnet-5` |
-| Reasoning | `high` |
-| Scout model | `gpt-5.6-luna` |
-| Sandbox | `small`, no direct internet |
-| Visibility | Workspace |
-| Tools | `load_skill`, `sweep_newspaper`, `update_todo_list`, `memory_update`, `set_homepage` |
+The `create-application` flow creates an ordinary member-owned application. Its prompt loads the
+`daily-brief` Skill and names the Sweep tool, shared Markdown result, homepage update, and draft-only
+approval boundary.
 
-The member portal reads the prompt, the models, the sandbox, and the visibility. An administrator
-changes those in chat with the main agent, and the extension never replaces the edits. The tool list
-is not one of them: it ships with the extension, no object verb writes it, and no portal panel reads
-it. This table is where an operator reads it.
+Open one conversation with the new application and ask it:
 
-If the workspace already has a different agent named `daily-brief`, the registered agent uses
-`daily-brief-sweep`. Its status shows `provisioned_by: sweep`.
+> Build and bind the Daily Brief homepage in this conversation. Schedule the brief for 8:00 AM on
+> weekdays. Keep this conversation as the task report.
 
-The scheduled turn loads the Skill and calls `sweep_newspaper`. It returns task and memory drafts.
-The Sweep hook refuses those mutation tools on the edition turn. They become usable when the
-member approves a draft in a later conversation turn.
+The member-facing turn registers this private application conversation, then uses the normal
+website and scheduled-task tools. It binds the homepage and creates one recurring task that reports
+to this conversation. Each scheduled run calls `sweep_newspaper` once, writes and shares a Markdown
+edition, and deploys the updated homepage under the same site name. Radar renders the shared
+Markdown file as the run result.
 
-## Homepage
+The scheduled turn cannot bind another homepage or apply task and memory drafts. The member can
+approve a named draft in a later turn in the same conversation.
 
-`set_homepage` lets the agent bind the portal homepage a member opens on its Home tab. Keep the
-`sites` extension active: the allowlist is intersected with the live registry, so the name
-contributes nothing without it.
+## Checks
 
-- A site a member deployed stays that member's to bind. That member asks the agent for it in a
-  conversation with the agent, and the agent binds it. Every other member is refused, because a
-  homepage answers the agent's audience instead of the site's own visibility.
-- A scheduled edition turn binds nothing. The Sweep hook refuses `set_homepage` there, as it
-  refuses the mutation tools.
-- The agent holds no file or deploy tool. A member builds and deploys the page, then asks the agent
-  to bind it.
+If a run fails, check these conditions:
 
-The portal homepage seed needs both `deploy_website` and `set_homepage`. This provision holds only
-`set_homepage`, so the seed job skips it instead of admitting a build turn it cannot finish.
+1. The member who created the task has a seat.
+2. The application has one active scheduled task.
+3. The task reports to the registered conversation that owns the bound site.
+4. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the search-provider credential are valid.
+5. `sweep`, `memory`, `objectives`, `todos`, `scheduled_tasks`, `sites`, and the search provider are
+   active.
 
-The tool list reaches a workspace that does not hold the agent yet: a new workspace at onboarding,
-an older workspace at its first extension job or member turn after the restart. A workspace that
-already holds the shipped row keeps the tool list that row was created with. A shipped row is
-written once and never again (RFC 0030), so a later version of the extension reaches new workspaces
-only, and no administrator path widens the list on a standing row.
-
-## Timezone and delivery
-
-Slack, terminal, and web chat record the latest valid IANA timezone for the speaking member. A
-member with no recorded timezone uses UTC. The hourly job creates no more than three attempts and
-one completed brief for a member's local date.
-
-Check these conditions if a brief does not arrive:
-
-1. The member has a seat.
-2. The member has sent a message from a surface that supplies their timezone, or UTC is acceptable.
-3. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `perplexity_api_key` are valid.
-4. The `sweep`, `memory`, `objectives`, `todos`, and search-provider extensions are active.
-5. An agent with `provisioned_by: sweep` exists with the settings above.
-
-Removing `sweep` stops new daily runs. The ordinary agent and its private conversation history
-remain.
+Removing `sweep` leaves the member-owned application, task, homepage, and conversation in place.
+The next run fails because `sweep_newspaper` is unavailable.

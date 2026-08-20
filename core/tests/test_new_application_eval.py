@@ -218,13 +218,13 @@ async def test_the_fixture_seed_reclaims_a_name_committed_while_it_runs(
 async def test_the_fixture_seed_clears_an_untalked_leftover_and_seeds_its_own(db: None) -> None:
     workspace_id, agent_id, member_id = await _workspace()
     await _application(workspace_id, LEFTOVER_APPLICATION, member_id)
-    provisioned_id = await _application(workspace_id, "daily-brief", None)
+    provisioned_id = await _application(workspace_id, "system-monitor", None)
 
     with ws(workspace_id):
         await new_application._seeded(new_application.EXISTING_APPLICATION)(workspace_id, agent_id)
 
     rows = await _applications(workspace_id)
-    assert [row.name for row in rows] == ["daily-brief", new_application.EXISTING_APPLICATION]
-    assert rows[0].id == provisioned_id
-    assert rows[1].prompt == new_application.EXISTING_PROMPT
-    assert rows[1].owner_member_id == member_id
+    assert [row.name for row in rows] == [new_application.EXISTING_APPLICATION, "system-monitor"]
+    assert rows[0].prompt == new_application.EXISTING_PROMPT
+    assert rows[0].owner_member_id == member_id
+    assert rows[1].id == provisioned_id
