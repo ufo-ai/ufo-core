@@ -82,6 +82,54 @@ async fn an_empty_candidate_list_is_not_an_error() {
 }
 
 #[tokio::test]
+async fn the_invitation_read_reads_back_whole_and_carries_the_next_page_cursor() {
+    let (base, log) = spawn_http(vec![
+        (
+            200,
+            r#"{"invitations":[{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c",
+             "email":"teammate@acme.com","invited_by":"admin@acme.com",
+             "workspace_label":"acme.com","invited_at":"2026-08-18T10:00:00Z"}]}"#
+                .to_string(),
+        ),
+        (200, r#"{"invitations":[]}"#.to_string()),
+    ])
+    .await;
+    let listed = workspaces(&base).invitations(None).await.unwrap();
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].email, "teammate@acme.com");
+    assert_eq!(listed[0].invited_by, "admin@acme.com");
+    assert_eq!(listed[0].workspace_label, "acme.com");
+    assert_eq!(
+        listed[0].workspace_id.to_string(),
+        "3e38d44d-322e-53af-97b6-6204849f6a5c"
+    );
+    assert_eq!(
+        log.lock().unwrap()[0].path,
+        "/internal/onboard/invitations",
+        "the first page asks for no cursor at all"
+    );
+
+    assert!(workspaces(&base)
+        .invitations(Some(&listed[0]))
+        .await
+        .unwrap()
+        .is_empty());
+    // The cursor is the whole ordering key: two teammates sharing an instant are separated by the
+    // pair that keys them, so neither hides behind the other at a page boundary.
+    let asked = log.lock().unwrap()[1].path.clone();
+    assert!(
+        asked.contains("after_invited_at=2026-08-18T10%3A00%3A00"),
+        "{asked}"
+    );
+    assert!(
+        asked.contains("after_workspace_id=3e38d44d-322e-53af-97b6-6204849f6a5c"),
+        "{asked}"
+    );
+    assert!(asked.contains("after_email=teammate%40acme.com"), "{asked}");
+}
+
+#[tokio::test]
 async fn the_fleet_count_reads_back_as_a_number() {
     let (base, log) = spawn_http(vec![(200, r#"{"craft":42}"#.to_string())]).await;
     assert_eq!(workspaces(&base).fleet().await.unwrap(), 42);

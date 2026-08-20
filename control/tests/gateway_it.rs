@@ -735,6 +735,27 @@ async fn the_console_stand_in_is_mounted_only_under_console_mode() {
     );
 }
 
+#[tokio::test]
+async fn the_mark_is_served_as_a_raster_for_the_readers_that_refuse_the_vector() {
+    // An invitation draws this one: mail clients block SVG, so a message pointing at the vector
+    // shows its recipient nothing. It is the same artwork, served as PNG at its own path.
+    let rig = rig(vec![], vec![], true).await;
+    let response = reqwest::get(format!("{}{LOGO_PNG_PATH}", rig.base))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .unwrap(),
+        "image/png"
+    );
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.as_ref(), LOGO_PNG_BYTES);
+    assert!(bytes.starts_with(b"\x89PNG"), "not a png");
+}
+
 #[test]
 fn the_invite_gate_defaults_to_required_and_refuses_a_value_that_is_not_a_boolean() {
     // Unset means required, so a deploy that forgets the knob never opens signup by accident.

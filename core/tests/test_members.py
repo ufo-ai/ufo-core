@@ -333,6 +333,8 @@ async def _member_row(workspace_id: UUID, email: str) -> sa.Row | None:
                     tables.member.c.id,
                     tables.member.c.is_admin,
                     tables.member.c.seated_at,
+                    tables.member.c.invited_at,
+                    tables.member.c.invited_by,
                 ).where(
                     tables.member.c.workspace_id == workspace_id,
                     tables.member.c.email == email,
@@ -367,6 +369,41 @@ async def test_an_admin_adds_a_member_as_an_admin(db: None) -> None:
         )
     row = await _member_row(workspace_id, "second@example.com")
     assert row is not None and row.is_admin
+
+
+async def test_an_added_member_carries_the_admin_who_added_them_and_when(db: None) -> None:
+    """The stamp is the invitation. Nothing else on the row separates somebody an admin added from
+    somebody who arrived by themselves, and the stamp is what the gateway enumerates to send them
+    the message naming who added them and where to sign in."""
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id):
+        answer = await _add(_context(workspace_id, main_agent, admin_id), email="told@example.com")
+    row = await _member_row(workspace_id, "told@example.com")
+    assert row is not None
+    assert row.invited_by == admin_id
+    assert row.invited_at is not None
+    assert "email" in answer
+    seated_themselves = await _member_row(workspace_id, "member@example.com")
+    assert seated_themselves is not None
+    assert seated_themselves.invited_at is None
+    assert seated_themselves.invited_by is None
+
+
+async def test_a_member_added_unannounced_carries_no_stamp(db: None) -> None:
+    """An admin who will tell the person themselves adds them with `notify` false. The stamp is the
+    whole event the delivery reads, so a row without one is a member nothing writes to."""
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id):
+        answer = await _add(
+            _context(workspace_id, main_agent, admin_id),
+            email="quiet@example.com",
+            notify=False,
+        )
+    row = await _member_row(workspace_id, "quiet@example.com")
+    assert row is not None
+    assert row.invited_at is None
+    assert row.invited_by is None
+    assert "email" not in answer
 
 
 async def test_a_non_admin_cannot_add_a_member(db: None) -> None:
@@ -434,7 +471,10 @@ async def test_a_member_an_admin_adds_can_speak_at_once(db: None) -> None:
         answer = await _add(_context(workspace_id, main_agent, admin_id), email="third@example.com")
     row = await _member_row(workspace_id, "third@example.com")
     assert row is not None and row.seated_at is not None
-    assert answer == "third@example.com is a workspace member. They can speak to the agent now."
+    assert answer == (
+        "third@example.com is a workspace member. They can speak to the agent now. "
+        "They will get an email with a link to sign in."
+    )
 
 
 async def test_an_admins_unseat_stops_the_agent_answering_that_member(db: None) -> None:
@@ -629,9 +669,12 @@ async def test_the_success_report_names_the_role_it_wrote(db: None) -> None:
             _context(workspace_id, main_agent, admin_id), email="chief@example.com", admin=True
         )
         as_member = await _add(
-            _context(workspace_id, main_agent, admin_id), email="hand@example.com"
+            _context(workspace_id, main_agent, admin_id), email="hand@example.com", notify=False
         )
-    assert as_admin == "chief@example.com is a workspace admin. They can speak to the agent now."
+    assert as_admin == (
+        "chief@example.com is a workspace admin. They can speak to the agent now. "
+        "They will get an email with a link to sign in."
+    )
     assert as_member == "hand@example.com is a workspace member. They can speak to the agent now."
 
 

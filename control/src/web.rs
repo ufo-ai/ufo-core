@@ -30,9 +30,16 @@ pub const LOGIN_PAGE: &str = include_str!("login.html");
 /// and a test holds the two copies identical.
 pub const LOGO_PATH: &str = "/login/logo.svg";
 pub const LOGO_BYTES: &[u8] = include_bytes!("assets/ufo-logo.svg");
+pub const LOGO_CACHE: &str = "public, max-age=31536000, immutable";
+
+/// The same mark as a raster, for the one reader that cannot have the vector: mail clients block
+/// SVG, so an invitation drawing `LOGO_PATH` shows its recipient nothing. It is twice the size it
+/// is drawn at, so it stays sharp where the pixels are doubled, and it carries the artwork alone —
+/// a transparent ground lets the card behind it hold the colour.
 pub const LOGO_PNG_PATH: &str = "/login/logo.png";
 pub const LOGO_PNG_BYTES: &[u8] = include_bytes!("assets/ufo-logo.png");
-pub const LOGO_CACHE: &str = "public, max-age=31536000, immutable";
+pub const LOGO_WIDTH: u32 = 72;
+pub const LOGO_HEIGHT: u32 = 18;
 
 /// One directive line, as the page's JSON reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -291,6 +291,11 @@ class AddMemberInput(BaseModel):
         description="Whether they administer the workspace — a workspace admin manages every "
         "member's role and seat, and reads the workspace's shape.",
     )
+    notify: bool = Field(
+        default=True,
+        description="Whether to email them that they were added, with a link to sign in. Set "
+        "false only when the member asks you not to write to this person.",
+    )
     user_description: str = Field(
         description="Who you are adding, in plain language for the activity timeline."
     )
@@ -304,7 +309,11 @@ class AddMember:
     speaking on a verified chat surface, a login that resolves this workspace. This one does not:
     a contractor, an advisor, or a colleague at a sister company is admitted at whatever domain
     their address carries, because a speaking admin vetted them, which is the same authority the
-    role and seat fields carry."""
+    role and seat fields carry.
+
+    Someone minted here has had no contact, so nothing else would ever tell them the workspace
+    exists: the member row itself carries who added them and when, and that stamp is what the
+    invitation email is delivered from."""
 
     async def add(self, ctx: ToolContext, args: AddMemberInput) -> ToolResult:
         if ctx.speaker_member_id is None or not await ctx.agent_is_main():
@@ -325,10 +334,19 @@ class AddMember:
             ):
                 raise AdminRequired(ADD_MEMBER_GATE)
             await self._absent(connection, email)
-            await create_member(connection, ws_current().workspace_id, email, is_admin=args.admin)
+            await create_member(
+                connection,
+                ws_current().workspace_id,
+                email,
+                is_admin=args.admin,
+                invited_by=ctx.speaker_member_id if args.notify else None,
+            )
         role = "a workspace admin" if args.admin else "a workspace member"
+        told = " They will get an email with a link to sign in." if args.notify else ""
         return ToolResult(
-            content=(TextContent(text=f"{email} is {role}. They can speak to the agent now."),)
+            content=(
+                TextContent(text=f"{email} is {role}. They can speak to the agent now.{told}"),
+            )
         )
 
     async def _absent(self, connection: AsyncConnection, email: str) -> None:
@@ -352,9 +370,9 @@ ADD_MEMBER_TOOL_DEF = ToolDef(
     description=(
         "Add someone to this workspace by their email, optionally as an admin, before they "
         "have ever contacted the agent, at any email domain — an outside contractor or advisor is "
-        "added the same way as a colleague. Only a workspace admin using the main agent may add a "
-        "member. Changing an existing member's role or seat is an apply on the member object, not "
-        "this."
+        "added the same way as a colleague. They are emailed a link to sign in unless notify is "
+        "false. Only a workspace admin using the main agent may add a member. Changing an "
+        "existing member's role or seat is an apply on the member object, not this."
     ),
     input_model=AddMemberInput,
     handler=AddMember().add,

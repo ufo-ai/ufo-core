@@ -14,6 +14,7 @@ use ufo_control::gateway::{
     GATEWAY_PORT_ENV, INVITE_REQUIRED_ENV,
 };
 use ufo_control::invite::{InviteCodes, SignupProfile};
+use ufo_control::invite_delivery::{self, InviteDeliveries, POLL_INTERVAL_SECONDS};
 use ufo_control::rls::{
     bootstrap_policies, ensure_control_role, ensure_serve_role, owner_dsn, serve_dsn,
     PG_ROLE_SEED_ENV,
@@ -26,6 +27,7 @@ use ufo_control::slack_connect::{rearm_failed_delivery, slack_connect_from_env};
 use ufo_control::store::OnboardStore;
 use ufo_control::token::TOKEN_SECRET_ENV;
 use ufo_control::{claim::ClaimWorkflow, directives::CLIENT_VERSION_ENV, workos};
+use uuid::Uuid;
 
 const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: u16 = 8080;
@@ -67,6 +69,9 @@ enum Verb {
     /// Re-arm one failed signup Slack Connect delivery once its cause is corrected.
     #[command(name = "slack-connect-retry")]
     SlackConnectRetry { email_domain: String },
+    /// Re-arm one failed teammate invitation email once its cause is corrected.
+    #[command(name = "invite-delivery-retry")]
+    InviteDeliveryRetry { workspace_id: Uuid, email: String },
     /// Create the shared serve role, the gateway role, and the workspace policies.
     #[command(name = "rls-bootstrap")]
     RlsBootstrap,
@@ -145,6 +150,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             object_number,
         } => invite(email, business, goals, object_number).await,
         Verb::SlackConnectRetry { email_domain } => slack_connect_retry(email_domain).await,
+        Verb::InviteDeliveryRetry {
+            workspace_id,
+            email,
+        } => invite_delivery_retry(workspace_id, email).await,
         Verb::RlsBootstrap => rls_bootstrap().await,
         Verb::ServeDsn {
             postgres_host,
@@ -191,7 +200,15 @@ async fn gateway() -> Result<(), String> {
     }
     let store = OnboardStore::new(pool.clone());
     let pool_for_slack = pool.clone();
+    let pool_for_invites = pool.clone();
     let apex_for_slack = apex.clone();
+    let apex_for_invites = apex.clone();
+    let core_for_invites = SharedWorkspaces {
+        workspace_url: workspace_url.clone(),
+        serve_internal_url: serve_internal_url.clone(),
+        control_token: control_token.clone(),
+    };
+    let sender = email_sender_from_env().map_err(|error| error.to_string())?;
     let state = GatewayState {
         onboarding: Onboarding {
             claims: ClaimWorkflow::new(store.clone(), verifier.clone()),
@@ -224,13 +241,27 @@ async fn gateway() -> Result<(), String> {
             .unwrap_or_else(|| "gateway".to_string()),
         std::process::id()
     );
-    match slack_connect_from_env(pool_for_slack, apex_for_slack, worker_id) {
+    match slack_connect_from_env(pool_for_slack, apex_for_slack, worker_id.clone()) {
         Ok(Some(inviter)) => {
             tokio::spawn(inviter.run());
         }
         Ok(None) => tracing::info!(target: "ufo_control::main", "gateway.slack_connect.disabled"),
         Err(error) => return Err(error.to_string()),
     }
+
+    // The teammate invitation poller runs on the same terms: an admin adding someone from the
+    // portal is answered by core, and the email that follows is this task's, on either replica.
+    tokio::spawn(
+        InviteDeliveries {
+            pool: pool_for_invites,
+            core: core_for_invites,
+            sender,
+            apex_host: apex_for_invites,
+            worker_id,
+            poll_interval: std::time::Duration::from_secs(POLL_INTERVAL_SECONDS),
+        }
+        .run(),
+    );
 
     let port: u16 = std::env::var(GATEWAY_PORT_ENV)
         .ok()
@@ -314,7 +345,7 @@ async fn invite(
             &minted.email,
             &message.subject,
             &message.text,
-            &message.html,
+            Some(&message.html),
         )
         .await
     {
@@ -359,6 +390,37 @@ async fn slack_connect_retry(email_domain: String) -> Result<(), String> {
     }
 }
 
+async fn invite_delivery_retry(workspace_id: Uuid, email: String) -> Result<(), String> {
+    let recipient = email.trim().to_lowercase();
+    // As with `invite`: one row of one `ufo_control` table, run from a gateway pod.
+    let dsn = db::gateway_dsn_from_env().map_err(|error| error.to_string())?;
+    {
+        let client = ledger_client(&dsn).await?;
+        require_control_schema(&client)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let pool = db::connect(&dsn, db::ca_bundle_from_env().map(PathBuf::from).as_deref())
+        .await
+        .map_err(|error| error.to_string())?;
+    let failed_at = invite_delivery::rearm_failed_delivery(&pool, workspace_id, &recipient)
+        .await
+        .map_err(|error| error.to_string())?;
+    match failed_at {
+        None => Err(format!(
+            "no failed invitation delivery for {recipient} in {workspace_id}"
+        )),
+        Some(failed_at) => {
+            println!(
+                "invitation delivery for {recipient} in {workspace_id} re-armed, failed since \
+                 {} UTC",
+                failed_at.format("%Y-%m-%d %H:%M")
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Policies before role grants: a table that gains its grant before its policy is readable by the
 /// serve role in the window between, so the order is load-bearing rather than incidental.
 async fn rls_bootstrap() -> Result<(), String> {
@@ -383,7 +445,7 @@ async fn owner_client(dsn: &str) -> Result<tokio_postgres::Client, String> {
     connect(dsn).await
 }
 
-/// A connection as the gateway's own role, which reaches the three `ufo_control` ledgers and nothing
+/// A connection as the gateway's own role, which reaches the `ufo_control` ledgers and nothing
 /// in `public`. The operator verbs use this so they can run where an operator can reach them.
 async fn ledger_client(dsn: &str) -> Result<tokio_postgres::Client, String> {
     connect(dsn).await

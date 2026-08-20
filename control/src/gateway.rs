@@ -552,6 +552,8 @@ async fn logo() -> Response {
         .into_response()
 }
 
+/// The same mark a mail client can draw. An invitation is read where SVG is blocked, so it fetches
+/// this one; nothing in a browser does.
 async fn logo_png() -> Response {
     (
         [

@@ -232,6 +232,57 @@ bot token (`UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN`, its own Secret through an expl
 `UFO_CONTROL_SLACK_CONNECT_ENABLED` defaults to false; enabled, a missing token or team ID fails
 gateway startup.
 
+## Teammate invitation email
+
+An admin adds a teammate from the portal and that person gets one email: who added them, which
+workspace, and where to sign in. Nothing else — no offer, no credit, no marketing. It carries both
+bodies a message needs: plain text, and an HTML alternative in the sign-in page's own palette, card,
+and button — every rule an inline attribute and every layout a table, because a mail client keeps no
+`<style>` block, resolves no custom property, and lays out no flexbox. The mark is set as text: SVG
+is the one image format clients reliably refuse.
+
+`member.invited_at` and `member.invited_by` are the durable fact, stamped by `add_member` where the
+teammate is minted, so an admin's action never waits on mail and a member who arrived by signing in
+themselves carries no stamp and earns no message. An admin who will tell the person themselves adds
+them with `notify` false, which writes no stamp and so sends nothing. Control reads it back over
+`/internal/onboard/invitations` and materializes `ufo_control.invite_delivery` rows keyed on
+`(workspace_id, email)` — the pair that is the person being invited, so re-reading a row already
+materialized conflicts and writes nothing.
+
+Every sweep reads every invitation, in bounded pages walked with a cursor over the read's own
+ordering key, and carries no mark to the next sweep. `now()` is fixed when a transaction starts
+while the seat write waits for the workspace row lock, so members commit out of stamp order: a mark
+raised by the row a sweep saw would sit past the row that commits after it, and nothing else writes
+this ledger, so that person would get no message and leave no failed row. The cost is a read of
+every invited member per cycle. Bounding it exactly would take core knowing which invitations were
+delivered, which is a control-to-core write that does not exist.
+
+```text
+member.invited_at, read whole every sweep
+  |
+  +-- materialize   one row per (workspace, email)
+  +-- claim         lease one due row; an expired lease is another replica's to recover
+  +-- cap           the workspace's day, counted under its own lock before SES is called
+  +-- sent_at       the attempt marker, written before the POST
+  +-- send          SESv2 from the verified sender: three facts, as text and as HTML
+  +-- delivered     the row settles
+```
+
+SES answers no read, so nothing can be asked after the fact whether a message was accepted. The
+attempt marker is what stands in for that: a claim that finds `sent_at` already set lands the row
+`failed` rather than sending a second copy, and only a verdict proving SES never accepted the
+message — a status it answered, or a connection that never opened — clears the marker and returns
+the row to `pending` behind a bounded schedule. Transport failures, 429 (bounded `Retry-After`),
+5xx, and documented transient SES errors reschedule; authentication, policy, verification, and
+invalid-recipient errors are terminal.
+
+Each workspace sends at most 100 invitations a day, counted in control's own ledger under that
+workspace's advisory lock before SES is called, so two replicas cannot each read ninety-nine. A row
+over the line lands `failed` naming the cap rather than disappearing.
+`ufo-control invite-delivery-retry <workspace-id> <email>` re-arms one failed row after its cause is
+fixed — it never sends directly and never touches a delivered row, and it clears the attempt marker,
+because an operator re-arms having decided the message never landed.
+
 Production runtime secret containers have no Terraform-managed version. The deployment initializes
 missing documents with their exact schemas, refreshes configured repository secrets, and preserves
 every other production-owned value. It validates both complete documents before writing either one
@@ -486,8 +537,8 @@ infra/modules/edge/
   worker.test.mjs         its behavior proof (node --test, ci checks job)
 
 control/src/
-  main.rs                 the six CLI verbs: gateway, migrate, invite, slack-connect-retry,
-                          rls-bootstrap, serve-dsn
+  main.rs                 the seven CLI verbs: gateway, migrate, invite, slack-connect-retry,
+                          invite-delivery-retry, rls-bootstrap, serve-dsn
   gateway.rs              the HTTP routes and the onboarding state machine
   claim.rs                claim time-to-live, verification, and the races each write loses
   workos.rs               Magic Auth, the Google hop, and the signed state and cookie seals
@@ -496,10 +547,11 @@ control/src/
   invite.rs               one-time domain-grant custody
   store.rs                the platform onboarding ledger
   slack_connect.rs        the signup Slack Connect channel and its delivery poller
+  invite_delivery.rs      the teammate invitation email and its delivery poller
   email.rs                work-email policy and SES delivery
   schema.rs               the ufo_control schema, shaped by the deploy's `ufo-control migrate`
   rls.rs                  shared database role and policy bootstrap
-  db.rs                   the pool over control's own three ledgers, and nothing else
+  db.rs                   the pool over control's own ledgers, and nothing else
   token.rs                bearer minting; the ufo surface owns verification
   directives.rs           the directive wire both renderers read
   client/ufo              the POSIX installer the gateway serves at /ufo

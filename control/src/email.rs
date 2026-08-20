@@ -2,9 +2,10 @@
 //!
 //! `WorkEmailPolicy` rejects free, personal, and disposable domains so a workspace maps to a real
 //! organization — the denylist fails CLOSED and a malformed address is rejected up front. The
-//! sender delivers a rendered subject, text body, and HTML body through SESv2, carrying no message
-//! shape of its own: `invite_email` is the one message the service sends, since WorkOS delivers the
-//! sign-in code.
+//! sender delivers a rendered subject, a plain-text body, and the HTML alternative beside it where
+//! one is rendered, through SESv2, carrying no message shape of its own
+//! beyond `invite_email`, the grant's own invitation; the teammate invitation renders in
+//! `invite_delivery`, and WorkOS delivers the sign-in code.
 //! Signing is pure CPU (hmac/sha256) so it runs inline, and every network call is async.
 //! Credentials are the pod's IRSA web identity (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`,
 //! injected by the EKS pod identity webhook from the gateway ServiceAccount's annotation),
@@ -103,6 +104,7 @@ pub const SES_SERVICE: &str = "ses";
 pub const SES_PATH: &str = "/v2/email/outbound-emails";
 pub const SES_TIMEOUT_SECONDS: u64 = 10;
 pub const ERROR_BODY_CHARS: usize = 1000;
+pub const MAX_RETRY_AFTER_SECONDS: f64 = 60.0;
 
 pub const SES_SENDER_ENV: &str = "UFO_SES_SENDER";
 pub const SES_REGION_ENV: &str = "UFO_SES_REGION";
@@ -250,10 +252,20 @@ pub enum EmailConfigError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
+    /// SES answered, so nothing was accepted. `retry_after` carries the bounded `Retry-After` a
+    /// throttle names, which is the only schedule a caller should prefer over its own.
     #[error("SES SendEmail returned {status}: {body}")]
-    Ses { status: u16, body: String },
+    Ses {
+        status: u16,
+        body: String,
+        retry_after: Option<f64>,
+    },
     #[error("STS AssumeRoleWithWebIdentity returned {status}: {body}")]
     Sts { status: u16, body: String },
+    /// The credential exchange never completed, so the SES POST was never made — which is what
+    /// tells a caller a resend cannot duplicate anything.
+    #[error("STS AssumeRoleWithWebIdentity could not be reached: {0}")]
+    StsUnreachable(String),
     #[error("STS AssumeRoleWithWebIdentity response is missing {0}")]
     MissingCredential(&'static str),
     #[error("STS AssumeRoleWithWebIdentity response is not XML: {0}")]
@@ -263,6 +275,8 @@ pub enum SendError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// The SES POST alone: a client that would not build, a connection that never opened, or a
+    /// request that left with no answer read. Which of the three decides whether a resend is safe.
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 }
@@ -304,19 +318,21 @@ impl SesEmailSender {
         email: &str,
         subject: &str,
         text: &str,
-        html: &str,
+        html: Option<&str>,
     ) -> Result<(), SendError> {
         let credentials = self.assume_role().await?;
+        let mut content = serde_json::Map::new();
+        content.insert("Text".to_string(), serde_json::json!({"Data": text}));
+        if let Some(html) = html {
+            content.insert("Html".to_string(), serde_json::json!({"Data": html}));
+        }
         let body = serde_json::json!({
             "FromEmailAddress": self.source,
             "Destination": {"ToAddresses": [email]},
             "Content": {
                 "Simple": {
                     "Subject": {"Data": subject},
-                    "Body": {
-                        "Text": {"Data": text},
-                        "Html": {"Data": html},
-                    },
+                    "Body": content,
                 }
             },
         })
@@ -332,9 +348,11 @@ impl SesEmailSender {
         let response = request.send().await?;
         let status = response.status();
         if status.is_client_error() || status.is_server_error() {
+            let retry_after = retry_after_seconds(response.headers());
             return Err(SendError::Ses {
                 status: status.as_u16(),
                 body: clipped(&response.text().await?),
+                retry_after,
             });
         }
         Ok(())
@@ -347,7 +365,8 @@ impl SesEmailSender {
                 path: self.token_file.clone(),
                 source,
             })?;
-        let response = client(STS_TIMEOUT_SECONDS)?
+        let response = client(STS_TIMEOUT_SECONDS)
+            .map_err(|error| SendError::StsUnreachable(error.to_string()))?
             .post(&self.endpoints.sts)
             .form(&[
                 ("Action", "AssumeRoleWithWebIdentity"),
@@ -358,9 +377,13 @@ impl SesEmailSender {
                 ("DurationSeconds", &STS_SESSION_SECONDS.to_string()),
             ])
             .send()
-            .await?;
+            .await
+            .map_err(|error| SendError::StsUnreachable(error.to_string()))?;
         let status = response.status();
-        let payload = response.text().await?;
+        let payload = response
+            .text()
+            .await
+            .map_err(|error| SendError::StsUnreachable(error.to_string()))?;
         if status.is_client_error() || status.is_server_error() {
             return Err(SendError::Sts {
                 status: status.as_u16(),
@@ -379,6 +402,16 @@ fn client(timeout_seconds: u64) -> Result<reqwest::Client, reqwest::Error> {
 
 fn clipped(body: &str) -> String {
     body.chars().take(ERROR_BODY_CHARS).collect()
+}
+
+/// The `Retry-After` a throttled response names, in seconds, clamped next to the call that reads
+/// it: a header naming an hour must not park a workspace's invitations for one.
+fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<f64> {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .map(|seconds| seconds.clamp(0.0, MAX_RETRY_AFTER_SECONDS))
 }
 
 fn host_of(url: &str) -> String {
@@ -520,7 +553,7 @@ impl EmailSender {
         email: &str,
         subject: &str,
         text: &str,
-        html: &str,
+        html: Option<&str>,
     ) -> Result<(), SendError> {
         match self {
             Self::Ses(sender) => sender.send(email, subject, text, html).await,

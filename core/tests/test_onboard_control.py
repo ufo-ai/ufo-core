@@ -6,6 +6,8 @@ no privilege on a core table any more, so what a workspace *is* — the seat, th
 default agent, the walled intake prompt — is core's to prove.
 """
 
+import logging
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,8 +16,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from ufo.balance import read_balance
-from ufo.db import workspace_tx
+from ufo.db import owner_tx, workspace_tx
 from ufo.onboard_control import (
+    CROSS_WORKSPACE_READ,
     SIGNUP_GRANT_MICRO_USD,
     SIGNUP_RESERVE_MICRO_USD,
     OnboardControl,
@@ -380,3 +383,126 @@ def test_the_workspace_derivation_matches_the_rust_contract() -> None:
     assert len(vectors) >= 4
     for domain, expected in vectors.items():
         assert deterministic_workspace_id(domain) == UUID(expected), domain
+
+
+STAMP = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)
+
+
+async def _stamp(member_id: UUID, invited_by: UUID, at: datetime) -> None:
+    async with owner_tx() as connection:
+        await connection.execute(
+            sa.text("update member set invited_at = :at, invited_by = :by where id = :id"),
+            {"at": at, "by": invited_by, "id": member_id},
+        )
+
+
+async def test_invitations_lists_the_teammates_an_admin_added(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the invitation read is postgres SQL, for a fleet sqlite never serves")
+    workspace_id = deterministic_workspace_id("acme.com")
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                )
+            )
+            admin = await create_member(connection, workspace_id, "admin@acme.com", is_admin=True)
+            teammate = await create_member(
+                connection, workspace_id, "teammate@acme.com", invited_by=admin
+            )
+            await create_member(connection, workspace_id, "walkin@acme.com")
+    await _stamp(teammate, admin, STAMP)
+    async with onboard_client as client:
+        response = await client.get("/internal/onboard/invitations")
+
+    assert response.status_code == 200
+    listed = response.json()["invitations"]
+    assert [row["email"] for row in listed] == ["teammate@acme.com"], (
+        "a member who arrived by themselves carries no stamp and earns no invitation"
+    )
+    assert listed[0]["workspace_id"] == str(workspace_id)
+    assert listed[0]["invited_by"] == "admin@acme.com"
+    assert listed[0]["workspace_label"] == "acme.com"
+    assert datetime.fromisoformat(listed[0]["invited_at"]) == STAMP
+
+
+def _cursor(row: dict[str, str]) -> dict[str, str]:
+    return {
+        "after_invited_at": row["invited_at"],
+        "after_workspace_id": row["workspace_id"],
+        "after_email": row["email"],
+    }
+
+
+async def test_the_invitation_page_cursor_walks_past_a_shared_stamp(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    # Two teammates stamped in one instant. The cursor is the whole ordering key, so the second is
+    # reachable: a cursor of the stamp alone would either repeat the first forever or hide the
+    # second behind it.
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the invitation read is postgres SQL, for a fleet sqlite never serves")
+    workspace_id = deterministic_workspace_id("acme.com")
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                )
+            )
+            admin = await create_member(connection, workspace_id, "admin@acme.com", is_admin=True)
+            first = await create_member(connection, workspace_id, "first@acme.com")
+            second = await create_member(connection, workspace_id, "second@acme.com")
+    await _stamp(first, admin, STAMP)
+    await _stamp(second, admin, STAMP)
+    async with onboard_client as client:
+        whole = (await client.get("/internal/onboard/invitations")).json()["invitations"]
+        after_first = await client.get("/internal/onboard/invitations", params=_cursor(whole[0]))
+        after_second = await client.get("/internal/onboard/invitations", params=_cursor(whole[1]))
+
+    assert [row["email"] for row in whole] == ["first@acme.com", "second@acme.com"]
+    assert [row["email"] for row in after_first.json()["invitations"]] == ["second@acme.com"]
+    assert after_second.json()["invitations"] == []
+
+
+async def test_a_page_cursor_missing_part_of_the_ordering_key_is_refused(
+    onboard_client: AsyncClient,
+) -> None:
+    async with onboard_client as client:
+        refused = await client.get(
+            "/internal/onboard/invitations", params={"after_email": "teammate@acme.com"}
+        )
+    assert refused.status_code == 422
+
+
+def _warned_routes(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.ufo["route"]
+        for record in caplog.records
+        if record.getMessage() == CROSS_WORKSPACE_READ
+    ]
+
+
+async def test_the_invitation_page_logs_no_cross_workspace_read_warning(
+    onboard_client: AsyncClient, database_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """RFC 0036 logs the two reads a person drives and nothing a sweep drives. This page is read by
+    `InviteDeliveries`, which polls forever, so a record per call would bury those two."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the invitation read is postgres SQL, for a fleet sqlite never serves")
+    async with onboard_client as client:
+        with caplog.at_level(logging.WARNING, logger="ufo"):
+            page = await client.get("/internal/onboard/invitations")
+            swept = _warned_routes(caplog)
+            await client.get("/internal/onboard/fleet")
+            await client.get(
+                "/internal/onboard/choices",
+                params={"email": "founder@acme.com", "domain": "acme.com"},
+            )
+
+    assert page.status_code == 200
+    assert swept == []
+    assert _warned_routes(caplog) == ["fleet", "choices"]

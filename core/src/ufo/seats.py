@@ -286,6 +286,7 @@ async def create_member(
     email: str,
     *,
     is_admin: bool = False,
+    invited_by: UUID | None = None,
 ) -> UUID:
     """The one member-creation write: every surface that mints a member — onboarding's admin, a
     channel-verified teammate join, hosted onboarding, whatever joins next — inserts through
@@ -306,7 +307,13 @@ async def create_member(
 
     It is lowercased here for the same reason: (workspace_id, email) uniqueness compares bytes, so a
     caller passing the address as typed would mint a second row for one person, and every read that
-    resolves a member by lowercased address would then find two."""
+    resolves a member by lowercased address would then find two.
+
+    `invited_by` names the admin who added them, and stamping it here stamps `invited_at` with the
+    insert that mints the row: the invitation is the creation, and the two facts an invitation
+    email states cannot then disagree with the member it names. A creation that loses the race
+    writes neither — the surviving row belongs to whoever got there first, and re-stamping it would
+    invite a member who is already here."""
     if not email_domain(email):
         raise ValueError(f"{email!r} is not one local@domain address")
     email = email.lower()
@@ -324,6 +331,8 @@ async def create_member(
                 workspace_id=workspace_id,
                 email=email,
                 is_admin=is_admin,
+                invited_at=sa.func.now() if invited_by is not None else None,
+                invited_by=invited_by,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

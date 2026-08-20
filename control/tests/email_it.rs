@@ -309,7 +309,7 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
             "founder@acme.com",
             "Your invitation",
             "body text",
-            "<p>body markup</p>",
+            Some("<p>body markup</p>"),
         )
         .await
         .unwrap();
@@ -345,6 +345,7 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
         payload["Content"]["Simple"]["Body"]["Text"]["Data"],
         "body text"
     );
+    // Both alternatives ride in one message: a client that refuses HTML has the text to render.
     assert_eq!(
         payload["Content"]["Simple"]["Body"]["Html"]["Data"],
         "<p>body markup</p>"
@@ -358,6 +359,32 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
 }
 
 #[tokio::test]
+async fn a_send_with_no_html_alternative_posts_a_text_only_body() {
+    let (base, log) = serve(vec![
+        (200, STS_RESPONSE.to_string()),
+        (200, "{}".to_string()),
+    ])
+    .await;
+    let (_directory, token_file) = projected_token();
+    sender(&base, token_file)
+        .send("founder@acme.com", "Your ufo invite", "body text", None)
+        .await
+        .unwrap();
+
+    let exchanges = log.lock().unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&exchanges[1].body).unwrap();
+    assert_eq!(
+        payload["Content"]["Simple"]["Body"]["Text"]["Data"],
+        "body text"
+    );
+    assert!(
+        payload["Content"]["Simple"]["Body"]["Html"].is_null(),
+        "{}",
+        exchanges[1].body
+    );
+}
+
+#[tokio::test]
 async fn send_surfaces_the_ses_denial_body() {
     let denial = r#"{"message":"Email address is not verified."}"#;
     let (base, _log) = serve(vec![
@@ -367,7 +394,7 @@ async fn send_surfaces_the_ses_denial_body() {
     .await;
     let (_directory, token_file) = projected_token();
     let refused = sender(&base, token_file)
-        .send("founder@acme.com", "s", "t", "<p>t</p>")
+        .send("founder@acme.com", "s", "t", Some("<p>t</p>"))
         .await
         .unwrap_err()
         .to_string();
@@ -381,7 +408,7 @@ async fn assume_role_surfaces_the_sts_error_body() {
     let (base, _log) = serve(vec![(403, denial.to_string())]).await;
     let (_directory, token_file) = projected_token();
     let refused = sender(&base, token_file)
-        .send("founder@acme.com", "s", "t", "<p>t</p>")
+        .send("founder@acme.com", "s", "t", Some("<p>t</p>"))
         .await
         .unwrap_err()
         .to_string();
@@ -396,7 +423,7 @@ async fn assume_role_surfaces_the_sts_error_body() {
 async fn an_unreadable_token_file_fails_loud_before_any_call() {
     let (base, log) = serve(vec![(200, STS_RESPONSE.to_string())]).await;
     let refused = sender(&base, PathBuf::from("/nonexistent/token"))
-        .send("founder@acme.com", "s", "t", "<p>t</p>")
+        .send("founder@acme.com", "s", "t", Some("<p>t</p>"))
         .await
         .unwrap_err()
         .to_string();
@@ -486,7 +513,12 @@ async fn console_mode_needs_no_ses_configuration() {
     .unwrap();
     assert!(matches!(built, EmailSender::Console));
     built
-        .send("founder@acme.com", "Your invitation", "body", "<p>body</p>")
+        .send(
+            "founder@acme.com",
+            "Your invitation",
+            "body",
+            Some("<p>body</p>"),
+        )
         .await
         .unwrap();
 }

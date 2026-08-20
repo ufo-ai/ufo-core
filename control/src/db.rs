@@ -1,7 +1,7 @@
 //! The pool over control's own `ufo_control` schema, and nothing else.
 //!
 //! The role this DSN names is granted the `ufo_control` schema and no privilege on any table in
-//! `public`, so a query that strays outside control's three ledgers fails as `permission denied`
+//! `public`, so a query that strays outside control's own ledgers fails as `permission denied`
 //! rather than reading a tenant's rows. Core's tables are reached over the onboarding RPC instead.
 //!
 //! TLS follows the DSN's own `sslmode`, which `tokio-postgres` parses and honours. The default is

@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -58,6 +59,23 @@ pub struct EnsuredWorkspace {
     /// the first run; a member returning to a workspace they already belong to lands where they
     /// left off.
     pub founding: bool,
+}
+
+/// One teammate an admin added, before that person has ever signed in: who added them, the
+/// workspace they were added to, and the stamp that orders the read. The three ordering fields are
+/// the page cursor the next page is asked from.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Invitation {
+    pub workspace_id: Uuid,
+    pub email: String,
+    pub invited_by: String,
+    pub workspace_label: String,
+    pub invited_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct Invitations {
+    invitations: Vec<Invitation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -127,6 +145,32 @@ impl SharedWorkspaces {
     pub async fn fleet(&self) -> Result<i64, SeatError> {
         let fleet: Fleet = self.get("fleet", &[]).await?;
         Ok(fleet.craft)
+    }
+
+    /// One page of teammates, oldest first, strictly after the row the caller last read. Core
+    /// bounds the page, so a caller cannot ask for the whole fleet's history in one answer; walking
+    /// the pages to exhaustion is the caller's own loop. None asks for the first page.
+    pub async fn invitations(
+        &self,
+        after: Option<&Invitation>,
+    ) -> Result<Vec<Invitation>, SeatError> {
+        let listed: Invitations = match after {
+            Some(row) => {
+                let stamp = row.invited_at.to_rfc3339();
+                let workspace = row.workspace_id.to_string();
+                self.get(
+                    "invitations",
+                    &[
+                        ("after_invited_at", &stamp),
+                        ("after_workspace_id", &workspace),
+                        ("after_email", &row.email),
+                    ],
+                )
+                .await?
+            }
+            None => self.get("invitations", &[]).await?,
+        };
+        Ok(listed.invitations)
     }
 
     /// Create the workspace identified by this verified domain and seat its first member.

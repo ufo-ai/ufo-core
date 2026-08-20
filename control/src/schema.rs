@@ -19,9 +19,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use tokio_postgres::Client;
 
 use crate::store::SCHEMA;
-use crate::{invite, slack_connect, store};
+use crate::{invite, invite_delivery, slack_connect, store};
 
-pub const LEDGERS: &[&str] = &[store::TABLE, invite::TABLE, slack_connect::TABLE];
+pub const LEDGERS: &[&str] = &[
+    store::TABLE,
+    invite::TABLE,
+    slack_connect::TABLE,
+    invite_delivery::TABLE,
+];
 
 pub const SHAPE_LOCK: &str = "select pg_advisory_xact_lock(hashtext('ufo_control schema'))";
 
@@ -41,7 +46,12 @@ const LIVE_COLUMNS: &str = "select table_name, column_name from information_sche
 /// Every statement that brings an empty database to head, in order.
 pub fn ddl() -> Vec<String> {
     let mut statements = vec![format!("create schema if not exists {SCHEMA}")];
-    for group in [store::DDL, invite::DDL, slack_connect::DDL] {
+    for group in [
+        store::DDL,
+        invite::DDL,
+        slack_connect::DDL,
+        invite_delivery::DDL,
+    ] {
         statements.extend(group.iter().map(|statement| statement.to_string()));
     }
     statements
@@ -235,7 +245,7 @@ mod tests {
     #[test]
     fn the_head_shape_reads_every_declared_column() {
         let shape = head_shape();
-        assert_eq!(shape.len(), 3, "one entry per ledger");
+        assert_eq!(shape.len(), 4, "one entry per ledger");
         let claim = &shape[store::TABLE];
         assert!(claim.contains("created_workspace"), "{claim:?}");
         assert!(claim.contains("invite_id"), "{claim:?}");

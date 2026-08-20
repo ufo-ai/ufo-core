@@ -6,6 +6,7 @@ pub mod directives;
 pub mod email;
 pub mod gateway;
 pub mod invite;
+pub mod invite_delivery;
 pub mod rls;
 pub mod schema;
 pub mod shared;

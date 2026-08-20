@@ -613,8 +613,10 @@ whoever asks, so a channel another organization sits in never hears the staff li
 session is always the signed-in member's own audience, so the panel needs no such branch.
 Adding someone is `add_member`, the one verb that mints a member before their first contact: a
 speaking admin on the main agent names an email at any domain and may make them an admin in the same
-act. The hosted sign-in resolves the verified address to every exact `member.email` row plus the
-workspace its domain names. One candidate opens directly; several are offered for the member to
+act. The member row records who added them and when, and that stamp is what the gateway reads to
+email that person who added them and where to sign in; an admin who will tell them personally adds
+them with `notify` false and no stamp is written. The hosted sign-in resolves the verified address
+to every exact `member.email` row plus the workspace its domain names. One candidate opens directly; several are offered for the member to
 choose before the workspace-scoped token is minted. An exact membership grants only its workspace,
 while a domain match grants the domain's workspace. With no candidate, the domain needs a live
 invite before its workspace is created. A live invite remains a creation choice when the address

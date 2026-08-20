@@ -75,7 +75,7 @@ services:
       <<: *dev-env
       UFO_CONTROL_EMAIL_MODE: console
       UFO_TOKEN_SECRET: ufo-local-dev-token-secret
-      # The gateway reads its own three ledgers and nothing else. Locally that is the owner role for
+      # The gateway reads its own ledgers and nothing else. Locally that is the owner role for
       # convenience; a deploy hands it the `ufo_control` role, which holds no privilege on any table
       # in `public`. Either way core's tables are reached over the onboarding RPC below.
       UFO_CONTROL_GATEWAY_DSN: postgresql://ufo:ufo@postgres:5432/ufo
