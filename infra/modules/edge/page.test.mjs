@@ -123,7 +123,7 @@ test("the bar carries the mark and the two account controls, and nothing else", 
   );
   assert.deepEqual(actions, [
     { text: "Sign In", href: "/login", target: null, rel: null },
-    { text: "Join UFO", href: JOIN_FORM, target: "_blank", rel: "noopener" },
+    { text: "Join Waitlist", href: JOIN_FORM, target: "_blank", rel: "noopener" },
   ]);
   await page.close();
 });
