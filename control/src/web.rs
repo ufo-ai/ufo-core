@@ -30,7 +30,15 @@ pub const LOGIN_PAGE: &str = include_str!("login.html");
 /// and a test holds the two copies identical.
 pub const LOGO_PATH: &str = "/login/logo.svg";
 pub const LOGO_BYTES: &[u8] = include_bytes!("assets/ufo-logo.svg");
-pub const LOGO_CACHE: &str = "public, max-age=31536000, immutable";
+pub const ASSET_CACHE: &str = "public, max-age=31536000, immutable";
+
+/// The artwork the page draws in the half beside the form — the brand's `canon/after` illustration
+/// `restaurant-door-two`, its 2048px master resampled to 1536px and encoded as WebP so the whole
+/// panel is 83 KB. It is drawn at half a landscape page, so the square master is what the panel
+/// crops from. The page names it in the style under the width that splits it rather than in the
+/// markup, so a narrow page spends none of those bytes on a panel it does not draw.
+pub const ILLUSTRATION_PATH: &str = "/login/sign-in.webp";
+pub const ILLUSTRATION_BYTES: &[u8] = include_bytes!("assets/sign-in.webp");
 
 /// The same mark as a raster, for the one reader that cannot have the vector: mail clients block
 /// SVG, so an invitation drawing `LOGO_PATH` shows its recipient nothing. It is twice the size it
@@ -155,10 +163,19 @@ mod tests {
         assert_eq!(parsed[0].fields, vec!["pick\tone", "a\nb", "c"]);
     }
 
+    fn styles(page: &str) -> &str {
+        let opened = page
+            .find("<style>")
+            .expect("the page carries its own style");
+        &page[opened..page.find("</style>").expect("the style block closes")]
+    }
+
     #[test]
     fn the_login_page_fetches_its_mark_and_nothing_else() {
-        // The page carries its own style and script and reaches for one file: the mark, on the
-        // connection already open. Inlined, the artwork would be 20 KB on a 15 KB page.
+        // The page carries its own style and script and reaches for one element: the mark, on the
+        // connection already open. Inlined, the artwork would be 20 KB on a 15 KB page. The
+        // illustration is a background the style asks for and the Google mark is inline artwork, so
+        // neither is an element the page fetches.
         assert!(LOGIN_PAGE.starts_with("<!doctype html>"));
         assert!(LOGIN_PAGE.contains("</html>"));
         assert!(
@@ -167,6 +184,43 @@ mod tests {
         );
         assert_eq!(LOGIN_PAGE.matches("src=").count(), 1);
         assert!(LOGIN_PAGE.contains(&format!("<img src=\"{LOGO_PATH}\" alt=\"ufo\"")));
+    }
+
+    #[test]
+    fn a_page_with_no_half_for_the_illustration_never_asks_for_it() {
+        // A browser fetches what a matching rule draws, so the artwork named only inside the split
+        // width is 83 KB a phone never spends. Naming it in the markup instead would spend them:
+        // an <img> in a display:none subtree is fetched all the same.
+        assert!(!LOGIN_PAGE.contains(&format!("<img src=\"{ILLUSTRATION_PATH}\"")));
+        let panel = styles(LOGIN_PAGE)
+            .split("@media (min-width: 900px) {")
+            .nth(1)
+            .expect("the split width has its own block");
+        assert!(
+            panel.contains(&format!("url({ILLUSTRATION_PATH})")),
+            "the artwork must be asked for inside the split width alone"
+        );
+    }
+
+    #[test]
+    fn the_illustration_takes_half_a_landscape_page_and_none_of_a_narrow_one() {
+        // The form is what a member came for, so the artwork is drawn only where there is a half to
+        // give it: the two halves appear at the one width that splits the page, and the panel is
+        // undrawn below it.
+        assert!(LOGIN_PAGE.contains("#art { display: none; }"));
+        assert!(LOGIN_PAGE.contains("@media (min-width: 900px) {"));
+        assert!(LOGIN_PAGE.contains("body { grid-template-columns: 1fr 1fr; }"));
+        assert!(LOGIN_PAGE.contains("#art { display: block;"));
+        assert!(LOGIN_PAGE.contains("center / cover no-repeat; }"));
+    }
+
+    #[test]
+    fn the_form_stands_on_the_page_rather_than_in_a_card() {
+        // Half a page is frame enough: the form is the only thing in its half, so a border around
+        // it would draw a second edge inside the one the split already draws.
+        assert!(!LOGIN_PAGE.contains("class=\"card\""));
+        let board = "#board { display: flex; flex-direction: column; gap: 16px; }";
+        assert!(LOGIN_PAGE.contains(board));
     }
 
     #[test]

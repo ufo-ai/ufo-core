@@ -25,8 +25,8 @@ use crate::shared::{EnsuredWorkspace, SeatError, SharedWorkspaces, WorkspaceChoi
 use crate::store::{OnboardClaim, OnboardStore};
 use crate::token;
 use crate::web::{
-    parse_directives, LOGIN_PAGE, LOGO_BYTES, LOGO_CACHE, LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH,
-    ONBOARD_SESSION_COOKIE, WEB_CHANNEL,
+    parse_directives, ASSET_CACHE, ILLUSTRATION_BYTES, ILLUSTRATION_PATH, LOGIN_PAGE, LOGO_BYTES,
+    LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE, WEB_CHANNEL,
 };
 use crate::workos::{
     console_signin_page, open_session, pack_state, seal_session, unpack_state, AuthCarry, Verifier,
@@ -454,6 +454,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/login", get(login))
         .route(LOGO_PATH, get(logo))
         .route(LOGO_PNG_PATH, get(logo_png))
+        .route(ILLUSTRATION_PATH, get(illustration))
         .route(AUTH_START_PATH, get(auth_start))
         .route(AUTH_CALLBACK_PATH, get(auth_callback))
         .route("/v1/onboard/web", post(onboard_web))
@@ -549,7 +550,7 @@ async fn logo() -> Response {
     (
         [
             (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, LOGO_CACHE),
+            (header::CACHE_CONTROL, ASSET_CACHE),
         ],
         LOGO_BYTES,
     )
@@ -562,9 +563,22 @@ async fn logo_png() -> Response {
     (
         [
             (header::CONTENT_TYPE, "image/png"),
-            (header::CACHE_CONTROL, LOGO_CACHE),
+            (header::CACHE_CONTROL, ASSET_CACHE),
         ],
         LOGO_PNG_BYTES,
+    )
+        .into_response()
+}
+
+/// The artwork the sign-in page draws beside its form, compiled in beside the mark and served the
+/// same way.
+async fn illustration() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/webp"),
+            (header::CACHE_CONTROL, ASSET_CACHE),
+        ],
+        ILLUSTRATION_BYTES,
     )
         .into_response()
 }

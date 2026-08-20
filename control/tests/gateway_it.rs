@@ -19,7 +19,8 @@ use ufo_control::invite::InviteCodes;
 use ufo_control::shared::SharedWorkspaces;
 use ufo_control::store::OnboardStore;
 use ufo_control::web::{
-    LOGIN_PAGE, LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE,
+    ILLUSTRATION_BYTES, ILLUSTRATION_PATH, LOGIN_PAGE, LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH,
+    ONBOARD_SESSION_COOKIE,
 };
 use ufo_control::workos::{Verifier, WorkosVerifier, CONSOLE_CODE};
 
@@ -198,6 +199,19 @@ async fn the_invitation_logo_is_served_as_a_png() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "image/png");
     assert_eq!(response.bytes().await.unwrap().as_ref(), LOGO_PNG_BYTES);
+}
+
+#[tokio::test]
+async fn the_sign_in_illustration_is_served_as_a_webp() {
+    let rig = rig(vec![], vec![], true).await;
+    let response = client()
+        .get(format!("{}{ILLUSTRATION_PATH}", rig.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/webp");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), ILLUSTRATION_BYTES);
 }
 
 #[tokio::test]

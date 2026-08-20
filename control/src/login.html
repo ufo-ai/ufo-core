@@ -16,21 +16,25 @@
     --radius: 4px;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100svh; display: flex; align-items: center;
-         justify-content: center; padding: 24px 16px;
+  body { margin: 0; min-height: 100svh; display: grid; grid-template-columns: 1fr;
          background: var(--surface); color: var(--ink);
          font: 15px/1.5 system-ui, sans-serif; }
+  /* The illustration takes half the page and the form the other half. A half of a landscape screen
+     is close enough to square that the square artwork fills it off its own centre. It is the
+     panel's background rather than an element, so the narrow page that draws no panel never asks
+     for the file: a rule under a media query that does not match fetches nothing. */
+  #art { display: none; }
+  #form-side { display: flex; align-items: center; justify-content: center;
+               padding: 24px 16px; }
   main { width: min(440px, 100%); display: flex; flex-direction: column; gap: 20px; }
   header { display: flex; justify-content: center; }
   header img { display: block; width: 72px; height: 18px; }
   @media (prefers-color-scheme: dark) { header img { filter: invert(1); } }
-  .card { display: flex; flex-direction: column; gap: 16px; padding: 20px;
-          border: 1px solid var(--edge); border-radius: var(--radius);
-          background: var(--surface); }
+  #board { display: flex; flex-direction: column; gap: 16px; }
   .head { display: flex; flex-direction: column; gap: 6px; font-size: 14px;
           color: var(--ink-soft); }
   #prompt-say strong { font-weight: 600; color: var(--ink); }
-  .card h1 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1; color: var(--ink); }
+  #board h1 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1; color: var(--ink); }
   #log { display: flex; flex-direction: column; gap: 4px; font-size: 14px;
          color: var(--ink-soft); }
   #log:empty { display: none; }
@@ -84,14 +88,21 @@
   #go { margin-top: 16px; }
   #google { display: none; }
   #google svg { width: 16px; height: 16px; vertical-align: -3px; margin-right: 8px; }
-  @media (min-width: 768px) { body { padding: 40px; } }
+  @media (min-width: 768px) { #form-side { padding: 40px; } }
+  @media (min-width: 900px) {
+    body { grid-template-columns: 1fr 1fr; }
+    #art { display: block;
+           background: #060c08 url(/login/sign-in.webp) center / cover no-repeat; }
+  }
 </style>
 </head>
 <body>
+<div id="art"></div>
+<div id="form-side">
 <main>
   <header><img src="/login/logo.svg" alt="ufo" width="72" height="18"></header>
 
-  <section class="card" id="board">
+  <section id="board">
     <div class="head">
       <h1 id="title">Sign in</h1>
       <div id="log"></div>
@@ -113,6 +124,7 @@
   </section>
 
 </main>
+</div>
 <script>
 const START = '/v1/onboard/auth/start';
 const params = new URLSearchParams(location.search);
@@ -241,7 +253,7 @@ function prompt(text, options) {
      came with it is the refusal and stands in the alert. One that moves the member on has nothing
      left to state — the step it moved to says where they are. A page that opens already past the
      first step was reloaded mid-walk, and the line that met it is a refusal too; one that opens on
-     the first step was met by the machine's own banner, which the mark above the card already says.
+     the first step was met by the machine's own banner, which the mark above the form already says.
   */
   const carried = said();
   if (carried && (previous ? stated.order <= previous.order : stated.order > 0)) {
