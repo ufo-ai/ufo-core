@@ -198,6 +198,14 @@ case "$URL" in
     [ "$NEGATIVE_FLEET_HOST" != "$HOST" ] || { printf '{"craft":-1}\\n'; exit; }
     printf '{"craft":1}\\n'
     ;;
+  */privacy)
+    [ "$BAD_LEGAL_PATH" != privacy ] || { printf 'wrong\\n'; exit; }
+    printf '<h1>Privacy Policy</h1>\\n'
+    ;;
+  */terms)
+    [ "$BAD_LEGAL_PATH" != terms ] || { printf 'wrong\\n'; exit; }
+    printf '<h1>Terms of Service</h1>\\n'
+    ;;
   */)
     [ "$BAD_ROOT_HOST" != "$HOST" ] || HOST=wrong.example
     printf 'curl https://%s/waitlist\\n' "$HOST"
@@ -1373,6 +1381,7 @@ def test_edge_deploys_are_isolated(
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "BAD_HOST": "",
         "BAD_FLEET_HOST": "",
+        "BAD_LEGAL_PATH": "",
         "BAD_LOGIN_HOST": "",
         "BAD_ONBOARD_HOST": "",
         "BAD_ROOT_HOST": "",
@@ -1381,14 +1390,25 @@ def test_edge_deploys_are_isolated(
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 5
+    assert len(invoked) == 7
     assert [call.rsplit(" ", 1)[-1] for call in invoked] == [
         f"https://{host}/",
         f"https://{host}/login",
         f"https://{host}/v1/onboard/ufo",
         f"https://{host}/ufo",
         f"https://{host}/fleet",
+        f"https://{host}/privacy",
+        f"https://{host}/terms",
     ]
+    for page in ("privacy", "terms"):
+        environment["BAD_LEGAL_PATH"] = page
+        failed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            capture_output=True,
+            env=environment,
+        )
+        assert failed.returncode != 0
+    environment["BAD_LEGAL_PATH"] = ""
     environment["BAD_ROOT_HOST"] = host
     failed = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", script],
