@@ -353,9 +353,9 @@ impl Onboarding {
     /// only when the verified email domain is the operator's. That target states a capability, not
     /// a destination: the page posts the token to the member portal unless it was asked for the
     /// debug surface by name. A terminal owner caps on `choose` rather than `ask`, so setting up
-    /// billing costs one selection. A joined teammate caps on the ordinary prompt. The web renderer
-    /// posts the token to its target as soon as both values arrive, so it is never handed a menu it
-    /// cannot drive.
+    /// billing costs one selection. A joined teammate caps on the ordinary prompt. The web channel
+    /// caps on nothing: the page posts the token to its target as soon as both values arrive, and a
+    /// prompt it cannot drive would sit on screen as a ghost step while the handoff runs.
     fn signed_in(
         &self,
         claim: &OnboardClaim,
@@ -391,7 +391,9 @@ impl Onboarding {
             } else {
                 Vec::new()
             },
-            if ensured.admin && claim.surface != WEB_CHANNEL {
+            if claim.surface == WEB_CHANNEL {
+                Vec::new()
+            } else if ensured.admin {
                 directive(
                     "choose",
                     &[FIRST_MOVE_PROMPT, SLACK_CHOICE, BILLING_CHOICE, TOUR_CHOICE],

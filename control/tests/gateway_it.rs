@@ -558,6 +558,69 @@ async fn a_teammate_with_one_candidate_joins_without_a_prompt() {
     assert!(!screen.contains("slack\t"), "{screen}");
 }
 
+/// One web turn: the page's POST with the session cookie it holds, answering the payload and the
+/// cookie the response re-minted, if any.
+async fn web_turn(
+    rig: &Rig,
+    cookie: Option<&str>,
+    body: &str,
+) -> (serde_json::Value, Option<String>) {
+    let mut request = client()
+        .post(format!("{}/v1/onboard/web", rig.base))
+        .body(body.to_string());
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    let response = request.send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let minted = response.headers().get("set-cookie").map(|value| {
+        value
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    });
+    let payload = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    (payload, minted)
+}
+
+#[tokio::test]
+async fn the_web_sign_in_caps_on_the_handoff_not_a_prompt() {
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"teammate@acme.com"}}"#.to_string()),
+        ],
+        vec![
+            (
+                200,
+                r#"{"choices":[{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","label":"acme.com","member":true}]}"#
+                    .to_string(),
+            ),
+            (200, r#"{"admin":false}"#.to_string()),
+        ],
+        true,
+    )
+    .await;
+    let (_, minted) = web_turn(&rig, None, "teammate@acme.com").await;
+    let cookie = minted.expect("the email turn binds a session");
+    let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
+    let verbs: Vec<&str> = payload["directives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|directive| directive["verb"].as_str().unwrap())
+        .collect();
+    assert!(verbs.contains(&"token"), "{payload}");
+    assert!(verbs.contains(&"workspace"), "{payload}");
+    assert!(
+        !verbs.contains(&"ask") && !verbs.contains(&"choose"),
+        "the page posts the token the moment it lands; a trailing prompt renders as a ghost workspace step: {payload}"
+    );
+}
+
 #[tokio::test]
 async fn two_candidates_are_offered_and_an_unlisted_answer_re_asks() {
     let choices = r#"{"choices":[
