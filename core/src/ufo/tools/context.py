@@ -59,7 +59,6 @@ from ufo.search import SearchProvider
 from ufo.seats import member_is_admin
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
 from ufo.subjects import member_subject
-from ufo.workspace import ws_current
 
 SHARED_BYTES_LIMIT = 256 * 1024
 PREVIEW_SIZE_TIMEOUT_SECONDS = 30
@@ -483,13 +482,6 @@ class ToolContext:
     async def open_credential_authorization(self, slot: str, sealed: str) -> str:
         requests, member_id = await self._credential_authorization(slot)
         return requests.open_authorization(sealed, self.turn.workspace_id, member_id, slot)
-
-    async def fulfill_credential_authorization(
-        self, slot: str, sealed: str, plaintext: str
-    ) -> None:
-        requests, member_id = await self._credential_authorization(slot)
-        requests.open_authorization(sealed, self.turn.workspace_id, member_id, slot)
-        await ws_current().put_credential(slot, plaintext)
 
     async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]:
         if self.speaker_member_id is None:

@@ -4323,10 +4323,8 @@ async def test_extension_tool_authorizes_its_declared_credential_as_an_admin(
                 await context.open_credential_authorization("sample_api", sealed)
                 == "provider-state"
             )
-            await context.fulfill_credential_authorization("sample_api", sealed, "secret")
     finally:
         init_workspace_credentials(None)
-    assert await store.get(turn.workspace_id, "sample_api") == "secret"
 
 
 def test_requested_credentials_reads_the_handlers_result_not_the_raw_call() -> None:
