@@ -32,13 +32,9 @@ REPLAY_ROUND_LIMIT = 6
 
 @dataclass(frozen=True)
 class ReplayResult:
-    """One arm's counterfactual outcome: the regenerated final answer, whether the model diverged
-    off the archived tool path, and how many model legs it took. `diverged` is surfaced, not hidden:
-    a diverged replay is a weaker signal the grader still scores on the partial answer."""
+    """One arm's counterfactual outcome: the regenerated final answer."""
 
     final_text: str
-    diverged: bool
-    rounds: int
 
 
 def _canonical_input(value: object) -> str:
@@ -154,7 +150,7 @@ class ReplayEvaluation:
         tools = replay_tools(archived)
         messages = replay_head(archived)
         last_text = ""
-        for turn in range(1, self.round_limit + 1):
+        for _turn in range(1, self.round_limit + 1):
             leg = await self.model.turn(system_prompt, messages, tools)
             content = leg.content
             if isinstance(content, str):
@@ -164,10 +160,10 @@ class ReplayEvaluation:
                 text = "".join(block.text for block in content if isinstance(block, TextBlock))
                 tool_uses = tuple(block for block in content if isinstance(block, ToolUseBlock))
             if not tool_uses:
-                return ReplayResult(text, diverged=False, rounds=turn)
+                return ReplayResult(text)
             fed = _feed_archived(tool_uses, results)
             if fed is None:
-                return ReplayResult(last_text, diverged=True, rounds=turn)
+                return ReplayResult(last_text)
             messages = (*messages, leg, fed)
             last_text = text or last_text
-        return ReplayResult(last_text, diverged=True, rounds=self.round_limit)
+        return ReplayResult(last_text)

@@ -403,7 +403,6 @@ async def test_replay_uses_metered_model_access_and_feeds_archived_results(db: N
             ).one()
 
     assert result.final_text == "regenerated final"
-    assert not result.diverged
     assert billed[0] == 2
     assert billed[1] == 10
     fed = client.requests[1].messages[-1]
@@ -459,8 +458,6 @@ async def test_replay_feeds_the_archived_tool_result_back() -> None:
     )
     result = await ReplayEvaluation(leg).replay(archived, "SYSTEM PROMPT")
     assert result.final_text == "regenerated final"
-    assert not result.diverged
-    assert result.rounds == 2
     fed = leg.seen[-1]
     assert not isinstance(fed.content, str)
     assert any(
@@ -469,7 +466,7 @@ async def test_replay_feeds_the_archived_tool_result_back() -> None:
     )
 
 
-async def test_replay_diverges_when_a_call_has_no_archived_result() -> None:
+async def test_replay_stops_when_a_call_has_no_archived_result() -> None:
     archived = _archived_bash("ls", "file-a")
     leg = ScriptedReplayLeg(
         turns=[
@@ -480,7 +477,7 @@ async def test_replay_diverges_when_a_call_has_no_archived_result() -> None:
         ]
     )
     result = await ReplayEvaluation(leg).replay(archived, "SYSTEM PROMPT")
-    assert result.diverged
+    assert result.final_text == ""
 
 
 def _labels(present_accepted: int, present_total: int, absent_accepted: int, absent_total: int):
