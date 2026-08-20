@@ -1156,8 +1156,11 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
             assert done.status_code == 200
             # No session stands behind this page — a Slack member finishes consent in a browser
             # that has never signed in — so it addresses them by what just happened and names the
-            # one thing left to do.
+            # one thing left to do. The turn already resumed, so nothing here needs the member:
+            # the page closes the window the portal opened for it, and the line stays for the tab
+            # no script owns.
             assert CLOSE_THIS_PAGE in done.text
+            assert "window.close()" in done.text
 
     # The conversation that asked for the account is told, as the granting member, so the turn
     # waiting there carries on without them asking it to. Both callbacks carry the one key the

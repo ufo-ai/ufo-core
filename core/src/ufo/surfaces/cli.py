@@ -2,8 +2,10 @@
 
 The connector handoff's own return leg, drawn by the page every return leg shares
 (`ufo.sdk.callback_page`). It says the one thing left to do: close the tab when the agent already
-has the work, ask for it when the message did not reach the conversation. It never closes itself —
-half of what it says is a thing the member has to go and do.
+has the work, ask for it when the message did not reach the conversation. Only the first of those
+takes the window away — the portal opened it, so this page can close it, and the member is back on
+the conversation that already carried on. The other half is a thing the member has to go and do, and
+a page that closed itself would take its own instruction with it.
 
 The mark is the portal's own file, byte for byte, and core serves it here because this page is
 reached with no session and no frontend build behind it. It was hand-minified once and drew
@@ -58,6 +60,7 @@ async def connect_callback(state: str = "", code: str = "") -> HTMLResponse:
     return callback_page(
         headline=f"{named} connected.",
         detail=CLOSE_THIS_PAGE if recorded.resumed else ASK_TO_CONTINUE,
+        close=recorded.resumed,
     )
 
 

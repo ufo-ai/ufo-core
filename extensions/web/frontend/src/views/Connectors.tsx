@@ -26,6 +26,7 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import { DataTable, OPEN } from "@/kernel/table";
+import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { Moment } from "@/lib/moments";
 import { agentName } from "@/lib/agentName";
 import { BASE, postIntent } from "@/lib/api";
@@ -315,6 +316,10 @@ function ConnectorList({
       : undefined;
   if (state.phase === "ready" && opened && !record) setOpened("");
   const source = useRef<EventSource | null>(null);
+  // Opened on the press and pointed at the provider when the frame carrying the URL lands. The
+  // press is the whole act: the wait between them is the typed verb and the broker's own call, no
+  // model round, and nothing appears under the button for the member to find and press again.
+  const consent = useRef<Window | null>(null);
 
   useEffect(() => {
     if (watching === null) return;
@@ -325,11 +330,17 @@ function ConnectorList({
       source.current = null;
     };
     stream.addEventListener("connect", (event) => {
-      setConsentUrl(JSON.parse((event as MessageEvent).data).url);
+      const url = JSON.parse((event as MessageEvent).data).url;
+      if (consent.current) consent.current.location.href = url;
+      // The link stands only for a member whose browser refused the window.
+      setConsentUrl(consent.current ? null : url);
+      consent.current = null;
       setHandoff(QUIET);
       done();
     });
     stream.addEventListener("connect_error", (event) => {
+      consent.current?.close();
+      consent.current = null;
       setHandoff({
         text: JSON.parse((event as MessageEvent).data).message,
         refused: true,
@@ -350,6 +361,7 @@ function ConnectorList({
     if (busy || !named) return;
     setBusy(true);
     setConsentUrl(null);
+    consent.current = openConsentWindow();
     const outcome = await postIntent(agent.id, {
       verb: "connect",
       kind: "connection",
@@ -358,6 +370,8 @@ function ConnectorList({
     });
     setBusy(false);
     if (!outcome.applied) {
+      consent.current?.close();
+      consent.current = null;
       setRefusal(outcomeNotice(outcome));
       return;
     }
@@ -462,9 +476,7 @@ function ConnectorList({
       {consentUrl || handoff.text ? (
         <Notice tone={handoff.refused ? "attention" : "quiet"}>
           {consentUrl ? (
-            <a href={consentUrl} target="_blank" rel="noopener">
-              Open the provider consent page
-            </a>
+            <ConsentLink url={consentUrl}>Open the provider consent page</ConsentLink>
           ) : (
             handoff.text
           )}

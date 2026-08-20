@@ -19,6 +19,7 @@ import logo from "@/assets/ufo-logo.svg";
 import { postIntent } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
+import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import type { Agent, Member } from "@/lib/types";
 
@@ -421,10 +422,15 @@ function useConnected(name: string, watching: boolean, onConnected: () => void) 
   }, [landed, onConnected]);
 }
 
-/** One connector's own step. The intent dispatches that connector's admin-gated tool, which seals
- *  the install link for this workspace and answers with it — a non-admin is told who installs it
- *  rather than pressing an act the workspace refuses. The link expires, so the act stays on the
- *  step and mints another.
+/** One connector's own step. The act dispatches that connector's admin-gated tool, which seals the
+ *  install link for this workspace and answers with it — a non-admin is told who installs it rather
+ *  than pressing an act the workspace refuses. The link expires, so the act stays on the step and
+ *  mints another.
+ *
+ *  Pressing it is the whole thing: the consent window opens on the press and the minted link lands
+ *  in it, rather than appearing under the button as a second thing to find. A browser that refuses
+ *  the window is the only case that still renders the link, because then there is nothing else to
+ *  carry the member over.
  *
  *  Each connector gets a step to itself because they are two different decisions, not two rows of
  *  one: putting the agent in the team's chat and giving it the team's code are worth different
@@ -453,9 +459,16 @@ function Connect({
   async function connect() {
     if (busy) return;
     setBusy(true);
+    // Opened on the press, before the round trip that mints the link: a window opened afterwards
+    // has lost the gesture the browser opens one for. It waits on the provider's own page.
+    const consent = openConsentWindow();
     const outcome = await postIntent(agent.id, { verb: CONNECT_VERB[row.name] });
     setBusy(false);
-    setLink(outcome.url ?? null);
+    if (consent && outcome.url) consent.location.href = outcome.url;
+    if (consent && !outcome.url) consent.close();
+    // The step keeps the link only for a member whose browser refused the window, so pressing once
+    // is the whole act for everybody else.
+    setLink(consent ? null : (outcome.url ?? null));
     setNotice(outcome.url ? QUIET : outcomeNotice(outcome));
   }
 
@@ -480,9 +493,7 @@ function Connect({
       )}
       {link ? (
         <Notice>
-          <a href={link} target="_blank" rel="noopener">
-            {"Open the " + row.label + " install page"}
-          </a>
+          <ConsentLink url={link}>{"Open the " + row.label + " install page"}</ConsentLink>
         </Notice>
       ) : null}
       <OutcomeNotice state={notice} />

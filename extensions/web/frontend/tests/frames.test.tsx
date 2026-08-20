@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { tokens } from "@/lib/turnStream";
@@ -403,6 +403,43 @@ test("a connect frame offers the consent link, and a connect_error states the fa
 
   stream.emit("connect_error", { message: "The provider refused the request." });
   expect(await screen.findByText("The provider refused the request.")).toBeTruthy();
+});
+
+test("consent opens in a window this page owns, so its return page can close itself", async () => {
+  const stream = await streaming();
+  const consent = { focus: vi.fn() };
+  const open = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
+  stream.emit("connect", { url: "https://consent.example/go" });
+  const link = await screen.findByRole("link", { name: "Connect account" });
+
+  await userEvent.click(link);
+
+  const [url, name, features] = open.mock.calls[0];
+  expect(url).toBe("https://consent.example/go");
+  expect(name).toBe("ufo-connect");
+  // A browser closes a window a script opened, and only that. Sized for a consent screen, so the
+  // conversation stays in sight behind it.
+  expect(features).toContain("popup");
+  expect(features).toContain("width=520");
+  expect(consent.focus).toHaveBeenCalled();
+  open.mockRestore();
+});
+
+test("a blocked consent window falls through to the tab the link already opens", async () => {
+  const stream = await streaming();
+  const open = vi.spyOn(window, "open").mockReturnValue(null);
+  stream.emit("connect", { url: "https://consent.example/go" });
+  const link = await screen.findByRole("link", { name: "Connect account" });
+  const clicked = new MouseEvent("click", { bubbles: true, cancelable: true });
+
+  act(() => {
+    link.dispatchEvent(clicked);
+  });
+
+  // Nothing was opened for the member, so the anchor keeps its own way of getting them there.
+  expect(clicked.defaultPrevented).toBe(false);
+  expect(link.getAttribute("target")).toBe("_blank");
+  open.mockRestore();
 });
 
 test("an apps frame draws the application the turn created, pressable to its own screen", async () => {

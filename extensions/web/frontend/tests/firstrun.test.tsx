@@ -232,6 +232,59 @@ test("continue is held closed until the install itself lands, not until the link
   expect(screen.getByRole("heading", { name: "The app answers in Slack" })).toBeTruthy();
 });
 
+test("one press opens the consent window and lands the minted link in it", async () => {
+  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  open({ "/intents": posted.route });
+  const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
+  const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
+
+  await record("Slack", "GitHub");
+  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
+
+  // The window opens on the press, before the link exists — a window opened after the round trip
+  // has lost the gesture the browser opens one for.
+  const [url, name, features] = opened.mock.calls[0];
+  expect(url).toBe("");
+  expect(name).toBe("ufo-connect");
+  expect(features).toContain("popup");
+  // Then the minted link lands in it, so there is nothing under the button to press next.
+  await waitFor(() => expect(consent.location.href).toBe(SLACK_LINK));
+  expect(screen.queryByRole("link", { name: "Open the Slack install page" })).toBeNull();
+  opened.mockRestore();
+});
+
+test("a browser that refuses the window still hands the member the link", async () => {
+  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  open({ "/intents": posted.route });
+  const opened = vi.spyOn(window, "open").mockReturnValue(null);
+
+  await record("Slack", "GitHub");
+  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
+
+  const link = await screen.findByRole("link", { name: "Open the Slack install page" });
+  expect(link.getAttribute("href")).toBe(SLACK_LINK);
+  opened.mockRestore();
+});
+
+test("a refused connect closes the window it opened rather than parking it on nothing", async () => {
+  const posted = recorder({
+    connect_slack: { applied: false, message: "A workspace admin connects Slack." },
+  });
+  open({ "/intents": posted.route });
+  const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
+  const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
+
+  await record("Slack", "GitHub");
+  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
+
+  await waitFor(() => expect(consent.close).toHaveBeenCalled());
+  expect(consent.location.href).toBe("");
+  opened.mockRestore();
+});
+
 test("the connect step passes itself when the install lands", async () => {
   const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
   let landed = false;

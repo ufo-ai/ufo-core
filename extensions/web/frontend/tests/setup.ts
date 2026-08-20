@@ -37,6 +37,11 @@ function installWhatJsdomLacks() {
     if (asked?.top !== undefined) this.scrollTop = asked.top;
     if (asked?.left !== undefined) this.scrollLeft = asked.left;
   };
+  // jsdom implements no `window.open`, and calling it there raises rather than returning anything a
+  // caller can read. A member's browser may also refuse the window, and that refusal is the case
+  // every act already falls back from — so it is the default here, and a test that cares about the
+  // window opening stubs this with its own.
+  window.open = () => null;
   globalThis.ResizeObserver = class {
     observe() {}
     unobserve() {}

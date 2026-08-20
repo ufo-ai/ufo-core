@@ -12,6 +12,8 @@ import {
   SECOND,
   SECOND_ID,
   SETTINGS,
+  StreamFake,
+  TURN_ID,
   declaredFloor,
   fact,
   json,
@@ -373,4 +375,59 @@ test("the agent's connectors stand on their own tab of its settings dialog", asy
   await userEvent.click(dialog.getByRole("tab", { name: "Settings" }));
   expect(await dialog.findByLabelText("Prompt")).toBeTruthy();
   expect(dialog.queryByRole("button", { name: "Add connector" })).toBeNull();
+});
+
+test("a connector's consent opens in a window this page owns, so its return page closes itself", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  wire({
+    "/connections": () => json({ connections: [] }),
+    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/settings": () => json(SETTINGS),
+    "/transcript": () => json({ messages: [] }),
+    "/intents": () => json({ applied: true, message: "", turn_id: TURN_ID }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+  const dialog = await openAgentSettings("Assistant", "Connectors");
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Add connector" }));
+  await userEvent.type(await screen.findByLabelText("Provider"), "notion");
+  const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
+  const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
+  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+
+  // The window opened on the press, before the verb had minted anything: opening one after the
+  // round trip would have lost the gesture the browser opens it for.
+  const [blank, name, features] = opened.mock.calls[0];
+  expect(blank).toBe("");
+  expect(name).toBe("ufo-connect");
+  expect(features).toContain("popup");
+  expect(consent.focus).toHaveBeenCalled();
+
+  StreamFake.last().emit("connect", { url: "https://consent.example/notion" });
+
+  // The frame carrying the link lands in that window, so the panel puts nothing under the act.
+  await waitFor(() => expect(consent.location.href).toBe("https://consent.example/notion"));
+  expect(screen.queryByRole("link", { name: "Open the provider consent page" })).toBeNull();
+  opened.mockRestore();
+});
+
+test("a connector consent the browser refuses still renders the link", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  wire({
+    "/connections": () => json({ connections: [] }),
+    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/settings": () => json(SETTINGS),
+    "/transcript": () => json({ messages: [] }),
+    "/intents": () => json({ applied: true, message: "", turn_id: TURN_ID }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+  const dialog = await openAgentSettings("Assistant", "Connectors");
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Add connector" }));
+  await userEvent.type(await screen.findByLabelText("Provider"), "notion");
+  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+  StreamFake.last().emit("connect", { url: "https://consent.example/notion" });
+
+  const link = await screen.findByRole("link", { name: "Open the provider consent page" });
+  expect(link.getAttribute("href")).toBe("https://consent.example/notion");
 });

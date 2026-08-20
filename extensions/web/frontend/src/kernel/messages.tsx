@@ -49,6 +49,7 @@ import { agentName } from "@/lib/agentName";
 import { speakerName } from "@/lib/audience";
 import { brailleOf, randomCell } from "@/lib/braille";
 import { cn } from "@/lib/cn";
+import { ConsentLink } from "@/lib/consent";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
 import { agentHash } from "@/lib/route";
@@ -728,11 +729,7 @@ function RunRow({ run, live }: { run: SubagentRun; live: boolean }) {
 }
 
 function ConnectLink({ url }: { url: string }) {
-  return (
-    <a href={url} target="_blank" rel="noopener">
-      Connect account
-    </a>
-  );
+  return <ConsentLink url={url}>Connect account</ConsentLink>;
 }
 
 /** The mark surfaces in the static oftener than the rest of the pool, so the shape a member already
