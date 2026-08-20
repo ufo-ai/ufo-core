@@ -3124,6 +3124,16 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     assert set(payload) == {"providers", "connectors"}
 
 
+def test_added_tiles_carry_the_labels_the_memory_states() -> None:
+    """The added tiles: the name is the slug the connect verb dispatches on, the label is what the
+    member reads and what the tooling memory writes. Which broker serves each is the catalog-wide
+    broker gate's to hold."""
+    tiles = {tile.name: tile.label for tile in web_panels.FIRST_RUN_PROVIDERS}
+    assert tiles["googlesheets"] == "Google Sheets"
+    assert tiles["attio"] == "Attio"
+    assert tiles["discord"] == "Discord"
+
+
 async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

@@ -200,14 +200,17 @@ FIRST_RUN_PROVIDERS = (
     ProviderTile(name="gmail", label="Gmail"),
     ProviderTile(name="googlecalendar", label="Google Calendar"),
     ProviderTile(name="googledrive", label="Google Drive"),
+    ProviderTile(name="googlesheets", label="Google Sheets"),
     ProviderTile(name="notion", label="Notion"),
     ProviderTile(name="jira", label="Jira"),
     ProviderTile(name="asana", label="Asana"),
     ProviderTile(name="linear", label="Linear"),
     ProviderTile(name="figma", label="Figma"),
     ProviderTile(name="zoom", label="Zoom"),
+    ProviderTile(name="discord", label="Discord"),
     ProviderTile(name="airtable", label="Airtable"),
     ProviderTile(name="intercom", label="Intercom"),
+    ProviderTile(name="attio", label="Attio"),
     ProviderTile(name="stripe", label="Stripe"),
 )
 

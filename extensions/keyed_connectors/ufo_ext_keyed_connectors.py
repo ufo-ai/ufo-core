@@ -38,17 +38,27 @@ SECTION_NAME = "keyed_connectors"
 REQUEST_DIMENSION = "requests"
 SENTINEL_PREFIX = "UFO_SENTINEL_KEYED_"
 HOST_SLOT_SUFFIX = "api_host"
+SWAPPABLE_SCHEMES = frozenset({"Bearer", "Token"})
 
 
 @dataclass(frozen=True)
 class KeyedSecret:
-    """One key a provider takes on the wire: the slot suffix naming it, the header it rides in, the
-    sandbox env var the agent sends it from, and what the member is asked for when filling it."""
+    """One key a provider takes on the wire: the slot suffix naming it, the header it rides in —
+    with the auth scheme prefixing its value, where the API takes one — the sandbox env var the
+    agent sends it from, and what the member is asked for when filling it."""
 
     key: str
     header: str
     env: str
     description: str
+    scheme: str = ""
+
+    def __post_init__(self) -> None:
+        if self.scheme and self.scheme not in SWAPPABLE_SCHEMES:
+            raise ValueError(
+                f"keyed secret {self.key!r} declares scheme {self.scheme!r}; the egress proxy "
+                f"swaps only {sorted(SWAPPABLE_SCHEMES)}-prefixed values"
+            )
 
 
 @dataclass(frozen=True)
@@ -110,7 +120,10 @@ class KeyedProvider:
         return (*keys, CredentialSlot(name=host.slot, description=host.description))
 
     def usage(self) -> str:
-        headers = " ".join(f'-H "{secret.header}: ${secret.env}"' for secret in self.secrets)
+        headers = " ".join(
+            f'-H "{secret.header}: {secret.scheme + " " if secret.scheme else ""}${secret.env}"'
+            for secret in self.secrets
+        )
         host = self.target_host
         base = self.host if isinstance(host, str) else f"${self.host_env}"
         named = [f"{self.provider}_{secret.key}" for secret in self.secrets]
@@ -158,6 +171,25 @@ KEYED_PROVIDERS: tuple[KeyedProvider, ...] = (
         "`api.ap1.datadoghq.com`, `api.ap2.datadoghq.com`, `api.uk1.datadoghq.com`, "
         "`api.ddog-gov.com` (US1-FED) or `api.us2.ddog-gov.com`. Read it off your Datadog URL; "
         "US1 orgs may leave it unset.",
+    ),
+    KeyedProvider(
+        provider="posthog",
+        label="PostHog",
+        host_env="POSTHOG_HOST",
+        secrets=(
+            KeyedSecret(
+                key="api_key",
+                header="Authorization",
+                scheme="Bearer",
+                env="POSTHOG_API_KEY",
+                description="PostHog personal API key (account settings → Personal API keys), "
+                "scoped to what the workspace needs.",
+            ),
+        ),
+        sites=("us.posthog.com", "eu.posthog.com"),
+        site_description="PostHog private API host — `us.posthog.com` (US Cloud) or "
+        "`eu.posthog.com` (EU Cloud). Read it off your PostHog URL; US Cloud orgs may leave it "
+        "unset.",
     ),
 )
 

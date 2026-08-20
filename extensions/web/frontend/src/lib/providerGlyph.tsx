@@ -1,6 +1,8 @@
 import {
+  IconAddressBook,
   IconBrandAirtable,
   IconBrandAsana,
+  IconBrandDiscord,
   IconBrandFigma,
   IconBrandGithub,
   IconBrandGmail,
@@ -16,6 +18,7 @@ import {
   IconBrandZoom,
   IconCalendar,
   IconPlug,
+  IconTable,
 } from "@tabler/icons-react";
 
 import { cn } from "@/lib/cn";
@@ -24,11 +27,14 @@ import { cn } from "@/lib/cn";
 export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
   airtable: IconBrandAirtable,
   asana: IconBrandAsana,
+  attio: IconAddressBook,
+  discord: IconBrandDiscord,
   figma: IconBrandFigma,
   github: IconBrandGithub,
   gmail: IconBrandGmail,
   googlecalendar: IconCalendar,
   googledrive: IconBrandGoogleDrive,
+  googlesheets: IconTable,
   instagram: IconBrandInstagram,
   intercom: IconBrandIntercom,
   jira: IconBrandJira,

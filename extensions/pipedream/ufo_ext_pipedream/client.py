@@ -8,8 +8,11 @@ namespace does not serve: one whose consent Composio's shared client cannot pass
 blocks restricted Gmail scopes, so the deploy's own Google OAuth client rides Pipedream Connect via
 `custom_oauth_env`), or one Composio withholds by judgment where Pipedream's actions cover the gap
 (Linear: `linear-search-issues` and `linear-list-workflow-states` reach issue state, which
-Composio's toolkit cannot filter by). A provider no broker holds managed auth for at all is not an
-entry here — it authenticates with a workspace key through the `keyed_connectors` extension.
+Composio's toolkit cannot filter by; Attio: `attio-create-update-record` and the person/task/note
+writes reach what Composio's read-only grant cannot; Discord: the `discord-send-message` family
+posts to a channel, which Composio's identity-only user OAuth cannot). A provider no broker holds
+managed auth for at all is not an entry here — it authenticates with a workspace key through the
+`keyed_connectors` extension.
 
 `connect_token` mints the hosted consent leg (pinning the success/error return legs);
 `newest_account` and `connected_account` correlate its return to the state-scoped external user,
@@ -69,6 +72,8 @@ class ConnectorSpec:
 
 
 CONNECTORS: dict[str, ConnectorSpec] = {
+    "attio": ConnectorSpec("Attio", "attio", "api.attio.com"),
+    "discord": ConnectorSpec("Discord", "discord", "discord.com"),
     "gmail": ConnectorSpec(
         "Gmail", "gmail", "gmail.googleapis.com", custom_oauth_env="PIPEDREAM_GMAIL_OAUTH_APP_ID"
     ),

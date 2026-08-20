@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from ufo_ext_keyed_connectors import KEYED_PROVIDERS, manifest
+from ufo_ext_keyed_connectors import KEYED_PROVIDERS, KeyedSecret, manifest
 
 from ufo.credential_kind import CREDENTIAL_KIND
 from ufo.credentials import CredentialStore, HostChoice
@@ -74,6 +75,52 @@ def test_the_prompt_section_tells_the_agent_the_call_it_can_make() -> None:
     assert "request_credentials" in body
     assert 'curl -sS "https://$DD_HOST/<path>" -H "DD-API-KEY: $DD_API_KEY"' in body
     assert "DD-APPLICATION-KEY: $DD_APP_KEY" in body
+
+
+def test_posthog_keys_ride_the_authorization_header_with_its_bearer_scheme() -> None:
+    """PostHog takes a personal API key as `Authorization: Bearer <key>`, so the row declares the
+    scheme and the recipe renders it — the proxy swaps a `Bearer <sentinel>` value and re-prefixes
+    the real key. The host is the account's cloud, chosen from the two published ones."""
+    assert "posthog" in {provider.provider for provider in KEYED_PROVIDERS}
+    posthog = next(provider for provider in KEYED_PROVIDERS if provider.provider == "posthog")
+    host = posthog.target_host
+    assert isinstance(host, HostChoice)
+    assert host.slot == "posthog_api_host"
+    assert host.default == "us.posthog.com"
+    assert host.hosts == ("us.posthog.com", "eu.posthog.com")
+    body = manifest().prompt_sections[0].body
+    assert (
+        'curl -sS "https://$POSTHOG_HOST/<path>" -H "Authorization: Bearer $POSTHOG_API_KEY"'
+        in body
+    )
+
+
+def test_a_scheme_the_proxy_cannot_swap_is_refused_at_declaration() -> None:
+    """The proxy re-prefixes only `Bearer` and `Token` values, so a row declaring any other scheme
+    would ship a recipe whose sentinel never swaps — it fails at import, not on the wire."""
+    with pytest.raises(ValueError, match="scheme"):
+        KeyedSecret(key="k", header="Authorization", scheme="Basic", env="K", description="k")
+
+
+async def test_posthog_is_connectable_end_to_end_through_workspace_credentials(db: None) -> None:
+    """From the filled slot to the wire: the stored key becomes one Authorization injection on the
+    workspace's chosen PostHog cloud, admitted and metered there and nowhere else."""
+    workspace_id = await _workspace()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "posthog_api_key", "phx-real")
+    await store.put(workspace_id, "posthog_api_host", "eu.posthog.com")
+
+    rules = await derive_credential_rules(injecting_slots((manifest(),)), workspace_id, store)
+
+    assert [rule for rule in rules if isinstance(rule, ScopeRule)] == [
+        ScopeRule(allowed_hosts=frozenset({"eu.posthog.com"}))
+    ]
+    assert [rule for rule in rules if isinstance(rule, MeterRule)] == [
+        MeterRule(host="eu.posthog.com", dimension="requests")
+    ]
+    assert {
+        (rule.header, rule.sentinel, rule.real) for rule in rules if isinstance(rule, InjectionRule)
+    } == {("Authorization", "UFO_SENTINEL_KEYED_POSTHOG_API_KEY", "phx-real")}
 
 
 async def test_datadog_is_connectable_end_to_end_through_workspace_credentials(

@@ -83,6 +83,29 @@ test("the page offers every catalog tool and marks the connected ones", async ()
   expect(screen.getByRole("link", { name: "Manage connected accounts" })).toBeTruthy();
 });
 
+test("a tile draws its provider's own mark, never the plug", async () => {
+  wire({
+    "/workspace/first-run": () =>
+      json({
+        providers: [
+          { name: "googlesheets", label: "Google Sheets" },
+          { name: "attio", label: "Attio" },
+          { name: "discord", label: "Discord" },
+        ],
+        connectors: [],
+      }),
+    "/connections": () => json({ connections: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const sheets = await screen.findByRole("button", { name: "Google Sheets" });
+  expect(sheets.querySelector(".tabler-icon-table")).toBeTruthy();
+  const attio = screen.getByRole("button", { name: "Attio" });
+  expect(attio.querySelector(".tabler-icon-address-book")).toBeTruthy();
+  const discord = screen.getByRole("button", { name: "Discord" });
+  expect(discord.querySelector(".tabler-icon-brand-discord")).toBeTruthy();
+});
+
 test("Connect stands current in the bar on its own page", async () => {
   wire({
     "/workspace/first-run": () => json(CATALOG),

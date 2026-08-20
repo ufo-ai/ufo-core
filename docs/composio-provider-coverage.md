@@ -205,6 +205,11 @@ introspection — banned on the judgement that a common request should not need 
 Linear connects through the Pipedream allowlist instead, whose `linear-search-issues` and
 `linear-list-workflow-states` actions reach issue state directly; the explicit registration wins
 before this namespace is consulted, so the ban here stands untouched.
+**`attio`** and **`discord`** connect through the same allowlist: Pipedream's `attio` OAuth reaches
+the record writes (`attio-create-update-record`, person/task/note creates) Composio's read-only
+grant cannot, and its `discord` OAuth posts through the `discord-send-message` family where
+Composio's user OAuth carries identity and invites alone. Reading Discord chat content remains out
+of every broker's reach here. Both bans stand untouched.
 Note `wrike` and `basecamp` are kept while lacking an assignee filter, which is the same class of
 gap one notch less severe. **`boldsign`** is the weakest: send and list work, and `DOCUMENT_LIST`
 may expose a download URL — unverified.
