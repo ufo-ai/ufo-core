@@ -54,6 +54,10 @@ print the variable. An unmodified `gh` command uses the connected GitHub account
 
 **A GitHub connector grant is not git access.** It authenticates `gh` and `call_external_tool` against `api.github.com` only; git reaches `github.com`, which the grant does not cover. A working connector is never a reason to skip `connect_github` when private git access is missing. So when asked whether GitHub is connected, answer for the thing being asked about: a working issue read, a connected-account id, or a `credential` object proves the API works and proves nothing about clone or push. If git has no credential, the honest answer is that git is not connected and an admin needs to run the connect flow — never cite the grant as evidence that a clone should work.
 
+## Connecting GitHub for issues and API operations
+
+The reverse holds too: git access is not API access. Issue and pull-request reads and writes through the API ride the workspace's GitHub connector account, which `connect_github` never grants. When API operations are missing, start the handoff with `connect_account` carrying `provider: github` — even when a connector listing shows no GitHub row, because the listing is not the verdict: the call either begins the handoff or names the deploy's actual gap. A request to set up GitHub for both repositories and issues takes both connects in the same turn. And when only the API side is missing — clone and push already work — `connect_github` has nothing left to grant and re-running it is noise for the admin: the API-side move is the connector handoff, with a privately collected token as the fallback on a deploy without one.
+
 ## Finding the Repository
 
 For GitHub-backed tasks, identify the repository URL and put it in the objective. If the user doesn't provide one directly:
