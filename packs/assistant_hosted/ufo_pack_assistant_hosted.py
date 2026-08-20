@@ -5,7 +5,8 @@ memory and recall, Perplexity research, brokered connectors (Composio's open nam
 Pipedream allowlist), keyed connectors (a workspace API key injected at the egress proxy) and MCP,
 the browser/computer-use tools,
 website building and the code REPL, document generation, todos, durable objectives, scheduled
-tasks, member-authored skills, the ufo terminal
+tasks, member-authored skills, markdown content sources over a GitHub repository or a serve-local
+directory, the ufo terminal
 surface, the member web portal, and the operator session debugger, the Bedrock and OpenRouter
 model providers, Metronome plan provisioning, usage and seat metering, and the coding
 subagent — but over managed backends instead
@@ -57,6 +58,7 @@ EXTENSIONS = (
     "keyed_connectors",
     "pipedream",
     "sources",
+    "gbrain",
     "coding",
     "browser",
     "browserbase",

@@ -164,6 +164,18 @@ def test_assistant_hosted_pack_activates_the_imessage_surface() -> None:
     assert imessage.deploy_keys == ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET")
 
 
+def test_assistant_hosted_pack_activates_the_gbrain_source_backends() -> None:
+    """`serve` validates every configured `[[sources]]` block and every `source` row against the
+    backend map the activated manifests build, so a hosted deploy carrying a gbrain origin boots
+    only while this pack brings the extension up — the backend names and the object kind that keys
+    those rows are the contract, not the extension's presence on disk."""
+    manifests = load_manifests(assistant_hosted.NAME)
+    gbrain = next(manifest for manifest in manifests if manifest.name == "gbrain")
+    assert {provider.backend for provider in gbrain.sources} == {"gbrain_git", "gbrain_folder"}
+    assert [kind.name for kind in gbrain.objects] == ["gbrain_source"]
+    assert [slot.name for slot in gbrain.credentials] == ["github_token"]
+
+
 def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() -> None:
     """The hosted variant narrows to its managed-infra bundle (Turbopuffer, Slack, Redis, E2B on top
     of the assistant capabilities) in declared order, followed by the pack's own manifest carrying
