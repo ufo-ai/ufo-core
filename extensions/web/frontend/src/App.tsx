@@ -410,7 +410,7 @@ export function App({ agents, member, onAgents }: AppProps) {
                 onAgents={openAgents}
                 onNewChat={openNewChat}
                 onSection={(section) => placeSection(section, {}, "push")}
-                onWorkspace={() => placeWorkspace("team", {}, "push")}
+                onWorkspace={(view) => placeWorkspace(view, {}, "push")}
                 onAdmin={openAdmin}
               />
               <div
@@ -478,6 +478,11 @@ function inChat(kind: Route["kind"]): boolean {
 
 /** A place the bar reaches, named once and read twice: the row at a desk width and the drawer at a
  *  phone width. Two lists would let the drawer fall a destination behind the bar. */
+/** The one workspace tab the bar reaches on its own: connecting an account is what a member comes
+ *  to this product to do, so it stands beside the sections rather than two presses inside
+ *  Workspace. */
+const CONNECTORS = "connectors";
+
 type Destination = { label: string; current: boolean; onSelect: () => void };
 
 function TopBar({
@@ -504,7 +509,7 @@ function TopBar({
   onAgents: () => void;
   onNewChat: (agentId: string) => void;
   onSection: (section: Section) => void;
-  onWorkspace: () => void;
+  onWorkspace: (view: WorkspaceTab) => void;
   onAdmin: () => void;
 }) {
   const leading: Destination[] = [
@@ -519,11 +524,18 @@ function TopBar({
       current: route.kind === "section" && route.section === section,
       onSelect: () => onSection(section),
     })),
+    {
+      label: "Connectors",
+      current: route.kind === "workspace" && route.view === CONNECTORS,
+      onSelect: () => onWorkspace(CONNECTORS),
+    },
   ];
+  // The connectors tab stands in the bar on its own, so Workspace does not also read current
+  // under it — one destination is where the member is.
   const workspace: Destination = {
     label: "Workspace",
-    current: route.kind === "workspace",
-    onSelect: onWorkspace,
+    current: route.kind === "workspace" && route.view !== CONNECTORS,
+    onSelect: () => onWorkspace("team"),
   };
 
   return (

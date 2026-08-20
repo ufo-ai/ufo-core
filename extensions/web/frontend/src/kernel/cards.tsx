@@ -83,7 +83,7 @@ export function CardGrid<Row>({
                 </div>
               ) : null}
               <div className="flex items-baseline justify-between gap-md">
-                <div data-part="primary" className="min-w-0 truncate font-display text-body">
+                <div data-part="primary" className="min-w-0 truncate text-body font-medium">
                   {primary(row)}
                 </div>
                 {mark?.shape !== "square" ? state : null}

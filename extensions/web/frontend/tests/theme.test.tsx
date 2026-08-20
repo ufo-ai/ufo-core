@@ -273,16 +273,15 @@ test("the bundled faces are Inter for the chrome and Roboto Mono for the code", 
   expect(css).toContain('--font-sans:"Inter",system-ui,sans-serif');
   expect(/@font-face\{font-family:Inter;src:url\(\/surface\/web\/static\/assets\/Inter-[^)]+\.woff2\)/.test(css)).toBe(true);
   expect(css).toContain('--font-mono:"RobotoMono"');
-  expect(css).toContain('--font-display:"Canela"');
   expect(/@font-face\{font-family:RobotoMono;src:url\(\/surface\/web\/static\/assets\/RobotoMono-[^)]+\.ttf\)/.test(css)).toBe(true);
-  expect(/@font-face\{font-family:Canela;src:url\(\/surface\/web\/static\/assets\/Canela-[^)]+\.otf\)/.test(css)).toBe(true);
 });
 
-test("a heading takes the body face, and the display serif reaches only what names it", () => {
+test("one sans face carries the chrome, and no rule names a second family", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(css).toContain("h1,h2,h3{text-wrap:balance}");
   expect(/h1,h2,h3\{[^}]*font-family/.test(css)).toBe(false);
-  expect(css).toContain(".font-display{font-family:var(--font-display)}");
+  expect(css).not.toContain("--font-display");
+  expect(css).not.toContain("Canela");
 });
 
 test("the shadcn contract carries the theme, and names nothing no component reads", () => {

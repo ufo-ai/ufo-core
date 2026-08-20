@@ -386,6 +386,13 @@ export async function pressRow(name: string): Promise<void> {
   await userEvent.click(row);
 }
 
+/** Open a list row's own record: the row itself is the control that reaches it. */
+export async function pressItem(name: string): Promise<void> {
+  const row = (await screen.findAllByText(name)).map((node) => node.closest("li")).find(Boolean);
+  if (!row) throw new Error("no item named " + name);
+  await userEvent.click(row);
+}
+
 export async function viewCard(name: string): Promise<HTMLElement> {
   const card = (await screen.findAllByText(name))
     .map((node) => node.closest("li"))

@@ -7,7 +7,7 @@ export const WORKSPACE_TABS = [
   "usage",
 ] as const;
 
-export const SECTIONS = ["artifacts", "radar", "connect"] as const;
+export const SECTIONS = ["artifacts", "radar"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];

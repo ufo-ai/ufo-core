@@ -50,7 +50,6 @@ const CHORD = "k";
 const SECTION_ICONS: Record<Section, TablerIcon> = {
   artifacts: IconFile,
   radar: IconRadar,
-  connect: IconPlug,
 };
 
 /** Where the bar reaches, in the order it lists them. These rows are the same destinations as the
@@ -64,6 +63,7 @@ const PLACES: { label: string; hash: string; icon: TablerIcon }[] = [
     hash: sectionHash(section),
     icon: SECTION_ICONS[section],
   })),
+  { label: "Connectors", hash: workspaceHash("connectors"), icon: IconPlug },
   { label: "Workspace", hash: workspaceHash("team"), icon: IconUsers },
 ];
 

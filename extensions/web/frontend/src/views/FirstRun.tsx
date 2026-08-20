@@ -23,7 +23,7 @@ import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import type { Agent, Member } from "@/lib/types";
 
-type ProviderTile = { name: string; label: string };
+type ProviderTile = { name: string; label: string; summary: string; group: string };
 
 type Connector = ProviderTile & { installed: boolean };
 

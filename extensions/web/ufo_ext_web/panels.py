@@ -188,30 +188,120 @@ class CorrectionIntent(BaseModel):
 
 class ProviderTile(BaseModel):
     """One tool the first run offers as a pick. `name` is the connector provider slug the portal
-    draws the brand glyph by; `label` is what the member reads and what the memory states."""
+    draws the brand glyph by; `label` is what the member reads and what the memory states;
+    `summary` says what the agent does once the account is connected, and `group` is the heading
+    the catalog stands under. The catalog's own order is the order both pages draw, so the tiles
+    of one group arrive together without either page sorting them."""
 
     name: str
     label: str
+    summary: str
+    group: str
 
 
 FIRST_RUN_PROVIDERS = (
-    ProviderTile(name="slack", label="Slack"),
-    ProviderTile(name="github", label="GitHub"),
-    ProviderTile(name="gmail", label="Gmail"),
-    ProviderTile(name="googlecalendar", label="Google Calendar"),
-    ProviderTile(name="googledrive", label="Google Drive"),
-    ProviderTile(name="googlesheets", label="Google Sheets"),
-    ProviderTile(name="notion", label="Notion"),
-    ProviderTile(name="jira", label="Jira"),
-    ProviderTile(name="asana", label="Asana"),
-    ProviderTile(name="linear", label="Linear"),
-    ProviderTile(name="figma", label="Figma"),
-    ProviderTile(name="zoom", label="Zoom"),
-    ProviderTile(name="discord", label="Discord"),
-    ProviderTile(name="airtable", label="Airtable"),
-    ProviderTile(name="intercom", label="Intercom"),
-    ProviderTile(name="attio", label="Attio"),
-    ProviderTile(name="stripe", label="Stripe"),
+    ProviderTile(
+        name="slack",
+        label="Slack",
+        summary="Answer in channels and direct messages.",
+        group="Communication",
+    ),
+    ProviderTile(
+        name="discord",
+        label="Discord",
+        summary="Answer in channels and direct messages.",
+        group="Communication",
+    ),
+    ProviderTile(
+        name="zoom",
+        label="Zoom",
+        summary="Read meetings, recordings, and transcripts.",
+        group="Communication",
+    ),
+    ProviderTile(
+        name="gmail",
+        label="Gmail",
+        summary="Search, read, and draft email.",
+        group="Email and calendar",
+    ),
+    ProviderTile(
+        name="googlecalendar",
+        label="Google Calendar",
+        summary="Search events and schedule meetings.",
+        group="Email and calendar",
+    ),
+    ProviderTile(
+        name="googledrive",
+        label="Google Drive",
+        summary="Search, read, and create files.",
+        group="Files and documents",
+    ),
+    ProviderTile(
+        name="googlesheets",
+        label="Google Sheets",
+        summary="Read and update spreadsheets.",
+        group="Files and documents",
+    ),
+    ProviderTile(
+        name="notion",
+        label="Notion",
+        summary="Search pages and update databases.",
+        group="Files and documents",
+    ),
+    ProviderTile(
+        name="airtable",
+        label="Airtable",
+        summary="Read and update bases.",
+        group="Files and documents",
+    ),
+    ProviderTile(
+        name="figma",
+        label="Figma",
+        summary="Read files, frames, and comments.",
+        group="Files and documents",
+    ),
+    ProviderTile(
+        name="github",
+        label="GitHub",
+        summary="Read repositories, open issues, and push changes.",
+        group="Projects and code",
+    ),
+    ProviderTile(
+        name="linear",
+        label="Linear",
+        summary="Read issues and update projects.",
+        group="Projects and code",
+    ),
+    ProviderTile(
+        name="jira",
+        label="Jira",
+        summary="Track issues and update boards.",
+        group="Projects and code",
+    ),
+    ProviderTile(
+        name="asana",
+        label="Asana",
+        summary="Read tasks and update projects.",
+        group="Projects and code",
+    ),
+    ProviderTile(
+        name="stripe",
+        label="Stripe",
+        summary="Read customers, payments, and invoices.",
+        group="Customers and revenue",
+    ),
+    ProviderTile(
+        name="intercom",
+        label="Intercom",
+        summary="Read conversations and draft replies.",
+        group="Customers and revenue",
+    ),
+    ProviderTile(
+        name="attio",
+        label="Attio",
+        summary="Read and update records.",
+        group="Customers and revenue",
+    ),
 )
 
 FIRST_RUN_PROVIDER_NAMES = frozenset(tile.name for tile in FIRST_RUN_PROVIDERS)

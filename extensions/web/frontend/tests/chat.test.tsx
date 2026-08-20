@@ -3130,7 +3130,11 @@ test("a standing connect is the act, pressable to the provider's own page", asyn
 });
 
 test("the starters close on a link to the connectors screen, which the press reaches", async () => {
-  wire({ ...transcript(), "/connections": () => json({ connections: [] }) });
+  wire({
+    ...transcript(),
+    "/connections": () => json({ connections: [] }),
+    "/workspace/first-run": () => json({ providers: [], connectors: [] }),
+  });
   location.hash = "#/";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -3144,7 +3148,7 @@ test("the starters close on a link to the connectors screen, which the press rea
   await userEvent.click(cta);
 
   expect(location.hash).toBe("#/workspace/connectors");
-  await screen.findByText("No connector is connected yet.");
+  await screen.findByText("No connector is offered yet.");
   expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
 });
 

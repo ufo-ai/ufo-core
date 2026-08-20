@@ -33,7 +33,7 @@ export function ItemContent({ children }: { children: ReactNode }) {
 
 export function ItemTitle({ children }: { children: ReactNode }) {
   return (
-    <div data-slot="item-title" data-part="primary" className="truncate font-display text-body">
+    <div data-slot="item-title" data-part="primary" className="truncate text-body font-medium">
       {children}
     </div>
   );
