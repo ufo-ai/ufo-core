@@ -13,9 +13,10 @@ terminal install command.
 1. **The team emails them an invitation.** Its link opens first run. There is nothing in it to
    retype. The invitation covers their whole email domain, so the person who opens it does not have
    to be the person who received it.
-2. **They enter their work email.** A verification code is emailed to them, and they enter it. Those
-   two prompts are the whole sign-in. The portal opens automatically after verification. They can
-   use the install command in the invitation if they want the terminal client.
+2. **They enter their work email.** A verification code is emailed to them, and they enter it — or,
+   on the same page, they choose Continue with Google and verify through their Google account
+   instead, skipping the code. The portal opens automatically after verification. They can use the
+   install command in the invitation if they want the terminal client.
 3. **Their verified email domain opens the workspace.** Nothing else is asked for. The invitation
    works once per domain, and lapses if it goes unused for a couple of weeks.
 4. **Joining an existing workspace needs no invitation.** A teammate whose email domain already has a

@@ -23,6 +23,7 @@ SLACK_TOOLS = "extensions/slack/ufo_ext_slack/tools.py"
 METRONOME = "extensions/metronome/ufo_ext_metronome.py"
 GATEWAY = "control/src/gateway.rs"
 GATEWAY_WEB = "control/src/login.html"
+WORKOS = "control/src/workos.rs"
 ONBOARD_CONTROL = "core/src/ufo/onboard_control.py"
 INVITES = "control/src/invite.rs"
 INVITE_DELIVERY = "control/src/invite_delivery.rs"
@@ -121,6 +122,14 @@ CLAIMS = (
         phrase="An exact membership needs no invite",
         source=GATEWAY,
         pattern=r"if choices\.is_empty\(\)",
+    ),
+    Claim(
+        claim="the browser sign-in page offers a Google account as an alternative to the emailed"
+        " code",
+        corpus="references/getting-started.md",
+        phrase="they choose Continue with Google and verify through their Google account",
+        source=WORKOS,
+        pattern=r'pub const GOOGLE_PROVIDER: &str = "GoogleOAuth";',
     ),
     Claim(
         claim="an admin is offered connecting Slack, then billing setup, at the end of signup",
