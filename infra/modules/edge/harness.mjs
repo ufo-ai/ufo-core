@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 
 const moduleDir = new URL(".", import.meta.url);
-const landingTemplate = await readFile(new URL("landing.html", moduleDir), "utf8");
 export const FAVICON_SVG = await readFile(
   new URL("../../../assets/brand/ufo-mark.svg", moduleDir),
   "utf8",
@@ -13,8 +12,7 @@ export const FAVICON_DARK_SVG = await readFile(
   "utf8",
 );
 const sourceTemplate = await readFile(new URL("worker.js", moduleDir), "utf8");
-export const landingPage = (hostname) => landingTemplate.replaceAll("__HOSTNAME__", hostname);
-export const LANDING_PAGE = landingPage("flyingobject.ai");
+export const LANDING_PAGE = await readFile(new URL("landing.html", moduleDir), "utf8");
 
 const legalShell = await readFile(new URL("legal.html", moduleDir), "utf8");
 const legalPage = async (title, body) =>
@@ -25,12 +23,9 @@ export const PRIVACY_PAGE = await legalPage("Privacy Policy", "privacy.html");
 export const TERMS_PAGE = await legalPage("Terms of Service", "terms.html");
 
 // Each tag is a distinct module, so a test gets its own isolate-level caches.
-export async function importWorker(tag, hostname = "flyingobject.ai") {
+export async function importWorker(tag) {
   const source = sourceTemplate
-    .replace(
-      '"__LANDING_HTML__"',
-      JSON.stringify(landingPage(hostname)),
-    )
+    .replace('"__LANDING_HTML__"', JSON.stringify(LANDING_PAGE))
     .replace('"__FAVICON_SVG__"', JSON.stringify(FAVICON_SVG))
     .replace('"__FAVICON_DARK_SVG__"', JSON.stringify(FAVICON_DARK_SVG))
     .replace('"__PRIVACY_HTML__"', JSON.stringify(PRIVACY_PAGE))

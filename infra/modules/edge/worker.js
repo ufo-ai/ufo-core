@@ -4,7 +4,7 @@ const MAX_EMAIL = 254;
 const COUNT_TTL_MS = 3_600_000;
 const FLEET_TTL_MS = 300_000;
 const FLEET_FETCH_TIMEOUT_MS = 3_000;
-const MAX_FLEET = 100;
+const PAGE_CACHE = "public, max-age=600";
 const WAITLIST_SENDER = "__WAITLIST_SENDER__";
 
 const LANDING_HTML = "__LANDING_HTML__";
@@ -88,7 +88,7 @@ function secure(url) {
 
 function page(html) {
   return new Response(html, {
-    headers: { "content-type": "text/html; charset=utf-8" },
+    headers: { "cache-control": PAGE_CACHE, "content-type": "text/html; charset=utf-8" },
   });
 }
 
@@ -129,8 +129,7 @@ async function landing(request, env, url) {
   if (!CLI_UA.test(request.headers.get("user-agent") ?? "")) {
     const bounce = secure(url);
     if (bounce) return bounce;
-    const count = await fleetCount(env.ORIGIN_BASE);
-    return page(LANDING_HTML.replace("__FLEET_N__", String(Math.min(MAX_FLEET, count))));
+    return page(LANDING_HTML);
   }
   const [total, workspaces] = await Promise.all([
     waitlistCount(env.DB),

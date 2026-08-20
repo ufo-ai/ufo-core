@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 
 import {
   FAVICON_DARK_SVG,
@@ -10,7 +11,6 @@ import {
   TERMS_PAGE,
   d1,
   importWorker,
-  landingPage,
 } from "./harness.mjs";
 
 const worker = await importWorker("shared");
@@ -65,27 +65,9 @@ test("browser landing over plain http is bounced to https with its query intact"
   assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
 });
 
-test("browser landing hides the terminal hint from sight", () => {
-  assert.match(
-    LANDING_PAGE,
-    /^<!doctype html>\n<!-- Terminal interface: curl https:\/\/flyingobject\.ai -->/,
-  );
-  assert.match(
-    LANDING_PAGE,
-    /<meta name="description" content="[^"]*curl https:\/\/flyingobject\.ai" \/>/,
-  );
-  assert.match(
-    LANDING_PAGE,
-    /<span hidden aria-hidden="true">Terminal interface: curl https:\/\/flyingobject\.ai<\/span>/,
-  );
-  assert.doesNotMatch(LANDING_PAGE, /terminal-hint/);
-  assert.match(
-    LANDING_PAGE,
-    /console\.info\("Terminal interface: curl https:\/\/flyingobject\.ai"\);/,
-  );
-});
-
-test("browser landing links the product favicon", () => {
+// The mark has one home in this repo. The page links the worker's routes rather than carrying a
+// copy, so a mark that changes on disk changes on the tab.
+test("the browser page links the product favicon and holds no copy of it", () => {
   assert.match(
     LANDING_PAGE,
     /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml" media="\(prefers-color-scheme: light\)" \/>/,
@@ -94,6 +76,7 @@ test("browser landing links the product favicon", () => {
     LANDING_PAGE,
     /<link rel="icon" href="\/favicon-dark\.svg" type="image\/svg\+xml" media="\(prefers-color-scheme: dark\)" \/>/,
   );
+  assert.doesNotMatch(LANDING_PAGE, /data:image\/svg\+xml/);
 });
 
 test("favicons serve the exact light and dark product marks", async () => {
@@ -108,52 +91,36 @@ test("favicons serve the exact light and dark product marks", async () => {
   }
 });
 
-test("every front door serves its own embedded page to browsers", async () => {
+// The page names no host, so every front door serves the one document.
+test("every front door serves the embedded page to browsers", async () => {
   for (const host of ["flyingobject.ai", "testing.flyingobject.ai"]) {
-    const fresh = await importWorker(`page-${host}`, host);
+    const fresh = await importWorker(`page-${host}`);
     const reply = await fresh.fetch(
       new Request(`https://${host}/?utm_source=card`, {
         headers: { "user-agent": "Mozilla/5.0" },
       }),
       { ...env, ORIGIN_BASE: `https://origin.${host}` },
     );
-    const page = await reply.text();
     assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
-    assert.equal(page, landingPage(host).replace("__FLEET_N__", "4"));
+    assert.equal(reply.headers.get("cache-control"), "public, max-age=600");
+    assert.equal(await reply.text(), LANDING_PAGE);
   }
 });
 
-test("the landing page carries the live craft count from the gateway", async () => {
-  const fresh = await importWorker("fleet-live");
-  fleetReply = () => Response.json({ craft: 4 });
-  const reply = await fresh.fetch(
-    new Request("https://flyingobject.ai/", { headers: { "user-agent": "Mozilla/5.0" } }),
-    env,
-  );
-  assert.match(await reply.text(), /const FLEET_N = 4;/);
-});
-
-test("the craft count is capped at the fleet limit", async () => {
-  const fresh = await importWorker("fleet-cap");
-  fleetReply = () => Response.json({ craft: 5000 });
-  const reply = await fresh.fetch(
-    new Request("https://flyingobject.ai/", { headers: { "user-agent": "Mozilla/5.0" } }),
-    env,
-  );
-  assert.match(await reply.text(), /const FLEET_N = 100;/);
-});
-
-test("a gateway outage lands an empty sky, not an error", async () => {
-  const fresh = await importWorker("fleet-outage");
+// The page stands whole in itself, so a gateway that is down takes nothing away from it.
+test("the browser page is served with no call of the worker's own", async () => {
+  const fresh = await importWorker("page-standalone");
   fleetReply = () => {
     throw new Error("origin down");
   };
+  const before = outbound.length;
   const reply = await fresh.fetch(
     new Request("https://flyingobject.ai/", { headers: { "user-agent": "Mozilla/5.0" } }),
     env,
   );
   assert.equal(reply.status, 200);
-  assert.match(await reply.text(), /const FLEET_N = 0;/);
+  assert.equal(await reply.text(), LANDING_PAGE);
+  assert.deepEqual(outbound.slice(before), []);
   fleetReply = () => Response.json({ craft: 0 });
 });
 
@@ -176,28 +143,23 @@ test("signup is positional, idempotent, and normalizes the email", async () => {
   assert.match(await duplicate.text(), /#1 on the waitlist\./);
 });
 
-test("the browser panel joins over the same wire the card documents", async () => {
-  // Drive the worker with exactly what the page declares and sends, so a change to either
-  // end of the panel's request has to keep landing on a route the worker actually serves.
-  const [, action] = LANDING_PAGE.match(/<form id="join"[^>]* action="([^"]+)"/);
-  const [, contentType] = LANDING_PAGE.match(/'content-type': '([^']+)'/);
-  const fresh = await importWorker("panel-join");
-  const reply = await fresh.fetch(
-    new Request(new URL(action, "https://flyingobject.ai"), {
-      method: "POST",
-      headers: { "content-type": contentType, "user-agent": "Mozilla/5.0" },
-      body: new URLSearchParams({ email: "Pilot@YourCo.com" }),
-    }),
-    { ...env, DB: d1() },
-  );
-  assert.equal(reply.status, 200);
-  assert.match((await reply.text()).trim(), /^#1 on the waitlist\./);
-});
+// A visitor reads nothing until the bytes above <body> arrive, and pays for the whole document
+// once per cache lifetime. Both are bounded here so an inlined asset cannot quietly restore the
+// weight: the payload the apex serves is the one thing on it a member cannot work around.
+const HEAD_BUDGET = 96 * 1024;
+const PAGE_BUDGET = 320 * 1024;
 
-test("the sky is decoration the pointer passes straight through", () => {
-  assert.match(LANDING_PAGE, /<div id="sky" aria-hidden="true"><\/div>/);
-  assert.match(LANDING_PAGE, /\.craft\{[^}]*pointer-events:none/);
-  assert.doesNotMatch(LANDING_PAGE, /addEventListener\('click'/);
+test("the served page stays inside its transfer budget", () => {
+  const transferred = (text) => gzipSync(Buffer.from(text), { level: 6 }).byteLength;
+  const head = LANDING_PAGE.slice(0, LANDING_PAGE.indexOf("<body>"));
+  assert.ok(
+    transferred(head) <= HEAD_BUDGET,
+    `${transferred(head)} bytes reach the browser before <body>, over ${HEAD_BUDGET}`,
+  );
+  assert.ok(
+    transferred(LANDING_PAGE) <= PAGE_BUDGET,
+    `the page transfers ${transferred(LANDING_PAGE)} bytes, over ${PAGE_BUDGET}`,
+  );
 });
 
 test("the served page fits the device without taking pinch zoom away", () => {
@@ -208,18 +170,6 @@ test("the served page fits the device without taking pinch zoom away", () => {
   // Pinning the scale is the usual way to stop Safari's focus zoom. It strips zoom from every
   // visitor and modern Safari ignores it anyway, so the controls carry 16px instead.
   assert.doesNotMatch(LANDING_PAGE, /(?:maximum|minimum)-scale|user-scalable/);
-});
-
-test("the join is a block in the page, submittable with nothing to open", () => {
-  assert.doesNotMatch(LANDING_PAGE, /dialog|showModal|aria-modal|::backdrop/i);
-  assert.match(
-    LANDING_PAGE,
-    /<form id="join" class="panel" action="\/waitlist" method="post" aria-labelledby="join-head">/,
-  );
-  assert.match(LANDING_PAGE, /<p class="head" id="join-head">Join Waitlist<\/p>/);
-  assert.match(LANDING_PAGE, /<input id="email" name="email" type="email" required maxlength="254"/);
-  assert.match(LANDING_PAGE, /<button id="go" class="go" type="submit">submit<\/button>/);
-  assert.match(LANDING_PAGE, /<p id="ack" class="ack" role="status"><\/p>/);
 });
 
 test("a first join queues and delivers one confirmation email", async () => {
@@ -446,7 +396,6 @@ test("the worker uses its configured environment origin", async () => {
     assert.equal(await binary.text(), `origin:${origin}/ufo/bin/aarch64-apple-darwin`);
     assert.deepEqual(await fleet.json(), { craft: 0 });
     assert.deepEqual(outbound.slice(start), [
-      `${origin}/fleet`,
       `${origin}/ufo`,
       `${origin}/ufo/bin/aarch64-apple-darwin`,
       `${origin}/fleet`,
@@ -538,6 +487,7 @@ test("each legal page is served whole, headed by its own title", async () => {
     const reply = await request(`https://flyingobject.ai${legal.path}`, { ua: "Mozilla/5.0" });
     assert.equal(reply.status, 200);
     assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(reply.headers.get("cache-control"), "public, max-age=600");
     const served = await reply.text();
     assert.equal(served, legal.document);
     assert.doesNotMatch(served, /__[A-Z_]+__/);

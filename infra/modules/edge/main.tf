@@ -10,7 +10,7 @@ terraform {
 
 locals {
   waitlist_sender = "no-reply@flyingobject.ai"
-  landing_html    = replace(file("${path.module}/landing.html"), "__HOSTNAME__", var.hostname)
+  landing_html    = file("${path.module}/landing.html")
   legal_shell     = file("${path.module}/legal.html")
   privacy_html = replace(
     replace(local.legal_shell, "__TITLE__", "Privacy Policy"),

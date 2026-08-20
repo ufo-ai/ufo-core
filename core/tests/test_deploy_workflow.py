@@ -4116,11 +4116,8 @@ def test_edge_doors_use_separate_environment_origins() -> None:
 def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
     module = ROOT / "infra" / "modules" / "edge"
     terraform = (module / "main.tf").read_text()
-    assert (
-        'landing_html    = replace(file("${path.module}/landing.html"), '
-        '"__HOSTNAME__", var.hostname)' in terraform
-    )
-    assert (module / "landing.html").read_text().count("__HOSTNAME__") == 5
+    assert 'landing_html    = file("${path.module}/landing.html")' in terraform
+    assert not re.search(r"__[A-Z_]+__", (module / "landing.html").read_text())
     worker = (module / "worker.js").read_text()
     harness = (module / "harness.mjs").read_text()
     substituted = {
@@ -4131,7 +4128,7 @@ def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
         "__TERMS_HTML__": "local.terms_html",
         "__WAITLIST_SENDER__": "local.waitlist_sender",
     }
-    assert set(re.findall(r'"(__[A-Z_]+__)"', worker)) - {"__FLEET_N__"} == set(substituted)
+    assert set(re.findall(r'"(__[A-Z_]+__)"', worker)) == set(substituted)
     for placeholder, value in substituted.items():
         assert worker.count(f'"{placeholder}"') == 1
         assert re.search(rf'"\\"{placeholder}\\"",\n\s+jsonencode\({re.escape(value)}\)', terraform)
