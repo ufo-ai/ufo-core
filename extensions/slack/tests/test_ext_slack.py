@@ -454,9 +454,11 @@ def _workspace_file(tmp_path, conversation_id: UUID, rel: str) -> Path:
     return tmp_path / "workspaces" / str(conversation_id) / rel
 
 
-async def _store(workspace_id: UUID) -> CredentialStore:
+async def _store(workspace_id: UUID, bot_token: str | None = BOT_TOKEN) -> CredentialStore:
+    """`bot_token=None` leaves the slot unset — a workspace whose install never finished."""
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, BOT_TOKEN)
+    if bot_token is not None:
+        await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, bot_token)
     return store
 
 
@@ -554,9 +556,10 @@ async def _mount_transport(
     identity: bool = True,
     public_base_url: str | None = PUBLIC_BASE_URL,
     ambient_reply: AmbientReplyClassifier = UNREACHED_AMBIENT_REPLY,
+    bot_token: str | None = BOT_TOKEN,
 ):
     _patch_httpx(monkeypatch, transport)
-    store = await _store(workspace_id)
+    store = await _store(workspace_id, bot_token)
     init_workspace_credentials(store)
     await _register_slack(store, workspace_id)
     blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
@@ -604,6 +607,7 @@ async def test_first_signed_event_proves_identity_and_retry_admits(
     async with client:
         first = await client.post(EVENTS_PATH, content=body, headers=_sign(body, int(time.time())))
         assert first.status_code == 503
+        assert "x-slack-no-retry" not in first.headers
         await asyncio.gather(*slack._IDENTITY_TASKS.values())
         response = await client.post(
             EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
@@ -623,6 +627,53 @@ async def test_first_signed_event_proves_identity_and_retry_admits(
                 .where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one() == 1
+
+
+async def test_events_for_a_workspace_with_no_bot_token_prove_no_identity(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """A workspace whose `slack_bot_token` slot is unset keeps receiving events — the team binding
+    the install wrote outlives the slot — and its identity can never be proven, because `auth.test`
+    reads the token that is missing. So no proof runs on any of those events, Slack is told not to
+    retry a delivery that cannot land, and the state is reported once per process with the workspace
+    id, which is what an operator acts on."""
+    caplog.set_level(logging.WARNING, logger="ufo")
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, blob = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _mock_transport(recorder, {}),
+        identity=False,
+        bot_token=None,
+    )
+    body = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text=f"<@{BOT_USER_ID}> hi"
+    )
+    async with client:
+        first = await client.post(EVENTS_PATH, content=body, headers=_sign(body, int(time.time())))
+        second = await client.post(EVENTS_PATH, content=body, headers=_sign(body, int(time.time())))
+    assert (first.status_code, second.status_code) == (503, 503)
+    assert first.headers["x-slack-no-retry"] == "1"
+    assert second.headers["x-slack-no-retry"] == "1"
+    assert workspace_id not in slack._IDENTITY_TASKS
+    assert _fetches(recorder, slack.SLACK_AUTH_TEST_URL) == []
+    assert await _read_identity(blob, workspace_id) is None
+    assert [r for r in caplog.records if "identity proof failed" in r.getMessage()] == []
+    [reported] = [r for r in caplog.records if r.message == "slack.install_incomplete"]
+    assert (reported.ufo["workspace_id"], reported.ufo["slot"]) == (
+        str(workspace_id),
+        slack.SLACK_BOT_TOKEN_SLOT,
+    )
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one() == 0
 
 
 async def test_manifest_workspace_verifies_with_its_own_signing_slot(

@@ -137,7 +137,7 @@ from ufo.sdk.hub import (
     ToolCall,
 )
 from ufo.sdk.manifest import HookContext, HookOutcome
-from ufo.sdk.o11y import log
+from ufo.sdk.o11y import log, warn
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
@@ -336,11 +336,17 @@ async def resolve_self_user_id(ctx: SurfaceIdentityContext) -> str | None:
     return None if identity is None else identity.bot_user_id
 
 
-async def _identity(ctx: SurfaceContext) -> SlackIdentity | None:
+async def _bot_token(ctx: SurfaceContext) -> str | None:
+    """The workspace's bot token, or None when its slot is unset — a workspace whose install never
+    finished, or whose slot an admin unset. Events keep routing to it either way: the team binding
+    the install wrote outlives the slot."""
     try:
-        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+        return await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     except CredentialSlotUnset:
         return None
+
+
+async def _identity(ctx: SurfaceContext, bot_token: str) -> SlackIdentity | None:
     identity = await read_identity(ctx.blob, bot_token)
     if identity is not None:
         await _mirror_self_user_id(ctx.workspace_id, identity.bot_user_id)
@@ -418,13 +424,14 @@ class SlackIdentityResolver:
 _IDENTITY_TASKS: dict[UUID, asyncio.Task[None]] = {}
 
 
-def _prove_identity_in_background(ctx: SurfaceContext) -> None:
+def _prove_identity_in_background(ctx: SurfaceContext, bot_token: str) -> None:
     """A manifest-app workspace whose secrets are filled but whose identity was never derived (the
     owner never re-ran `slack_connect`) proves it off the first inbound event, so the retry admits.
-    One task per workspace; the OAuth path never reaches here (its callback wrote the identity)."""
+    One task per workspace; the OAuth path never reaches here (its callback wrote the identity).
+    The token arrives as an argument, so a workspace whose slot is unset cannot reach the proof."""
     if ctx.workspace_id in _IDENTITY_TASKS:
         return
-    task = asyncio.create_task(_run_identity_proof(ctx))
+    task = asyncio.create_task(_run_identity_proof(ctx, bot_token))
     _IDENTITY_TASKS[ctx.workspace_id] = task
 
     def _untrack(done: asyncio.Task[None]) -> None:
@@ -434,14 +441,49 @@ def _prove_identity_in_background(ctx: SurfaceContext) -> None:
     task.add_done_callback(_untrack)
 
 
-async def _run_identity_proof(ctx: SurfaceContext) -> None:
+async def _run_identity_proof(ctx: SurfaceContext, bot_token: str) -> None:
     try:
-        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
         await SlackIdentityResolver(ctx.blob, bot_token).resolve()
     except SlackIdentityError as error:
-        _LOG.error("slack identity proof failed: %s", error)
+        _LOG.error("slack identity proof failed for workspace %s: %s", ctx.workspace_id, error)
     except Exception:
-        _LOG.error("slack identity proof failed", exc_info=True)
+        _LOG.error("slack identity proof failed for workspace %s", ctx.workspace_id, exc_info=True)
+
+
+_INSTALL_INCOMPLETE_REPORTED: set[UUID] = set()
+
+NO_RETRY_HEADERS = {"x-slack-no-retry": "1"}
+
+
+def _identity_unavailable(ctx: SurfaceContext, bot_token: str | None) -> Response:
+    """The answer to a verified Slack request whose workspace has no readable identity record.
+
+    A workspace holding its bot token proves the identity in the background and admits on Slack's
+    retry, or logs what `auth.test` refused. A workspace whose token slot is unset has nothing to
+    prove it with: `auth.test` reads that token. So no proof is started there, and the answer
+    carries `x-slack-no-retry`, which spends one delivery on the state rather than the four Slack
+    sends over six minutes. The state is reported once per process, carrying the workspace id — the
+    field an operator acts on, the fix being the owner filling the slot — and a restart reports it
+    afresh, which is the reminder that it is still broken.
+
+    Neither state says anything in Slack, deliberately: every message this surface posts needs the
+    bot token that is missing. The owner's way back is `slack_connect`, which names the empty slots,
+    and the portal's credential list, which shows the slot unfilled."""
+    if bot_token is None:
+        if ctx.workspace_id not in _INSTALL_INCOMPLETE_REPORTED:
+            _INSTALL_INCOMPLETE_REPORTED.add(ctx.workspace_id)
+            warn(
+                "slack.install_incomplete",
+                workspace_id=str(ctx.workspace_id),
+                slot=SLACK_BOT_TOKEN_SLOT,
+            )
+        return Response(
+            "Slack is not installed for this workspace",
+            status_code=503,
+            headers=NO_RETRY_HEADERS,
+        )
+    _prove_identity_in_background(ctx, bot_token)
+    return Response("Slack identity is being verified", status_code=503)
 
 
 URL_VERIFIED_BLOB_KEY = "surfaces/slack/url_verified"
@@ -1562,10 +1604,10 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     payload = json.loads(raw)
     if not isinstance(payload, dict):
         raise ValueError("Slack body must be an object")
-    identity = await _identity(ctx)
-    if identity is None:
-        _prove_identity_in_background(ctx)
-        return Response("Slack identity is being verified", status_code=503)
+    bot_token = await _bot_token(ctx)
+    identity = None if bot_token is None else await _identity(ctx, bot_token)
+    if bot_token is None or identity is None:
+        return _identity_unavailable(ctx, bot_token)
     if payload.get("team_id") != identity.team_id:
         return JSONResponse({"ok": True, "ignored": True})
     await _mark_url_verified(ctx, signing_secret)
@@ -1575,7 +1617,6 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         return Response("Slack channel audience is unavailable", status_code=503)
     if inbound is None:
         return JSONResponse({"ok": True, "ignored": True})
-    bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     if inbound.addressed or inbound.files or await _folds_into_live_turn(ctx, bot_token, inbound):
         await _admit_inbound(ctx, bot_token, inbound, identity)
         return JSONResponse({"ok": True})
@@ -3373,10 +3414,10 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
         verify_slack_signature(request.headers, raw, signing_secret)
     except SlackSignatureError as error:
         return Response(str(error), status_code=401)
-    identity = await _identity(ctx)
-    if identity is None:
-        _prove_identity_in_background(ctx)
-        return Response("Slack identity is being verified", status_code=503)
+    bot_token = await _bot_token(ctx)
+    identity = None if bot_token is None else await _identity(ctx, bot_token)
+    if bot_token is None or identity is None:
+        return _identity_unavailable(ctx, bot_token)
     interaction = _to_interaction(raw, identity)
     if interaction is None:
         return JSONResponse({"ok": True, "ignored": True})
@@ -3412,7 +3453,6 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                     ASK_EMPTY_SUBMIT_TEXT,
                 )
                 return JSONResponse({"ok": True, "ignored": True})
-            bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
             sender, answered_at = await asyncio.gather(
                 _slack_user(bot_token, interaction.slack_user_id),
                 _slack_permalink(bot_token, interaction.channel, interaction.message_ts),
@@ -3838,7 +3878,7 @@ async def _reply_mention_ids(
     bound is membership of the team that record names."""
     if "@" not in text:
         return {}
-    identity = await _identity(ctx)
+    identity = await _identity(ctx, bot_token)
     if identity is None:
         return {}
     return await SlackNames(bot_token).mention_ids(channel, identity)

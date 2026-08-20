@@ -58,16 +58,11 @@ class _UnreadableStore(ScopedStore):
 
 @dataclass
 class _IdentityReadContext:
-    """The three members `_identity` touches on a surface context: the workspace the route bound,
-    the blob holding the identity record, and the bot-token slot it is fingerprinted against."""
+    """The two members `_identity` touches on a surface context: the workspace the route bound and
+    the blob holding the identity record. Its caller reads the bot token and hands it over."""
 
     workspace_id: UUID
     blob: BlobStore
-    bot_token: str
-
-    async def credential(self, slot: str) -> str:
-        assert slot == slack.SLACK_BOT_TOKEN_SLOT
-        return self.bot_token
 
 
 def _send(arguments: dict[str, JsonValue], slug: str = SLACK_SEND_SLUG) -> CallExternalToolInput:
@@ -147,10 +142,10 @@ async def test_the_surfaces_own_identity_read_mirrors_the_id_into_the_store(
             .model_dump_json()
             .encode(),
         )
-    ctx = _IdentityReadContext(workspace_id=workspace_id, blob=blob, bot_token=bot_token)
+    ctx = _IdentityReadContext(workspace_id=workspace_id, blob=blob)
 
     with ws(workspace_id):
-        identity = await slack._identity(cast(SurfaceContext, ctx))
+        identity = await slack._identity(cast(SurfaceContext, ctx), bot_token)
         assert identity is not None and identity.bot_user_id == BOT_USER_ID
         assert (
             await ScopedStore(extension=slack.SLACK_EXTENSION).get(slack.SELF_USER_ID_STORE_KEY)
