@@ -498,6 +498,9 @@ test("each legal page is served whole, headed by its own title", async () => {
       legal.headings,
     );
     assert.match(served, /founders@metalcraft\.ai/);
+    assert.match(served, /ufo\.ai/);
+    assert.doesNotMatch(served, /Flying Object AI/);
+    assert.doesNotMatch(served, /flyingobject\.ai/);
   }
 });
 
