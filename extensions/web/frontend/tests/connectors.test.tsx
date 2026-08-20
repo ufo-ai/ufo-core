@@ -707,3 +707,31 @@ test("the row moves up when the account lands", async () => {
   expect(await screen.findByLabelText("Notion connected")).toBeTruthy();
   expect(within(row("Notion")).queryByRole("button", { name: "Connect" })).toBeNull();
 });
+
+test("the category picker narrows both zones and lands in the place", async () => {
+  location.hash = workspaceHash("connectors");
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await screen.findByLabelText("Notion connected");
+
+  await pick("Category", "Communication");
+
+  expect(location.hash).toContain("chip=Communication");
+  expect(connects("Slack")).toBeTruthy();
+  // Notion is connected but stands under another category, so its zone goes with it.
+  expect(screen.queryByText("Notion")).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Connected" })).toBeNull();
+  expect(screen.queryByText("Gmail")).toBeNull();
+});
+
+/** A connection on a provider the catalog does not name has no category, so a picked one hides it
+ *  rather than sweeping it into a group it never stood under. */
+test("a connection outside the catalog stands only under every category", async () => {
+  location.hash = workspaceHash("connectors");
+  library({ "/connections": () => json({ connections: [grant("sentry", false, "g9")] }) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await screen.findByLabelText("sentry connected");
+
+  await pick("Category", "Communication");
+  expect(screen.queryByLabelText("sentry connected")).toBeNull();
+});

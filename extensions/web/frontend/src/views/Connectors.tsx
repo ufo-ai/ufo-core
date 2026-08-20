@@ -24,7 +24,7 @@ import {
 import { Td, TdFact } from "@/components/ui/table";
 import { useBeside } from "@/kernel/beside";
 import type { Placement } from "@/kernel/pager";
-import { RecordPanel } from "@/kernel/pane";
+import { PageToolbar, RecordPanel } from "@/kernel/pane";
 import {
   Notice,
   type NoticeState,
@@ -133,6 +133,7 @@ type Standing = {
   label: string;
   detail: ReactNode;
   said: string;
+  group: string;
   grant: string | null;
 };
 
@@ -153,6 +154,7 @@ function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
       label: row.label,
       detail: tiles.get(row.name)?.summary ?? "",
       said: row.label + " " + row.name,
+      group: tiles.get(row.name)?.group ?? "",
       grant: null,
     }));
   return [
@@ -169,6 +171,7 @@ function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
         </>
       ),
       said: [entry.provider, entry.account_label ?? "", entry.account_id ?? "", entry.owner_email ?? ""].join(" "),
+      group: tiles.get(entry.provider)?.group ?? "",
       grant: entry.grant,
     })),
   ];
@@ -202,6 +205,16 @@ function grouped(rows: Offer[]): [string, Offer[]][] {
 /** What the GitHub row opens beside the list. The three legs are GitHub's alone, so they are read
  *  where every other detail of a connector is read — its own record — rather than as a block on the
  *  page's ground under a heading that names no provider. */
+/** Every category the catalog carries, in the order it carries them, so the picker lists them the
+ *  way the page stacks them. */
+function categories(catalog: FirstRunPayload): string[] {
+  return [...new Set(catalog.providers.map((tile) => tile.group))];
+}
+
+/** What the picker stands at when no category is picked. Radix names an option by a value, and an
+ *  empty one is how it says nothing is selected — so the whole catalog is a named choice. */
+const EVERY_CATEGORY = "all";
+
 const COVERAGE = "github-coverage";
 
 const GITHUB = "github";
@@ -228,8 +241,15 @@ function joined(
  *  open the consent window on the press itself, so one press is the whole act. While a press waits
  *  on the provider's pages, both reads re-read at the watch cadence and the row moves up the moment
  *  the account lands. */
-export function WorkspaceConnectors({ place }: { place: Placement }) {
+export function WorkspaceConnectors({
+  place,
+  onPlace,
+}: {
+  place: Placement;
+  onPlace: (place: Placement) => void;
+}) {
   const query = place.q ?? "";
+  const picked = place.chip ?? EVERY_CATEGORY;
   const [reloads, setReloads] = useState(0);
   const [opened, setOpened] = useState("");
   const [waiting, setWaiting] = useState<string | null>(null);
@@ -355,6 +375,28 @@ export function WorkspaceConnectors({ place }: { place: Placement }) {
 
   return (
     <>
+      {catalog.phase === "ready" && categories(catalog.payload).length > 1 ? (
+        <PageToolbar>
+          <Select
+            value={picked}
+            onValueChange={(next) =>
+              onPlace({ chip: next === EVERY_CATEGORY ? undefined : next })
+            }
+          >
+            <SelectTrigger aria-label="Category" className={cn(BAR_CONTROL, "w-auto")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={EVERY_CATEGORY}>All categories</SelectItem>
+              {categories(catalog.payload).map((group) => (
+                <SelectItem key={group} value={group}>
+                  {group}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </PageToolbar>
+      ) : null}
       {handoff ? (
         <Notice>
           <ConsentLink url={handoff.url}>{handoff.text}</ConsentLink>
@@ -364,16 +406,26 @@ export function WorkspaceConnectors({ place }: { place: Placement }) {
       <Panel state={state}>
         {(reads) => {
           const term = query.toLowerCase();
-          const mine = standing(reads.catalog, reads.pool).filter((row) =>
-            (row.label + " " + row.said).toLowerCase().includes(term),
+          const inCategory = (group: string) =>
+            picked === EVERY_CATEGORY || group === picked;
+          const mine = standing(reads.catalog, reads.pool).filter(
+            (row) =>
+              inCategory(row.group) &&
+              (row.label + " " + row.said).toLowerCase().includes(term),
           );
-          const open = offers(reads.catalog, reads.pool).filter((row) =>
-            (row.label + " " + row.name + " " + row.summary).toLowerCase().includes(term),
+          const open = offers(reads.catalog, reads.pool).filter(
+            (row) =>
+              inCategory(row.group) &&
+              (row.label + " " + row.name + " " + row.summary).toLowerCase().includes(term),
           );
           if (!mine.length && !open.length) {
             return (
               <PanelBlank
-                body={query ? "No connector matches this search." : "No connector is offered yet."}
+                body={
+                  query || picked !== EVERY_CATEGORY
+                    ? "No connector matches this search."
+                    : "No connector is offered yet."
+                }
               />
             );
           }

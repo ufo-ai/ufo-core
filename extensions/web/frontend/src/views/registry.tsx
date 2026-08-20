@@ -55,7 +55,7 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     label: "Connectors",
     remountOnPlace: false,
     search: "Search connectors",
-    render: (place) => <WorkspaceConnectors place={place} />,
+    render: (place, onPlace) => <WorkspaceConnectors place={place} onPlace={onPlace} />,
   },
   credentials: declared("Credentials", CREDENTIALS),
   usage: {
