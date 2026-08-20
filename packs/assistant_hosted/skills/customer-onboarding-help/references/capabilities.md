@@ -50,9 +50,11 @@ No memory crosses between customer workspaces.
 ## The web portal
 
 Web sign-in opens the web portal automatically, where a member chats with the workspace's main agent
-in the browser. A workspace admin reaches every agent there. Another agent appears for a member only
-after an admin shares it, said in that agent's own chat ("let alex@example.com reach this agent on
-the web") — the same way it is revoked.
+in the browser. A workspace admin reaches every agent there. Every other member reaches the agents
+open to everyone in the workspace, any agent they created themselves, and any agent shared with
+them — sharing is said in that agent's own chat ("let alex@example.com reach this agent on the web")
+and revoked the same way. A member who asks for a new app chooses whether it is theirs alone or open
+to everyone in the workspace.
 
 ## Members and admins
 

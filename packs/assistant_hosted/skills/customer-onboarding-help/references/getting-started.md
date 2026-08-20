@@ -5,7 +5,8 @@
 A new customer is invited by the UFO team, by email. The invitation opens the workspace's first-run
 page. The customer signs in with their work email, and sign-in continues to that page without
 another action. A member chats with the workspace's main agent there. An admin reaches every agent;
-other agents appear once an admin shares them (see `capabilities.md`). The invitation also gives the
+every other member reaches the agents open to everyone in the workspace, the agents they created
+themselves, and any agent shared with them (see `capabilities.md`). The invitation also gives the
 terminal install command.
 
 ## Step by step, as the customer experiences it

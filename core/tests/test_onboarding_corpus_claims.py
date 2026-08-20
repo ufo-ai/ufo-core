@@ -43,6 +43,7 @@ TOOLS_CONTEXT = "core/src/ufo/tools/context.py"
 STOP = "core/src/ufo/surfaces/stop.py"
 WEB_PANELS = "extensions/web/ufo_ext_web/panels.py"
 WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
+WEB_AUDIENCE = "extensions/web/ufo_ext_web/audience.py"
 TERMINAL_SURFACE = "extensions/ufo/ufo_ext_ufo/surface.py"
 SPEC = "spec.md"
 TASK_SCHEDULING_SKILL_MD = (
@@ -397,6 +398,16 @@ CLAIMS = (
         phrase="the agent hosts it and shares a permanent link instead of a file to\ndownload",
         source=SITES_TOOLS,
         pattern=r"register that port as a hosted site, returning its\s+`site_url`",
+    ),
+    Claim(
+        claim="a member reaches every workspace-visible agent and their own, not only shared ones",
+        corpus="references/capabilities.md",
+        phrase="the agents open to everyone in the workspace, any agent they created themselves",
+        source=WEB_AUDIENCE,
+        pattern=(
+            r'if a\.visibility == "workspace"\s+or a\.id in granted\s+'
+            r"or \(member_id is not None and a\.owner_member_id == member_id\)"
+        ),
     ),
     Claim(
         claim="the billing screen turns a fixed automatic-refill rule on or off, no chat needed",
