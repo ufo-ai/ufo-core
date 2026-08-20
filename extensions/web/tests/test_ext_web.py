@@ -5581,7 +5581,7 @@ async def test_a_conversation_is_walled_to_its_member_and_its_agent(
     assert turns == 1
 
 
-async def test_web_stream_privately_opens_the_speakers_connect_handoff(
+async def test_web_stream_names_the_standing_connect_and_mints_nothing(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     client, workspace_id, _agent_id = web
@@ -5639,10 +5639,30 @@ async def test_web_stream_privately_opens_the_speakers_connect_handoff(
     assert response.status_code == 200
     lines = response.text.splitlines()
     connect_data = json.loads(lines[lines.index("event: connect") + 1].removeprefix("data: "))
-    assert connect_data["url"].startswith("https://oauth.example.test/authorize")
-    assert connect_data["provider"] == "acme"
-    assert connect_data["label"] == "Acme CRM"
+    assert connect_data == {"provider": "acme", "label": "Acme CRM", "turn": str(turn_id)}
     assert lines.index("event: connect") < lines.index("event: terminal")
+    # The act is the asking member's, as the transcript draws it: a request another member spoke
+    # names no act here either, since the grant would land on whoever pressed.
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                terminal=TerminalFrame(
+                    status="done",
+                    text="Use the connection control.",
+                    connect_request=ConnectRequest(provider="acme", requester_member_id=uuid4()),
+                ).model_dump(mode="json")
+            )
+            .where(tables.turn.c.id == turn_id)
+        )
+    theirs = await client.get(
+        f"/surface/web/turns/{turn_id}/stream",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert "event: connect" not in theirs.text
+    # Nothing is minted for a control nobody has pressed: the state a consent URL carries is signed
+    # for minutes, and one drawn into the reply would be spent before the member reached it.
+    assert "oauth.example.test" not in response.text
     async with workspace_tx() as connection:
         memoized_url = (
             await connection.execute(
@@ -5651,7 +5671,7 @@ async def test_web_stream_privately_opens_the_speakers_connect_handoff(
                 )
             )
         ).scalar_one()
-    assert memoized_url == connect_data["url"]
+    assert memoized_url is None
 
 
 async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
@@ -6615,13 +6635,15 @@ async def test_credential_prompts_stream_pending_and_fulfill_privately(
     assert turns == 1
 
 
-async def test_transcript_reload_still_offers_the_pending_connect_handoff(
+async def test_transcript_reload_draws_the_standing_connect_without_minting(
     web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     """The reload draws the same connect control the live stream drew, at the same memoized URL —
     the reply told the member to press it, and the consent window's own focus round-trip is what
     re-reads the transcript. A deploy without a connect flow serves the transcript without it."""
     client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     flow = ConnectFlow(
         providers={"github": ConnectProvider()},
@@ -6641,6 +6663,20 @@ async def test_transcript_reload_still_offers_the_pending_connect_handoff(
             connect_request=ConnectRequest(provider="github", requester_member_id=member_id),
         ),
     )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nconnect github",
+                ),
+                Message(role="assistant", content="Use the connection control."),
+            ),
+        ),
+    )
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     try:
         streamed = dict(await _collect_events(client, token, turn_id))
@@ -6651,17 +6687,293 @@ async def test_transcript_reload_still_offers_the_pending_connect_handoff(
     finally:
         install_connect_flow(None)
     assert loaded.status_code == 200
-    control = loaded.json()["connect"]
-    assert control["url"].startswith("https://oauth.example.test/authorize")
-    assert control["provider"] == "github"
-    assert control["label"] == "GitHub"
+    control = _drawn_connect(loaded)
+    assert control == {"provider": "github", "label": "GitHub", "turn": str(turn_id)}
+    # The stream and the reload draw one control, and neither mints: a read answers a read.
     assert streamed["connect"] == control
+    assert "oauth.example.test" not in loaded.text
     unbrokered = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
         headers=cookie,
     )
     assert unbrokered.status_code == 200
-    assert "connect" not in unbrokered.json()
+    assert _drawn_connect(unbrokered) is None
+
+
+def _drawn_connect(response: Response) -> dict[str, object] | None:
+    """The connect control the transcript draws, off the reply that asked for it."""
+    for message in response.json()["messages"]:
+        if message["role"] == "assistant" and "connect" in message:
+            return message["connect"]
+    return None
+
+
+async def test_a_landed_connect_settles_on_the_reply_that_asked_for_it(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The control rides the reply that asked, so it stands where the words that named it are —
+    while later turns run, and once the connect has landed, when it states the account it made
+    rather than an act to press again."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    flow = ConnectFlow(
+        providers={"github": ConnectProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="https://ufo.example.test/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(
+            status="done",
+            text="Use the connection control.",
+            connect_request=ConnectRequest(provider="github", requester_member_id=member_id),
+        ),
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nconnect github",
+                ),
+                Message(role="assistant", content="Use the connection control."),
+            ),
+        ),
+    )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    read = f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}"
+    try:
+        pending = await client.get(read, headers=cookie)
+        # A later turn in the same conversation leaves the control where it was asked for.
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=2,
+                    status="done",
+                    inbound="anything else",
+                    speaker_member_id=member_id,
+                    terminal=TerminalFrame(status="done", text="Sure.").model_dump(mode="json"),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        after_turn = await client.get(read, headers=cookie)
+        # What the callback writes when the grant lands, stamped with the conversation that asked.
+        with ws(workspace_id), bind_agent(agent_id):
+            await GrantStore().record(
+                provider="github",
+                account_id="github-account",
+                host="api.github.test",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+                account_label="Work account",
+                landed_turn_id=turn_id,
+            )
+        settled = await client.get(read, headers=cookie)
+        # A colleague's own connect on the same provider settles nothing here: the grant lands on
+        # whoever presses, so this member's request is still theirs to press.
+        colleague_id, _colleague_token = await _seed_member(workspace_id, "peer@example.com")
+        second_conversation, second_turn = await _seed_web_turn(
+            workspace_id,
+            agent_id,
+            member_id,
+            "owner@example.com",
+            TerminalFrame(
+                status="done",
+                text="Use the connection control.",
+                connect_request=ConnectRequest(provider="asana", requester_member_id=member_id),
+            ),
+        )
+        await _write_transcript(
+            blob,
+            second_conversation,
+            Conversation(
+                seq=1,
+                messages=(
+                    Message(
+                        role="user",
+                        content=(
+                            f"<context>\nmessage_ref: {second_turn}\n</context>\nconnect asana"
+                        ),
+                    ),
+                    Message(role="assistant", content="Use the connection control."),
+                ),
+            ),
+        )
+        with ws(workspace_id), bind_agent(agent_id):
+            await GrantStore().record(
+                provider="asana",
+                account_id="asana-account",
+                host="api.asana.test",
+                grantor_member_id=colleague_id,
+                conversation_id=second_conversation,
+                shared=True,
+                account_label="Their account",
+            )
+        # A second account on a provider this member already connected: the request that asked for
+        # it is its own, and reads as open until its own connect lands.
+        third_conversation, third_turn = await _seed_web_turn(
+            workspace_id,
+            agent_id,
+            member_id,
+            "owner@example.com",
+            TerminalFrame(
+                status="done",
+                text="Use the connection control.",
+                connect_request=ConnectRequest(provider="github", requester_member_id=member_id),
+            ),
+        )
+        await _write_transcript(
+            blob,
+            third_conversation,
+            Conversation(
+                seq=1,
+                messages=(
+                    Message(
+                        role="user",
+                        content=(
+                            f"<context>\nmessage_ref: {third_turn}\n</context>\nconnect github"
+                        ),
+                    ),
+                    Message(role="assistant", content="Use the connection control."),
+                ),
+            ),
+        )
+        second_account = await client.get(
+            f"/surface/web/agents/{agent_id}/transcript?conversation={third_conversation}",
+            headers=cookie,
+        )
+        # That request's own connect lands. The account it reaches is one the member already held,
+        # so the connection row still names the conversation that first made it — the stamp on this
+        # turn is what settles this reply.
+        with ws(workspace_id), bind_agent(agent_id):
+            await GrantStore().record(
+                provider="github",
+                account_id="github-account",
+                host="api.github.test",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=True,
+                account_label="Work account",
+                landed_turn_id=third_turn,
+            )
+        reconnected = await client.get(
+            f"/surface/web/agents/{agent_id}/transcript?conversation={third_conversation}",
+            headers=cookie,
+        )
+        theirs = await client.get(
+            f"/surface/web/agents/{agent_id}/transcript?conversation={second_conversation}",
+            headers=cookie,
+        )
+    finally:
+        install_connect_flow(None)
+
+    asked = _drawn_connect(pending)
+    assert asked == {"provider": "github", "label": "GitHub", "turn": str(turn_id)}
+    assert _drawn_connect(after_turn) == asked
+    landed = _drawn_connect(settled)
+    assert landed == {"provider": "github", "label": "GitHub", "account": "Work account"}
+    assert "connect" not in settled.json()
+    mine = _drawn_connect(theirs)
+    assert mine == {"provider": "asana", "label": "Asana", "turn": str(second_turn)}
+    again = _drawn_connect(second_account)
+    assert again == {"provider": "github", "label": "GitHub", "turn": str(third_turn)}
+    settled_again = _drawn_connect(reconnected)
+    assert settled_again == {"provider": "github", "label": "GitHub", "account": "Work account"}
+
+
+async def test_the_press_mints_the_consent_and_sends_the_window_to_the_provider(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The chip's address is this surface's own, and the press is what mints: the window lands on
+    the provider by redirect, a second press hours later mints again rather than sending the member
+    to a state the callback would refuse, and the request belongs to nobody but who asked."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    flow = ConnectFlow(
+        providers={"github": ConnectProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="https://ufo.example.test/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(
+            status="done",
+            text="Use the connection control.",
+            connect_request=ConnectRequest(provider="github", requester_member_id=member_id),
+        ),
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nconnect github",
+                ),
+                Message(role="assistant", content="Use the connection control."),
+            ),
+        ),
+    )
+    press = f"/surface/web/turns/{turn_id}/connect"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com", admin=True)
+    try:
+        opened = await client.get(press, headers=cookie, follow_redirects=False)
+        again = await client.get(press, headers=cookie, follow_redirects=False)
+        async with workspace_tx() as connection:
+            clock = (
+                "datetime('now','-11 minutes')"
+                if connection.dialect.name == "sqlite"
+                else "now() - interval '11 minutes'"
+            )
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(connect_authorized_at=sa.text(clock))
+                .where(tables.turn.c.id == turn_id)
+            )
+        later = await client.get(press, headers=cookie, follow_redirects=False)
+        stolen = await client.get(
+            press,
+            headers={"cookie": f"{SESSION_COOKIE}={peer_token}"},
+            follow_redirects=False,
+        )
+    finally:
+        install_connect_flow(None)
+    assert opened.status_code == 303
+    assert opened.headers["location"].startswith("https://oauth.example.test/authorize")
+    # One press, one consent: a second press inside the window sends the member to the same page.
+    assert again.headers["location"] == opened.headers["location"]
+    assert later.status_code == 303
+    assert later.headers["location"] != opened.headers["location"]
+    assert stolen.status_code in (403, 404)
+    unbrokered = await client.get(press, headers=cookie, follow_redirects=False)
+    assert unbrokered.status_code == 404
+    assert web_surface.CONNECT_ASK_AGAIN in unbrokered.text
 
 
 async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children(
@@ -9226,7 +9538,12 @@ async def test_a_connect_intent_leaves_the_private_handoff_on_the_turn(
         )
         lines = streamed.text.splitlines()
         connect_data = json.loads(lines[lines.index("event: connect") + 1].removeprefix("data: "))
-        assert connect_data["url"].startswith("https://oauth.example.test/authorize")
+        assert connect_data == {
+            "provider": "github",
+            "label": "GitHub",
+            "turn": outcome["turn_id"],
+        }
+        assert "oauth.example.test" not in streamed.text
         unknown = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
             json={"verb": "connect", "kind": "connection", "name": "nonesuch"},

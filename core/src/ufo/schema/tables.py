@@ -228,6 +228,7 @@ turn = sa.Table(
     sa.Column("on_behalf_of_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column("connect_authorization_url", sa.Text, nullable=True),
     sa.Column("connect_authorized_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("connect_landed_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("context", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("created_refs", sa.JSON(none_as_null=True), nullable=True),

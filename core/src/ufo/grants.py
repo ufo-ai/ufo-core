@@ -34,6 +34,12 @@ from ufo.schema.records import TerminalFrame
 from ufo.workspace import ws, ws_current
 
 CONNECT_STATE_TTL_SECONDS = 600
+CONNECT_MEMO_SECONDS = 120
+"""How long one minted authorization is handed back before the next press mints another. Shorter
+than the window the state is signed for, and by more than a consent flow takes: a URL handed out at
+the end of its own signing window sends the member to a page the callback then refuses, and the
+member reads that as the connection failing. Minting is local, so the cost of a fresh one is
+nothing."""
 GRANT_SENTINEL_PREFIX = "UFO_SENTINEL_GRANT_"
 CONNECTED_MESSAGE = "Connected {provider}: {account}."
 CONNECTED_KEY_PREFIX = "connect:"
@@ -214,6 +220,9 @@ class ConnectionRecorded:
     account_id: str
     owner_member_id: UUID
     agent_id: UUID
+    account_label: str = ""
+    """What the provider called the account, where it called it anything: the name a surface states
+    to the member, since the broker's own id names nothing they would recognise."""
 
 
 class ConnectionHooks(Protocol):
@@ -274,6 +283,11 @@ class ConnectState(BaseModel):
     grantor_member_id: UUID
     conversation_id: UUID
     shared: bool = False
+    turn_id: UUID | None = None
+    """The turn whose request this state was minted for, stamped when the grant lands so the reply
+    that asked reads as answered. A state minted before this field existed carries none, and the
+    grant it lands still records — the stamp is what a surface draws, never what makes the
+    connection."""
 
 
 @dataclass(frozen=True)
@@ -299,13 +313,20 @@ class GrantStore:
         conversation_id: UUID,
         shared: bool,
         account_label: str | None = None,
+        landed_turn_id: UUID | None = None,
     ) -> UUID:
         """Create or reuse the member's connection, grant the bound agent, and answer the connection
         the grant landed on. A broker account has
         one owner per workspace; reconnecting it as another member fails instead of reassigning the
         account, its sources, and every existing edge. Reconnecting only widens sharing: a
         `shared=False` reconnect keeps a workspace-shared connection shared, so a per-agent
-        connect never revokes other members' access — narrowing is `set_shared`'s act alone."""
+        connect never revokes other members' access — narrowing is `set_shared`'s act alone.
+
+        `landed_turn_id` stamps the turn whose request this connect answered, in the same
+        transaction as the grant: the surfaces draw a settled control off that stamp, and one
+        written separately could fail on its own and leave a reply still asking for an act already
+        done — or, written before the conversation is told, cost the member the answer they are
+        owed."""
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in account_id):
             raise ValueError("account_id has a control character; refusing to record the grant")
         async with workspace_tx() as connection:
@@ -384,6 +405,15 @@ class GrantStore:
                     },
                 )
             )
+            if landed_turn_id is not None:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(connect_landed_at=sa.func.now())
+                    .where(
+                        tables.turn.c.id == landed_turn_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                    )
+                )
         return existing.id
 
     async def active_grants(self) -> tuple[Grant, ...]:
@@ -704,6 +734,7 @@ class ConnectFlow:
         grantor_member_id: UUID,
         conversation_id: UUID,
         shared: bool,
+        turn_id: UUID | None = None,
     ) -> str:
         descriptor = self._provider(provider)
         state = ConnectState(
@@ -713,6 +744,7 @@ class ConnectFlow:
             grantor_member_id=grantor_member_id,
             conversation_id=conversation_id,
             shared=shared,
+            turn_id=turn_id,
         )
         sealed = self.fernet.encrypt(state.model_dump_json().encode()).decode()
         return descriptor.authorize_url(sealed, self.redirect_uri)
@@ -759,6 +791,7 @@ class ConnectFlow:
                 conversation_id=claims.conversation_id,
                 shared=claims.shared,
                 account_label=account.account_label,
+                landed_turn_id=claims.turn_id,
             )
             if self.connections is not None:
                 await self.connections.fire(
@@ -768,6 +801,7 @@ class ConnectFlow:
                         account_id=account.account_id,
                         owner_member_id=claims.grantor_member_id,
                         agent_id=claims.agent_id,
+                        account_label=account.account_label or "",
                     )
                 )
             label = self.label_for(descriptor.provider)
@@ -814,7 +848,26 @@ class ConnectFlow:
 
 @dataclass(frozen=True)
 class ConnectHandoff:
-    """Memoize a terminal connect request's OAuth URL for its speaking member."""
+    """Hand a terminal connect request's OAuth URL to its speaking member, minting one where the
+    turn holds none it can still use.
+
+    The URL is memoized so every read of one request names one control, and re-minted once the state
+    it carries has aged past its signing window: the window is what stops a stale state from being
+    replayed at the callback, and it is far shorter than the time a member spends on the provider's
+    pages. A request that refused to re-mint would leave the surface with no URL to draw, taking the
+    control away from a member whose reply still tells them to press it — so the control stands as
+    long as the request does, and pressing it is always a live consent page. Everything that gates
+    who may open one is unchanged: the request must still stand on the turn, name a provider the
+    deploy serves, name an agent the workspace still holds, and belong to the member asking. That
+    last pair is why the checks are read again on every press rather than once when the request was
+    made: a request outliving its own signing window may outlive the agent it was to grant, and a
+    grant sealed for one that is gone fails inside the callback, where the member is waiting.
+
+    The write that replaces an aged authorization names the URL it read, not the stamp beside it: a
+    stamp written by the store's own clock reads back in whatever precision that store keeps and
+    would match nothing, while every mint seals its own state, so no two URLs are equal. The read
+    holds the row, but SQLite takes no row lock, so that comparison is what arbitrates a race — the
+    caller whose URL has moved lost, and reads the winner's, minted just now."""
 
     flow: ConnectFlow
 
@@ -828,7 +881,6 @@ class ConnectHandoff:
                         tables.turn.c.connect_authorization_url,
                         tables.turn.c.connect_authorized_at,
                         tables.turn.c.terminal,
-                        tables.turn.c.updated_at,
                     )
                     .where(
                         tables.turn.c.id == turn_id,
@@ -849,32 +901,33 @@ class ConnectHandoff:
                 raise ConnectRequestInvalid("connect request belongs to another member")
             if not self.flow.knows_provider(request.provider):
                 raise ConnectRequestInvalid("connect provider is no longer available")
-            now = datetime.now(UTC)
-            if row.connect_authorization_url is not None:
-                if row.connect_authorized_at is None:
-                    raise ConnectRequestInvalid("connect authorization is incomplete")
-                authorized_at = (
-                    row.connect_authorized_at
-                    if row.connect_authorized_at.tzinfo is not None
-                    else row.connect_authorized_at.replace(tzinfo=UTC)
+            grantee = request.grantee_agent_id or row.agent_id
+            held = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id).where(
+                        tables.agent.c.id == grantee,
+                        tables.agent.c.workspace_id == workspace_id,
+                    )
                 )
-                if now - authorized_at > timedelta(seconds=CONNECT_STATE_TTL_SECONDS):
-                    raise ConnectRequestInvalid("connect authorization has expired")
-                return row.connect_authorization_url
-            updated_at = (
-                row.updated_at
-                if row.updated_at.tzinfo is not None
-                else row.updated_at.replace(tzinfo=UTC)
-            )
-            if now - updated_at > timedelta(seconds=CONNECT_STATE_TTL_SECONDS):
-                raise ConnectRequestInvalid("connect request has expired")
+            ).scalar_one_or_none()
+            if held is None:
+                raise ConnectRequestInvalid("connect request names an agent that is gone")
+            held = self._held(row.connect_authorization_url, row.connect_authorized_at)
+            if held is not None:
+                return held
             url = self.flow.authorize(
                 workspace_id=workspace_id,
-                agent_id=request.grantee_agent_id or row.agent_id,
+                agent_id=grantee,
                 provider=request.provider,
                 grantor_member_id=request.requester_member_id,
                 conversation_id=row.conversation_id,
                 shared=request.shared,
+                turn_id=turn_id,
+            )
+            held_url = (
+                tables.turn.c.connect_authorization_url.is_(None)
+                if row.connect_authorization_url is None
+                else tables.turn.c.connect_authorization_url == row.connect_authorization_url
             )
             updated = await connection.execute(
                 sa.update(tables.turn)
@@ -882,7 +935,7 @@ class ConnectHandoff:
                 .where(
                     tables.turn.c.id == turn_id,
                     tables.turn.c.workspace_id == workspace_id,
-                    tables.turn.c.connect_authorization_url.is_(None),
+                    held_url,
                 )
             )
             if updated.rowcount == 1:
@@ -898,9 +951,25 @@ class ConnectHandoff:
                     )
                 )
             ).one_or_none()
-            if memoized is None or memoized.connect_authorization_url is None:
+            if memoized is None:
                 raise ConnectRequestInvalid("connect request is no longer available")
-            return memoized.connect_authorization_url
+            won = self._held(memoized.connect_authorization_url, memoized.connect_authorized_at)
+            if won is None:
+                raise ConnectRequestInvalid("connect request is no longer available")
+            return won
+
+    def _held(self, url: str | None, authorized_at: datetime | None) -> str | None:
+        """The memoized authorization while a press can still finish on it — None where the turn
+        holds none to hand over, having never minted one or holding one old enough that the consent
+        it opens could outlive the state it carries."""
+        if url is None or authorized_at is None:
+            return None
+        stamped = (
+            authorized_at if authorized_at.tzinfo is not None else authorized_at.replace(tzinfo=UTC)
+        )
+        if datetime.now(UTC) - stamped > timedelta(seconds=CONNECT_MEMO_SECONDS):
+            return None
+        return url
 
 
 _installed_flow: ConnectFlow | None = None

@@ -62,9 +62,9 @@ test("a connect intent opens the stream for the turn it reports and shows the co
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(StreamFake.last().url).toContain("/turns/" + TURN_ID + "/stream");
 
-  StreamFake.last().emit("connect", { url: "https://consent.example/authorize" });
+  StreamFake.last().emit("connect", { provider: "notion", label: "Notion", turn: TURN_ID });
   const link = await screen.findByRole("link", { name: "Open the provider consent page" });
-  expect(link.getAttribute("href")).toBe("https://consent.example/authorize");
+  expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
 
 test("a credential intent that answers with a request renders the prompt carrying its seal", async () => {

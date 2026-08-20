@@ -41,6 +41,7 @@ REPLY_ID = UUID("66666666-6666-4666-8666-666666666666")
 CONVERSATION_ID = "55555555-5555-4555-8555-555555555555"
 ATTEMPT = "44444444444444444444444444444444"
 APP_ID = "22222222-2222-4222-8222-222222222222"
+TURN_ID = "33333333-3333-4333-8333-333333333333"
 
 
 def sse_frames() -> dict[type, LiveFrame]:
@@ -92,11 +93,7 @@ def _synthesized() -> list[bytes]:
                 "subagents": [],
             },
         ),
-        _event(
-            "connect_error",
-            {"message": "Connection request unavailable; ask me to connect again."},
-        ),
-        _event("connect", {"url": "https://connect.example/authorize?state=abc"}),
+        _event("connect", {"provider": "notion", "label": "Notion", "turn": TURN_ID}),
         _event(
             "credentials",
             {

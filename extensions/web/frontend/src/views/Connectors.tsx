@@ -56,6 +56,10 @@ const ACCESS = { label: "Access", fact: true };
 const POOL_COLUMNS = [PROVIDER, "Account", ACCESS, "Apps"];
 const AGENT_COLUMNS = [PROVIDER, "Account", ACCESS];
 const ATTACH_AGENT = "attach-agent";
+/** What a press that never became a request states. Both connector screens draw it, so it is said
+ *  once: a member reads one sentence for one outcome wherever they pressed. */
+export const CONNECT_REFUSED =
+  "No connection request was opened. Ask in chat to connect the account.";
 
 /** What names the account to the member: the label the provider gave it, else the address it is
  *  held under. The broker's id names neither, so it stands only where the connection carries
@@ -329,8 +333,12 @@ function ConnectorList({
       stream.close();
       source.current = null;
     };
-    stream.addEventListener("connect", (event) => {
-      const url = JSON.parse((event as MessageEvent).data).url;
+    // The request stands once the turn commits it; the address below is what mints the consent URL,
+    // so the window this press opened is pointed at our own surface and redirected from there.
+    let asked = false;
+    stream.addEventListener("connect", () => {
+      asked = true;
+      const url = BASE + "/turns/" + watching + "/connect";
       if (consent.current) consent.current.location.href = url;
       // The link stands only for a member whose browser refused the window.
       setConsentUrl(consent.current ? null : url);
@@ -338,16 +346,16 @@ function ConnectorList({
       setHandoff(QUIET);
       done();
     });
-    stream.addEventListener("connect_error", (event) => {
-      consent.current?.close();
-      consent.current = null;
-      setHandoff({
-        text: JSON.parse((event as MessageEvent).data).message,
-        refused: true,
-      });
+    // A turn that ended without asking is a refusal the member is still waiting on, and the window
+    // they pressed for has nowhere to go.
+    stream.addEventListener("terminal", () => {
+      if (!asked) {
+        consent.current?.close();
+        consent.current = null;
+        setHandoff({ text: CONNECT_REFUSED, refused: true });
+      }
       done();
     });
-    stream.addEventListener("terminal", done);
     stream.onerror = done;
     return () => {
       stream.close();

@@ -19,7 +19,7 @@ import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { useMainAgent } from "@/lib/mainAgent";
 import { workspaceHash } from "@/lib/route";
-import type { PoolPayload } from "@/views/Connectors";
+import { CONNECT_REFUSED, type PoolPayload } from "@/views/Connectors";
 import { CONNECT_VERB, FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
 
 type Reads = { offered: FirstRunPayload; pool: PoolPayload };
@@ -77,22 +77,25 @@ export function Connect() {
     if (watching === null) return;
     const stream = new EventSource(BASE + "/turns/" + watching + "/stream");
     const done = () => stream.close();
-    stream.addEventListener("connect", (event) => {
-      const url = JSON.parse((event as MessageEvent).data).url;
+    let asked = false;
+    stream.addEventListener("connect", () => {
+      asked = true;
+      const url = BASE + "/turns/" + watching + "/connect";
       if (consent.current) consent.current.location.href = url;
       setHandoff(consent.current ? null : { url, text: "Open the provider consent page" });
       consent.current = null;
       setNotice(QUIET);
       done();
     });
-    stream.addEventListener("connect_error", (event) => {
-      consent.current?.close();
-      consent.current = null;
-      setNotice({ text: JSON.parse((event as MessageEvent).data).message, refused: true });
-      setWaiting(null);
+    stream.addEventListener("terminal", () => {
+      if (!asked) {
+        consent.current?.close();
+        consent.current = null;
+        setNotice({ text: CONNECT_REFUSED, refused: true });
+        setWaiting(null);
+      }
       done();
     });
-    stream.addEventListener("terminal", done);
     stream.onerror = done;
     return done;
   }, [watching]);

@@ -178,9 +178,15 @@ export type Message = {
   apps?: ChatApp[];
 };
 
-/** The private connect control a turn offers: the member's memoized URL, the provider slug the
- *  control draws the mark by, and the words it carries. */
-export type ChatConnect = { url: string; provider?: string; label?: string };
+/** The private connect act a reply left the member: `turn` while the request stands — the press
+ *  opens that turn's handoff, which is where the consent URL is minted — and `account` once the
+ *  connect landed and the control is the record of it rather than an act to press. */
+export type ChatConnect = {
+  turn?: string;
+  provider?: string;
+  label?: string;
+  account?: string;
+};
 
 export type Transcript = {
   messages: Message[];
@@ -190,8 +196,6 @@ export type Transcript = {
   earlier?: number;
   turn?: string;
   credentials?: CredentialRequest | null;
-  /** The private connect control the newest turn still offers, at the URL that turn memoized. */
-  connect?: ChatConnect | null;
 };
 
 export type SchemaProperty = {

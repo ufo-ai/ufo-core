@@ -24,7 +24,11 @@ from pathlib import Path
 
 from ufo.sdk.manifest import CredentialSlot, HookSpec, Manifest, SkillSpec
 from ufo.sdk.surfaces import SurfaceRoute, SurfaceSpec
-from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
+from ufo_ext_slack.hooks import (
+    CONNECTOR_CALL_TOOL,
+    attribute_connector_send,
+    settle_connect_button,
+)
 from ufo_ext_slack.surface import (
     SLACK_BOT_TOKEN_SLOT,
     SLACK_EXTENSION,
@@ -87,6 +91,7 @@ def manifest() -> Manifest:
                 tools=(CONNECTOR_CALL_TOOL,),
             ),
             HookSpec(event="user_prompt_submit", handler=follow_turn),
+            HookSpec(event="connection_recorded", handler=settle_connect_button),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
     )

@@ -463,6 +463,10 @@ class Turn(BaseModel):
     parent_turn_id: UUID | None = None
     subagent_profile: str | None = None
     subagent_name: str | None = None
+    connect_landed_at: datetime | None = None
+    """When the connect this turn asked for landed, stamped by the callback that recorded the grant.
+    What says one request was answered, where the account alone cannot: a member may hold two on one
+    provider, and may reconnect from another conversation entirely."""
     result_delivery: ResultDelivery | None = None
     sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None

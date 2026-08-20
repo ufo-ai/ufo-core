@@ -36,12 +36,8 @@
     "data": "{\"profile\": \"deep_research\", \"name\": \"Calendar check\", \"conversation_id\": \"55555555-5555-4555-8555-555555555555\", \"events\": [{\"kind\": \"note\", \"text\": \"checking the calendar\"}], \"output\": \"found it\", \"subagents\": []}"
   },
   {
-    "event": "connect_error",
-    "data": "{\"message\": \"Connection request unavailable; ask me to connect again.\"}"
-  },
-  {
     "event": "connect",
-    "data": "{\"url\": \"https://connect.example/authorize?state=abc\"}"
+    "data": "{\"provider\": \"notion\", \"label\": \"Notion\", \"turn\": \"33333333-3333-4333-8333-333333333333\"}"
   },
   {
     "event": "credentials",

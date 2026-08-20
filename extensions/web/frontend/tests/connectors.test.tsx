@@ -403,10 +403,10 @@ test("a connector's consent opens in a window this page owns, so its return page
   expect(features).toContain("popup");
   expect(consent.focus).toHaveBeenCalled();
 
-  StreamFake.last().emit("connect", { url: "https://consent.example/notion" });
+  StreamFake.last().emit("connect", { provider: "notion", label: "Notion", turn: TURN_ID });
 
   // The frame carrying the link lands in that window, so the panel puts nothing under the act.
-  await waitFor(() => expect(consent.location.href).toBe("https://consent.example/notion"));
+  await waitFor(() => expect(consent.location.href).toBe("/surface/web/turns/" + TURN_ID + "/connect"));
   expect(screen.queryByRole("link", { name: "Open the provider consent page" })).toBeNull();
   opened.mockRestore();
 });
@@ -426,8 +426,8 @@ test("a connector consent the browser refuses still renders the link", async () 
   await userEvent.click(within(dialog).getByRole("button", { name: "Add connector" }));
   await userEvent.type(await screen.findByLabelText("Provider"), "notion");
   await userEvent.click(screen.getByRole("button", { name: "Connect" }));
-  StreamFake.last().emit("connect", { url: "https://consent.example/notion" });
+  StreamFake.last().emit("connect", { provider: "notion", label: "Notion", turn: TURN_ID });
 
   const link = await screen.findByRole("link", { name: "Open the provider consent page" });
-  expect(link.getAttribute("href")).toBe("https://consent.example/notion");
+  expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });

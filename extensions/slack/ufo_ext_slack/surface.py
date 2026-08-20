@@ -3665,6 +3665,86 @@ async def _replace_controls_with_answers(bot_token: str, submit: AnswerSubmit) -
             blocks.append(_context_line(ASK_SUBMITTED_BY_LINE.format(user=submit.slack_user_id)))
             continue
         blocks.append(dict(block))
+    await _rewrite_slack_message(
+        bot_token,
+        submit.channel,
+        submit.message_ts,
+        submit.message_text or submit.answers[0].question,
+        blocks,
+    )
+
+
+CONNECT_SETTLED_LINE = "Connected {provider}: {account}."
+
+
+class ConnectMessage(BaseModel):
+    """Where a reply's connect button stands: the message that carries it, and the blocks it was
+    posted with. Held because the button outlives the press — a member authorizes on the provider's
+    pages, and the connection lands on a hook with nothing in hand but the account it made — so this
+    is what says which message to rewrite."""
+
+    channel: str
+    ts: str
+    text: str
+    blocks: tuple[dict[str, object], ...] = ()
+
+
+def connect_message_key(member_id: UUID, provider: str) -> str:
+    """Keyed by who was asked and what for, which is all the landing connection names. A second
+    request for the same provider replaces the first: the newest button is the one standing."""
+    return f"connect-message/{member_id}/{provider}"
+
+
+async def _hold_connect_message(
+    store: ScopedStore,
+    request: ConnectRequest | None,
+    posted: dict[str, object],
+    channel: str,
+    ts: str | None,
+) -> None:
+    """Remember the message this reply's connect button was posted in.
+
+    The button itself is what is remembered, not the request: a turn that asked a question and
+    requested a connection posts the question's controls — one actions row is Slack's lot — so the
+    reply the member reads carries no button, and a message rewritten as though it did would state a
+    landed account under a question. Every post that does carry one is held, whichever body Slack
+    accepted."""
+    if request is None or ts is None:
+        return
+    raw = posted.get("blocks")
+    blocks = tuple(
+        block for block in (raw if isinstance(raw, list) else ()) if isinstance(block, dict)
+    )
+    if not any(_is_connect_action(block) for block in blocks):
+        return
+    await store.put(
+        connect_message_key(request.requester_member_id, request.provider),
+        ConnectMessage(
+            channel=channel,
+            ts=ts,
+            text=str(posted.get("text", "")),
+            blocks=blocks,
+        ).model_dump(mode="json"),
+    )
+
+
+def _is_connect_action(block: Mapping[str, object]) -> bool:
+    if block.get("type") != "actions":
+        return False
+    elements = block.get("elements")
+    return any(
+        isinstance(element, dict) and element.get("action_id") == CONNECT_ACTION_ID
+        for element in (elements if isinstance(elements, list) else ())
+    )
+
+
+async def _rewrite_slack_message(
+    bot_token: str, channel: str, ts: str, text: str, blocks: list[dict[str, object]]
+) -> None:
+    """Replace one message the bot posted, blocks and all. Both rewrites go through here — a
+    question settling into the answers that were sent, and a connect button settling into the
+    account it made — so the two cannot drift on how a message is addressed or what a failure
+    means."""
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         await _slack_ok(
             client.post(
@@ -3673,16 +3753,23 @@ async def _replace_controls_with_answers(bot_token: str, submit: AnswerSubmit) -
                     "Authorization": f"Bearer {bot_token}",
                     "Content-Type": "application/json; charset=utf-8",
                 },
-                content=json.dumps(
-                    {
-                        "channel": submit.channel,
-                        "ts": submit.message_ts,
-                        "text": submit.message_text or submit.answers[0].question,
-                        "blocks": blocks,
-                    }
-                ),
+                content=json.dumps({"channel": channel, "ts": ts, "text": text, "blocks": blocks}),
             )
         )
+
+
+async def settle_connect_message(
+    bot_token: str, held: ConnectMessage, provider: str, account: str
+) -> None:
+    """Rewrite a landed connect's button into the account it made, with `chat.update`: the thread
+    reads what the member did rather than a button that would ask for it again, and the reply prose
+    above it is echoed back exactly as Slack accepted it. Every block but the button's own is the
+    message's own, so nothing else in the thread moves."""
+    blocks: list[dict[str, object]] = [
+        dict(block) for block in held.blocks if not _is_connect_action(block)
+    ]
+    blocks.append(_context_line(CONNECT_SETTLED_LINE.format(provider=provider, account=account)))
+    await _rewrite_slack_message(bot_token, held.channel, held.ts, held.text, blocks)
 
 
 def _context_line(text: str) -> dict[str, object]:
@@ -4094,6 +4181,14 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
             part_metadata = metadata if last else None
             part_actions = actions if last else None
             delivery_id = f"{writeback.turn_id}:{index}:markdown"
+            body = slack_reply_body(
+                channel,
+                thread,
+                part,
+                part_metadata,
+                delivery_id=delivery_id,
+                actions=part_actions,
+            )
             progress, stored, payload = await _deliver_slack_reply(
                 client,
                 bot_token,
@@ -4102,23 +4197,32 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
                 progress,
                 stored,
                 delivery_id,
-                slack_reply_body(
+                body,
+            )
+            if payload.get("error") != SLACK_INVALID_BLOCKS_ERROR:
+                ts = _posted_message_ts(payload)
+                if first_ts is None:
+                    first_ts = ts
+                await _hold_connect_message(
+                    store,
+                    writeback.terminal.connect_request,
+                    json.loads(body),
+                    channel,
+                    ts,
+                )
+                continue
+            _LOG.warning("slack rejected blocks for %s; re-posting conservatively", channel)
+            if part_actions is not None:
+                delivery_id = f"{writeback.turn_id}:{index}:sections"
+                conservative = slack_reply_body(
                     channel,
                     thread,
                     part,
                     part_metadata,
                     delivery_id=delivery_id,
                     actions=part_actions,
-                ),
-            )
-            if payload.get("error") != SLACK_INVALID_BLOCKS_ERROR:
-                ts = _posted_message_ts(payload)
-                if first_ts is None:
-                    first_ts = ts
-                continue
-            _LOG.warning("slack rejected blocks for %s; re-posting conservatively", channel)
-            if part_actions is not None:
-                delivery_id = f"{writeback.turn_id}:{index}:sections"
+                    sections=True,
+                )
                 progress, stored, payload = await _deliver_slack_reply(
                     client,
                     bot_token,
@@ -4127,19 +4231,18 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
                     progress,
                     stored,
                     delivery_id,
-                    slack_reply_body(
-                        channel,
-                        thread,
-                        part,
-                        part_metadata,
-                        delivery_id=delivery_id,
-                        actions=part_actions,
-                        sections=True,
-                    ),
+                    conservative,
                 )
                 ts = _posted_message_ts(payload)
                 if first_ts is None:
                     first_ts = ts
+                await _hold_connect_message(
+                    store,
+                    writeback.terminal.connect_request,
+                    json.loads(conservative),
+                    channel,
+                    ts,
+                )
                 continue
             metadata_size = len(part_metadata) + 2 if part_metadata is not None else 0
             fallback_parts = slack_reply_parts(part, SLACK_TEXT_MESSAGE_LIMIT - metadata_size)

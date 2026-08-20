@@ -3085,6 +3085,50 @@ test("a starter says its sentence on the press, and leaves with the start screen
   expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
 });
 
+test("a landed connect states the account it made, and presses nothing", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "connect github" },
+        {
+          role: "assistant",
+          text: "Use the connection control.",
+          connect: { provider: "github", label: "GitHub", account: "Work account" },
+        },
+      ],
+    }),
+  );
+  open();
+
+  const settled = await screen.findByText("GitHub connected");
+
+  expect(settled.closest("a")).toBeNull();
+  expect(screen.getByText("Work account")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: /Connect/ })).toBeNull();
+  // The words that asked stay: the record reads with the instruction it answers.
+  expect(screen.getByText("Use the connection control.")).toBeTruthy();
+});
+
+test("a standing connect is the act, pressable to the provider's own page", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "connect github" },
+        {
+          role: "assistant",
+          text: "Use the connection control.",
+          connect: { provider: "github", label: "GitHub", turn: TURN_ID },
+        },
+      ],
+    }),
+  );
+  open();
+
+  const act = await screen.findByRole("link", { name: "Connect GitHub" });
+
+  expect(act.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
+});
+
 test("the starters close on a link to the connectors screen, which the press reaches", async () => {
   wire({ ...transcript(), "/connections": () => json({ connections: [] }) });
   location.hash = "#/";

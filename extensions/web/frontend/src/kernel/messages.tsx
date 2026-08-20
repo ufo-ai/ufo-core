@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { IconChevronRight } from "@tabler/icons-react";
+import { IconCheck, IconChevronRight } from "@tabler/icons-react";
 
 import {
   Attachment,
@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/message-scroller";
 import { Reveal } from "@/components/ui/reveal";
 import { AgentIcon } from "@/lib/agentIcon";
+import { BASE } from "@/lib/api";
 import { agentName } from "@/lib/agentName";
 import { speakerName } from "@/lib/audience";
 import { brailleOf, randomCell } from "@/lib/braille";
@@ -730,18 +731,44 @@ function RunRow({ run, live }: { run: SubagentRun; live: boolean }) {
   );
 }
 
-/** The private connect act a reply leaves for the member, drawn as the act it is: a chip carrying
- *  the provider's mark and name, opening the consent window on the press. */
+/** The private connect act a reply leaves for the member, and what that act became.
+ *
+ *  While the request stands it is the act: a chip carrying the provider's mark and name, opening the
+ *  consent window on the press. Once the connect has landed the same chip states the account it
+ *  made, pressing nothing — the words above it asked the member to connect, so a chip that vanished
+ *  would leave that instruction pointing at nothing, and one still offering to connect would ask for
+ *  an act already done. It is the shape a connected connector already takes on the first run. */
 function ConnectLink({ connect }: { connect: ChatConnect }) {
+  const mark = connect.provider ? (
+    <BrandMark provider={connect.provider} className="size-icon" />
+  ) : null;
+  const named = connect.label ?? "account";
+  if (!connect.turn) {
+    return (
+      <span
+        className={cn(
+          buttonVariants({ variant: "outline", size: "bar" }),
+          "self-start text-ink-soft",
+        )}
+      >
+        {mark}
+        {named + " connected"}
+        {connect.account ? <span className="truncate">{connect.account}</span> : null}
+        <IconCheck className="size-icon text-ink" aria-hidden />
+      </span>
+    );
+  }
+  // The address the press opens is this surface's own: it mints the consent URL for this turn's
+  // request and redirects the window there, so the chip holds nothing that can go stale.
   return (
     <ConsentLink
-      url={connect.url}
+      url={BASE + "/turns/" + connect.turn + "/connect"}
       className={cn(
         buttonVariants({ variant: "outline", size: "bar" }),
         "self-start no-underline",
       )}
     >
-      {connect.provider ? <BrandMark provider={connect.provider} className="size-icon" /> : null}
+      {mark}
       {connect.label ? "Connect " + connect.label : "Connect account"}
     </ConsentLink>
   );

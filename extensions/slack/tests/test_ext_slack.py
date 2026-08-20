@@ -34,7 +34,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request as StarletteRequest
 from ufo_ext_connectors.tools import ATTRIBUTION_MRKDWN
-from ufo_ext_slack.hooks import attribute_connector_send
+from ufo_ext_slack.hooks import attribute_connector_send, settle_connect_button
 from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_web.audience import EXTENSION_WEB
 from ufo_testsupport.surfaces import (
@@ -57,7 +57,7 @@ from ufo.credentials import (
 from ufo.db import current_workspace, workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_hooks, turn_tools
-from ufo.ext.manifest import UserPromptSubmit
+from ufo.ext.manifest import HookContext, UserPromptSubmit
 from ufo.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT,
     ATTACHMENTS_ELEMENT,
@@ -68,7 +68,13 @@ from ufo.ext.surface import (
     member_message_text,
     mint_marker,
 )
-from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
+from ufo.grants import (
+    ConnectFlow,
+    ConnectionRecorded,
+    GrantStore,
+    OAuthAccount,
+    install_connect_flow,
+)
 from ufo.hub import (
     Absorbed,
     CostTick,
@@ -5819,6 +5825,21 @@ async def test_invalid_blocks_reposts_once(
         }
         if connect_request is not None:
             assert second["blocks"][-2]["elements"][0]["action_id"] == slack.CONNECT_ACTION_ID
+            # The button the member actually reads is the one this body posted, so that is the
+            # message a landing connection settles.
+            with ws(workspace_id):
+                held = await slack.ScopedStore(slack.SLACK_EXTENSION).get(
+                    slack.connect_message_key(
+                        connect_request.requester_member_id, connect_request.provider
+                    )
+                )
+            assert held is not None
+            assert (held["channel"], held["ts"]) == ("C5", "999.200")
+            assert any(
+                element.get("action_id") == slack.CONNECT_ACTION_ID
+                for block in held["blocks"]
+                for element in (block.get("elements") or [])
+            )
         else:
             assert second["blocks"][1]["text"]["text"] == "*Need a decision*"
             assert second["blocks"][2]["block_id"] == "ask:0"
@@ -8798,6 +8819,7 @@ def test_the_manifest_arms_the_followers_from_the_turns_own_start() -> None:
     assert [(spec.event, spec.handler) for spec in slack_manifest().hooks] == [
         ("pre_tool_use", attribute_connector_send),
         ("user_prompt_submit", slack.follow_turn),
+        ("connection_recorded", settle_connect_button),
     ]
 
 
@@ -9425,6 +9447,114 @@ class _ConnectProvider:
         self, code: str, redirect_uri: str, workspace_id: UUID, state: str
     ) -> OAuthAccount:
         return OAuthAccount(account_id="calendar-account")
+
+
+async def test_a_question_carrying_a_connect_request_holds_no_button_to_settle(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Slack takes one actions row, so a turn that both asked a question and requested a connection
+    posts the question's controls and no button. Nothing is held for a button that was never posted:
+    a landing connection that rewrote that message would state an account under the question."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    app, _client, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    async with workspace_tx() as connection:
+        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+    await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "Which one?",
+        blob,
+        artifact=False,
+        question=ASK_QUESTION,
+        connect_request=ConnectRequest(provider="google_calendar", requester_member_id=member_id),
+        speaker_member_id=member_id,
+    )
+    await app.state.writeback_poller.drain()
+    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
+    assert not any(
+        element.get("action_id") == slack.CONNECT_ACTION_ID
+        for block in posted["blocks"]
+        for element in (block.get("elements") or [])
+    )
+
+    hook = HookContext(
+        ext=context_for(slack.SLACK_EXTENSION, frozenset({slack.SLACK_BOT_TOKEN_SLOT})),
+        payload=ConnectionRecorded(
+            connection_id=uuid4(),
+            provider="google_calendar",
+            account_id="calendar-account",
+            owner_member_id=member_id,
+            agent_id=agent_id,
+        ),
+    )
+    with ws(workspace_id):
+        await settle_connect_button(hook)
+
+    assert _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL) == []
+
+
+async def test_a_landed_connection_settles_the_slack_button_it_was_asked_from(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The member pressed the button, authorized on the provider's pages, and never came back to the
+    thread — so the thread is where the button would sit offering an act already done. The landing
+    connection rewrites the message it was asked from: the button is gone, the account it made is
+    stated under the reply, and the reply's own words are echoed back untouched. A workspace holding
+    no such button is left alone."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    app, _client, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    async with workspace_tx() as connection:
+        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+    await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "Use the private connection control.",
+        blob,
+        artifact=False,
+        connect_request=ConnectRequest(provider="google_calendar", requester_member_id=member_id),
+        speaker_member_id=member_id,
+    )
+    await app.state.writeback_poller.drain()
+    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
+    assert any(block["type"] == "actions" for block in posted["blocks"])
+
+    hook = HookContext(
+        ext=context_for(slack.SLACK_EXTENSION, frozenset({slack.SLACK_BOT_TOKEN_SLOT})),
+        payload=ConnectionRecorded(
+            connection_id=uuid4(),
+            provider="google_calendar",
+            account_id="calendar-account",
+            account_label="Work calendar",
+            owner_member_id=member_id,
+            agent_id=agent_id,
+        ),
+    )
+    with ws(workspace_id):
+        await settle_connect_button(hook)
+        # The button was held under the member and provider the connection names, and settling it
+        # spends that hold: a second landing on the same account rewrites nothing.
+        await settle_connect_button(hook)
+
+    rewrites = [
+        json.loads(request.content)
+        for request in _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
+    ]
+    assert len(rewrites) == 1
+    settled = rewrites[0]
+    assert (settled["channel"], settled["ts"]) == ("C5", "999.100")
+    assert not any(block["type"] == "actions" for block in settled["blocks"])
+    assert settled["blocks"][:-1] == [
+        block for block in posted["blocks"] if block["type"] != "actions"
+    ]
+    assert settled["blocks"][-1] == {
+        "type": "context",
+        # What the provider called the account, never the broker's own id.
+        "elements": [{"type": "mrkdwn", "text": "Connected google_calendar: Work calendar."}],
+    }
 
 
 async def test_connect_writeback_keeps_oauth_private_and_checks_the_requester(

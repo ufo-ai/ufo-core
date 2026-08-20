@@ -395,19 +395,18 @@ test("a cost frame meters tokens and priced spend", async () => {
   expect(await screen.findByText("1,200 tok · $0.03")).toBeTruthy();
 });
 
-test("a connect frame offers the consent link, and a connect_error states the failure", async () => {
+test("a connect frame offers the act, pressable to the address that mints its consent", async () => {
   const stream = await streaming();
-  stream.emit("connect", { url: "https://consent.example/go", provider: "gmail", label: "Gmail" });
+  stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
   const link = await screen.findByRole("link", { name: "Connect Gmail" });
-  expect(link.getAttribute("href")).toBe("https://consent.example/go");
-
-  stream.emit("connect_error", { message: "The provider refused the request." });
-  expect(await screen.findByText("The provider refused the request.")).toBeTruthy();
+  // Nothing on the page holds a consent URL: the press lands here, and this mints one and
+  // redirects, so what the member reaches is as fresh as their press.
+  expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
 
 test("the consent link stands after the page re-reads the transcript", async () => {
   const stream = await streaming();
-  stream.emit("connect", { url: "https://consent.example/go", provider: "gmail", label: "Gmail" });
+  stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
   await screen.findByRole("link", { name: "Connect Gmail" });
   stream.emit("terminal", {
     status: "done",
@@ -425,9 +424,12 @@ test("the consent link stands after the page re-reads the transcript", async () 
       json({
         messages: [
           { role: "user", text: "go" },
-          { role: "assistant", text: "Authorize it, says the record." },
+          {
+            role: "assistant",
+            text: "Authorize it, says the record.",
+            connect: { provider: "gmail", label: "Gmail", turn: TURN_ID },
+          },
         ],
-        connect: { url: "https://consent.example/go", provider: "gmail", label: "Gmail" },
       }),
   });
   act(() => {
@@ -436,13 +438,13 @@ test("the consent link stands after the page re-reads the transcript", async () 
 
   await screen.findByText("Authorize it, says the record.");
   const link = await screen.findByRole("link", { name: "Connect Gmail" });
-  expect(link.getAttribute("href")).toBe("https://consent.example/go");
+  expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
 
 test("a connect turn that ends wordless keeps the control it posted", async () => {
   const stream = await streaming();
   stream.emit("tool", { tool: "connect_account", preview: "" });
-  stream.emit("connect", { url: "https://consent.example/go", provider: "gmail", label: "Gmail" });
+  stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
   await screen.findByRole("link", { name: "Connect Gmail" });
 
   // The reply was cut into the steps, so the terminal states no words — the control and the steps
@@ -451,7 +453,7 @@ test("a connect turn that ends wordless keeps the control it posted", async () =
   await delivered();
 
   const link = screen.getByRole("link", { name: "Connect Gmail" });
-  expect(link.getAttribute("href")).toBe("https://consent.example/go");
+  expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
   expect(screen.getByText("Completed 1 step")).toBeTruthy();
 });
 
@@ -459,13 +461,13 @@ test("consent opens in a window this page owns, so its return page can close its
   const stream = await streaming();
   const consent = { focus: vi.fn() };
   const open = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
-  stream.emit("connect", { url: "https://consent.example/go", provider: "gmail", label: "Gmail" });
+  stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
   const link = await screen.findByRole("link", { name: "Connect Gmail" });
 
   await userEvent.click(link);
 
   const [url, name, features] = open.mock.calls[0];
-  expect(url).toBe("https://consent.example/go");
+  expect(url).toBe("/surface/web/turns/" + TURN_ID + "/connect");
   expect(name).toBe("ufo-connect");
   // A browser closes a window a script opened, and only that. Sized for a consent screen, so the
   // conversation stays in sight behind it.
@@ -478,7 +480,7 @@ test("consent opens in a window this page owns, so its return page can close its
 test("a blocked consent window falls through to the tab the link already opens", async () => {
   const stream = await streaming();
   const open = vi.spyOn(window, "open").mockReturnValue(null);
-  stream.emit("connect", { url: "https://consent.example/go" });
+  stream.emit("connect", { turn: TURN_ID });
   const link = await screen.findByRole("link", { name: "Connect account" });
   const clicked = new MouseEvent("click", { bubbles: true, cancelable: true });
 

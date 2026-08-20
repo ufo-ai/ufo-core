@@ -9,7 +9,7 @@ import {
   type Bubble,
   type LiveTurn,
 } from "@/lib/chatStore";
-import type { ChatApp, ChatConnect, ChatFile, SubagentRun, Transcript } from "@/lib/types";
+import type { ChatApp, ChatFile, SubagentRun, Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const MALFORMED_REPLY = "Malformed reply — try again.";
@@ -514,11 +514,6 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     onLive((live) => ({ ...live, connect: frame }));
   });
 
-  source.addEventListener("connect_error", (event) => {
-    const frame = JSON.parse((event as MessageEvent).data);
-    onLive((live) => ({ ...live, activity: frame.message }));
-  });
-
   source.addEventListener("terminal", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
     updateChat(chatKey, (state) => {
@@ -597,20 +592,6 @@ export function resyncChat(target: ChatTarget): void {
   void refreshTranscript(target);
 }
 
-/** The reply the transcript's open connect handoff rides: the newest turn's, which is the last
- *  assistant message — the same bubble the live stream folded the control into — or a wordless
- *  reply of its own when that turn's words all became steps. */
-function withConnect(messages: Bubble[], connect: ChatConnect): Bubble[] {
-  for (let at = messages.length - 1; at >= 0; at -= 1) {
-    if (messages[at].role === "assistant") {
-      return messages.map((message, index) =>
-        index === at ? { ...message, connect } : message,
-      );
-    }
-  }
-  return [...messages, { role: "assistant", text: "", connect }];
-}
-
 export async function refreshTranscript(
   target: ChatTarget,
   onlyIfEmpty = false,
@@ -648,10 +629,9 @@ export async function refreshTranscript(
     if (!onlyIfEmpty && (current.busy || current.turn)) return current;
     const question = current.handoffs.question ?? null;
     const running = ("turn" in payload && payload.turn) || null;
-    const connect = ("connect" in payload && payload.connect) || null;
     return {
       ...current,
-      messages: connect ? withConnect(payload.messages, connect) : payload.messages,
+      messages: payload.messages,
       earlier: payload.earlier ?? 0,
       fault: null,
       busy: running ? true : current.busy,

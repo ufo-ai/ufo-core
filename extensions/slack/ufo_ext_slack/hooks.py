@@ -1,5 +1,5 @@
-"""This extension's turn-lifecycle hook: the connector Slack send, footered with a mention of the
-bot user this workspace's own install proved.
+"""This extension's hooks: the connector Slack send, footered with a mention of the bot user this
+workspace's own install proved, and the connect button a landed connection settles.
 
 The footer belongs to whoever knows the id, and that is this extension — the connectors tool marks
 the send generically because it has no Slack identity to name. So the marking is rewritten here, in
@@ -18,10 +18,18 @@ import re
 
 from ufo_ext_connectors.tools import CallExternalToolInput
 
+from ufo.sdk.grants import ConnectionRecorded
 from ufo.sdk.manifest import HookContext, HookOutcome, ModifyInput, PreToolUse
 from ufo.sdk.o11y import log
 from ufo_ext_slack.attribution import is_slack_send, mention_attributed
-from ufo_ext_slack.surface import BOT_USER_ID_PATTERN, SELF_USER_ID_STORE_KEY
+from ufo_ext_slack.surface import (
+    BOT_USER_ID_PATTERN,
+    SELF_USER_ID_STORE_KEY,
+    SLACK_BOT_TOKEN_SLOT,
+    ConnectMessage,
+    connect_message_key,
+    settle_connect_message,
+)
 
 CONNECTOR_CALL_TOOL = "call_external_tool"
 SELF_USER_ID_READ_SECONDS = 1.0
@@ -58,4 +66,36 @@ async def _mirrored_self_user_id(ctx: HookContext) -> str | None:
         return None
     if isinstance(mirrored, str) and re.match(BOT_USER_ID_PATTERN, mirrored):
         return mirrored
+    return None
+
+
+async def settle_connect_button(ctx: HookContext) -> HookOutcome:
+    """Rewrite the Slack button a landed connection answers into the account it made.
+
+    The member pressed the button, authorized on the provider's pages, and never came back to the
+    thread — so the thread is where the button would sit offering an act already done. The
+    connection names who it belongs to and what for, which is what the button was held under; a
+    workspace whose Slack never posted one has nothing held and nothing to rewrite.
+
+    Slack is told after the grant stands, so a failure here costs the member nothing they did: the
+    account is connected, the agent has been told, and the button is stale rather than wrong."""
+    match ctx.payload:
+        case ConnectionRecorded(
+            provider=provider,
+            account_id=account_id,
+            account_label=account_label,
+            owner_member_id=owner,
+        ):
+            held = await ctx.ext.store.get(connect_message_key(owner, provider))
+            if held is None:
+                return None
+            await settle_connect_message(
+                await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT),
+                ConnectMessage.model_validate(held),
+                provider,
+                account_label or account_id,
+            )
+            await ctx.ext.store.delete(connect_message_key(owner, provider))
+        case _:
+            raise RuntimeError("slack connect hook fired on a non-connection_recorded payload")
     return None

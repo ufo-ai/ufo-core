@@ -33,6 +33,7 @@ from ufo.egress_rules import (
 from ufo.ext.loader import connection_hooks
 from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
 from ufo.grants import (
+    CONNECT_MEMO_SECONDS,
     ConnectFlow,
     ConnectHandoff,
     ConnectionOwnedByAnotherMember,
@@ -895,6 +896,27 @@ async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
+    asking_turn = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=asking_turn,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="connect stub",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(
+                    status="done",
+                    connect_request=ConnectRequest(provider="stub", requester_member_id=member_id),
+                ).model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     dbos = _QueueDbos()
     flow = ConnectFlow(
         providers={"stub": StubProvider()},
@@ -914,20 +936,34 @@ async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(
                 grantor_member_id=member_id,
                 conversation_id=conversation_id,
                 shared=False,
+                turn_id=asking_turn,
             )
         ).query
     )["state"][0]
 
     recorded = await flow.complete(state=state, code="the-code")
 
+    # The conversation carries on: the landing grant tells it, and the stamp the surfaces draw a
+    # settled control from rides the same write the grant did, so neither can cost the other.
     assert recorded.resumed is True
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            stamped = (
+                await connection.execute(
+                    sa.select(tables.turn.c.connect_landed_at).where(
+                        tables.turn.c.id == asking_turn
+                    )
+                )
+            ).scalar_one()
+    assert stamped is not None
     with ws(workspace_id):
         async with workspace_tx() as connection:
             turns = (
                 (
                     await connection.execute(
                         sa.select(tables.turn.c.id, tables.turn.c.inbound).where(
-                            tables.turn.c.conversation_id == conversation_id
+                            tables.turn.c.conversation_id == conversation_id,
+                            tables.turn.c.id != asking_turn,
                         )
                     )
                 )
@@ -949,7 +985,10 @@ async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(
                 await connection.execute(
                     sa.select(sa.func.count())
                     .select_from(tables.turn)
-                    .where(tables.turn.c.conversation_id == conversation_id)
+                    .where(
+                        tables.turn.c.conversation_id == conversation_id,
+                        tables.turn.c.id != asking_turn,
+                    )
                 )
             ).scalar_one()
     assert after == 1
@@ -1236,7 +1275,53 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
     assert (rows[0].owner_member_id, rows[0].conversation_id) == (member_id, conversation_id)
 
 
-async def test_connect_handoff_expires_with_its_terminal_request(db: None) -> None:
+async def test_connect_handoff_refuses_a_request_whose_agent_is_gone(db: None) -> None:
+    """A request outliving its own signing window may outlive the agent it was to grant. Sealing a
+    state for one the workspace no longer holds moves the failure into the callback, where the
+    member waits on a page that can only apologise, so the press is refused where they are still
+    looking at the control."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+    )
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="connect",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(
+                    status="done",
+                    connect_request=ConnectRequest(
+                        provider="stub",
+                        requester_member_id=member_id,
+                        grantee_agent_id=uuid4(),
+                    ),
+                ).model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with pytest.raises(ConnectRequestInvalid, match="agent that is gone"):
+        await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
+
+
+async def test_connect_handoff_mints_for_a_request_older_than_one_signing_window(db: None) -> None:
+    """A request outlives the window any one state is signed for — a member reads the reply, leaves,
+    and presses the control later — so an old request mints rather than refusing the only act its
+    reply names."""
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
@@ -1268,11 +1353,28 @@ async def test_connect_handoff_expires_with_its_terminal_request(db: None) -> No
                 updated_at=datetime.now(UTC) - timedelta(minutes=11),
             )
         )
-    with pytest.raises(ConnectRequestInvalid, match="expired"):
-        await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
+    minted = await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
+    assert minted.startswith("https://stub.test/oauth?state=")
+    async with workspace_tx() as connection:
+        stamped = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.connect_authorization_url,
+                    tables.turn.c.connect_authorized_at,
+                ).where(tables.turn.c.id == turn_id)
+            )
+        ).one()
+    assert stamped.connect_authorization_url == minted
+    assert stamped.connect_authorized_at is not None
 
 
-async def test_connect_handoff_replays_against_its_authorization_ttl(db: None) -> None:
+async def test_connect_handoff_replays_one_authorization_then_remints_past_its_window(
+    db: None,
+) -> None:
+    """Every read of one request names one control while the state it carries is live, so a reload
+    and the stream draw the same URL. Once that state has aged past the window the callback would
+    refuse it, the next read mints a fresh one in its place — the control the member presses is
+    always a live consent page."""
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
@@ -1319,8 +1421,40 @@ async def test_connect_handoff_replays_against_its_authorization_ttl(db: None) -
             .values(connect_authorized_at=datetime.now(UTC) - timedelta(minutes=11))
             .where(tables.turn.c.id == turn_id)
         )
-    with pytest.raises(ConnectRequestInvalid, match="authorization has expired"):
-        await handoff.authorize(workspace_id, turn_id, member_id)
+    reminted = await handoff.authorize(workspace_id, turn_id, member_id)
+    assert reminted.startswith("https://stub.test/oauth?state=")
+    assert reminted != url
+    assert await handoff.authorize(workspace_id, turn_id, member_id) == reminted
+    # One handed back late in its own signing window would send the member to a consent page the
+    # callback then refuses, so the memo is spent well before the state it holds is.
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                connect_authorized_at=datetime.now(UTC)
+                - timedelta(seconds=CONNECT_MEMO_SECONDS + 1)
+            )
+            .where(tables.turn.c.id == turn_id)
+        )
+    fresher = await handoff.authorize(workspace_id, turn_id, member_id)
+    assert fresher not in (url, reminted)
+    # Age it by the store's own clock, which is what stamped it: a stamp read back in whatever
+    # precision that store keeps names no row, so the write that replaces an aged authorization
+    # names the URL it read instead.
+    async with workspace_tx() as connection:
+        clock = (
+            "datetime('now','-11 minutes')"
+            if connection.dialect.name == "sqlite"
+            else "now() - interval '11 minutes'"
+        )
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(connect_authorized_at=sa.text(clock))
+            .where(tables.turn.c.id == turn_id)
+        )
+    again = await handoff.authorize(workspace_id, turn_id, member_id)
+    assert again.startswith("https://stub.test/oauth?state=")
+    assert again not in (url, reminted)
 
 
 async def test_connect_account_without_a_speaker_is_refused() -> None:

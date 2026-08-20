@@ -1795,6 +1795,37 @@ class SurfaceContext:
             raise ConnectRequestInvalid("connect flow is unavailable") from error
         return await ConnectHandoff(flow).authorize(self.workspace_id, turn_id, member_id)
 
+    async def held_accounts(self, owner_member_id: UUID) -> dict[str, str]:
+        """What this member's own connections are held under, keyed by provider: the account a
+        settled connect control names. Which request settled is the turn's own stamp, so this read
+        only supplies the name — the newest account where the member holds more than one on a
+        provider, which is the one their last connect made."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.connection.c.provider,
+                        tables.connection.c.account_label,
+                        tables.connection.c.account_id,
+                    )
+                    .where(
+                        tables.connection.c.workspace_id == self.workspace_id,
+                        tables.connection.c.owner_member_id == owner_member_id,
+                    )
+                    .order_by(tables.connection.c.updated_at)
+                )
+            ).all()
+        return {row.provider: row.account_label or row.account_id for row in rows}
+
+    def connect_available(self) -> bool:
+        """Whether this deploy holds the connect machinery at all — no credential key means no flow,
+        and a surface that drew a connect act anyway would offer a press with nowhere to go."""
+        try:
+            installed_connect_flow()
+        except ConnectUnavailable:
+            return False
+        return True
+
     def connect_label(self, provider: str) -> str:
         """The member-facing name of a connect provider, as the connect flow declares it."""
         return installed_connect_flow().label_for(provider)
@@ -3942,6 +3973,7 @@ class SurfaceContext:
             tables.turn.c.subagent_profile,
             tables.turn.c.subagent_name,
             tables.turn.c.traceparent,
+            tables.turn.c.connect_landed_at,
         )
 
     def _turn_record(self, row: sa.Row) -> Turn:
@@ -3963,6 +3995,7 @@ class SurfaceContext:
             subagent_profile=row.subagent_profile,
             subagent_name=row.subagent_name,
             traceparent=row.traceparent,
+            connect_landed_at=row.connect_landed_at,
         )
 
 

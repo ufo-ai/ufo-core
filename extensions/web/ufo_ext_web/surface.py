@@ -41,6 +41,7 @@ from pydantic import BaseModel, JsonValue, ValidationError
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
+from ufo.sdk.callback_page import callback_page
 from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
 from ufo.sdk.http import (
     FormData,
@@ -1328,6 +1329,7 @@ def _rendered_messages(
     asked: Mapping[str, str] | None = None,
     files: Mapping[str, list[dict[str, object]]] | None = None,
     apps: Mapping[str, list[dict[str, object]]] | None = None,
+    connects: Mapping[str, dict[str, object]] | None = None,
     attach: Attach | None = None,
     answers: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
@@ -1361,7 +1363,10 @@ def _rendered_messages(
     file stands on the words that shared it and stays there when later turns run. A turn that
     shared and wrote nothing still renders its reply — the file needs the reply it belongs to.
     `apps` names the applications each turn created and rides the reply the same way, so the card
-    that opens one stands under the words that made it.
+    that opens one stands under the words that made it. `connects` names the private connect act a
+    turn left the member and rides it the same way again — the control stands under the words that
+    asked for it, and stays there while later turns run, drawn as the account it made once the
+    connect landed.
 
     A member's own bubble carries what they attached the same way, off the note admission wrote at
     the foot of their words: `attach` turns each saved path into the file the bubble draws, so the
@@ -1377,6 +1382,7 @@ def _rendered_messages(
     live view settles into. The rule reaches a turn's own reply and no further: a run's transcript
     closes on the message it stored last, and that message is the answer its page states."""
     subagents = subagents or {}
+    connects = connects or {}
     questions = questions or {}
     asked = asked or {}
     files = files or {}
@@ -1402,7 +1408,16 @@ def _rendered_messages(
         asked = None if closing is None else questions.get(closing)
         shared = [] if closing is None else files.get(closing, [])
         made = [] if closing is None else apps.get(closing, [])
-        if not answer and not pending and not runs and asked is None and not shared and not made:
+        control = None if closing is None else connects.get(closing)
+        if (
+            not answer
+            and not pending
+            and not runs
+            and asked is None
+            and not shared
+            and not made
+            and control is None
+        ):
             return
         reply: dict[str, object] = {"role": "assistant", "text": answer}
         if pending:
@@ -1415,6 +1430,8 @@ def _rendered_messages(
             reply["files"] = shared
         if made:
             reply["apps"] = made
+        if control is not None:
+            reply["connect"] = control
         rendered.append(reply)
         pending = []
         answer = ""
@@ -1535,6 +1552,7 @@ class _TranscriptAids:
     asks: _Asks
     files: dict[str, list[dict[str, object]]]
     apps: dict[str, list[dict[str, object]]]
+    connects: dict[str, dict[str, object]]
     attach: Attach
     run_conversation: bool
 
@@ -1549,6 +1567,7 @@ class _TranscriptAids:
             self.asked,
             self.files,
             self.apps,
+            self.connects,
             self.attach,
             self.asks.stated,
         )
@@ -1608,9 +1627,53 @@ async def _transcript_aids(
         asks=_asks(conversation_id, turns, admitted),
         files=files,
         apps=drawn,
+        connects=await _connect_controls(ctx, conversation_id, turns, viewer),
         attach=partial(_attachment_preview, agent_id, conversation_id),
         run_conversation=any(turn.subagent_profile is not None for turn in turns),
     )
+
+
+async def _connect_controls(
+    ctx: SurfaceContext,
+    conversation_id: UUID,
+    turns: tuple[Turn, ...],
+    viewer: UUID,
+) -> dict[str, dict[str, object]]:
+    """The private connect act each turn left this member, keyed by the turn that left it.
+
+    A request whose connect landed is drawn as the account it made: the words above it asked the
+    member to press something, and a control that vanished on landing would leave that instruction
+    pointing at nothing, while one still offering to connect would ask for an act already done. What
+    says it landed is the turn's own stamp, written by the callback that recorded the grant — a
+    member may hold two accounts on one provider, and may reconnect from another conversation
+    entirely, so the accounts they hold cannot answer which request was answered. A request still
+    open is drawn as the act itself, naming the turn the press opens rather than a consent URL: the
+    URL is minted where that press lands, so the control a member comes back to hours later is as
+    fresh as their press.
+
+    Another member's request is drawn for nobody but them: the grant lands on whoever presses, so a
+    colleague reading the conversation is shown no act, as the stream shows them none. A deploy that
+    holds no connect flow draws none either — there is nowhere for a press to go."""
+    if not ctx.connect_available():
+        return {}
+    controls: dict[str, dict[str, object]] = {}
+    held: dict[str, str] | None = None
+    for turn in turns:
+        terminal = turn.terminal
+        request = None if terminal is None else terminal.connect_request
+        if request is None or request.requester_member_id != viewer:
+            continue
+        if turn.connect_landed_at is None:
+            controls[str(turn.id)] = _connect_control(ctx, request.provider, turn.id)
+            continue
+        if held is None:
+            held = await ctx.held_accounts(viewer)
+        controls[str(turn.id)] = {
+            "provider": request.provider,
+            "label": _provider_label(ctx, request.provider),
+            "account": held.get(request.provider, ""),
+        }
+    return controls
 
 
 async def _conversation_messages(
@@ -1835,39 +1898,29 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         if turn.terminal is None:
             payload["turn"] = str(turn.id)
         else:
-            payload.update(await _open_handoffs(ctx, turn.id, member_id, turn.terminal))
+            payload.update(await _open_handoffs(ctx, turn.terminal))
     return JSONResponse(payload)
 
 
-async def _open_handoffs(
-    ctx: SurfaceContext, turn_id: UUID, member_id: UUID, terminal: TerminalFrame
-) -> dict[str, object]:
+async def _open_handoffs(ctx: SurfaceContext, terminal: TerminalFrame) -> dict[str, object]:
     """What the conversation's newest committed turn still asks of the member, so a reload
-    re-renders the same affordances the live stream drew: credential prompts still awaiting
-    values, and the private connect control an open handoff still offers — at the URL the turn
-    memoized, so the reload and the stream name one control. Pressing that control is itself what
-    re-reads this projection (the consent window's focus round-trip), so a reload that dropped it
-    would take the control away the moment it was used. A request another member spoke, one whose
-    seal expired, or a deploy with no connect flow serves the transcript without it. A question,
-    a shared file, and the card of an app the turn created are not among the handoffs — each rides
-    the reply it belongs to, which is where the member answers one, reads another, and opens the
-    third."""
+    re-renders the affordance the live stream drew: credential prompts still awaiting values. A
+    question, a shared file, an app's card, and the connect control are not among them — each rides
+    the reply it belongs to, which is where the member answers one, reads another, opens the third,
+    and presses the fourth."""
     handoffs: dict[str, object] = {}
     if terminal.credential_request is not None:
         prompts = await _pending_prompts(ctx, terminal.credential_request)
         if prompts is not None:
             handoffs["credentials"] = prompts
-    if terminal.connect_request is not None:
-        provider = terminal.connect_request.provider
-        try:
-            handoffs["connect"] = {
-                "url": await ctx.connect_url(turn_id, member_id),
-                "provider": provider,
-                "label": _provider_label(ctx, provider),
-            }
-        except ConnectRequestInvalid:
-            pass
     return handoffs
+
+
+def _connect_control(ctx: SurfaceContext, provider: str, turn_id: UUID) -> dict[str, object]:
+    """The standing connect act, as every surface read draws it: what is being connected, and the
+    turn whose request the press opens. It carries no consent URL — that is minted at the address
+    the press lands on — so nothing the member is looking at can go stale while they read it."""
+    return {"provider": provider, "label": _provider_label(ctx, provider), "turn": str(turn_id)}
 
 
 def _provider_label(ctx: SurfaceContext, provider: str) -> str:
@@ -3199,6 +3252,36 @@ async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(payload)
 
 
+CONNECT_ASK_AGAIN = "Ask the app to connect the account again."
+
+
+async def connect_handoff(ctx: SurfaceContext, request: Request) -> Response:
+    """The outbound leg of one turn's connect handoff: mint this member's own consent URL and send
+    the window that opened here on to the provider.
+
+    Minting happens on the press rather than when the reply was drawn. The state a consent URL
+    carries is signed for minutes and the member reads at their own pace, so one minted for a chip
+    nobody had pressed yet is spent before they reach it — and re-minting it on every read of the
+    conversation would write to the turn to answer a read. The chip carries this address instead, so
+    the press is what mints, and what the member lands on is always live.
+
+    A request that can no longer be opened says so where the window is, which is the only place the
+    member is looking."""
+    reached = await _member_turn(ctx, request)
+    if isinstance(reached, Response):
+        return reached
+    member_id, turn_id, _email = reached
+    try:
+        url = await ctx.connect_url(turn_id, member_id)
+    except ConnectRequestInvalid:
+        return callback_page(
+            headline="This connection request is no longer available.",
+            detail=CONNECT_ASK_AGAIN,
+            status=404,
+        )
+    return RedirectResponse(url, status_code=303)
+
+
 async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID, str] | Response:
     """One turn this member may reach, as the member, the turn, and the email their audience is
     resolved from, or the refusal to answer with. The turn must belong to the member AND its agent
@@ -3332,7 +3415,11 @@ async def _events(
 ) -> AsyncIterator[bytes]:
     """The turn as the live chat draws it. A created application is gated on the audience read at
     the terminal frame, not the one the stream opened on: the streamed turn is itself what creates
-    the application, so the reader's audience holds it only once that turn has ended."""
+    the application, so the reader's audience holds it only once that turn has ended.
+
+    A connect act is drawn on the same terms the transcript draws it on: for the member who asked
+    and nobody else, since the grant lands on whoever presses, and only where the deploy holds the
+    machinery a press would need."""
     async with ctx.tail(turn_id, since) as frames:
         async for cursor, frame in frames:
             if isinstance(frame, Terminal):
@@ -3348,24 +3435,13 @@ async def _events(
                     nodes = await _subagent_nodes(ctx, tuple(mine))
                     for run in nodes.get(str(turn_id), []):
                         yield _event("subagent", dict(run))
-                if frame.frame.connect_request is not None:
-                    provider = frame.frame.connect_request.provider
-                    try:
-                        url = await ctx.connect_url(turn_id, member_id)
-                    except ConnectRequestInvalid:
-                        yield _event(
-                            "connect_error",
-                            {"message": "Connection request unavailable; ask me to connect again."},
-                        )
-                    else:
-                        yield _event(
-                            "connect",
-                            {
-                                "url": url,
-                                "provider": provider,
-                                "label": _provider_label(ctx, provider),
-                            },
-                        )
+                request = frame.frame.connect_request
+                if (
+                    request is not None
+                    and request.requester_member_id == member_id
+                    and ctx.connect_available()
+                ):
+                    yield _event("connect", _connect_control(ctx, request.provider, turn_id))
                 if frame.frame.credential_request is not None:
                     prompts = await _pending_prompts(ctx, frame.frame.credential_request)
                     if prompts is not None:
@@ -3891,5 +3967,6 @@ ROUTES = (
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),
     SurfaceRoute(method="GET", path="workspace/usage", handler=workspace_usage),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
+    SurfaceRoute(method="GET", path="turns/{turn_id}/connect", handler=connect_handoff),
     SurfaceRoute(method="POST", path="credentials", handler=fulfill_credential),
 )
