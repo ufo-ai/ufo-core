@@ -74,6 +74,13 @@ ship — visual character lives in CSS and the drawn craft, never in the charact
 and the landing fleet is live data (one craft per workspace). The curl card and the landing page
 keep it, each held there by a test; strip decoration around it, never it.
 
+## Prompts
+
+A change to text a model reads — a prompt section, a tool description, injected context — ships
+only ablated: run the relevant evals with and without the changed wording, and with any other
+section covering the same ground, and keep only what the arms prove load-bearing. A prompt change
+no eval can measure gets that eval first.
+
 ## Skills
 
 Creating or editing a Skill requires reading and applying
