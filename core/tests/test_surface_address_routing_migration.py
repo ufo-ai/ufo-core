@@ -10,7 +10,7 @@ from alembic.config import Config
 from ufo.db import MIGRATIONS_DIR
 
 NOW = datetime(2026, 8, 20, tzinfo=UTC)
-BEFORE = "20260819175749"
+BEFORE = "20260820010508"
 AFTER = "20260820052830"
 
 
