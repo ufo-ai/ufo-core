@@ -1,24 +1,24 @@
 # The WorkOS DNS records, all DNS-only (proxied = false, ttl auto) so Cloudflare answers them
 # straight through: WorkOS verifies each record itself, and a proxied record never verifies.
 #
-# The AuthKit domain auth.ufo.ai and the Google OAuth domain oauth.ufo.ai answer the same WorkOS
-# target. The email sending domain mail.flyingobject.ai carries its own SendGrid CNAMEs — one mail
-# CNAME and two DKIM keys. WorkOS issues fresh targets for each sending domain it verifies, so
-# mail.ufo.ai means new values read out of WorkOS, never these renamed.
+# In the ufo.ai zone: the AuthKit domain auth.ufo.ai, the Google OAuth domain oauth.ufo.ai, and the
+# three SendGrid records WorkOS issues for the sending domain mail.ufo.ai — one mail CNAME and two
+# DKIM keys. The em host belongs to the domain WorkOS verified it for, so it changes with the domain
+# while the DKIM targets and the SendGrid user do not.
 #
-# Each record already exists live — created through the Cloudflare API to bring the domain up — so
-# they are imported into edge state once, never recreated:
+# In the flyingobject.ai zone: the sending domain WorkOS still has verified. It retires once
+# mail.ufo.ai verifies, and its records are deleted in that same change.
 #
-#   terraform import 'cloudflare_dns_record.workos["sendgrid"]'  7d788212bd48a93f3d7df3bfd9b599e1/98a1065aa3740f04f2cb218cd0cc4e32
-#   terraform import 'cloudflare_dns_record.workos["dkim_wos"]'  7d788212bd48a93f3d7df3bfd9b599e1/75b93b7a52ac22b5f8254914c9e92447
-#   terraform import 'cloudflare_dns_record.workos["dkim_wos2"]' 7d788212bd48a93f3d7df3bfd9b599e1/a9943b080a94733fc4e6dc1dea652082
-#
-# The two ufo.ai record ids come from the zone listing at import time:
+# Every record here already exists live — created through the Cloudflare API to bring the domain up —
+# so each is imported into state once, never recreated. `terraform state list` says which addresses
+# state already holds; import the rest. Zone and record ids come from the Cloudflare API:
 #
 #   curl -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
 #     "https://api.cloudflare.com/client/v4/zones?name=ufo.ai"
 #   curl -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-#     "https://api.cloudflare.com/client/v4/zones/<zone>/dns_records?name=auth.ufo.ai"
+#     "https://api.cloudflare.com/client/v4/zones/<zone>/dns_records?name=em9982.mail.ufo.ai"
+#
+#   terraform import 'cloudflare_dns_record.workos_ufo["em9982.mail.ufo.ai"]' <zone>/<record>
 
 resource "cloudflare_dns_record" "workos" {
   for_each = {
@@ -36,12 +36,18 @@ resource "cloudflare_dns_record" "workos" {
 }
 
 resource "cloudflare_dns_record" "workos_ufo" {
-  for_each = toset(["auth.ufo.ai", "oauth.ufo.ai"])
+  for_each = {
+    "auth.ufo.ai"                 = "cname.workos-dns.com"
+    "oauth.ufo.ai"                = "cname.workos-dns.com"
+    "em9982.mail.ufo.ai"          = "u36670648.wl149.sendgrid.net"
+    "wos._domainkey.mail.ufo.ai"  = "wos.domainkey.u36670648.wl149.sendgrid.net"
+    "wos2._domainkey.mail.ufo.ai" = "wos2.domainkey.u36670648.wl149.sendgrid.net"
+  }
 
   zone_id = data.cloudflare_zone.ufo_ai.id
-  name    = each.value
+  name    = each.key
   type    = "CNAME"
-  content = "cname.workos-dns.com"
+  content = each.value
   ttl     = 1
   proxied = false
 }
