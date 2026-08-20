@@ -82,7 +82,9 @@ IFRAME_SANDBOX = (
 SHARE_CARD_URL = "https://ufo.ai/share/og-site.jpg"
 SHARE_CARD_WIDTH = "1200"
 SHARE_CARD_HEIGHT = "630"
-SHARE_CARD_ALT = "Made with UFO — three figures under a dark sky, the UFO mark above them."
+SHARE_CARD_ALT = (
+    "Made with UFO — two figures in black silhouette on a blue ground, ember dots above them."
+)
 GENERIC_SHARE_TITLE = "A site on UFO"
 SHARE_DESCRIPTION = "A site made with UFO."
 VISIBILITY_LABELS: dict[Visibility, str] = {

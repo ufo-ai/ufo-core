@@ -109,7 +109,8 @@ test("the page hands an unfurler a titled card at an absolute https URL", async 
       "og:image:width": "1200",
       "og:image:height": "630",
       "og:image:type": "image/jpeg",
-      "og:image:alt": "Go further. — three figures under a dark sky, the UFO mark above them.",
+      "og:image:alt":
+        "Go further. — three figures in black silhouette on a blue ground, ember dots above them.",
       "twitter:card": "summary_large_image",
       "twitter:title": "UFO — Go further.",
       "twitter:description": "UFO. Go further.",

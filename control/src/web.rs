@@ -53,10 +53,11 @@ pub const LOGO_HEIGHT: u32 = 18;
 /// An unfurler carries no session and follows one absolute URL, so a card cannot live behind the
 /// portal's session gate or on a site's own `no-store` origin — it is compiled in and served beside
 /// the mark, on the apex origin that already answers anonymously and caches for a year. Both files
-/// are generated from the marketing page's own artwork and faces, so this crate reads the committed
-/// renders rather than keeping a second copy of either; `assets/brand/share/README.md` holds the one
-/// command that reproduces them, and it writes them here, beside the other compiled-in artwork,
-/// because the gateway image builds from `control` alone and reaches nothing above it.
+/// are generated from the brand's own illustrations and the marketing page's faces, so this crate
+/// reads the committed renders rather than keeping a second copy of either;
+/// `assets/brand/share/README.md` holds the one command that reproduces them, and it writes them
+/// here, beside the other compiled-in artwork, because the gateway image builds from `control` alone
+/// and reaches nothing above it.
 pub const SHARE_HOME_PATH: &str = "/share/og-home.jpg";
 pub const SHARE_HOME_BYTES: &[u8] = include_bytes!("assets/og-home.jpg");
 pub const SHARE_SITE_PATH: &str = "/share/og-site.jpg";

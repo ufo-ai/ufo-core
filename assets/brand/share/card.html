@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <style>
+  /* The share card, 1200x630. Faces are the marketing page's own subset woff2,
+     extracted at render time so this template keeps no second copy of them. */
   @font-face { font-family: 'Canela'; font-style: normal; font-weight: 300;
     src: url('fonts/Canela-normal-300.woff2') format('woff2'); }
   @font-face { font-family: 'Canela'; font-style: italic; font-weight: 300;
@@ -11,60 +13,49 @@
     src: url('fonts/Inter-normal-500.woff2') format('woff2'); }
 
   :root {
-    --void-900: #0D1418;
-    --signal-400: #4F97C7;
+    --void-900: #0D1418;   /* the marketing page's ground */
     --sand-25: #FFFAEF;
-    --sand-50: #F3ECDE;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 1200px; height: 630px; }
-  body { background: var(--void-900); overflow: hidden; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
 
-  .card { position: relative; width: 1200px; height: 630px; overflow: hidden; }
+  .card { position: relative; width: 1200px; height: 630px; overflow: hidden;
+          background: var(--void-900); }
 
-  /* The artboard framing the landing page uses: a square image in a wide
-     window, the figures held low so the sky stays open for the headline. */
-  .art {
-    position: absolute; inset: 0; width: 100%; height: 100%;
-    object-fit: cover; object-position: 50% 18%;
-  }
-  /* Scrim: darkens the sky the headline sits on, leaves the figures lit. */
-  .scrim {
-    position: absolute; inset: 0;
-    background:
-      linear-gradient(180deg, rgba(13,20,24,0.94) 0%, rgba(13,20,24,0.72) 42%, rgba(13,20,24,0.10) 72%, rgba(13,20,24,0) 100%);
-  }
+  /* The illustration, cover-cropped by render_cards.py so its silhouettes begin
+     below the type. Nothing here re-frames it. */
+  .art { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
-  .lockup {
-    position: absolute; top: 52px; left: 64px;
-    display: flex; align-items: center; gap: 14px;
-  }
-  .lockup svg { width: 34px; height: 34px; display: block; }
-  .lockup .word {
-    font-family: 'Canela', Georgia, serif; font-weight: 300;
-    font-size: 38px; line-height: 1; color: var(--sand-25);
-    letter-spacing: 0.02em;
-  }
+  /* One stack holds every text object, laid out in flow with fixed gaps, so a
+     longer headline pushes the claim down instead of landing on top of it.
+     Type sizes are measured against reference cards at this exact frame — see
+     README.md. The floor is 40px: a feed renders the card near a third of its
+     size, so 21px type arrives as 7px and disappears. */
+  .stack { position: absolute; top: 48px; left: 64px; display: flex;
+           flex-direction: column; align-items: flex-start; color: var(--void-900); }
 
-  .headline {
-    position: absolute; left: 64px; right: 64px; top: 196px;
-    font-family: 'Canela', Georgia, serif; font-weight: 300;
-    font-size: 132px; line-height: 1.02; color: var(--sand-50);
-    text-align: center; white-space: nowrap;
-  }
-  .headline .lead { color: var(--signal-400); }
-  .headline em { font-style: italic; }
+  .lockup { display: flex; align-items: center; gap: 16px; }
+  .lockup svg { width: 40px; height: 40px; display: block; flex: 0 0 auto; }
+  .lockup .word { font-family: 'Canela', Georgia, serif; font-weight: 300;
+                  font-size: 52px; line-height: 1; letter-spacing: 0.02em; }
 
-  /* --- sites variant ---------------------------------------------------- */
-  body.sites .headline { top: 214px; font-size: 108px; }
+  .display { font-family: 'Canela', Georgia, serif; font-weight: 300;
+             line-height: 1.04; white-space: nowrap; margin-top: 56px; }
+  .display em { font-style: italic; }
+
+  .claim { font-family: 'Inter', system-ui, sans-serif; font-weight: 500;
+           font-size: 46px; line-height: 1.22; letter-spacing: -0.005em;
+           margin-top: 30px; color: rgba(13, 20, 24, 0.80); }
 </style>
 </head>
-<body class="VARIANT">
+<body>
   <div class="card">
-    <img class="art" src="hero.png" alt="">
-    <div class="scrim"></div>
-    <div class="lockup">MARK<span class="word">UFO</span></div>
-    <div class="headline">HEADLINE</div>
+    <img class="art" src="ART" alt="">
+    <div class="stack">
+      <div class="lockup">MARK<span class="word">UFO</span></div>
+      <div class="display" style="font-size: DISPLAY_SIZEpx">HEADLINE</div>
+      <div class="claim">CLAIM</div>
+    </div>
   </div>
 </body>
 </html>
