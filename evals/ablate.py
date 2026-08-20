@@ -1,0 +1,419 @@
+"""Run a text-ablation experiment: one eval arm per variant of the text the model reads.
+
+`python -m evals.ablate experiment.toml` reads an experiment file naming a base revision and a
+set of arms — each arm a map of repo paths to variant files — and measures every arm on the same
+cases. Each arm is materialized as its own git worktree and venv, so an arm is exactly a git
+state and its diff is reviewable; a control arm on the unmodified base always runs beside the
+variants. Repeats become extra `[[run]]` blocks in the arm's `evals.stack` matrix, so each repeat
+is an isolated stack with its own database and serve. Results compare sample-level pass counts
+per case against the control, and the report calls a case moved only when the gap is wide enough
+to survive the suite's own noise.
+
+The experiment file:
+
+    name = "customers-section-clauses"
+    base = "origin/main"
+    suites = ["onboarding_help"]
+    cases = ["slack-install-pending", "promised-credits"]
+    repeats = 1
+    budget_usd = 60.0
+
+    [template]
+    database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+    blob = { backend = "filesystem", root = "./blobs" }
+    connect = { public_base_url = "http://evals.invalid" }
+    pack = { name = "assistant_hosted" }
+
+    [[arm]]
+    name = "no-topic-list"
+    [arm.files]
+    "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "arms/no-topic-list.py"
+
+Credentials come from the invoking environment — the orchestrator adds nothing and strips
+nothing, so run it under the same minimal environment an `evals.stack` run takes."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+import tomli_w
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from evals.harness.registry import narrowed_tasks
+from evals.registry import TASKS
+
+CONTROL_ARM = "control"
+ARM_LABEL_PREFIX = "ablate"
+EGRESS_BINARY = Path("egress/target/debug/ufo-egress")
+RUNS_DIR = Path("eval-reports/runs")
+EXPERIMENTS_DIR = Path("eval-reports/experiments")
+WORKTREES_DIR = Path(".local/ablate")
+SIGNAL_GAP = 2
+SIGNAL_FLOOR = 3
+
+
+class ArmSpec(BaseModel):
+    """One variant arm: variant files copied over repo paths in the arm's own worktree."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    files: dict[str, Path]
+
+    @field_validator("name")
+    @classmethod
+    def _name_fits_a_stack_label(cls, name: str) -> str:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,20}", name):
+            raise ValueError(f"arm name {name!r} must match [a-z0-9][a-z0-9_-]{{0,20}}")
+        if name == CONTROL_ARM:
+            raise ValueError(f"{CONTROL_ARM!r} is implicit — every experiment runs it")
+        return name
+
+
+class ExperimentSpec(BaseModel):
+    """The experiment file: what to vary, what to measure it on, and what it may spend."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    base: str
+    suites: tuple[str, ...]
+    cases: tuple[str, ...] = ()
+    repeats: int = 1
+    concurrency: int = 4
+    max_stacks: int = 3
+    budget_usd: float
+    est_usd_per_case: float = 1.20
+    template: dict[str, dict[str, str]]
+    arm: tuple[ArmSpec, ...]
+
+    @field_validator("arm")
+    @classmethod
+    def _arm_names_are_unique(cls, arms: tuple[ArmSpec, ...]) -> tuple[ArmSpec, ...]:
+        names = [arm.name for arm in arms]
+        if len(set(names)) != len(names):
+            raise ValueError(f"duplicate arm names: {sorted(names)}")
+        return arms
+
+
+def load_experiment(path: Path) -> ExperimentSpec:
+    spec = ExperimentSpec.model_validate(tomllib.loads(path.read_text()))
+    resolved = tuple(
+        ArmSpec(
+            name=arm.name,
+            files={
+                repo_path: (path.parent / variant).resolve()
+                for repo_path, variant in arm.files.items()
+            },
+        )
+        for arm in spec.arm
+    )
+    for arm in resolved:
+        for repo_path, variant in arm.files.items():
+            if not variant.is_file():
+                raise SystemExit(f"arm {arm.name!r}: variant for {repo_path} missing: {variant}")
+    return spec.model_copy(update={"arm": resolved})
+
+
+@dataclass(frozen=True)
+class CaseCount:
+    """Sample-level tallies for one case in one arm, summed across repeats."""
+
+    passes: int
+    samples: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ArmResult:
+    name: str
+    counts: dict[str, CaseCount]
+    cost_usd: float
+    error: str | None = None
+
+
+def collect_counts(records: list[dict]) -> tuple[dict[str, CaseCount], float]:
+    """Sample-level pass counts per case across every record of one arm. A case's `passed` is
+    any-sample semantics; ablation resolution needs the samples themselves, so this reads the
+    attempts. A runner that records no attempts (the arc, slack-silence, and skill-selection
+    suites) still scored the case, so its case-level verdict counts as the one sample it is.
+    Excluded cases are dropped and infra-excluded samples leave the case's denominator,
+    the way the harness scores them — a transport-dead sample measures the harness, not the text.
+    Their cost stays in the total: the run paid for them."""
+    passes: dict[str, int] = {}
+    samples: dict[str, int] = {}
+    reasons: dict[str, list[str]] = {}
+    cost = 0
+    for record in records:
+        for report in record["reports"]:
+            for case in report["cases"]:
+                if case.get("excluded"):
+                    continue
+                name = case["name"]
+                evidence = case.get("evidence") or {}
+                attempts = evidence.get("attempts") or []
+                excluded = (evidence.get("excludedSamples") or 0) + (
+                    evidence.get("excludedTrials") or 0
+                )
+                if attempts:
+                    passes[name] = passes.get(name, 0) + sum(
+                        1 for attempt in attempts if attempt.get("passed")
+                    )
+                    samples[name] = samples.get(name, 0) + len(attempts) - excluded
+                    cost += sum(attempt.get("costMicroUsd") or 0 for attempt in attempts)
+                else:
+                    passes[name] = passes.get(name, 0) + (1 if case["passed"] else 0)
+                    samples[name] = samples.get(name, 0) + 1
+                if not case["passed"]:
+                    reasons.setdefault(name, []).append((case.get("reason") or "")[:160])
+    counts = {
+        name: CaseCount(passes[name], samples[name], tuple(reasons.get(name, ())))
+        for name in samples
+    }
+    return counts, cost / 1e6
+
+
+def verdict(control: CaseCount, arm: CaseCount) -> str:
+    """One case's movement between the control and an arm, at sample level. A pass-count gap only
+    means something when both sides ran the same number of samples, so an arm that lost a repeat
+    or a case reports `needs-samples` rather than a movement it did not measure. `regressed` and
+    `improved` require a gap of at least SIGNAL_GAP samples with both sides holding at least
+    SIGNAL_FLOOR — below that a flip is inside the suite's own noise — except a total collapse
+    or a total fix (one side zero, the other everything), which compares rates and so is a signal
+    at any size."""
+    gap = control.passes - arm.passes
+    same_samples = control.samples == arm.samples
+    comparable = same_samples and arm.samples >= SIGNAL_FLOOR
+    collapse = arm.samples > 0 and arm.passes == 0 and control.passes == control.samples > 0
+    fixed = control.samples > 0 and control.passes == 0 and arm.passes == arm.samples > 0
+    if collapse or (comparable and gap >= SIGNAL_GAP):
+        return "regressed"
+    if fixed or (comparable and -gap >= SIGNAL_GAP):
+        return "improved"
+    if same_samples and gap == 0:
+        return "flat"
+    return "needs-samples"
+
+
+def render_report(spec: ExperimentSpec, results: tuple[ArmResult, ...]) -> str:
+    control = next(result for result in results if result.name == CONTROL_ARM)
+    lines = [f"# Ablation: {spec.name}", ""]
+    lines.append(f"Base {spec.base}, {spec.repeats} repeat(s), suites {', '.join(spec.suites)}.")
+    total = sum(result.cost_usd for result in results)
+    lines.append(f"Total case cost ${total:.2f}.")
+    for result in results:
+        if result.error:
+            lines += ["", f"## {result.name}: FAILED — {result.error}"]
+            continue
+        if result.name == CONTROL_ARM:
+            lines += ["", f"## control (${result.cost_usd:.2f})", ""]
+            for name in sorted(control.counts):
+                count = control.counts[name]
+                lines.append(f"- {name}: {count.passes}/{count.samples}")
+            continue
+        moved = []
+        lines += ["", f"## {result.name} (${result.cost_usd:.2f})", ""]
+        for name in sorted(control.counts):
+            base = control.counts[name]
+            arm = result.counts.get(name)
+            if arm is None:
+                lines.append(f"- {name}: MISSING (excluded or not recorded)")
+                continue
+            call = verdict(base, arm)
+            if call in ("regressed", "improved"):
+                moved.append((name, call))
+            note = f" [{call}]" if call != "flat" else ""
+            lines.append(
+                f"- {name}: {arm.passes}/{arm.samples} vs control "
+                f"{base.passes}/{base.samples}{note}"
+            )
+            if call == "regressed" and arm.reasons:
+                lines.append(f"    reason: {arm.reasons[0]}")
+        summary = "; ".join(f"{name} {call}" for name, call in moved) if moved else "no case moved"
+        lines.append(f"  => {summary}")
+    return "\n".join(lines) + "\n"
+
+
+@dataclass(frozen=True)
+class Ablation:
+    """The experiment run: materialize one worktree and venv per arm, drive one `evals.stack`
+    per arm with `repeats` run blocks, collect sample counts, and write the comparison."""
+
+    repo: Path
+    spec: ExperimentSpec
+    out: Path
+
+    async def run(self) -> int:
+        self._preflight()
+        base = self._resolve_base()
+        arms = (ArmSpec.model_construct(name=CONTROL_ARM, files={}), *self.spec.arm)
+        slots = asyncio.Semaphore(self.spec.max_stacks)
+        results = await asyncio.gather(*(self._arm(arm, base, slots) for arm in arms))
+        report = render_report(self.spec, tuple(results))
+        self.out.mkdir(parents=True, exist_ok=True)
+        (self.out / "report.md").write_text(report)
+        (self.out / "experiment.json").write_text(
+            json.dumps(self.spec.model_dump(mode="json"), indent=2) + "\n"
+        )
+        print(report)
+        failed = [result.name for result in results if result.error]
+        if failed:
+            print(f"arms failed: {', '.join(failed)}", file=sys.stderr)
+        return 1 if failed else 0
+
+    def _preflight(self) -> None:
+        binary = self.repo / EGRESS_BINARY
+        if not binary.is_file():
+            raise SystemExit(
+                f"{EGRESS_BINARY} missing — build it: cargo build --manifest-path egress/Cargo.toml"
+            )
+        cases = self._planned_cases()
+        runs = (len(self.spec.arm) + 1) * self.spec.repeats
+        cost = runs * cases * self.spec.est_usd_per_case
+        if cost > self.spec.budget_usd:
+            raise SystemExit(
+                f"estimated ${cost:.0f} ({runs} runs x {cases} cases at "
+                f"${self.spec.est_usd_per_case}/case) exceeds budget ${self.spec.budget_usd:.0f}"
+            )
+        print(
+            f"estimated ${cost:.0f} ({runs} runs x {cases} cases), "
+            f"budget ${self.spec.budget_usd:.0f}"
+        )
+
+    def _planned_cases(self) -> int:
+        by_suite = {task.name: task for task in TASKS}
+        unknown = [name for name in self.spec.suites if name not in by_suite]
+        if unknown:
+            raise SystemExit(f"unknown suites: {', '.join(unknown)}")
+        tasks = tuple(by_suite[name] for name in self.spec.suites)
+        if self.spec.cases:
+            tasks = narrowed_tasks(tasks, self.spec.cases)
+        return max(sum(len(task.cases) for task in tasks), 1)
+
+    def _resolve_base(self) -> str:
+        return self._git("rev-parse", self.spec.base).strip()
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(
+            ("git", "-C", str(self.repo), *args), check=True, capture_output=True, text=True
+        ).stdout
+
+    async def _arm(self, arm: ArmSpec, base: str, slots: asyncio.Semaphore) -> ArmResult:
+        async with slots:
+            root = self.repo / WORKTREES_DIR / self.spec.name / arm.name
+            print(f"[{arm.name}] materializing", flush=True)
+            try:
+                await asyncio.to_thread(self._materialize, arm, base, root)
+                print(f"[{arm.name}] stack running", flush=True)
+                exit_code, tail = await self._stack(arm, root)
+                records = [
+                    json.loads(path.read_text())
+                    for path in sorted((root / RUNS_DIR).glob("*.json"))
+                ]
+                if not records:
+                    return ArmResult(
+                        arm.name, {}, 0.0, error=f"stack exited {exit_code}, no record: {tail}"
+                    )
+                counts, cost = collect_counts(records)
+                archive = self.out / "runs" / arm.name
+                archive.mkdir(parents=True, exist_ok=True)
+                for path in (root / RUNS_DIR).glob("*.json"):
+                    shutil.copy(path, archive / path.name)
+                print(f"[{arm.name}] done (${cost:.2f})", flush=True)
+                return ArmResult(arm.name, counts, cost)
+            except Exception as error:
+                print(f"[{arm.name}] FAILED: {type(error).__name__}: {error}", flush=True)
+                return ArmResult(arm.name, {}, 0.0, error=f"{type(error).__name__}: {error}")
+            finally:
+                await asyncio.to_thread(self._remove_worktree, root)
+
+    def _materialize(self, arm: ArmSpec, base: str, root: Path) -> None:
+        if root.exists():
+            self._remove_worktree(root)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        self._git("worktree", "add", "--detach", str(root), base)
+        for repo_path, variant in arm.files.items():
+            target = root / repo_path
+            if not target.is_file():
+                raise RuntimeError(f"arm {arm.name!r}: {repo_path} is not a file at {base}")
+            shutil.copy(variant, target)
+        subprocess.run(("uv", "sync"), cwd=root, check=True, capture_output=True)
+        binary = root / EGRESS_BINARY
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(self.repo / EGRESS_BINARY, binary)
+        binary.chmod(0o755)
+        config = root / "ablate-template.toml"
+        config.write_text(tomli_w.dumps(self.spec.template))
+        args = ["--concurrency", str(self.spec.concurrency), "--only", *self.spec.suites]
+        if self.spec.cases:
+            args += ["--case", *self.spec.cases]
+        matrix = {
+            "run": [
+                {
+                    "label": f"{ARM_LABEL_PREFIX}-{arm.name}-{index}",
+                    "config": str(config),
+                    "args": args,
+                }
+                for index in range(self.spec.repeats)
+            ]
+        }
+        (root / "ablate-matrix.toml").write_text(tomli_w.dumps(matrix))
+
+    async def _stack(self, arm: ArmSpec, root: Path) -> tuple[int, str]:
+        process = await asyncio.create_subprocess_exec(
+            "uv",
+            "run",
+            "--project",
+            str(root),
+            "python",
+            "-m",
+            "evals.stack",
+            str(root / "ablate-matrix.toml"),
+            cwd=root,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await process.communicate()
+        return process.returncode or 0, output.decode(errors="replace")[-1500:]
+
+    def _remove_worktree(self, root: Path) -> None:
+        if not root.exists():
+            return
+        subprocess.run(
+            ("git", "-C", str(self.repo), "worktree", "remove", "--force", str(root)),
+            check=False,
+            capture_output=True,
+        )
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="python -m evals.ablate")
+    parser.add_argument("experiment", type=Path, help="experiment TOML")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="output directory (default eval-reports/experiments/<name>)",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    spec = load_experiment(args.experiment)
+    repo = Path(
+        subprocess.run(
+            ("git", "rev-parse", "--show-toplevel"), check=True, capture_output=True, text=True
+        ).stdout.strip()
+    )
+    out = args.out or (repo / EXPERIMENTS_DIR / spec.name)
+    code = asyncio.run(Ablation(repo=repo, spec=spec, out=out).run())
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    main()
