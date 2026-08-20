@@ -19,7 +19,7 @@ from evals.harness.capability import (
     shared_file_names,
 )
 from evals.harness.harness import Json, JsonObject
-from evals.harness.registry import EvalTask, capability_task
+from evals.harness.registry import EvalTask, capability_task, rewrapped
 from evals.jobbench.models import RubricItem, SnapshotCase
 from evals.jobbench.snapshot import load_snapshot
 
@@ -47,7 +47,7 @@ def load_boundary(
     if not selected:
         raise ValueError("JobBench snapshot has no materialized cases")
     return tuple(
-        replace(
+        rewrapped(
             capability_task(
                 f"jobbench.{case.case_id}",
                 (
@@ -56,7 +56,7 @@ def load_boundary(
                     ),
                 ),
             ),
-            pin_runtime=True,
+            lambda task: replace(task, pin_runtime=True),
         )
         for case in snapshot.cases
         if case.case_id in selected

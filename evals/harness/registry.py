@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import cast
 
@@ -56,6 +56,7 @@ class EvalTask:
     pin_runtime: bool = False
     exclusive: bool = False
     packs: tuple[str, ...] = ()
+    narrow: Callable[[tuple[str, ...]], EvalTask] | None = None
 
 
 def capability_task(
@@ -104,6 +105,19 @@ def capability_task(
             )
         return EvalReport(name=name, suite="capability", digest=digest, cases=results)
 
+    def narrow(names: tuple[str, ...]) -> EvalTask:
+        kept = tuple(case for case in cases if case.name in names)
+        rubricked = any(case.rubric or case.artifact_rubric or case.visual_rubric for case in kept)
+        return capability_task(
+            name,
+            kept,
+            judge_model=judge_model if rubricked else None,
+            judge_max_tokens=judge_max_tokens,
+            judge_reasoning=judge_reasoning,
+            serial=serial,
+            packs=packs,
+        )
+
     return EvalTask(
         name,
         "capability",
@@ -116,6 +130,7 @@ def capability_task(
         judge_reasoning=judge_reasoning,
         exclusive=serial,
         packs=packs,
+        narrow=narrow,
     )
 
 
@@ -161,6 +176,19 @@ def scenario_task(
                 results.append(await run_scenario_case(case, target))
         return EvalReport(name=name, suite="scenario", digest=digest, cases=tuple(results))
 
+    def narrow(names: tuple[str, ...]) -> EvalTask:
+        kept = tuple(case for case in cases if case.name in names)
+        return scenario_task(
+            name,
+            kept,
+            simulator_model=simulator_model,
+            simulator_max_tokens=simulator_max_tokens,
+            simulator_reasoning=simulator_reasoning,
+            judge_model=judge_model if any(case.rubric for case in kept) else None,
+            judge_max_tokens=judge_max_tokens,
+            judge_reasoning=judge_reasoning,
+        )
+
     return EvalTask(
         name,
         "scenario",
@@ -175,6 +203,7 @@ def scenario_task(
         judge_max_tokens=judge_max_tokens,
         judge_reasoning=judge_reasoning,
         exclusive=True,
+        narrow=narrow,
     )
 
 
@@ -196,6 +225,17 @@ def arc_task(name: str, cases: tuple[ArcCase, ...]) -> EvalTask:
     return EvalTask(name, "arc", digest, tuple(case.name for case in cases), run, exclusive=True)
 
 
+def rewrapped(task: EvalTask, wrap: Callable[[EvalTask], EvalTask]) -> EvalTask:
+    """The task as `wrap` builds it, with `wrap` applied again to every narrowing of it. A suite
+    that wraps its runner or sets a task flag here keeps both under `--case`, where the narrowed
+    task is otherwise rebuilt from the kept cases alone."""
+    narrow = task.narrow
+    wrapped = wrap(task)
+    if narrow is None:
+        return wrapped
+    return replace(wrapped, narrow=lambda names: rewrapped(narrow(names), wrap))
+
+
 def selected_tasks(
     tasks: tuple[EvalTask, ...], names: tuple[str, ...] = ()
 ) -> tuple[EvalTask, ...]:
@@ -206,3 +246,24 @@ def selected_tasks(
     if missing:
         raise ValueError(f"unknown eval task: {', '.join(missing)}")
     return tuple(by_name[name] for name in names)
+
+
+def narrowed_tasks(
+    tasks: tuple[EvalTask, ...], case_names: tuple[str, ...]
+) -> tuple[EvalTask, ...]:
+    """Narrow the selected tasks to the named cases: each task keeps only the cases named, a task
+    naming none is dropped, and a case no selected task carries is an error. A narrowed task's
+    digest covers the kept subset, so its report compares only to runs of the same subset."""
+    known = {case for task in tasks for case in task.cases}
+    unknown = tuple(name for name in case_names if name not in known)
+    if unknown:
+        raise ValueError(f"unknown eval case: {', '.join(unknown)}")
+    narrowed = []
+    for task in tasks:
+        kept = tuple(name for name in task.cases if name in case_names)
+        if not kept:
+            continue
+        if task.narrow is None:
+            raise ValueError(f"suite {task.name!r} cannot narrow to individual cases")
+        narrowed.append(task.narrow(kept))
+    return tuple(narrowed)

@@ -71,7 +71,7 @@ from evals.handbook.runner import (
 )
 from evals.harness.harness import EvalReport, digest_payload
 from evals.harness.judge import ModelJudge
-from evals.harness.registry import EvalTask, selected_tasks
+from evals.harness.registry import EvalTask, narrowed_tasks, selected_tasks
 from evals.harness.target import InProcessTarget
 from evals.harness.viewer import (
     MAX_SHARE_EXPIRY_SECONDS,
@@ -177,6 +177,12 @@ def main(argv: list[str] | None = None) -> None:
         help="rebuild a diagnostic copy of a run recorded without evidence from durable state",
     )
     parser.add_argument("--only", nargs="*", default=(), help="run only the named suites")
+    parser.add_argument(
+        "--case",
+        nargs="*",
+        default=(),
+        help="run only the named cases within the --only suites",
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="run archive directory")
     parser.add_argument("--agent", default=DEFAULT_AGENT_NAME, help="target agent name")
     parser.add_argument(
@@ -281,6 +287,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
     names = tuple(args.only)
+    if args.case and not names:
+        parser.error("--case requires --only naming the suites to narrow")
     if (args.memory_100 is None) != (args.memory_100_state is None):
         parser.error("--memory-100 and --memory-100-state must be provided together")
     if (args.memory_ingestion is None) != (args.memory_ingestion_state is None):
@@ -403,6 +411,8 @@ def main(argv: list[str] | None = None) -> None:
         if args.skill_loading_case:
             subset = _skill_loading_subset(tuple(args.skill_loading_case))
             tasks = tuple(subset if task.name == "skill_loading" else task for task in tasks)
+        if args.case:
+            tasks = narrowed_tasks(tasks, tuple(args.case))
     except (OSError, ValueError, ValidationError) as error:
         parser.error(str(error))
     if args.list:

@@ -22,7 +22,7 @@ from evals.harness.capability import (
     WorkspaceFile,
 )
 from evals.harness.harness import Json, JsonObject
-from evals.harness.registry import EvalTask, capability_task
+from evals.harness.registry import EvalTask, capability_task, rewrapped
 from ufo.blob import WorkspaceBlobStore
 from ufo.credentials import CredentialStore
 from ufo.ext.manifest import Manifest
@@ -80,13 +80,12 @@ def load_handbook(
     if ingest is not None:
         tasks = _scorable_ingested(tasks, requested=bool(task_ids))
     return tuple(
-        replace(
+        rewrapped(
             capability_task(
                 f"handbook.{task.task_id}",
                 (_capability_case(task, pin, checkout, credentials, ingest),),
             ),
-            pin_runtime=True,
-            exclusive=True,
+            lambda built: replace(built, pin_runtime=True, exclusive=True),
         )
         for task in tasks
     )

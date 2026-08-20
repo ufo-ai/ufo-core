@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ufo_ext_memory.events import MAX_RECALL_ERROR_CLASS_CHARS, MAX_RECALLED_MEMORY_IDS
 
 from evals.harness.harness import EvalReport
-from evals.harness.registry import EvalTask
+from evals.harness.registry import EvalTask, rewrapped
 from evals.harness.target import CapabilityTarget
 
 MAX_RECALL_SKIP_REASON_CHARS = 64
@@ -46,7 +46,10 @@ class MemoryRecallEvent(BaseModel):
 
 def recall_graded(task: EvalTask) -> EvalTask:
     """The task with the recall aggregates folded onto its report."""
+    return rewrapped(task, _with_aggregates)
 
+
+def _with_aggregates(task: EvalTask) -> EvalTask:
     async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
         return with_recall_aggregates(await task.run(target, slots))
 

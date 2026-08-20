@@ -94,7 +94,13 @@ from evals.harness.judge import (
     rubric_pass,
     visual_rubric_pass,
 )
-from evals.harness.registry import EvalTask, capability_task, gather_cases
+from evals.harness.registry import (
+    EvalTask,
+    capability_task,
+    gather_cases,
+    narrowed_tasks,
+    rewrapped,
+)
 from evals.harness.scorers import (
     WEB_TOOLS,
     combine,
@@ -109,6 +115,7 @@ from evals.harness.scorers import (
     skill_scorer,
 )
 from evals.harness.target import (
+    CapabilityTarget,
     InProcessTarget,
     TargetResult,
     _terminal_result,
@@ -541,6 +548,84 @@ def test_serial_capability_task_changes_the_suite_digest() -> None:
     serial = capability_task("stateful", cases, serial=True)
 
     assert concurrent.digest != serial.digest
+
+
+def test_narrowed_tasks_keep_the_named_cases_in_suite_order() -> None:
+    cases = tuple(
+        CapabilityCase(name, "answer", exact_scorer(name)) for name in ("one", "two", "three")
+    )
+    task = capability_task("stateful", cases, serial=True)
+
+    (narrowed,) = narrowed_tasks((task,), ("three", "one"))
+
+    assert narrowed.cases == ("one", "three")
+    assert narrowed.exclusive
+    assert narrowed.digest != task.digest
+
+
+def test_narrowing_keeps_the_judge_only_while_a_kept_case_carries_a_rubric() -> None:
+    judged = CapabilityCase("judged", "answer", exact_scorer("answer"), rubric=("a claim",))
+    plain = CapabilityCase("plain", "answer", exact_scorer("answer"))
+    task = capability_task("mixed", (judged, plain), judge_model=SEMANTIC_JUDGE_MODEL)
+
+    (kept_plain,) = narrowed_tasks((task,), ("plain",))
+    (kept_judged,) = narrowed_tasks((task,), ("judged",))
+
+    assert kept_plain.judge_model is None
+    assert kept_judged.judge_model == SEMANTIC_JUDGE_MODEL
+
+
+def test_narrowing_drops_a_suite_naming_none_and_rejects_an_unknown_case() -> None:
+    left = capability_task("left", (CapabilityCase("one", "answer", exact_scorer("one")),))
+    right = capability_task("right", (CapabilityCase("two", "answer", exact_scorer("two")),))
+
+    assert tuple(task.name for task in narrowed_tasks((left, right), ("two",))) == ("right",)
+    with pytest.raises(ValueError, match="unknown eval case: zero"):
+        narrowed_tasks((left, right), ("zero",))
+
+
+def test_a_scenario_suite_narrows_and_an_arc_suite_refuses() -> None:
+    flows = next(task for task in TASKS if task.name == "object_tools_flows")
+    handback = next(task for task in TASKS if task.name == "handback")
+
+    (narrowed,) = narrowed_tasks((flows,), flows.cases[:1])
+
+    assert narrowed.cases == flows.cases[:1]
+    assert narrowed.simulator_model == flows.simulator_model
+    assert narrowed.exclusive
+    with pytest.raises(ValueError, match="cannot narrow"):
+        narrowed_tasks((handback,), handback.cases[:1])
+
+
+async def test_narrowing_keeps_the_runner_and_the_flags_the_suite_wrapped_on() -> None:
+    @dataclass
+    class Target:
+        judge: None = None
+
+        async def run(self, case: CapabilityCase) -> TargetResult:
+            return TargetResult(CapabilityOutput(case.name, ()), clean=True)
+
+    wrapped_cases: list[tuple[str, ...]] = []
+
+    def wrap(task: EvalTask) -> EvalTask:
+        async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
+            wrapped_cases.append(task.cases)
+            return await task.run(target, slots)
+
+        return replace(task, run=run, pin_runtime=True, exclusive=True)
+
+    cases = tuple(
+        CapabilityCase(name, "answer", exact_scorer(name)) for name in ("one", "two", "three")
+    )
+    task = rewrapped(capability_task("wrapped", cases), wrap)
+
+    (narrowed,) = narrowed_tasks((task,), ("three", "one"))
+    report = await narrowed.run(Target(), asyncio.Semaphore(2))  # type: ignore[arg-type]
+
+    assert narrowed.pin_runtime
+    assert narrowed.exclusive
+    assert wrapped_cases == [("one", "three")]
+    assert tuple(case.name for case in report.cases) == ("one", "three")
 
 
 async def test_github_connection_cases_seed_the_claimed_state(db: None) -> None:

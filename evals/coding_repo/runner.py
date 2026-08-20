@@ -42,7 +42,7 @@ from evals.harness.capability import (
 )
 from evals.harness.capability import Grader as HarnessGrader
 from evals.harness.harness import EvalReport, JsonObject
-from evals.harness.registry import EvalRunner, EvalTask, capability_task
+from evals.harness.registry import EvalRunner, EvalTask, capability_task, rewrapped
 from evals.harness.scorers import delegation_only_scorer
 from evals.harness.target import CapabilityTarget
 from ufo.tools.builtins import SPAWN_DETACHED_LEAD, SPAWN_MOVED_LEAD
@@ -151,18 +151,20 @@ def load_coding_repo(
     tasks: tuple[EvalTask, ...] = ()
     if answers:
         tasks += (
-            replace(
+            rewrapped(
                 capability_task(ANSWERS_TASK, answers, judge_model=JUDGE_MODEL),
-                pin_runtime=True,
+                lambda task: replace(task, pin_runtime=True),
             ),
         )
     if deliverables:
-        captured = capability_task(DELIVERABLES_TASK, deliverables)
         tasks += (
-            replace(
-                captured,
-                run=_dropping_captures(captured, submissions_root),
-                pin_runtime=True,
+            rewrapped(
+                capability_task(DELIVERABLES_TASK, deliverables),
+                lambda task: replace(
+                    task,
+                    run=_dropping_captures(task, submissions_root),
+                    pin_runtime=True,
+                ),
             ),
         )
     return tasks
