@@ -26,15 +26,19 @@ a workspace still spends the balance on generated images and video and on calls 
 so it can still be refused — check `status` before telling any admin why a turn stopped, rather
 than assuming the balance is the reason.
 
-An admin asks, and the agent returns a short-lived portal link. They open it, save a card, and that
-is the whole customer-facing action. There is no form to fill in inside UFO and no dashboard setting
-to change.
+A card is entered at the payment provider, through a short-lived portal link. An admin can ask the
+agent for that link, and while no card is on file the billing screen offers a button that returns
+the same link. There is no form inside UFO for a card, an invoice, or any other billing detail.
 
-- Saving or changing a card, invoices, billing details: return a fresh portal link.
-- Adding credit: an admin can arrange automatic refills from the card on file, naming how much to
-  add and the balance to refill below. Saving a card alone adds nothing — the refill has to be
-  arranged, and it can only be arranged once a card is saved, because it runs with nobody present.
-  A one-off top-up is not something they can do; say you will pass that to the team.
+- Saving or changing a card, invoices, billing details: return a fresh portal link. The billing
+  screen offers that link too, but only while no card is on file.
+- Adding credit: the workspace's billing screen carries a control of its own for this — turn
+  automatic refills on or off from the billing screen, at a fixed amount and a fixed balance to
+  refill below, with no chat needed. An admin can also ask you to arrange a refill at a different
+  amount or a different balance to refill below. Saving a card alone adds nothing — a refill has to
+  be arranged either way, and it can only be arranged once a card is saved, because it runs with
+  nobody present. A one-off top-up is not something either route can do; say you will pass that to
+  the team.
 - If refills stop after a card is refused, the card is the thing to fix — arranging the refill
   again is what restarts it.
 - Checking state: read the status, which reports whether a card is on file and how much balance is

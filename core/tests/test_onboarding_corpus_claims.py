@@ -41,6 +41,7 @@ BUILTIN_TOOLS_SOURCE = "core/src/ufo/tools/builtins.py"
 SITES_TOOLS = "extensions/sites/ufo_ext_sites/tools.py"
 TOOLS_CONTEXT = "core/src/ufo/tools/context.py"
 STOP = "core/src/ufo/surfaces/stop.py"
+WEB_PANELS = "extensions/web/ufo_ext_web/panels.py"
 WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
 TERMINAL_SURFACE = "extensions/ufo/ufo_ext_ufo/surface.py"
 SPEC = "spec.md"
@@ -396,6 +397,28 @@ CLAIMS = (
         phrase="the agent hosts it and shares a permanent link instead of a file to\ndownload",
         source=SITES_TOOLS,
         pattern=r"register that port as a hosted site, returning its\s+`site_url`",
+    ),
+    Claim(
+        claim="the billing screen turns a fixed automatic-refill rule on or off, no chat needed",
+        corpus="references/billing-and-seats.md",
+        phrase="turn\n  automatic refills on or off from the billing screen",
+        source=WEB_PANELS,
+        pattern=r'verb: Literal\["refill"\]',
+    ),
+    Claim(
+        claim="a custom refill amount or balance line still needs the agent, not the screen",
+        corpus="references/not-yet.md",
+        phrase="a different amount, a different\n  balance line",
+        source=WEB_PANELS,
+        pattern=r"amount_dollars: int \| None = None",
+    ),
+    Claim(
+        claim="the billing screen asks for the portal link that saves a first card",
+        corpus="references/billing-and-seats.md",
+        phrase="while no card is on file the billing screen offers a button that returns\nthe same"
+        " link",
+        source=WEB_PANELS,
+        pattern=r'verb: Literal\["save_card"\]',
     ),
     Claim(
         claim="an expiry stops a scheduled task from running again",
