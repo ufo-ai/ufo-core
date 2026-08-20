@@ -24,9 +24,11 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
 from PIL import Image
 from pydantic import BaseModel, ValidationError
+from ufo_ext_composio.client import BANNED
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
+from ufo_ext_pipedream.client import CONNECTORS as PIPEDREAM_CONNECTORS
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
 from ufo_ext_scheduled_tasks.schedules import (
@@ -57,6 +59,7 @@ from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import (
+    FIRST_RUN_PROVIDER_NAMES,
     ApplyIntent,
     ConnectGitHubIntent,
     ConnectSlackIntent,
@@ -9151,6 +9154,13 @@ async def test_a_connect_intent_leaves_the_private_handoff_on_the_turn(
         assert unknown.json()["applied"] is False
     finally:
         install_connect_flow(None)
+
+
+def test_every_catalog_tile_is_served_by_a_broker() -> None:
+    """Every catalog tile is a connect act on the Connect page, so a tile no broker serves is a
+    press that can only refuse: a slug Composio withholds by judgment stands in the catalog only
+    when an explicitly registered connector claims it first."""
+    assert FIRST_RUN_PROVIDER_NAMES & set(BANNED) <= set(PIPEDREAM_CONNECTORS)
 
 
 def test_the_first_run_connect_steps_prepare_the_install_tools_verbatim() -> None:

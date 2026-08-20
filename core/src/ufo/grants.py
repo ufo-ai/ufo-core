@@ -47,8 +47,13 @@ def grant_sentinel(account_id: str) -> str:
     return f"{GRANT_SENTINEL_PREFIX}{account_id}"
 
 
-class UnknownProvider(KeyError):
-    """No OAuth provider is installed under this name — no connectors extension declares it."""
+class UnknownProvider(LookupError):
+    """No OAuth provider is installed under this name — no connectors extension declares it and no
+    open namespace claims it. Its str is member-facing: the raise reaches the intent outcome and
+    the turn's terminal verbatim, so it carries a sentence, never the bare slug."""
+
+    def __init__(self, provider: str) -> None:
+        super().__init__(f"No connector is available for {provider!r}.")
 
 
 class ConnectStateInvalid(ValueError):

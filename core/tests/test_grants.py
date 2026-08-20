@@ -687,7 +687,7 @@ def test_unknown_provider_is_rejected() -> None:
         store=GrantStore(),
         redirect_uri=REDIRECT_URI,
     )
-    with pytest.raises(UnknownProvider):
+    with pytest.raises(UnknownProvider) as caught:
         flow.authorize(
             workspace_id=uuid4(),
             agent_id=uuid4(),
@@ -696,6 +696,19 @@ def test_unknown_provider_is_rejected() -> None:
             conversation_id=uuid4(),
             shared=False,
         )
+    assert str(caught.value) == "No connector is available for 'nope'."
+
+
+async def test_validating_an_unclaimed_provider_states_the_refusal() -> None:
+    flow = ConnectFlow(
+        providers={},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+    )
+    with pytest.raises(UnknownProvider) as caught:
+        await flow.validate_provider("linear")
+    assert str(caught.value) == "No connector is available for 'linear'."
 
 
 async def test_grant_summaries_expose_the_audit_view(db: None) -> None:

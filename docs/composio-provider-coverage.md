@@ -202,6 +202,9 @@ only the dedicated ones.
 Two entries deserve their dissent recorded. **`linear`** can filter by project and assignee and
 offers raw GraphQL via `LINEAR_RUN_QUERY_OR_MUTATION`, so "open bugs" is reachable by schema
 introspection — banned on the judgement that a common request should not need hand-written GraphQL.
+Linear connects through the Pipedream allowlist instead, whose `linear-search-issues` and
+`linear-list-workflow-states` actions reach issue state directly; the explicit registration wins
+before this namespace is consulted, so the ban here stands untouched.
 Note `wrike` and `basecamp` are kept while lacking an assignee filter, which is the same class of
 gap one notch less severe. **`boldsign`** is the weakest: send and list work, and `DOCUMENT_LIST`
 may expose a download URL — unverified.

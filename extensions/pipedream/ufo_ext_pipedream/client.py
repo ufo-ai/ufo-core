@@ -4,10 +4,12 @@ Pipedream brokers managed OAuth (Connect Link hosted consent), pre-built provide
 Connect Proxy that injects the account's credential server-side — the token never leaves Pipedream,
 so a grant stores only the connected-account id (`apn_…`), never a secret. Exactly the Composio
 model; this second broker holds an explicit allowlist (`CONNECTORS`) of providers Composio's open
-namespace cannot broker because its shared client cannot pass the provider's consent (Gmail: Google
+namespace does not serve: one whose consent Composio's shared client cannot pass (Gmail: Google
 blocks restricted Gmail scopes, so the deploy's own Google OAuth client rides Pipedream Connect via
-`custom_oauth_env`). A provider no broker holds managed auth for at all is not an entry here — it
-authenticates with a workspace key through the `keyed_connectors` extension.
+`custom_oauth_env`), or one Composio withholds by judgment where Pipedream's actions cover the gap
+(Linear: `linear-search-issues` and `linear-list-workflow-states` reach issue state, which
+Composio's toolkit cannot filter by). A provider no broker holds managed auth for at all is not an
+entry here — it authenticates with a workspace key through the `keyed_connectors` extension.
 
 `connect_token` mints the hosted consent leg (pinning the success/error return legs);
 `newest_account` and `connected_account` correlate its return to the state-scoped external user,
@@ -70,6 +72,7 @@ CONNECTORS: dict[str, ConnectorSpec] = {
     "gmail": ConnectorSpec(
         "Gmail", "gmail", "gmail.googleapis.com", custom_oauth_env="PIPEDREAM_GMAIL_OAUTH_APP_ID"
     ),
+    "linear": ConnectorSpec("Linear", "linear", "api.linear.app"),
 }
 
 
