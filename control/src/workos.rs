@@ -392,7 +392,7 @@ const CONSOLE_STYLE: &str = r#"
          justify-content: center; padding: 24px 16px;
          background: var(--surface); color: var(--ink);
          font: 15px/1.5 system-ui, sans-serif; }
-  main { width: min(440px, 100%); display: flex; flex-direction: column; gap: 20px; }
+  main { width: min(440px, 100%); display: flex; flex-direction: column; gap: 60px; }
   header { display: flex; justify-content: center; }
   header img { display: block; width: 72px; height: 18px; }
   @media (prefers-color-scheme: dark) { header img { filter: invert(1); } }
