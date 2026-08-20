@@ -31,13 +31,11 @@ bind it with `set_homepage`. Then create one recurring task in this same convers
 must name `daily-brief`, `sweep_newspaper`, the shared Markdown edition, and the homepage update.
 The task keeps reporting into this conversation; do not open a conversation per edition.
 
-## Editions
+## Scheduled edition
 
-A scheduled edition collects first: call `sweep_newspaper` exactly once and treat its result as
-the complete bounded input. When the member supplies the collected material, or says not to
-collect, that material is the complete bounded input: format it and call no tools — no
-`sweep_newspaper`, no `update_todo_list`, no `memory_update`. Either way, use no other private
-sources.
+A scheduled edition calls `sweep_newspaper` exactly once and treats its result as the complete
+bounded input; any other turn's bounded input is what the member supplied. Do not use other
+private sources.
 
 Rank items by member impact, urgency, and how much the new information changes the next action.
 Prefer a specific unfinished commitment over general activity. Prefer a changed decision or stale
@@ -66,9 +64,8 @@ Update the homepage files in this conversation with the new edition, then run `d
 the existing site name. Never call `set_homepage` from a scheduled turn. The member-facing setup
 turn already bound the site.
 
-Draft at most three tasks and three memories. A draft is a proposal, not approval. Preparing an
-edition never calls `update_todo_list` or `memory_update`; only member approval in a later turn
-does.
+Draft at most three tasks and three memories. A draft is a proposal, not approval. Never call
+`update_todo_list` or `memory_update` during a scheduled edition.
 
 ## Scout roles
 

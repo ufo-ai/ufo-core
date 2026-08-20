@@ -94,11 +94,7 @@ def test_manifest_pins_four_luna_scouts() -> None:
     skill = skill_registry((declared,)).named("daily-brief")
     assert skill.description.startswith("Load when")
     instructions = " ".join(skill.instructions.split())
-    assert (
-        "Preparing an edition never calls `update_todo_list` or `memory_update`;"
-        " only member approval in a later turn does." in instructions
-    )
-    assert "no `sweep_newspaper`, no `update_todo_list`, no `memory_update`" in instructions
+    assert "Never call `update_todo_list` or `memory_update`" in instructions
     assert "write" in instructions
     assert "share_file" in instructions
     assert "`configure_daily_brief`" in instructions
