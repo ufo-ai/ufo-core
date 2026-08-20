@@ -1795,6 +1795,10 @@ class SurfaceContext:
             raise ConnectRequestInvalid("connect flow is unavailable") from error
         return await ConnectHandoff(flow).authorize(self.workspace_id, turn_id, member_id)
 
+    def connect_label(self, provider: str) -> str:
+        """The member-facing name of a connect provider, as the connect flow declares it."""
+        return installed_connect_flow().label_for(provider)
+
     async def admitted_body(self, idempotency_key: str) -> str | None:
         """The message body an idempotency key admitted — the founding inbound of the turn the key
         opened, or the queue row it landed as — or None when the key admitted nothing. How a

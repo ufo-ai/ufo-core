@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/attachment";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
+import { buttonVariants } from "@/components/ui/button";
 import {
   Item,
   ItemContent,
@@ -48,6 +49,7 @@ import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { speakerName } from "@/lib/audience";
 import { brailleOf, randomCell } from "@/lib/braille";
+import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink } from "@/lib/consent";
 import type { EarlierMessages } from "@/lib/earlier";
@@ -56,7 +58,7 @@ import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
-import type { ChatApp, ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
+import type { ChatApp, ChatConnect, ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
 
 /** How far from the foot still counts as being at it. A reader is at the bottom of a conversation
  *  long before they are at the last pixel of it: a line lands, the composer grows by a row, the
@@ -317,7 +319,7 @@ export function MessageLog({
             <Files files={message.files} onOpen={onOpenArtifacts} />
           )}
           {message.role === "user" || !message.apps?.length ? null : <Apps apps={message.apps} />}
-          {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
+          {message.connect ? <ConnectLink connect={message.connect} /> : null}
           {message.meta ? <Meta>{message.meta}</Meta> : null}
           {message.question && question ? question(message.question) : null}
         </Speech>
@@ -353,7 +355,7 @@ export function MessageLog({
                 <Files files={row.live.files} onOpen={onOpenArtifacts} />
               ) : null}
               {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
-              {row.live.connectUrl ? <ConnectLink url={row.live.connectUrl} /> : null}
+              {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
               {row.live.meter ? <Meta>{row.live.meter}</Meta> : null}
               {row.live.meta ? <Meta>{row.live.meta}</Meta> : null}
             </Speech>
@@ -728,8 +730,21 @@ function RunRow({ run, live }: { run: SubagentRun; live: boolean }) {
   );
 }
 
-function ConnectLink({ url }: { url: string }) {
-  return <ConsentLink url={url}>Connect account</ConsentLink>;
+/** The private connect act a reply leaves for the member, drawn as the act it is: a chip carrying
+ *  the provider's mark and name, opening the consent window on the press. */
+function ConnectLink({ connect }: { connect: ChatConnect }) {
+  return (
+    <ConsentLink
+      url={connect.url}
+      className={cn(
+        buttonVariants({ variant: "outline", size: "bar" }),
+        "self-start no-underline",
+      )}
+    >
+      {connect.provider ? <BrandMark provider={connect.provider} className="size-icon" /> : null}
+      {connect.label ? "Connect " + connect.label : "Connect account"}
+    </ConsentLink>
+  );
 }
 
 /** The mark surfaces in the static oftener than the rest of the pool, so the shape a member already

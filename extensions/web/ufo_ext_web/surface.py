@@ -1858,11 +1858,26 @@ async def _open_handoffs(
         if prompts is not None:
             handoffs["credentials"] = prompts
     if terminal.connect_request is not None:
+        provider = terminal.connect_request.provider
         try:
-            handoffs["connect"] = {"url": await ctx.connect_url(turn_id, member_id)}
+            handoffs["connect"] = {
+                "url": await ctx.connect_url(turn_id, member_id),
+                "provider": provider,
+                "label": _provider_label(ctx, provider),
+            }
         except ConnectRequestInvalid:
             pass
     return handoffs
+
+
+def _provider_label(ctx: SurfaceContext, provider: str) -> str:
+    """The words the portal already uses for this provider: the first-run catalog's label, so the
+    chat control and the connect tiles name one thing one way, or the connect flow's declared name
+    for a provider the catalog does not curate."""
+    for tile in FIRST_RUN_PROVIDERS:
+        if tile.name == provider:
+            return tile.label
+    return ctx.connect_label(provider)
 
 
 async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
@@ -3321,6 +3336,7 @@ async def _events(
                     for run in nodes.get(str(turn_id), []):
                         yield _event("subagent", dict(run))
                 if frame.frame.connect_request is not None:
+                    provider = frame.frame.connect_request.provider
                     try:
                         url = await ctx.connect_url(turn_id, member_id)
                     except ConnectRequestInvalid:
@@ -3329,7 +3345,14 @@ async def _events(
                             {"message": "Connection request unavailable; ask me to connect again."},
                         )
                     else:
-                        yield _event("connect", {"url": url})
+                        yield _event(
+                            "connect",
+                            {
+                                "url": url,
+                                "provider": provider,
+                                "label": _provider_label(ctx, provider),
+                            },
+                        )
                 if frame.frame.credential_request is not None:
                     prompts = await _pending_prompts(ctx, frame.frame.credential_request)
                     if prompts is not None:

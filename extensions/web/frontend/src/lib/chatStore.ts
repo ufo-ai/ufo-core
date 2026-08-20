@@ -4,6 +4,7 @@ import type { ToastState } from "@/components/ui/toast";
 import type {
   ActivityEvent,
   ChatApp,
+  ChatConnect,
   ChatFile,
   ChatQuestion,
   CredentialRequest,
@@ -15,7 +16,7 @@ export type { ActivityEvent } from "@/lib/types";
 
 export type Bubble = Message & {
   meta?: string;
-  connectUrl?: string;
+  connect?: ChatConnect;
   /** A send whose POST has not answered yet, carrying the send's own token — how the response
    *  settles its own bubble however the log has shifted around it, since an index recorded at send
    *  time stops naming the bubble the moment a drain inserts a reply ahead of it. */
@@ -36,7 +37,7 @@ export type LiveTurn = {
   activity: string | null;
   meter: string | null;
   meta: string | null;
-  connectUrl: string | null;
+  connect: ChatConnect | null;
   events: ActivityEvent[];
   subagents: SubagentRun[];
   /** What the turn has shared so far. It settles on the reply that closes the turn, where the
@@ -115,7 +116,7 @@ export function liveTurn(): LiveTurn {
     activity: null,
     meter: null,
     meta: null,
-    connectUrl: null,
+    connect: null,
     events: [],
     subagents: [],
     files: [],

@@ -5518,10 +5518,11 @@ async def test_web_stream_privately_opens_the_speakers_connect_handoff(
     client, workspace_id, _agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
     flow = ConnectFlow(
-        providers={"github": ConnectProvider()},
+        providers={"acme": ConnectProvider(provider="acme")},
         fernet=Fernet(Fernet.generate_key()),
         store=GrantStore(),
         redirect_uri="https://ufo.example.test/v1/connect/callback",
+        labels={"acme": "Acme CRM"},
     )
     install_connect_flow(flow)
     conversation_id, turn_id = uuid4(), uuid4()
@@ -5547,15 +5548,13 @@ async def test_web_stream_privately_opens_the_speakers_connect_handoff(
                 agent_id=agent_id,
                 seq=1,
                 status="done",
-                inbound="connect github",
+                inbound="connect acme",
                 admission_source="member",
                 speaker_member_id=member_id,
                 terminal=TerminalFrame(
                     status="done",
                     text="Use the connection control.",
-                    connect_request=ConnectRequest(
-                        provider="github", requester_member_id=member_id
-                    ),
+                    connect_request=ConnectRequest(provider="acme", requester_member_id=member_id),
                 ).model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -5572,6 +5571,8 @@ async def test_web_stream_privately_opens_the_speakers_connect_handoff(
     lines = response.text.splitlines()
     connect_data = json.loads(lines[lines.index("event: connect") + 1].removeprefix("data: "))
     assert connect_data["url"].startswith("https://oauth.example.test/authorize")
+    assert connect_data["provider"] == "acme"
+    assert connect_data["label"] == "Acme CRM"
     assert lines.index("event: connect") < lines.index("event: terminal")
     async with workspace_tx() as connection:
         memoized_url = (
@@ -6581,9 +6582,11 @@ async def test_transcript_reload_still_offers_the_pending_connect_handoff(
     finally:
         install_connect_flow(None)
     assert loaded.status_code == 200
-    url = loaded.json()["connect"]["url"]
-    assert url.startswith("https://oauth.example.test/authorize")
-    assert streamed["connect"]["url"] == url
+    control = loaded.json()["connect"]
+    assert control["url"].startswith("https://oauth.example.test/authorize")
+    assert control["provider"] == "github"
+    assert control["label"] == "GitHub"
+    assert streamed["connect"] == control
     unbrokered = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
         headers=cookie,

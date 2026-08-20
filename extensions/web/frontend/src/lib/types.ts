@@ -178,6 +178,10 @@ export type Message = {
   apps?: ChatApp[];
 };
 
+/** The private connect control a turn offers: the member's memoized URL, the provider slug the
+ *  control draws the mark by, and the words it carries. */
+export type ChatConnect = { url: string; provider?: string; label?: string };
+
 export type Transcript = {
   messages: Message[];
   /** The compacted-away page standing directly above `messages`, read at
@@ -187,7 +191,7 @@ export type Transcript = {
   turn?: string;
   credentials?: CredentialRequest | null;
   /** The private connect control the newest turn still offers, at the URL that turn memoized. */
-  connect?: { url: string } | null;
+  connect?: ChatConnect | null;
 };
 
 export type SchemaProperty = {
