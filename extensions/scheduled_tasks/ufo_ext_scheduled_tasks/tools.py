@@ -51,7 +51,7 @@ SCHEDULE_MAX = 100
 RESPONSE_EXCERPT_MAX = 400
 PROMPT_EXCERPT_MAX = 400
 SCHEDULE_GATE = (
-    "only the task's creator may change its content; an admin may change cadence or expiry"
+    "only the task's creator may change its content; an admin may change cadence, expiry, or pause"
 )
 SCHEDULE_REQUESTER_GATE = "creating a scheduled task requires a member requester"
 DELETE_GATE = "only the task's creator or a workspace admin may delete a scheduled task"
@@ -160,8 +160,8 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
     conversation as that agent, acting on behalf of the creator.
 
     Content editing is narrower than cadence management: an update keeps the original creator, so
-    an admin may change schedule or expiry but never the prompt or description that fires as that
-    member against their private capabilities. Every new task requires an acting member."""
+    an admin may change schedule, expiry, or pause but never the prompt or description that fires as
+    that member against their private capabilities. Every new task requires an acting member."""
 
     kind_name: ClassVar[str] = SCHEDULED_TASK_KIND
     mutate_gate: ClassVar[str] = SCHEDULE_GATE
@@ -439,7 +439,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "reporting into a member's own conversation by that member alone, and a private or "
         "externally-shared channel's tasks by nobody else at all. Seeing a task is not changing "
         "it — only its creator may edit or delete it, and an admin may inspect or change another "
-        "member's cadence or expiry, or delete it, but cannot alter its prompt or "
+        "member's cadence, expiry, or pause, or delete it, but cannot alter its prompt or "
         "description. The main agent may name another agent only when updating that agent's "
         "existing task; creation requires the executor's own conversation. A fire acts as the "
         "creator and uses the creator's private connections, but "

@@ -1,13 +1,14 @@
 ---
 name: task-scheduling
-description: Load when a member asks to create, change, or cancel a recurring task, notification, or reminder, or asks for a one-time reminder.
+description: Load when a member asks to create, change, pause, resume, or cancel a recurring task, notification, or reminder, or asks for a one-time reminder.
 ---
 # Task Scheduling
 
 Recurring tasks are workspace objects of kind `scheduled_task`, managed with the generic object
 tools:
 
-- **object_apply** — create or update a recurring task from a YAML manifest (below)
+- **object_apply** — create or update a recurring task from a YAML manifest (below); `paused: true`
+  stops the fires and `paused: false` starts them again
 - **object_list** with `kind: scheduled_task` — list tasks with their name and schedule
 - **object_get** — one task's spec plus its live status (`next_run_at`, `last_run_at`)
 - **object_delete** — cancel a task by name; the result echoes the deleted spec
@@ -47,7 +48,7 @@ For a recurring task that fires daily or more often and can safely stop:
 Keep `prompt` limited to the recurring work. Never embed an expiry date, occurrence count, or
 continuation instruction; runtime adds the final-fire check-in.
 
-Leave `expires_at` unset only when pausing could itself harm an external-service operation:
+Leave `expires_at` unset only when stopping could itself harm an external-service operation:
 credential refresh, synchronization, keep-alive work, or monitoring where a gap loses required
 coverage. Reading an external service for an informational digest is not an exception.
 
@@ -92,8 +93,8 @@ User: "Watch my inbox for investor replies and notify me immediately"
   clearly keep or lower frequency. Treat an explicit "set it up" or "go ahead" as confirmation.
   When unsure, confirm.
 - Recurring tasks use a cron `schedule` and persist until deleted or their optional UTC
-  `expires_at`; the platform cancels an expired task before another run. One-shot `run_at` is not
-  supported.
+  `expires_at`; the platform cancels an expired task before another run. A paused task persists
+  too and fires nothing. One-shot `run_at` is not supported.
 - When both day-of-month and day-of-week restrict a recurring task, both constraints must match.
   For example, `0 12 1-7 * 1` runs on the first Monday of each month.
 - Do NOT delegate durable scheduled workflows to subagents — they don't hold the object tools
@@ -103,15 +104,23 @@ User: "Watch my inbox for investor replies and notify me immediately"
   latency, so an exact-minute gate silently skips fires. Phrase any time-of-day gate as a
   tolerance window or compare against the `<scheduled_task>` header's `scheduled_fire`.
 
-## Stopping a recurring task
+## Pausing a recurring task
 
-Use `object_delete` with `kind: scheduled_task` when the user asks to pause, stop, cancel, or
-delete a scheduled task. There is no pause state. Pass the exact task `name` — `object_list`
-returns the names.
+Apply `paused: true` with `kind: scheduled_task` when the user asks to pause, hold, or stop a task
+for now. The task keeps its name, schedule, prompt, and run history and fires nothing.
+Apply `paused: false` to start it again from the next fire.
+
+- Pass the exact task `name` — `object_list` returns the names and each task's `paused` state.
+- Never delete a task the user asked you to pause. A delete cannot be undone.
+
+## Cancelling a recurring task
+
+Use `object_delete` with `kind: scheduled_task` when the user asks to cancel or delete a scheduled
+task for good. Pass the exact task `name` — `object_list` returns the names.
 
 - If the task name is ambiguous or missing, list the tasks or ask for the name.
 - If the delete reports no such object, tell the user no matching scheduled task was active.
-- If a recurring task is blocked by expired auth or missing permissions, delete it instead of
+- If a recurring task is blocked by expired auth or missing permissions, pause it instead of
   letting it keep firing.
 
 Do not recreate a missing scheduled task unless the user explicitly asks.
