@@ -43,6 +43,7 @@ TOOLS_CONTEXT = "core/src/ufo/tools/context.py"
 STOP = "core/src/ufo/surfaces/stop.py"
 WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
 TERMINAL_SURFACE = "extensions/ufo/ufo_ext_ufo/surface.py"
+SPEC = "spec.md"
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,13 @@ CLAIMS = (
         phrase="members are unlimited",
         source=METRONOME,
         pattern=r'"priced_micro_usd": str\(export\.priced_micro_usd\)',
+    ),
+    Claim(
+        claim="no count of members is shipped, rated, or enforced anywhere",
+        corpus="references/billing-and-seats.md",
+        phrase="No count of members is shipped, rated, or enforced anywhere",
+        source=SPEC,
+        pattern=r"so no count of\nmembers is shipped, rated, or enforced anywhere",
     ),
     Claim(
         claim="a spent balance refuses the turn rather than queueing it",

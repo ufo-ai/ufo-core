@@ -59,8 +59,8 @@ gated on how many there are.
 - To remove someone's access, an admin unseats them in chat. The agent stops answering them, and a
   turn of theirs still running stops before its next step. Their history and what the agent
   remembers about them stay, and seating them again restores their access.
-- If a customer asks about a limit, there is none to quote. Members are counted, and past roughly 25
-  the team gets in touch — that is outreach, not a cap, and nothing stops working.
+- If a customer asks about a limit, there is none to quote. No count of members is shipped, rated,
+  or enforced anywhere — the workspace pays for what it spends, not how many people it holds.
 
 ## Boundaries
 
