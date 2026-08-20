@@ -292,3 +292,13 @@ def test_pack_name_colliding_with_a_bundled_extension_fails_loud(
     monkeypatch.setattr(loader, "discovered_packs", lambda: {collide.name: collide})
     with pytest.raises(RuntimeError, match="collides with a bundled extension"):
         load_manifests("memory")
+
+
+def test_every_pack_serving_the_portal_also_carries_the_digest_writer() -> None:
+    """The radar projection reads `report_digest_entry`, a table the `report_digest` extension's own
+    migration creates and only its packs apply. A pack that served the portal without the writer
+    would migrate no such table and 500 the feed on every read, so the pairing is asserted here
+    rather than left to whoever edits a pack's extension list next."""
+    for name, pack in discovered_packs().items():
+        if "web" in pack.extensions:
+            assert "report_digest" in pack.extensions, name

@@ -60,6 +60,7 @@ EXTENSIONS = (
     "imessage",
     "sites",
     "scheduled_tasks",
+    "report_digest",
     "sweep",
     "research",
     "repl",

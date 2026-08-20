@@ -29,6 +29,8 @@ from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
 from ufo_ext_pipedream.client import CONNECTORS as PIPEDREAM_CONNECTORS
+from ufo_ext_report_digest.manifest import manifest as report_digest_manifest
+from ufo_ext_report_digest.writer import report_digest_entry
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
 from ufo_ext_scheduled_tasks.schedules import (
@@ -1055,6 +1057,7 @@ async def web(
             SOURCE_TRIGGER_KIND_ONLY,
             SLOTTED,
             sites_manifest(),
+            report_digest_manifest(),
         ),
         CredentialStore(fernet=CREDENTIAL_FERNET),
         blob,
@@ -3673,13 +3676,76 @@ async def _seed_scheduled_run(
     return run_id
 
 
+async def _seed_digest_entry(
+    workspace_id: UUID,
+    turn_id: UUID,
+    *,
+    title: str,
+    summary: str,
+    points: tuple[tuple[str, str], ...] = (),
+) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(report_digest_entry).values(
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                title=title,
+                summary=summary,
+                points=[{"text": text, "actor": actor} for text, actor in points],
+                reader="the queue owner",
+                model="model-under-test",
+                written_at=datetime(2026, 8, 14, 9, 5, tzinfo=UTC),
+            )
+        )
+
+
+async def test_radar_reads_without_the_writer_extension(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deploy that does not run `report_digest` has no entry table, and installing or removing an
+    extension is a lockfile act rather than a code change. The feed is the portal's, not the
+    writer's: it reads whole, with every entry null, instead of failing on a table that was never
+    created."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=f"{agent_id}/m@example.com/{uuid4().hex}",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    run = await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        conversation_id,
+        text="the run's own last word",
+        fired=datetime.now(UTC),
+        artifact=("report.md", "text/markdown"),
+    )
+    await _seed_digest_entry(
+        workspace_id, run, title="written already", summary="and stored already"
+    )
+    monkeypatch.setattr(web_surface, "DIGEST_WRITER", "an-extension-no-deploy-carries")
+
+    answered = await client.get(RADAR_PATH, cookies={SESSION_COOKIE: token})
+
+    assert answered.status_code == 200
+    [row] = answered.json()["runs"]
+    assert row["turn_id"] == str(run)
+    assert row["entry"] is None
+
+
 async def test_radar_lists_scheduled_runs_with_output_and_files(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The radar feed: every reader — an admin included — gets only the runs of conversations
-    whose content they read, each naming its task and carrying the terminal reply and signed
-    download and preview links for the files it shared. Another member's private run, a room's
-    run, and a member turn never list, and an agent outside the audience is unknown."""
+    whose content they read, each naming its task, carrying the terminal reply and signed download
+    and preview links for the files it shared, and holding the entry written for what it published
+    — null where the writer has not reached it. Another member's private run, a room's run, and a
+    member turn never list, their entries with them, and an agent outside the audience is
+    unknown."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
@@ -3759,12 +3825,26 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         "n@example.com",
         TerminalFrame(status="done", text="typed"),
     )
+    await _seed_digest_entry(
+        workspace_id,
+        shared_run,
+        title="The queue holds two stale items",
+        summary="Twelve items are queued and two are past their deadline.",
+        points=(("Two items are past their deadline", "the queue"), ("Ten are on time", "")),
+    )
+    await _seed_digest_entry(
+        workspace_id,
+        private_run,
+        title="What n alone reads",
+        summary="The run that reported into n's own conversation.",
+    )
     m_view = (
         await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     ).json()
     assert [run["turn_id"] for run in m_view["runs"]] == [str(failed_run), str(shared_run)]
     failed = m_view["runs"][0]
     assert (failed["status"], failed["text"]) == ("failed", "the queue read timed out")
+    assert failed["entry"] is None
     run = m_view["runs"][1]
     assert run["task"] == "morning-digest"
     assert "prompt" not in run
@@ -3773,9 +3853,17 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
     assert run["surface"] == "slack"
     assert run["source"] == "https://acme.slack.com/archives/C42/p1"
     assert run["conversation_id"] == str(shared_conversation)
-    assert [entry["filename"] for entry in run["artifacts"]] == ["queue.png"]
+    assert [artifact["filename"] for artifact in run["artifacts"]] == ["queue.png"]
     assert run["artifacts"][0]["url"].startswith("https://web/")
     assert "preview" in run["artifacts"][0]["preview_url"]
+    assert run["entry"] == {
+        "title": "The queue holds two stale items",
+        "summary": "Twelve items are queued and two are past their deadline.",
+        "points": [
+            {"text": "Two items are past their deadline", "actor": "the queue"},
+            {"text": "Ten are on time", "actor": ""},
+        ],
+    }
     n_view = (
         await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     ).json()
@@ -3787,6 +3875,11 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
     resumed = next(run for run in n_view["runs"] if run["turn_id"] == str(private_run))
     assert resumed["task"] is None
     assert resumed["text"] == ""
+    assert resumed["entry"] == {
+        "title": "What n alone reads",
+        "summary": "The run that reported into n's own conversation.",
+        "points": [],
+    }
     admin_view = (
         await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
@@ -3811,8 +3904,8 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
 
 async def test_radar_permalink_reads_one_run(web: tuple[AsyncClient, UUID, UUID]) -> None:
     """`turn` pins the feed to exactly one run under the same audience fence: the reader gets that
-    run alone with no cursors, a run outside their audience reads as an empty page, and a token
-    that names no turn is refused."""
+    run alone with its entry and no cursors, a run outside their audience reads as an empty page
+    carrying neither the run nor its entry, and a token that names no turn is refused."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
@@ -3858,12 +3951,30 @@ async def test_radar_permalink_reads_one_run(web: tuple[AsyncClient, UUID, UUID]
         fired=fired + timedelta(minutes=1),
         artifact=("mine.md", "text/markdown"),
     )
+    await _seed_digest_entry(
+        workspace_id,
+        pinned,
+        title="The queue holds twelve items",
+        summary="Twelve items are queued.",
+        points=(("Twelve items are queued", "the queue"),),
+    )
+    await _seed_digest_entry(
+        workspace_id,
+        private_run,
+        title="What m alone reads",
+        summary="The run that reported into m's own conversation.",
+    )
     page = (
         await client.get(
             f"{RADAR_PATH}?turn={pinned}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
         )
     ).json()
     assert [run["turn_id"] for run in page["runs"]] == [str(pinned)]
+    assert page["runs"][0]["entry"] == {
+        "title": "The queue holds twelve items",
+        "summary": "Twelve items are queued.",
+        "points": [{"text": "Twelve items are queued", "actor": "the queue"}],
+    }
     assert page["older"] is None
     assert page["newer"] is None
     fenced = (
@@ -3881,6 +3992,8 @@ async def test_radar_permalink_reads_one_run(web: tuple[AsyncClient, UUID, UUID]
 async def test_radar_pages_by_keyset(
     web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The cursors walk the feed in both directions, and each page carries the entries of the runs
+    standing on it alone."""
     client, workspace_id, agent_id = web
     _member, token = await _seed_member(workspace_id, "m@example.com")
     conversation = await _seed_agent_conversation(
@@ -3905,17 +4018,33 @@ async def test_radar_pages_by_keyset(
         )
         for index in range(3)
     ]
+    for index, run in enumerate(runs):
+        await _seed_digest_entry(
+            workspace_id,
+            run,
+            title=f"Run {index}",
+            summary=f"What run {index} found.",
+            points=((f"Point {index}", "the runner"),),
+        )
     monkeypatch.setattr(web_surface, "RADAR_MIN_RUNS", 2)
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     first = (await client.get(RADAR_PATH, headers=headers)).json()
     assert [run["turn_id"] for run in first["runs"]] == [str(runs[2]), str(runs[1])]
     assert first["runs"][0]["text"] == ""
     assert first["runs"][0]["task"] is None
+    assert [run["entry"]["title"] for run in first["runs"]] == ["Run 2", "Run 1"]
     assert first["newer"] is None and first["older"] is not None
     second = (
         await client.get(f"{RADAR_PATH}?after={quote(first['older'])}", headers=headers)
     ).json()
     assert [run["turn_id"] for run in second["runs"]] == [str(runs[0])]
+    assert [run["entry"] for run in second["runs"]] == [
+        {
+            "title": "Run 0",
+            "summary": "What run 0 found.",
+            "points": [{"text": "Point 0", "actor": "the runner"}],
+        }
+    ]
     assert second["older"] is None and second["newer"] is not None
     back = (
         await client.get(f"{RADAR_PATH}?after={quote(second['newer'])}", headers=headers)
@@ -5810,6 +5939,7 @@ async def test_admin_view_reads_the_workspace_shape(
         (entry["name"], entry["version"], entry["sandbox_internet"])
         for entry in payload["deploy"]["extensions"]
     ] == [
+        ("report_digest", "0.1.0", False),
         ("scheduled_tasks", "0.1.0", False),
         ("sites", "0.1.0", False),
         ("sources", "0.1.0", False),

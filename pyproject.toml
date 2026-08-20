@@ -70,6 +70,7 @@ openrouter = "ufo_ext_openrouter:manifest"
 perplexity = "ufo_ext_perplexity:manifest"
 pipedream = "ufo_ext_pipedream.manifest:manifest"
 redis_hub = "ufo_ext_redis_hub.manifest:manifest"
+report_digest = "ufo_ext_report_digest.manifest:manifest"
 repl = "ufo_ext_repl.manifest:manifest"
 research = "ufo_ext_research.manifest:manifest"
 sample = "ufo_ext_sample:manifest"
@@ -160,6 +161,7 @@ packages = [
     "extensions/monitors/ufo_ext_monitors",
     "extensions/pipedream/ufo_ext_pipedream",
     "extensions/redis_hub/ufo_ext_redis_hub",
+    "extensions/report_digest/ufo_ext_report_digest",
     "extensions/repl/ufo_ext_repl",
     "extensions/research/ufo_ext_research",
     "extensions/scheduled_tasks/ufo_ext_scheduled_tasks",

@@ -36,6 +36,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
+import sqlalchemy as sa
 from pydantic import BaseModel, JsonValue, ValidationError
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
@@ -3112,12 +3113,67 @@ async def _radar_task_names(
     return names
 
 
+DIGEST_WRITER = "report_digest"
+
+
+async def _digest_entries(
+    ctx: SurfaceContext, turn_ids: tuple[UUID, ...]
+) -> dict[UUID, dict[str, object]]:
+    """The entry written for each of this page's runs, by turn — one query, so a page joins its
+    entries without a read per run. The rows are the `report_digest` extension's, written by its
+    job from what a run published; this projection only reads them, and a run the job has not
+    reached yet has no row.
+
+    The table exists only where that extension's migration ran, and installing or removing one is a
+    lockfile act — so the read is gated on the deploy's own extension set, the same set fixed at
+    boot, rather than on the database answering. A deploy without the writer draws the feed with no
+    entries, which is what a deploy without the writer has."""
+    writing = any(entry.name == DIGEST_WRITER for entry in ctx.deploy_extensions)
+    if not turn_ids or not writing:
+        return {}
+    report_digest_entry = sa.table(
+        "report_digest_entry",
+        sa.column("workspace_id", sa.Uuid),
+        sa.column("turn_id", sa.Uuid),
+        sa.column("title", sa.Text),
+        sa.column("summary", sa.Text),
+        sa.column("points", sa.JSON),
+    )
+    async with web_extension().transaction() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    report_digest_entry.c.turn_id,
+                    report_digest_entry.c.title,
+                    report_digest_entry.c.summary,
+                    report_digest_entry.c.points,
+                ).where(
+                    report_digest_entry.c.workspace_id == ctx.workspace_id,
+                    report_digest_entry.c.turn_id.in_(turn_ids),
+                )
+            )
+        ).all()
+    return {
+        row.turn_id: {
+            "title": row.title,
+            "summary": row.summary,
+            "points": [{"text": point["text"], "actor": point["actor"]} for point in row.points],
+        }
+        for row in rows
+    }
+
+
 async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
     """One keyset page of what ran on its own — the scheduled turns reporting into conversations
     whose content this reader reads, an admin's page included, each naming the task that fired it
     and linking the files it shared: what a run made is its published report, so a successful
     run's reply carries no text here and only a run that did not end well says why. `agent`
     narrows the page to one agent the audience holds.
+
+    Each run carries `entry`, the digest a job wrote from what that run published — a title, a
+    one-line summary, and up to three points, each naming whoever the report says acted. A run the
+    writer has not reached carries it null and reads on its task's name: a line that guessed at
+    findings would be the one line on the page a reader could not trust.
 
     The newest page holds today whole: it carries every run of the current UTC day — the day the
     portal dates a stamp by — and never fewer than `RADAR_MIN_RUNS`, so a quiet day still reads as
@@ -3166,9 +3222,13 @@ async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
             member_id, limit=limit, cursor=cursor, agent_id=agent_id
         )
     task_names = await _radar_task_names(ctx, audience, member_id, page.rows)
+    entries = await _digest_entries(ctx, tuple(run.turn_id for run in page.rows))
     return JSONResponse(
         {
-            "runs": [_radar_run(ctx, run, task_names) for run in page.rows],
+            "runs": [
+                _radar_run(ctx, run, task_names) | {"entry": entries.get(run.turn_id)}
+                for run in page.rows
+            ],
             "older": None if page.older is None else page.older.encode(),
             "newer": None if page.newer is None else page.newer.encode(),
         }

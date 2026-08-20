@@ -14,6 +14,17 @@ import {
   wire,
 } from "./harness";
 
+/** What the report-digest skill wrote about the run below: the title the feed heads the entry
+ *  with, the line under it, and the findings with whoever the report named beside each. */
+const WRITTEN = {
+  title: "Portal moves to app.example.com, reports endpoint breaks",
+  summary: "Search dropped from 1.4s to 180ms; the old reports path dies September 1.",
+  points: [
+    { text: "Reports endpoint needs a workspace id", actor: "Theo Lindqvist" },
+    { text: "Portal moved to app.example.com", actor: "Marshall Reed" },
+  ],
+};
+
 const RUN = {
   turn_id: "0b7e2d43-5a86-4f19-9c3d-8e64a02b7c15",
   conversation_id: CONVO_ID,
@@ -24,6 +35,7 @@ const RUN = {
   surface: "slack",
   source: "https://acme.slack.com/archives/C42/p1",
   text: "",
+  entry: WRITTEN,
   artifacts: [
     {
       filename: "queue.png",
@@ -59,16 +71,19 @@ const FAILED_RUN = {
   fired_at: "2026-08-14T07:00:00+00:00",
   status: "failed",
   text: "The roll-up source timed out.",
+  entry: null,
   artifacts: [],
 };
 
+/** A report published since the digest job last ran: it carries nothing written yet. */
 const QUIET_RUN = {
   ...RUN,
   turn_id: "3e0b5a76-8db9-4c42-af60-b197d35e0f48",
   task: "quiet-check",
   fired_at: "2026-08-14T08:00:00+00:00",
   status: "done",
-  text: "",
+  text: "All quiet on the queue.",
+  entry: null,
   artifacts: [],
 };
 
@@ -81,6 +96,7 @@ const STOPPED_RUN = {
   fired_at: "2026-08-13T09:00:00+00:00",
   status: "cancelled",
   text: "",
+  entry: null,
   artifacts: [],
 };
 
@@ -103,21 +119,123 @@ function mountRadarSection() {
   );
 }
 
-test("a story is what a run made or how it went wrong, never what it said", async () => {
+/** The feed standing on one run's own address, which is what an entry and a story's dateline
+ *  both link. */
+function mountPinnedRun(run: { turn_id: string }) {
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="radar" place={{ open: "run/" + run.turn_id }} />
+    </MainAgentProvider>,
+  );
+}
+
+test("an entry states what the report found and who contributed each line", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [RUN], older: null }) });
+  mountRadarSection();
+
+  expect(await screen.findByRole("heading", { level: 3, name: WRITTEN.title })).toBeTruthy();
+  expect(screen.getByText(/Search dropped from 1.4s to 180ms/)).toBeTruthy();
+  expect(screen.getByText(/ago$/).closest("p")?.textContent).toBe(
+    "3h ago · Assistant · morning-digest",
+  );
+
+  const attributed = screen.getByText("Reports endpoint needs a workspace id").closest("li");
+  expect(within(attributed as HTMLElement).getByText("Theo Lindqvist")).toBeTruthy();
+  expect(screen.getByText("Marshall Reed")).toBeTruthy();
+});
+
+test("the whole entry opens the report it describes", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [RUN], older: null }) });
+  mountRadarSection();
+
+  const opened = await screen.findByRole("link", { name: new RegExp(WRITTEN.title) });
+  expect(opened.getAttribute("href")).toBe("#/radar?open=run%2F" + RUN.turn_id);
+});
+
+test("a picture the report made is drawn beside the entry", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [RUN], older: null }) });
+  mountRadarSection();
+
+  const picture = await screen.findByRole("presentation");
+  expect(picture.getAttribute("src")).toBe("/dl/queue.png?preview");
+});
+
+test("a report with no entry yet stands on its task and states nothing it cannot", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [QUIET_RUN], older: null }) });
+  mountRadarSection();
+
+  const entry = (await screen.findByRole("heading", { level: 3, name: "quiet-check" })).closest(
+    "li",
+  );
+  expect(entry?.querySelector("ul")).toBeNull();
+  expect(screen.queryByText("All quiet on the queue.")).toBeNull();
+});
+
+test("a run that did not end well is marked and says why", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [FAILED_RUN], older: null }) });
+  mountRadarSection();
+
+  expect(await screen.findByText(/Failed/)).toBeTruthy();
+  expect(screen.getByText("The roll-up source timed out.")).toBeTruthy();
+});
+
+test("a run that did not end well says why, whatever was written about it", async () => {
+  /** The writer only digests a run that ended well, so an entry on a failed run means a partial
+   *  report was digested before the run stopped. What the member can act on is the reason it
+   *  stopped, and the entry must not draw over it. */
   wire({
-    "/workspace/radar": () => json({ runs: [RUN, FAILED_RUN, STOPPED_RUN], older: null }),
-    "/dl/notes.md": () => new Response("### Standup\n\nTwo blockers cleared."),
+    "/workspace/radar": () =>
+      json({ runs: [{ ...FAILED_RUN, entry: WRITTEN }], older: null }),
   });
   mountRadarSection();
 
-  expect(await screen.findByRole("heading", { level: 2, name: "Aug 14 2026" })).toBeTruthy();
-  expect(screen.getByRole("heading", { level: 2, name: "Aug 13 2026" })).toBeTruthy();
+  expect(await screen.findByText("The roll-up source timed out.")).toBeTruthy();
+  expect(screen.queryByText(WRITTEN.summary)).toBeNull();
+});
 
-  const headline = screen.getByRole("heading", { level: 3, name: "morning-digest" });
-  expect(headline.querySelector("button")).toBeNull();
+test("the feed draws every run the page holds", async () => {
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN, QUIET_RUN, STOPPED_RUN], older: "older|x" }),
+  });
+  mountRadarSection();
+
+  expect(await screen.findByRole("heading", { level: 3, name: WRITTEN.title })).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 3, name: "quiet-check" })).toBeTruthy();
   expect(screen.getByRole("heading", { level: 3, name: "Scheduled run" })).toBeTruthy();
+  expect(screen.getByText(/Stopped/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Older" })).toBeTruthy();
+});
 
-  const byline = screen.getAllByText("by")[0];
+test("the feed walks older pages by cursor", async () => {
+  const reads: string[] = [];
+  wire({
+    "/workspace/radar": (url) => {
+      reads.push(url);
+      return url.includes("after=")
+        ? json({ runs: [STOPPED_RUN], older: null, newer: "newer|x" })
+        : json({ runs: [RUN], older: "older|x", newer: null });
+    },
+  });
+  mountRadarSection();
+
+  expect(await screen.findByRole("heading", { level: 3, name: WRITTEN.title })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Older" }));
+
+  expect(await screen.findByText(/Stopped/)).toBeTruthy();
+  expect(reads.some((read) => read.includes("after=older%7Cx"))).toBe(true);
+});
+
+test("a story is what a run made, never what it said", async () => {
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/dl/notes.md": () => new Response("### Standup\n\nTwo blockers cleared."),
+  });
+  mountPinnedRun(RUN);
+
+  const headline = await screen.findByRole("heading", { level: 3, name: "morning-digest" });
+  expect(headline.querySelector("button")).toBeNull();
+
+  const byline = screen.getByText("by");
   expect(byline.textContent).toBe("by assistant morning-digest");
   expect(within(byline).getByRole("link", { name: "assistant" }).getAttribute("href")).toBe(
     "#/agents/" + AGENT.id,
@@ -133,18 +251,24 @@ test("a story is what a run made or how it went wrong, never what it said", asyn
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   expect(screen.queryByText("notes.md")).toBeNull();
 
-  const conversations = screen.getAllByRole("link", { name: "Conversation" });
-  expect(conversations[0].getAttribute("href")).toBe("#/c/" + CONVO_ID);
-  const threads = screen.getAllByRole("link", { name: "Slack" });
-  expect(threads[0].textContent).toBe("Slack ↗");
-  expect(threads[0].getAttribute("href")).toBe(RUN.source);
-  const stamps = screen.getAllByText(/ago$/);
-  expect(stamps.length).toBeGreaterThan(0);
-  expect(stamps[0].closest("a")?.getAttribute("href")).toBe("#/radar?open=run%2F" + RUN.turn_id);
+  expect(screen.getByRole("link", { name: "Conversation" }).getAttribute("href")).toBe(
+    "#/c/" + CONVO_ID,
+  );
+  const thread = screen.getByRole("link", { name: "Slack" });
+  expect(thread.textContent).toBe("Slack ↗");
+  expect(thread.getAttribute("href")).toBe(RUN.source);
+  expect(screen.getByText(/ago$/).closest("a")?.getAttribute("href")).toBe(
+    "#/radar?open=run%2F" + RUN.turn_id,
+  );
+});
 
+test("a story that ended badly is marked and says why", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [FAILED_RUN], older: null }) });
+  mountPinnedRun(FAILED_RUN);
+
+  expect(await screen.findByRole("heading", { level: 3, name: "weekly-numbers" })).toBeTruthy();
   expect(screen.getByText("Failed")).toBeTruthy();
   expect(screen.getByText("The roll-up source timed out.")).toBeTruthy();
-  expect(screen.getByText("Stopped")).toBeTruthy();
 });
 
 /** jsdom lays nothing out, so the fold — the one measurement `Reveal` reads — is stated here. */
@@ -161,7 +285,7 @@ test("a story is titled the way its report titles itself, and says that title on
     "/workspace/radar": () => json({ runs: [RUN], older: null }),
     "/dl/notes.md": () => new Response("# Standup\n\nTwo blockers cleared."),
   });
-  mountRadarSection();
+  mountPinnedRun(RUN);
 
   expect(await screen.findByRole("heading", { level: 3, name: "Standup" })).toBeTruthy();
   expect(screen.queryByRole("heading", { level: 3, name: "morning-digest" })).toBeNull();
@@ -176,7 +300,7 @@ test("a report reads inline behind a fold, never inside a box of its own that sc
     "/workspace/radar": () => json({ runs: [RUN], older: null }),
     "/dl/notes.md": () => new Response("# Standup\n\n" + "Two blockers cleared. ".repeat(80)),
   });
-  mountRadarSection();
+  mountPinnedRun(RUN);
 
   const more = await screen.findByRole("button", { name: "Show more" });
   const region = document.getElementById(String(more.getAttribute("aria-controls")));
@@ -198,19 +322,11 @@ test("a report that fits is offered no fold", async () => {
     "/workspace/radar": () => json({ runs: [RUN], older: null }),
     "/dl/notes.md": () => new Response("# Standup\n\nTwo blockers cleared."),
   });
-  mountRadarSection();
+  mountPinnedRun(RUN);
 
   expect(await screen.findByText("Two blockers cleared.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   restore();
-});
-
-test("the feed draws every run the page holds", async () => {
-  wire({ "/workspace/radar": () => json({ runs: [QUIET_RUN], older: "older|x" }) });
-  mountRadarSection();
-
-  expect(await screen.findByRole("heading", { level: 3, name: "quiet-check" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Older" })).toBeTruthy();
 });
 
 test("a story's task opens the task record where the prompt is read", async () => {
@@ -232,7 +348,7 @@ test("a story's task opens the task record where the prompt is read", async () =
       });
     },
   });
-  mountRadarSection();
+  mountPinnedRun(RUN);
 
   await userEvent.click(await screen.findByRole("button", { name: "morning-digest" }));
 
@@ -242,27 +358,7 @@ test("a story's task opens the task record where the prompt is read", async () =
 
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("heading", { level: 2, name: "morning-digest" })).toBeNull();
-  expect(await screen.findByRole("button", { name: "morning-digest" })).toBeTruthy();
-});
-
-test("the feed walks older pages by cursor", async () => {
-  const reads: string[] = [];
-  wire({
-    "/workspace/radar": (url) => {
-      reads.push(url);
-      return url.includes("after=")
-        ? json({ runs: [STOPPED_RUN], older: null, newer: "newer|x" })
-        : json({ runs: [RUN], older: "older|x", newer: null });
-    },
-    "/dl/notes.md": () => new Response("All quiet on the queue."),
-  });
-  mountRadarSection();
-
-  expect(await screen.findByRole("button", { name: "morning-digest" })).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Older" }));
-
-  expect(await screen.findByText("Stopped")).toBeTruthy();
-  expect(reads.some((read) => read.includes("after=older%7Cx"))).toBe(true);
+  expect(await screen.findByRole("heading", { level: 3, name: WRITTEN.title })).toBeTruthy();
 });
 
 test("a permalink pins the feed to its one report, and the way back is offered", async () => {
@@ -276,11 +372,7 @@ test("a permalink pins the feed to its one report, and the way back is offered",
     },
     "/dl/notes.md": () => new Response("# Standup\n\nTwo blockers cleared."),
   });
-  render(
-    <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="radar" place={{ open: "run/" + RUN.turn_id }} />
-    </MainAgentProvider>,
-  );
+  mountPinnedRun(RUN);
 
   expect(await screen.findByRole("heading", { level: 3, name: "Standup" })).toBeTruthy();
   expect(reads[0]).toContain("turn=" + RUN.turn_id);
@@ -293,11 +385,7 @@ test("a permalink pins the feed to its one report, and the way back is offered",
 
 test("a permalink that resolves no readable run states it", async () => {
   wire({ "/workspace/radar": () => json({ runs: [], older: null }) });
-  render(
-    <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="radar" place={{ open: "run/" + RUN.turn_id }} />
-    </MainAgentProvider>,
-  );
+  mountPinnedRun(RUN);
 
   expect(
     await screen.findByText("This report does not exist or is not shared with you."),
@@ -310,7 +398,7 @@ test("a shared picture opens full with its download", async () => {
     "/workspace/radar": () => json({ runs: [RUN], older: null }),
     "/dl/notes.md": () => new Response("# Standup\n\nAll clear."),
   });
-  mountRadarSection();
+  mountPinnedRun(RUN);
 
   await userEvent.click(await screen.findByRole("img", { name: "the queue" }));
 
@@ -332,7 +420,7 @@ test("a shared file with no picture opens on its name with its download", async 
     "/workspace/radar": () => json({ runs: [RUN], older: null }),
     "/dl/notes.md": () => new Response("# Standup\n\nAll clear."),
   });
-  mountRadarSection();
+  mountPinnedRun(RUN);
 
   const chip = await screen.findByText("brief.pdf");
   await userEvent.click(chip.closest("button") as HTMLElement);

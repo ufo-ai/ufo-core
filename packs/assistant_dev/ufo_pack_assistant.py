@@ -27,6 +27,7 @@ EXTENSIONS = (
     "objectives",
     "sites",
     "scheduled_tasks",
+    "report_digest",
     "sweep",
     "monitors",
     "research",

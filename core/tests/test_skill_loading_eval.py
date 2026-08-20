@@ -229,9 +229,13 @@ def test_catalog_names_are_unique() -> None:
 
 
 def test_every_catalog_skill_is_loadable_by_the_target() -> None:
+    """Every skill a case names is one the target actually carries — a case naming a skill the pack
+    does not ship can only ever fail. A case that expects no load names none, and is held to its
+    forbidden set alone."""
     carried = set(skill_registry(load_manifests("assistant")).by_name) | {SETUP_SKILL_NAME}
     for case in CASES:
-        assert case.expected in carried, (case.name, case.expected)
+        if not case.expects_no_load:
+            assert case.expected in carried, (case.name, case.expected)
         missing = [name for name in case.forbidden if name not in carried]
         assert not missing, (case.name, missing)
 

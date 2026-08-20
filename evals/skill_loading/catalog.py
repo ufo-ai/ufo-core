@@ -531,6 +531,34 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("daily-brief", "task-scheduling"),
     ),
     SkillLoadCase(
+        "daily-brief-not-a-digest",
+        "Put my own private brief together for this morning — my work, my messages, my pages. "
+        "Nobody else sees it.",
+        expected="daily-brief",
+        forbidden=("report-digest",),
+    ),
+    SkillLoadCase(
+        "digest-stacked-up-reports",
+        "I have been out since Monday and eight reports are sitting unread. Boil each one down "
+        "to a couple of lines so I can decide which ones are worth opening.",
+        expected="report-digest",
+        forbidden=("daily-brief", "research-report", "task-scheduling"),
+    ),
+    SkillLoadCase(
+        "digest-what-the-competitor-report-found",
+        "What did Friday's competitor report turn up? Give me the short version — the findings, "
+        "not the whole thing.",
+        expected="report-digest",
+        forbidden=("research-report", "daily-brief"),
+    ),
+    SkillLoadCase(
+        "digest-report-benchmark-question",
+        "The competitor report says their p95 search latency is down to 180ms. Is that actually "
+        "fast for a search API these days, or is it table stakes now?",
+        expects_no_load=True,
+        forbidden=("report-digest", "research-report", "daily-brief"),
+    ),
+    SkillLoadCase(
         "coding-trace-webhook",
         "Trace how an incoming webhook event reaches the dispatcher in the code under repo/ and "
         "explain where retries are handled.",
@@ -936,6 +964,13 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Every weekday at 8:30 AM, send me a summary of new high-priority support escalations.",
         expected="task-scheduling",
         forbidden=("daily-brief",),
+    ),
+    SkillLoadCase(
+        "schedule-new-weekly-report",
+        "Set up a report on new enterprise signups that reaches me every Monday at 9, starting "
+        "next week.",
+        expected="task-scheduling",
+        forbidden=("report-digest",),
     ),
     SkillLoadCase(
         "schedule-weekly-pipeline",

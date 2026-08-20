@@ -238,6 +238,9 @@
      Large enough that a rendered document page reads as that page and not as a grey square, and
      small enough that three of them stand across the reading column. */
   --size-thumbnail: 132px;
+  /* The picture a digest entry carries: wide enough to read a chart's shape, short enough
+     that it never sets the height of an entry whose words are the point. */
+  --size-digest-picture: 72px;
   --grid-slot: minmax(0, 1fr) var(--container-record);
   --size-avatar: 24px;
   --size-band: 128px;

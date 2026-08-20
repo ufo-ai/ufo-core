@@ -96,6 +96,11 @@ const RUN = {
   surface: "web",
   source: null,
   text: "",
+  entry: {
+    title: "Pipeline slipped a week",
+    summary: "Two deals stuck in procurement decide the month.",
+    points: [{ text: "Northbay needs signatures before the 31st", actor: "" }],
+  },
   artifacts: [
     {
       filename: "roll-up.pdf",
@@ -797,7 +802,7 @@ test("the radar section is reached by its own hash and leads with the feed", asy
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
-  expect(await screen.findByText("roll-up.pdf")).toBeTruthy();
+  expect(await screen.findByText("Pipeline slipped a week")).toBeTruthy();
   expect(reads[0]).not.toContain("agent=");
   expect(screen.getByRole("tab", { name: "Reports" }).getAttribute("aria-selected")).toBe("true");
 
@@ -1118,13 +1123,13 @@ test("Radar shows one family at a time and the switcher names which", async () =
   mountRadar();
 
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
-  expect(await screen.findByText("roll-up.pdf")).toBeTruthy();
+  expect(await screen.findByText("Pipeline slipped a week")).toBeTruthy();
   expect(reads.every((read) => read.includes("/workspace/radar"))).toBe(true);
 
   await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
 
   expect(await screen.findByText("daily-brief")).toBeTruthy();
-  expect(screen.queryByText("roll-up.pdf")).toBeNull();
+  expect(screen.queryByText("Pipeline slipped a week")).toBeNull();
 
   await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
 

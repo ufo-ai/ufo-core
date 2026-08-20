@@ -1,5 +1,6 @@
 import { useLayoutEffect, useState } from "react";
 
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Filter } from "@/components/ui/filter";
 import { Reveal } from "@/components/ui/reveal";
@@ -11,10 +12,12 @@ import { Pager, type Placement } from "@/kernel/pager";
 import { PageHeader, PageToolbar } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { slackLink } from "@/lib/audience";
+import { AgentIcon } from "@/lib/agentIcon";
+import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import { useAgents } from "@/lib/mainAgent";
 import { Markdown } from "@/lib/markdown";
-import { Moment, day } from "@/lib/moments";
+import { Moment } from "@/lib/moments";
 import { agentHash, chatHash, sectionHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
@@ -31,8 +34,9 @@ const FAMILIES = [
 const TASK_KIND = "scheduled_task";
 const OBJECT_PREFIX = "object/";
 const RUN_PREFIX = "run/";
+const DONE = "done";
 
-type RadarArtifact = {
+export type RadarArtifact = {
   filename: string;
   subject: string | null;
   media_type: string;
@@ -51,8 +55,17 @@ export type RadarRun = {
   surface: string;
   source: string | null;
   text: string;
+  entry: DigestWritten | null;
   artifacts: RadarArtifact[];
 };
+
+/** One finding as the digest writer states it, and — where the report says who did the thing —
+ *  the person who did it. */
+export type DigestPoint = { text: string; actor: string };
+
+/** What the report-digest skill wrote about one report. A report published since the job last ran
+ *  carries none yet, and stands on its task's name until it does. */
+export type DigestWritten = { title: string; summary: string; points: DigestPoint[] };
 
 export type RadarPayload = { runs: RadarRun[]; older?: string | null; newer?: string | null };
 
@@ -178,26 +191,27 @@ function Feed({
               {back ? <div className="mt-4xl">{back}</div> : null}
             </>
           );
+        if (pinned)
+          return (
+            <>
+              <ol className="m-0 flex list-none flex-col p-0">
+                {payload.runs.map((run) => (
+                  <Story key={run.turn_id} run={run} onPlace={onPlace} />
+                ))}
+              </ol>
+              <div className="mt-4xl">{back}</div>
+            </>
+          );
         return (
           <>
-            <div className="flex flex-col gap-4xl">
-              {editions(payload.runs).map((edition) => (
-                <section key={edition.date} className="flex flex-col">
-                  <div className="flex items-center gap-lg">
-                    <h2 className="m-0 font-mono text-mono font-normal uppercase text-ink-soft">
-                      {edition.date}
-                    </h2>
-                    <span aria-hidden className="h-px flex-1 bg-edge" />
-                  </div>
-                  <ol className="m-0 flex list-none flex-col p-0">
-                    {edition.runs.map((run) => (
-                      <Story key={run.turn_id} run={run} onPlace={onPlace} />
-                    ))}
-                  </ol>
-                </section>
+            <ol className="m-0 flex list-none flex-col p-0">
+              {payload.runs.map((run) => (
+                <Entry key={run.turn_id} run={run} onPlace={onPlace} />
               ))}
+            </ol>
+            <div className="mt-4xl">
+              <Pager payload={payload} onPlace={onPlace} />
             </div>
-            <div className="mt-4xl">{back ?? <Pager payload={payload} onPlace={onPlace} />}</div>
           </>
         );
       }}
@@ -205,16 +219,11 @@ function Feed({
   );
 }
 
-/** The page's runs under the calendar day each fired on, in the order the page already holds. */
-function editions(runs: RadarRun[]): { date: string; runs: RadarRun[] }[] {
-  const grouped: { date: string; runs: RadarRun[] }[] = [];
-  for (const run of runs) {
-    const date = day(run.fired_at) ?? "";
-    const last = grouped[grouped.length - 1];
-    if (last && last.date === date) last.runs.push(run);
-    else grouped.push({ date, runs: [run] });
-  }
-  return grouped;
+/** A picture the report made — a chart, a capture — is what draws a reader down the page to it.
+ *  Only a file with a rendered preview qualifies: the feed shows the picture or nothing, never a
+ *  frame around a name. */
+function isPicture(artifact: RadarArtifact): boolean {
+  return artifact.preview_url !== null;
 }
 
 /** A markdown file the run shared is the run's own document: it reads inline as the story rather
@@ -224,6 +233,99 @@ function isDocument(artifact: RadarArtifact): boolean {
   return (
     artifact.url !== null &&
     (artifact.media_type === "text/markdown" || artifact.filename.endsWith(".md"))
+  );
+}
+
+/** One report on the rail: what it found, in the shortest form that earns a press. The app's own
+ *  mark is the node, so which app filed it is read before the entry is, and the rail runs between
+ *  the marks and stops under the last. The whole entry opens the report it describes. */
+function Entry({
+  run,
+  onPlace,
+}: {
+  run: RadarRun;
+  onPlace: (place: Placement) => void;
+}) {
+  const agent = useAgents().find((entry) => entry.id === run.agent_id);
+  const picture = run.artifacts.find(isPicture) ?? null;
+  const note = STATUS_NOTES[run.status];
+  const heading = run.entry?.title ?? run.task ?? "Scheduled run";
+  /** A run that did not end well says why, whatever else was written about it: the reason it
+   *  stopped is the whole of what the member can act on, and an entry drawn over the partial
+   *  report it left would read as though the run had delivered. */
+  const summary = run.status === DONE ? (run.entry?.summary ?? null) : run.text || null;
+  return (
+    <li className="group/entry flex gap-lg">
+      <div className="flex flex-col items-center gap-sm">
+        <Avatar>
+          <AvatarFallback>
+            <AgentIcon name={agent?.icon ?? "propylon"} />
+          </AvatarFallback>
+        </Avatar>
+        <span aria-hidden className="w-px flex-1 bg-edge group-last/entry:hidden" />
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-sm pb-6xl group-last/entry:pb-0">
+        <p className="m-0 truncate font-mono text-small tabular-nums text-ink-soft">
+          <Moment at={run.fired_at} />
+          {agent ? <span>{" \u00b7 " + agentName(agent.name)}</span> : null}
+          {run.task ? " \u00b7 " : null}
+          {run.task ? (
+            <button
+              type="button"
+              onClick={() =>
+                onPlace({ open: OBJECT_PREFIX + TASK_KIND + "/" + run.task, agent: run.agent_id })
+              }
+              className="m-0 border-0 bg-transparent p-0 text-left font-mono text-inherit hover:underline"
+            >
+              {run.task}
+            </button>
+          ) : null}
+          {note ? (
+            <span
+              className={run.status === "failed" ? "[color:var(--color-attention-ink)]" : undefined}
+            >
+              {" \u00b7 " + note}
+            </span>
+          ) : null}
+        </p>
+        <a
+          href={sectionHash("radar", { open: RUN_PREFIX + run.turn_id })}
+          className="flex items-start gap-xl text-inherit no-underline"
+        >
+          <div className="flex min-w-0 flex-1 flex-col gap-sm">
+            <h3 className="m-0 line-clamp-2 text-subtitle font-medium text-ink group-hover/entry:underline">
+              {heading}
+            </h3>
+            {summary ? <p className="m-0 line-clamp-2 text-ui text-ink-soft">{summary}</p> : null}
+            {run.entry?.points.length ? (
+              <ul className="m-0 flex list-none flex-col gap-2xs p-0">
+                {run.entry.points.map((made, at) => (
+                  <li key={run.turn_id + "/" + at} className="flex items-baseline gap-sm text-ui">
+                    <span aria-hidden className="text-ink-faint">
+                      —
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-ink">{made.text}</span>
+                    {made.actor ? (
+                      <span className="shrink-0 whitespace-nowrap text-small text-ink-soft">
+                        {made.actor}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+          {picture ? (
+            <img
+              loading="lazy"
+              alt=""
+              src={picture.preview_url ?? ""}
+              className="h-(--size-digest-picture) w-(--container-attachment) shrink-0 rounded-panel border border-edge object-cover"
+            />
+          ) : null}
+        </a>
+      </div>
+    </li>
   );
 }
 
