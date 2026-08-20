@@ -10,8 +10,10 @@ that is a plain string or a connector's own JSON map is opaque and passes throug
 `delete_missing` (full-snapshot) stream is exempt from the cap and always returns `snapshot=True`:
 tombstone correctness requires the complete enumeration, so it is never sliced. The adapter also
 hands a row's pinned backfill window down on the `StreamSpec` it drives, which is how a connector
-floors a first sync. Every assertion reads the adapter's `SyncResult` or the specs the probe
-connector was driven with."""
+floors a first sync, and resolves the base URL each run drives — the connector's own host, the
+address a row pins, or that host completed by the connected account's identifier for a connector
+declaring `account_url_key`. Every assertion reads the adapter's `SyncResult` or the specs and
+addresses the probe connector was driven with."""
 
 import json
 import logging
@@ -48,6 +50,7 @@ class _FeedConnector(Connector):
         self.received_cursors: list[str | None] = []
         self.received_streams: list[StreamSpec] = []
         self.received_windows: list[datetime | None] = []
+        self.received_base_urls: list[str] = []
         self.closed = False
 
     def streams(self) -> list[StreamSpec]:
@@ -66,6 +69,7 @@ class _FeedConnector(Connector):
         self.received_cursors.append(cursor)
         self.received_streams.append(stream)
         self.received_windows.append(backfill_after)
+        self.received_base_urls.append(base_url)
         try:
             for page in self._feed:
                 yield page
@@ -437,3 +441,96 @@ async def test_capped_run_closes_a_rest_connectors_paginate(
     )
     assert result.next_cursor == "2"
     assert connector.paginate_closed is True
+
+
+ACCOUNT_URL_KEY = "tenantRef"
+ACCOUNT_URL_STREAM = StreamSpec(name="items", source_object="items")
+
+
+class _AccountUrlConnector(_FeedConnector):
+    """A connector whose declared host stops at the connected account: `base_url` is the fixed
+    prefix and the account's own identifier completes it."""
+
+    account_url_key = ACCOUNT_URL_KEY
+
+
+class _AccountProxy:
+    """An auth proxy that also answers a connection's identifiers, as a broker-backed one does."""
+
+    def __init__(self, value: str | None) -> None:
+        self._value = value
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        return Credential(bearer="unused")
+
+    async def account_parameter(
+        self, workspace_id: UUID, provider: str, account: str, key: str
+    ) -> str | None:
+        return self._value if key == ACCOUNT_URL_KEY else None
+
+
+async def _account_url_run(connector: _FeedConnector, proxy: object) -> None:
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=proxy)
+    await ConnectorBackend(connector=connector).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream=ACCOUNT_URL_STREAM.name), None, auth
+    )
+
+
+async def test_the_connected_account_completes_the_connectors_host() -> None:
+    connector = _AccountUrlConnector(ACCOUNT_URL_STREAM, [_records(1)])
+    await _account_url_run(connector, _AccountProxy("acct-9130"))
+    assert connector.received_base_urls == ["https://probe.example/acct-9130"]
+
+
+async def test_a_connector_declaring_no_account_key_keeps_its_own_host() -> None:
+    connector = _FeedConnector(ACCOUNT_URL_STREAM, [_records(1)])
+    await _account_url_run(connector, _AccountProxy("acct-9130"))
+    assert connector.received_base_urls == ["https://probe.example"]
+
+
+async def test_a_row_that_pins_the_address_is_not_completed_again() -> None:
+    connector = _AccountUrlConnector(ACCOUNT_URL_STREAM, [_records(1)])
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_AccountProxy("acct-9130"))
+    await ConnectorBackend(connector=connector).fetch(
+        ConnectorSourceConfig(
+            account=ACCOUNT,
+            stream=ACCOUNT_URL_STREAM.name,
+            base_url="https://probe.example/acct-1",
+        ),
+        None,
+        auth,
+    )
+    assert connector.received_base_urls == ["https://probe.example/acct-1"]
+
+
+@pytest.mark.parametrize(
+    "answered",
+    [
+        None,
+        "",
+        "acct-1/../../evil",
+        "acct-1?redirect=evil",
+        "acct-1#fragment",
+        "..",
+        "evil.test/acct-1",
+        "a" * 100,
+    ],
+)
+async def test_an_account_identifier_that_is_not_one_path_segment_fails_the_run(
+    answered: str | None,
+) -> None:
+    """The identifier reaches a request URL, so anything but one plain segment is refused: a slash,
+    a traversal, or a query character would re-point the run at another path or another host."""
+    connector = _AccountUrlConnector(ACCOUNT_URL_STREAM, [_records(1)])
+    with pytest.raises(RuntimeError, match="resolved no account URL"):
+        await _account_url_run(connector, _AccountProxy(answered))
+    assert connector.received_base_urls == []
+
+
+async def test_an_auth_proxy_holding_no_connection_metadata_fails_the_run() -> None:
+    """A workspace key carries no connection, so nothing completes the host — the run fails loud
+    instead of dialling the prefix, which names no account at the provider."""
+    connector = _AccountUrlConnector(ACCOUNT_URL_STREAM, [_records(1)])
+    with pytest.raises(RuntimeError, match="resolved no account URL"):
+        await _account_url_run(connector, _NoAuthProxy())
+    assert connector.received_base_urls == []

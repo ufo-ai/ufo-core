@@ -385,10 +385,19 @@ class Connector(ABC):
     async-yields a stream's records grouped into pages given a resolved `Credential` and base URL;
     `render` turns one record into the `(title, body)` the adapter lands as a page. The runner
     consumes pages in order. Returning a smaller page gives more durable cursor checkpoints at the
-    cost of more work."""
+    cost of more work.
+
+    A connector declares its API address in one of three shapes. `base_url` alone is a complete
+    fixed host every account of the provider shares. `base_url` empty is a per-tenant host only the
+    member knows, carried by the source row. `base_url` plus `account_url_key` is a fixed host that
+    stops short of the connected account: the account's own provider-issued identifier completes it
+    as one trailing path segment (QuickBooks' `realmId`, giving `/v3/company/<realmId>`), resolved
+    per run from the connection through `AccountParameters`. That key names an identifier and never
+    secret material — its value reaches the request URL."""
 
     name: ClassVar[str] = ""
     base_url: ClassVar[str] = ""
+    account_url_key: ClassVar[str] = ""
 
     @abstractmethod
     def streams(self) -> list[StreamSpec]:

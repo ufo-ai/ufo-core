@@ -9,7 +9,9 @@ predates it, or a broker org rotation) tells the agent to have the member reconn
 answering with tool slugs; `search` rides the Tool Router; `credential` confirms
 the account is owned by this workspace's broker user (metadata, never a token — the confused-deputy
 guard) and returns a `Credential` whose transport proxies provider HTTP through Composio's
-proxy-execute, so a feed-sync source holds no secret.
+proxy-execute, so a feed-sync source holds no secret; `account_parameter` reads one named identifier
+off that same confirmed metadata, which is how the feed-sync of a per-company provider resolves the
+company its API address carries.
 
 Files cross as references: `file_outputs` finds the `{name, mimetype, s3url}` objects an execute
 response carries (presigned URLs on Composio's file store), and `stage_upload` mints an upload slot
@@ -135,6 +137,19 @@ class ComposioBroker:
                 inner=client.transport or httpx.AsyncHTTPTransport(),
             )
         )
+
+    async def account_parameter(
+        self, workspace_id: UUID, provider: str, account: str, key: str
+    ) -> str | None:
+        broker_user = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+        try:
+            return await composio.composio_client().account_parameter(
+                account, broker_user, provider, key
+            )
+        except composio.ComposioError as error:
+            if error.status != NOT_FOUND:
+                raise
+            raise _reconnect_error(error, provider) from error
 
     async def _slug_miss(
         self,

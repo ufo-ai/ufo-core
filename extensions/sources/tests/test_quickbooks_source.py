@@ -1,7 +1,7 @@
-"""The QuickBooks connector over a mock transport: the `/query` loop, the `QueryResponse.<Entity>`
-envelope unwrap, the nested `MetaData.LastUpdatedTime` cursor lifted to a flat watermark, the
-incremental `WHERE` clause, and a refusal as `StreamSkipped`. Offline — a canned transport,
-no DB, no token."""
+"""The QuickBooks connector over a mock transport: the company the connected account names in every
+request path, the `/query` loop, the `QueryResponse.<Entity>` envelope unwrap, the nested
+`MetaData.LastUpdatedTime` cursor lifted to a flat watermark, the incremental `WHERE` clause, and a
+refusal as `StreamSkipped`. Offline — a canned transport, no DB, no token."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -15,14 +15,30 @@ from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
+REALM = "9130347596"
+COMPANY_PATH = f"/v3/company/{REALM}"
+PINNED_BASE_URL = "https://quickbooks.api.intuit.com/v3/company/1234567890"
 
 
 class _MockProxy:
-    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+    """The broker's answers for one connected account: a proxying transport, and the company id its
+    connection carries — None for a connection whose broker holds none."""
+
+    def __init__(
+        self, handler: Callable[[httpx.Request], httpx.Response], realm: str | None = REALM
+    ) -> None:
         self._handler = handler
+        self._realm = realm
+        self.asked: list[str] = []
 
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
+
+    async def account_parameter(
+        self, workspace_id: UUID, provider: str, account: str, key: str
+    ) -> str | None:
+        self.asked.append(key)
+        return self._realm
 
 
 async def _fetch(
@@ -40,7 +56,7 @@ def _refs(result: SyncResult) -> set[str]:
 
 def _handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith("/query")
+        assert request.url.path == f"{COMPANY_PATH}/query"
         seen.append(request.url.params.get("query") or "")
         return httpx.Response(
             200,
@@ -113,3 +129,59 @@ async def test_stream_skipped_on_refusal() -> None:
 
     with pytest.raises(StreamSkipped):
         await _fetch("customers", handle)
+
+
+async def test_query_addresses_the_company_the_connection_names() -> None:
+    """QBO answers a query only under the company file it is addressed to. The connector's host
+    stops at `/v3/company`, so the connection's `realmId` completes the address — a realm-less
+    `/v3/company/query` names no company and can never return a record."""
+    paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"QueryResponse": {}})
+
+    proxy = _MockProxy(handle)
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=proxy)
+    await ConnectorBackend(connector=QuickBooksConnector()).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream="customers"), None, auth
+    )
+    assert paths == [f"{COMPANY_PATH}/query"]
+    assert proxy.asked == ["realmId"]
+
+
+async def test_a_connection_that_names_no_company_fails_before_any_request() -> None:
+    """A run whose account answers no realm fails loud rather than dial the realm-less host: that
+    request names no company, so no retry of it can succeed."""
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"QueryResponse": {}})
+
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handle, realm=None))
+    with pytest.raises(RuntimeError, match="resolved no account URL"):
+        await ConnectorBackend(connector=QuickBooksConnector()).fetch(
+            ConnectorSourceConfig(account=ACCOUNT, stream="customers"), None, auth
+        )
+    assert requests == []
+
+
+async def test_a_pinned_base_url_addresses_the_company_it_names() -> None:
+    """A binding carrying the whole address uses it and asks the broker nothing — the path left
+    for a connection whose broker holds no company id."""
+    paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"QueryResponse": {}})
+
+    proxy = _MockProxy(handle, realm=None)
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=proxy)
+    await ConnectorBackend(connector=QuickBooksConnector()).fetch(
+        ConnectorSourceConfig(account=ACCOUNT, stream="customers", base_url=PINNED_BASE_URL),
+        None,
+        auth,
+    )
+    assert paths == ["/v3/company/1234567890/query"]
+    assert proxy.asked == []

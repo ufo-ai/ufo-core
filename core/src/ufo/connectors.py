@@ -14,6 +14,12 @@ lives:
   - `headers` — provider-specific auth headers (api-key, basic) for a provider whose auth is not a
     bearer token.
 
+A provider whose API address carries the connected account's own identifier (QuickBooks' company id
+in `/v3/company/<realmId>`) reads it through the same seam: an auth proxy implementing
+`AccountParameters` answers the connector's declared `account_url_key` off the connection's
+metadata, so the address follows the account the member connected instead of being typed a second
+time.
+
 The secret behind `bearer`/`headers` lives encrypted in the credential store and is read in-process
 by the sync job under a workspace-scoped `CredentialAccess` — it NEVER reaches the sandbox or the
 agent surface, the actual invariant (like the BYOK model/embed backends). Keep a `Credential` out of
@@ -32,7 +38,7 @@ providers sync through `direct`."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 import httpx
@@ -83,6 +89,24 @@ class AuthProxy(Protocol):
     backend at boot and threads it onto the sync runner."""
 
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential: ...
+
+
+@runtime_checkable
+class AccountParameters(Protocol):
+    """Reads one named identifier off a connected account's connection metadata — how a connector
+    whose API address carries a per-account id (QuickBooks' company/realm id in
+    `/v3/company/<realmId>`) resolves it from the account the member connected, instead of the
+    member typing what the broker already holds. `key` is the connector's declared
+    `account_url_key` and names a provider-issued identifier, never a secret: its value reaches the
+    request URL.
+
+    A capability, not a requirement: an auth proxy or broker without it answers nothing (a BYOK key
+    carries no connection metadata), and such a source must carry a `base_url` of its own or fail
+    its run."""
+
+    async def account_parameter(
+        self, workspace_id: UUID, provider: str, account: str, key: str
+    ) -> str | None: ...
 
 
 class UnknownBrokerTool(LookupError):
@@ -165,7 +189,11 @@ class ConnectorBroker(Protocol):
     produced files to their presigned URLs, and `stage_upload` mints where a workspace file is PUT
     before a tool call consumes it (raising ValueError for a broker whose tools take URL inputs
     instead). The sandbox runs both transfers itself, through the egress proxy — the declared
-    `transfer_hosts` a grant admits."""
+    `transfer_hosts` a grant admits.
+
+    A broker that also holds a connection's provider-issued identifiers implements
+    `AccountParameters`, which is what resolves the per-account API address of a provider whose
+    host carries one."""
 
     async def tools(
         self, workspace_id: UUID, provider: str, query: str
@@ -304,6 +332,15 @@ class ConnectorRegistry:
         return await self.resolver.catalog(query, limit)
 
 
+def _broker(registry: ConnectorRegistry, provider: str) -> ConnectorBroker | None:
+    found = registry.entries.get(provider)
+    if found is not None:
+        return found.broker
+    if registry.resolver is not None:
+        return registry.resolver.entry(provider).broker
+    return None
+
+
 async def _credential(
     registry: ConnectorRegistry,
     workspace_id: UUID,
@@ -311,13 +348,9 @@ async def _credential(
     account: str,
 ) -> Credential:
     if account != DIRECT_ACCOUNT:
-        found = registry.entries.get(provider)
-        if found is not None:
-            return await found.broker.credential(workspace_id, provider, account)
-        if registry.resolver is not None:
-            return await registry.resolver.entry(provider).broker.credential(
-                workspace_id, provider, account
-            )
+        broker = _broker(registry, provider)
+        if broker is not None:
+            return await broker.credential(workspace_id, provider, account)
         raise RuntimeError(f"no connector broker resolves {provider!r} credentials")
     if registry.fallback is not None:
         return await registry.fallback.credential(workspace_id, provider, account)
@@ -411,6 +444,20 @@ class _BoundSourceCredentials:
                 account=account,
             )
         )
+
+    async def account_parameter(
+        self, workspace_id: UUID, provider: str, account: str, key: str
+    ) -> str | None:
+        """The connection's value for one provider-issued identifier, from the broker that holds the
+        account — None where the source spends a workspace key or its broker holds no such
+        metadata. Read after `credential` bound the source's connection, so the account is already
+        confirmed as this source's own."""
+        if account == DIRECT_ACCOUNT:
+            return None
+        broker = _broker(self.registry, provider)
+        if not isinstance(broker, AccountParameters):
+            return None
+        return await broker.account_parameter(workspace_id, provider, account, key)
 
 
 @dataclass(frozen=True)

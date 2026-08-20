@@ -56,6 +56,7 @@ log. The manifest registers one backend per connector in the registry."""
 
 import hashlib
 import json
+import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
@@ -63,6 +64,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from ufo.connectors import AccountParameters
 from ufo.o11y import warn
 from ufo.sources.connector import Connector, StreamPage, StreamSpec
 from ufo.sources.rest import get_path
@@ -78,6 +80,11 @@ from ufo.sources.sync import (
 MAX_RECORDS_PER_RUN = 5_000
 CAP_OVERRUN_FACTOR = 4
 BACKFILL_KEY = "ufo_backfill"
+ACCOUNT_URL_SEGMENT = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?")
+"""What a connected account's identifier may look like where it completes a connector's `base_url`.
+The value comes from the broker, and it lands in a request URL: anything outside one plain path
+segment (a slash, a dot-dot alone, an `@`, a `%`, a query or fragment character) would re-point the
+request at another path or another host, so it is refused rather than dialled."""
 
 
 class _BackfillEnvelope(BaseModel):
@@ -116,8 +123,10 @@ class ConnectorSourceConfig(SourceRowConfig):
     stream this row pulls. `base_url` overrides the connector's host for a per-tenant provider
     (Freshdesk's `https://<account>.freshdesk.com`, Zendesk's `<subdomain>.zendesk.com`), whose
     connector class leaves `base_url` empty; it is part of the config the `source_row_id` hashes, so
-    two tenants of the same provider settle on distinct rows. The backend never reads a raw token —
-    it asks the proxy for a `Credential`.
+    two tenants of the same provider settle on distinct rows. It also pins the address of a provider
+    whose host carries the connected account's own identifier, for the connection whose broker
+    cannot answer that identifier; left empty there, each run resolves the address from the
+    connection instead. The backend never reads a raw token — it asks the proxy for a `Credential`.
 
     `backfill_days` is what the registering member asked this row's first sync to reach — None takes
     the stream's declared `backfill_window_days`, `"all"` the whole history — and `backfill_after`
@@ -156,7 +165,7 @@ class ConnectorBackend:
             auth.workspace_id, self.connector.name, config.account
         )
         stream = self._stream(config.stream)
-        base_url = config.base_url or self.connector.base_url
+        base_url = config.base_url or await self._account_base_url(config, auth)
         if not base_url:
             raise RuntimeError(
                 f"connector source {self.connector.name!r} resolved no base_url: it is a "
@@ -241,6 +250,31 @@ class ConnectorBackend:
             deletes=tuple(deletes),
             snapshot=stream.delete_missing,
         )
+
+    async def _account_base_url(self, config: ConnectorSourceConfig, auth: SourceAuth) -> str:
+        """The connector's own address, completed by the connected account where the provider's host
+        carries a per-account identifier (`account_url_key`) — resolved from the connection each
+        run, so it follows the account rather than a value typed at registration.
+
+        A connector declaring no key answers its class constant unchanged. A declared key that
+        resolves to nothing usable fails the run here: the address would otherwise be the host one
+        segment short of a company, which names no account at the provider."""
+        key = self.connector.account_url_key
+        if not key:
+            return self.connector.base_url
+        segment = None
+        if isinstance(auth.auth_proxy, AccountParameters):
+            segment = await auth.auth_proxy.account_parameter(
+                auth.workspace_id, self.connector.name, config.account, key
+            )
+        if segment is None or ACCOUNT_URL_SEGMENT.fullmatch(segment) is None:
+            raise RuntimeError(
+                f"connector source {self.connector.name!r} resolved no account URL: its API host "
+                f"carries the connected account's {key!r}, which the account {config.account!r} "
+                "answered with nothing usable, and the source row set no base_url — a "
+                "misconfigured source fails its run rather than dial a host that names no account"
+            )
+        return f"{self.connector.base_url}/{segment}"
 
     def _stream(self, name: str) -> StreamSpec:
         for stream in self.connector.streams():

@@ -1933,6 +1933,11 @@ async def test_open_namespace_provider_with_a_byok_key_syncs_directly(
         ("chargebee", "https://acme.chargebee.com/api/v2/", "https://acme.chargebee.com/api/v2"),
         ("freshdesk", "https://acme.freshdesk.com/", "https://acme.freshdesk.com"),
         ("mailchimp", "https://us21.api.mailchimp.com/", "https://us21.api.mailchimp.com"),
+        (
+            "quickbooks",
+            "https://quickbooks.api.intuit.com/v3/company/9130347596/",
+            "https://quickbooks.api.intuit.com/v3/company/9130347596",
+        ),
         ("recruitee", "https://api.recruitee.com/c/acme/", "https://api.recruitee.com/c/acme"),
         ("salesforce", "https://acme.my.salesforce.com/", "https://acme.my.salesforce.com"),
         ("zendesk", "https://acme.zendesk.com/", "https://acme.zendesk.com"),
@@ -1952,6 +1957,10 @@ def test_tenant_urls_are_validated_by_provider(
         ("chargebee", "https://acme.chargebee.com/admin"),
         ("freshdesk", "https://localhost"),
         ("mailchimp", "http://us21.api.mailchimp.com"),
+        ("quickbooks", "https://quickbooks.api.intuit.com.evil.test/v3/company/9130347596"),
+        ("quickbooks", "https://quickbooks.api.intuit.com/v3/company"),
+        ("quickbooks", "https://quickbooks.api.intuit.com/v3/company/9130347596/query"),
+        ("quickbooks", "http://quickbooks.api.intuit.com/v3/company/9130347596"),
         ("recruitee", "https://api.recruitee.com/c/acme?redirect=evil"),
         ("salesforce", "https://evil.test"),
         ("zendesk", "https://attacker@acme.zendesk.com"),
@@ -1960,6 +1969,19 @@ def test_tenant_urls_are_validated_by_provider(
 def test_tenant_urls_reject_cross_provider_and_unsafe_origins(provider: str, base_url: str) -> None:
     with pytest.raises(ValueError):
         _validated_base_url(provider, base_url)
+
+
+def test_a_provider_whose_host_names_the_connected_account_may_leave_base_url_unset() -> None:
+    """QuickBooks' host stops at `/v3/company`, so a binding either pins the company or leaves the
+    field empty for each run to resolve from the connection. A provider whose host is complete still
+    refuses any override, and a per-tenant provider still requires one."""
+    assert CONNECTORS["quickbooks"].account_url_key == "realmId"
+    assert _validated_base_url("quickbooks", None) is None
+    assert _validated_base_url("quickbooks", "") is None
+    with pytest.raises(ValueError, match="fixed API host"):
+        _validated_base_url("asana", "https://app.asana.com/api/1.0")
+    with pytest.raises(ValueError, match="requires base_url"):
+        _validated_base_url("zendesk", None)
 
 
 async def test_invalid_base_url_registers_nothing(db: None) -> None:

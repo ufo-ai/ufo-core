@@ -9,9 +9,14 @@ incremental stream rides the `WHERE` clause on `Metadata.LastUpdatedTime`; the r
 without that cursor (`payment_methods`, `tax_agencies`) full-refresh. Because the cursor is nested
 (`MetaData.LastUpdatedTime`), `flatten` lifts it to a flat key so the adapter advances the watermark
 over it. `Id` is the primary key for every entity. A refusal (401/403) raises `StreamSkipped`. The
-credential is resolved through the auth proxy the runner threads (Composio also supplies the
-per-realm base URL); this connector holds no token. The write path is intentionally absent — the
-source seam only reads."""
+credential is resolved through the auth proxy the runner threads; this connector holds no token.
+
+QBO addresses one company file per request: every path sits under `/v3/company/<realmId>`, so
+`base_url` here is the host without that segment and `account_url_key` names the identifier that
+completes it. The connected account's `realmId` is what the broker holds from the consent leg, so
+each run resolves the company from the connection; a binding whose broker answers none carries the
+whole address as its own `base_url`. The write path is intentionally absent — the source seam only
+reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -78,6 +83,7 @@ QUICKBOOKS_STREAMS: list[StreamSpec] = [
 class QuickBooksConnector(RestConnector):
     name = "quickbooks"
     base_url = "https://quickbooks.api.intuit.com/v3/company"
+    account_url_key = "realmId"
     streams_list = QUICKBOOKS_STREAMS
 
     @staticmethod

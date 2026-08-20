@@ -32,6 +32,7 @@ TOOL_PAGE_LIMIT = 100
 MAX_LISTED_TOOLS = 500
 TOOLKIT_SEARCH_LIMIT = 10
 MAX_EXECUTE_ARGUMENTS_BYTES = 1024 * 1024
+ACCOUNT_PARAMETER_DEPTH = 4
 IDEMPOTENCY_HEADER = "x-idempotency-key"
 TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
 TOOL_ROUTER_SESSION_PATH = "/tool_router/session"
@@ -162,7 +163,9 @@ class ComposioClient:
     the toolkit's existing auth config, else a managed one), and `connected_account` confirms an
     account is active, owned by the expected workspace user, and authenticates the requested
     toolkit. A foreign or cross-toolkit account id is refused from metadata without reading a
-    token. `list_tools` and `tool_schema` are the catalog the dynamic tools search and describe;
+    token, and `account_parameter` reads one named identifier off that same confirmed metadata (the
+    company id a per-company provider's API address carries). `list_tools` and `tool_schema` are the
+    catalog the dynamic tools search and describe;
     `execute_tool` runs one on Composio's server-side execute API for a bound account, bounding the
     arguments payload before the call. Each call opens and closes its own client so a transport
     override (a test's MockTransport) is honoured and no connection leaks."""
@@ -184,6 +187,23 @@ class ComposioClient:
     async def connected_account(
         self, account_id: str, expected_user_id: str, expected_toolkit: str
     ) -> OAuthAccount:
+        await self._account(account_id, expected_user_id, expected_toolkit)
+        return OAuthAccount(account_id=account_id)
+
+    async def account_parameter(
+        self, account_id: str, expected_user_id: str, expected_toolkit: str, key: str
+    ) -> str | None:
+        """One named identifier the account's connection carries — the QuickBooks company id the
+        provider issued at consent — or None where it carries none. The account is confirmed as this
+        workspace's first, exactly as `connected_account` does. Composio nests a connection's own
+        parameters under the auth state that stored them, and the nesting differs per auth scheme,
+        so the key is read wherever the account payload holds it."""
+        payload = await self._account(account_id, expected_user_id, expected_toolkit)
+        return _parameter(payload, key)
+
+    async def _account(
+        self, account_id: str, expected_user_id: str, expected_toolkit: str
+    ) -> dict[str, object]:
         payload = await self._get(f"/connected_accounts/{account_id}")
         owner = payload.get("user_id")
         if not isinstance(owner, str) or owner != expected_user_id:
@@ -205,7 +225,7 @@ class ComposioClient:
                 f"connected account {account_id!r} authenticates toolkit {slug!r}, "
                 f"not {expected_toolkit!r}",
             )
-        return OAuthAccount(account_id=account_id)
+        return payload
 
     async def account_label(self, account_id: str) -> str | None:
         payload = await self._get(f"/connected_accounts/{account_id}")
@@ -378,6 +398,28 @@ class ComposioClient:
             timeout=COMPOSIO_TIMEOUT_SECONDS,
             transport=self.transport,
         )
+
+
+def _parameter(payload: Mapping[str, object], key: str, depth: int = 0) -> str | None:
+    """The value a connected-account payload holds under `key`, as a string — read at the top level
+    or in any nested object, since Composio files a connection's own parameters under the auth state
+    that stored them. Bounded by `ACCOUNT_PARAMETER_DEPTH` so one deep payload cannot cost an
+    unbounded walk."""
+    match payload.get(key):
+        case str() as value if value:
+            return value
+        case bool():
+            return None
+        case int() as value:
+            return str(value)
+    if depth >= ACCOUNT_PARAMETER_DEPTH:
+        return None
+    for nested in payload.values():
+        if isinstance(nested, Mapping):
+            found = _parameter(nested, key, depth + 1)
+            if found is not None:
+                return found
+    return None
 
 
 def _body(response: httpx.Response) -> dict[str, object]:
