@@ -5,6 +5,7 @@ export const WORKSPACE_TABS = [
   "connectors",
   "credentials",
   "usage",
+  "billing",
 ] as const;
 
 export const SECTIONS = ["artifacts", "radar"] as const;

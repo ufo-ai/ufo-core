@@ -14,6 +14,9 @@ from ufo.balance import (
     Headroom as Headroom,
 )
 from ufo.balance import (
+    Purchase as Purchase,
+)
+from ufo.balance import (
     configured_auto_topup as configured_auto_topup,
 )
 from ufo.balance import (
@@ -30,6 +33,9 @@ from ufo.balance import (
 )
 from ufo.balance import (
     read_headroom as read_headroom,
+)
+from ufo.balance import (
+    recent_purchases as recent_purchases,
 )
 from ufo.balance import (
     set_auto_topup as set_auto_topup,

@@ -62,6 +62,7 @@ from ufo.sdk.balance import (
     read_auto_topup,
     read_balance,
     read_headroom,
+    recent_purchases,
     set_auto_topup,
 )
 from ufo.sdk.bearer import SESSION_COOKIE, verify_token, workspace_claim
@@ -553,6 +554,36 @@ async def _default_payment_method(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class CardOnFile:
+    """The card a member recognises: the brand and the last four digits the provider shows them.
+
+    Whether a card exists is already the default payment method's presence; this is what the screen
+    prints beside it, so an admin can tell which card the refill will charge without opening the
+    provider."""
+
+    brand: str
+    last4: str
+
+
+async def _card_on_file(
+    config: BillingConfig, customer_id: str, transport: httpx.AsyncBaseTransport | None
+) -> CardOnFile | None:
+    """The default card's brand and last four, or None where the customer has no default.
+
+    Two reads rather than one expansion, because the id is what a charge names and the digits are
+    only ever read by a screen — so the charge path stays the single-request one it was, and this
+    pays for its own second call. A default that is not a card (a bank debit) has no digits to
+    print and answers None."""
+    method = await _default_payment_method(config, customer_id, transport)
+    if method is None:
+        return None
+    match await _stripe(config, "GET", f"/payment_methods/{method}", transport):
+        case {"card": {"brand": str() as brand, "last4": str() as last4}}:
+            return CardOnFile(brand=brand, last4=last4)
+    return None
+
+
 async def _stripe(
     config: BillingConfig,
     method: str,
@@ -846,7 +877,10 @@ def _rfc3339(moment: datetime) -> str:
 
 
 BILLING_ROUTE_PATH = "billing"
-BILLING_SCREEN_PATH = "/surface/web#/workspace/usage"
+BILLING_SCREEN_PATH = "/surface/web#/workspace/billing"
+# How much of the credit history the screen states. Enough to show the rhythm of a workspace's
+# refills without becoming a ledger nobody reads to the end of.
+BILLING_PURCHASES_SHOWN = 10
 
 
 def _billing_screen(public_base_url: str | None) -> str | None:
@@ -892,14 +926,27 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
         headroom = await read_headroom(connection, ext.store.workspace_id)
         balance = await read_balance(connection, ext.store.workspace_id)
         arranged = await configured_auto_topup(connection, ext.store.workspace_id)
+        purchases = await recent_purchases(
+            connection, ext.store.workspace_id, BILLING_PURCHASES_SHOWN
+        )
     if headroom is None or balance is None:
         return JSONResponse({"limited": False})
     config = BillingConfig.from_env()
     record = await _billing_record(ext)
-    card = record is not None and (
-        await _default_payment_method(config, record.stripe_customer_id, BILLING_TRANSPORT)
-        is not None
-    )
+    card, unread = None, False
+    if record is not None:
+        try:
+            card = await _card_on_file(config, record.stripe_customer_id, BILLING_TRANSPORT)
+        except (StripeError, httpx.HTTPError) as error:
+            # The balance is ours and the card is the provider's, so a provider that will not answer
+            # must not take the page down with it: this is the one screen a stopped workspace can
+            # still read, and what it most needs to state — how much is left, and why turns stopped
+            # — is already in hand. The card reads as unknown rather than as absent, because
+            # "no card" invites saving one and would be a guess.
+            unread = True
+            warn(
+                "metronome.card_unread", workspace_id=str(ext.store.workspace_id), error=repr(error)
+            )
     return JSONResponse(
         {
             "limited": True,
@@ -909,9 +956,18 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
             "refused_below_micro_usd": headroom.reserve_micro_usd - headroom.grace_micro_usd,
             "granted_micro_usd": balance.granted_micro_usd,
             "charged_micro_usd": balance.charged_micro_usd,
-            "card_on_file": card,
+            "card": None if card is None else {"brand": card.brand, "last4": card.last4},
+            "card_unread": unread,
             "autopay_micro_usd": None if arranged is None else arranged.amount_micro_usd,
             "autopay_below_micro_usd": None if arranged is None else arranged.threshold_micro_usd,
+            "purchases": [
+                {
+                    "at": purchase.created_at.isoformat(),
+                    "granted_micro_usd": purchase.granted_micro_usd,
+                    "charged_micro_usd": purchase.charged_micro_usd,
+                }
+                for purchase in purchases
+            ],
         }
     )
 

@@ -3,11 +3,12 @@
 State these plainly as not available yet. Do not imply a date, do not promise them, and do not
 describe them as coming soon in a way a customer could hold the team to.
 
-- **Choosing a custom refill amount or balance line from the portal.** The billing screen can turn a
-  fixed automatic-refill rule on or off with no chat needed, and while no card is on file it offers a
-  button that returns the portal link for saving one. It carries nothing else: a different amount, a
-  different balance line, changing the card already on file, or reading an invoice still goes through
-  the agent or a portal link.
+- **A one-off top-up.** The billing screen states the balance, the card on file, and the credit
+  already added, and it carries both acts that add credit: a button that returns the portal link for
+  saving or changing a card, and an automatic-refill rule at any whole-dollar amount and balance
+  line. Adding credit once, without leaving a standing rule behind, is not something the screen or
+  the agent can do — say you will pass it to the team. An invoice is read at the provider, through
+  that same portal link.
 - **Customer-issued invitations.** A customer cannot invite another company. Only the UFO team issues
   invitations.
 - **A second workspace on the same email domain.** One workspace exists per email domain, and a

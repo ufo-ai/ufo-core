@@ -1,9 +1,10 @@
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.balance import balance_absent, credit, read_balance, set_reserve
+from ufo.balance import balance_absent, credit, read_balance, recent_purchases, set_reserve
 from ufo.db import workspace_tx
 from ufo.schema import tables
 
@@ -103,3 +104,57 @@ async def test_a_later_credit_leaves_the_reserve_alone(db: None) -> None:
     assert current is not None
     assert current.balance_micro_usd == 20_000_000
     assert current.reserve_micro_usd == 2_000_000
+
+
+async def _dated_credit(
+    workspace_id: UUID, granted: int, charged: int, reference: str, day: int
+) -> None:
+    """Credit the balance and stamp the row a known day apart from its siblings.
+
+    `credit` stamps `now()`, which is the transaction's clock at whatever resolution the driver
+    keeps — one second on SQLite — so credits written in the same second are indistinguishable by
+    time. Ordering is what these tests are about, so they set the instant rather than race a clock
+    they do not control."""
+    async with workspace_tx() as connection:
+        await credit(connection, workspace_id, granted, charged, reference)
+        await connection.execute(
+            sa.update(tables.balance_purchase)
+            .where(tables.balance_purchase.c.reference == reference)
+            .values(created_at=datetime(2026, 8, day, tzinfo=UTC))
+        )
+
+
+async def test_the_purchase_list_is_newest_first_and_bounded(db: None) -> None:
+    """The list behind the lifetime totals, for a screen stating where a balance came from. Newest
+    first, because a member reading it is checking what just happened, and bounded at the query so a
+    workspace that refills daily cannot hand a screen a year of rows."""
+    async with workspace_tx() as connection:
+        workspace_id = await _workspace(connection)
+    for index in range(4):
+        await _dated_credit(
+            workspace_id, (index + 1) * 1_000_000, 0, f"credit-{index}", day=index + 1
+        )
+    async with workspace_tx() as connection:
+        listed = await recent_purchases(connection, workspace_id, 3)
+    assert [purchase.granted_micro_usd for purchase in listed] == [4_000_000, 3_000_000, 2_000_000]
+
+
+async def test_a_grant_and_a_purchase_read_apart_in_the_list(db: None) -> None:
+    """A grant adds without charging, so the two figures ride every row separately: money the
+    workspace paid cannot be told from credit it was given by one amount alone."""
+    async with workspace_tx() as connection:
+        workspace_id = await _workspace(connection)
+    await _dated_credit(workspace_id, 5_000_000, 5_000_000, "paid", day=1)
+    await _dated_credit(workspace_id, 100_000_000, 0, "granted", day=2)
+    async with workspace_tx() as connection:
+        listed = await recent_purchases(connection, workspace_id, 10)
+    assert [(row.granted_micro_usd, row.charged_micro_usd) for row in listed] == [
+        (100_000_000, 0),
+        (5_000_000, 5_000_000),
+    ]
+
+
+async def test_a_workspace_with_no_credits_lists_none(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id = await _workspace(connection)
+        assert await recent_purchases(connection, workspace_id, 10) == ()

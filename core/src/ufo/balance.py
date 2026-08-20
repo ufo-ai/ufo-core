@@ -202,6 +202,53 @@ async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Head
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Purchase:
+    """One credit to the balance: what it added, what it cost, and when. A grant charges nothing, so
+    the two figures are separate rather than one amount — an admin reading the list can tell money
+    they paid from credit they were given."""
+
+    granted_micro_usd: int
+    charged_micro_usd: int
+    created_at: datetime
+
+
+async def recent_purchases(
+    connection: AsyncConnection, workspace_id: UUID, limit: int
+) -> tuple[Purchase, ...]:
+    """The newest credits first, at most `limit` of them.
+
+    `read_balance` sums the same rows into lifetime totals; this is the list behind that sum, for a
+    screen stating where a balance came from. It is bounded at the query rather than by the caller
+    slicing, because a workspace that has refilled every day for a year has a list no screen reads
+    to the end of.
+
+    The id breaks a tie on the timestamp: `now()` is the transaction's clock, so two credits written
+    together carry the same instant, and ordering on time alone would let one read put them in one
+    order and the next read another."""
+    rows = await connection.execute(
+        sa.select(
+            tables.balance_purchase.c.granted_micro_usd,
+            tables.balance_purchase.c.charged_micro_usd,
+            tables.balance_purchase.c.created_at,
+        )
+        .where(tables.balance_purchase.c.workspace_id == workspace_id)
+        .order_by(
+            tables.balance_purchase.c.created_at.desc(),
+            tables.balance_purchase.c.id.desc(),
+        )
+        .limit(limit)
+    )
+    return tuple(
+        Purchase(
+            granted_micro_usd=int(row.granted_micro_usd),
+            charged_micro_usd=int(row.charged_micro_usd),
+            created_at=row.created_at,
+        )
+        for row in rows
+    )
+
+
 async def read_balance(connection: AsyncConnection, workspace_id: UUID) -> Balance | None:
     """The balance and the lifetime totals behind it, or None where the workspace has never been
     credited. A gate reads the balance row alone; this is the whole picture an operator or an admin

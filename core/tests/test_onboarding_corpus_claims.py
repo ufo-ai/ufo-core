@@ -44,6 +44,7 @@ STOP = "core/src/ufo/surfaces/stop.py"
 WEB_PANELS = "extensions/web/ufo_ext_web/panels.py"
 WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
 WEB_AUDIENCE = "extensions/web/ufo_ext_web/audience.py"
+WEB_BILLING_VIEW = "extensions/web/frontend/src/views/Billing.tsx"
 TERMINAL_SURFACE = "extensions/ufo/ufo_ext_ufo/surface.py"
 SPEC = "spec.md"
 TASK_SCHEDULING_SKILL_MD = (
@@ -410,26 +411,41 @@ CLAIMS = (
         ),
     ),
     Claim(
-        claim="the billing screen turns a fixed automatic-refill rule on or off, no chat needed",
+        claim="the billing screen turns automatic refills on or off, no chat needed",
         corpus="references/billing-and-seats.md",
-        phrase="turn\n  automatic refills on or off from the billing screen",
+        phrase="turn\n  automatic refills on or off",
         source=WEB_PANELS,
         pattern=r'verb: Literal\["refill"\]',
     ),
     Claim(
-        claim="a custom refill amount or balance line still needs the agent, not the screen",
-        corpus="references/not-yet.md",
-        phrase="a different amount, a different\n  balance line",
-        source=WEB_PANELS,
-        pattern=r"amount_dollars: int \| None = None",
+        claim="the screen takes any whole-dollar refill amount and balance line, not a fixed pair",
+        corpus="references/billing-and-seats.md",
+        phrase="at any whole-dollar amount and any balance to refill below",
+        source=WEB_BILLING_VIEW,
+        pattern=r"refill\(figures\.amount, figures\.below\)",
     ),
     Claim(
-        claim="the billing screen asks for the portal link that saves a first card",
+        claim="the billing screen asks for the portal link, to save a first card or change one",
         corpus="references/billing-and-seats.md",
-        phrase="while no card is on file the billing screen offers a button that returns\nthe same"
-        " link",
+        phrase="the billing screen offers a button that returns the same link — to save a\nfirst"
+        " card, or to change the one on file",
         source=WEB_PANELS,
         pattern=r'verb: Literal\["save_card"\]',
+    ),
+    Claim(
+        claim="no route adds credit once without leaving a standing rule behind",
+        corpus="references/not-yet.md",
+        phrase="Adding credit once, without leaving a standing rule behind, is not something the"
+        " screen or\n  the agent can do",
+        source=METRONOME,
+        pattern=r'action: Literal\["status", "portal", "autopay"\]',
+    ),
+    Claim(
+        claim="the screen names the card it will charge by brand and last four",
+        corpus="references/billing-and-seats.md",
+        phrase="names the card it will charge, by brand and last four digits",
+        source=WEB_BILLING_VIEW,
+        pattern=r'card\.brand \+ " •••• " \+ card\.last4',
     ),
     Claim(
         claim="an expiry stops a scheduled task from running again",

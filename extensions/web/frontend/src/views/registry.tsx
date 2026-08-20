@@ -10,6 +10,7 @@ import { Memory } from "@/views/Memory";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { CREDENTIALS } from "@/views/WorkspaceCredentials";
+import { WorkspaceBilling } from "@/views/Billing";
 import { WorkspaceUsage } from "@/views/Usage";
 
 export type PaneView = {
@@ -62,6 +63,11 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     label: "Usage",
     remountOnPlace: false,
     render: () => <WorkspaceUsage />,
+  },
+  billing: {
+    label: "Billing",
+    remountOnPlace: false,
+    render: () => <WorkspaceBilling />,
   },
 };
 

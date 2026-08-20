@@ -27,18 +27,21 @@ so it can still be refused — check `status` before telling any admin why a tur
 than assuming the balance is the reason.
 
 A card is entered at the payment provider, through a short-lived portal link. An admin can ask the
-agent for that link, and while no card is on file the billing screen offers a button that returns
-the same link. There is no form inside UFO for a card, an invoice, or any other billing detail.
+agent for that link, and the billing screen offers a button that returns the same link — to save a
+first card, or to change the one on file. There is no form inside UFO for a card, an invoice, or any
+other billing detail.
 
 - Saving or changing a card, invoices, billing details: return a fresh portal link. The billing
-  screen offers that link too, but only while no card is on file.
+  screen offers that link too, whether or not a card is already on file.
 - Adding credit: the workspace's billing screen carries a control of its own for this — turn
-  automatic refills on or off from the billing screen, at a fixed amount and a fixed balance to
-  refill below, with no chat needed. An admin can also ask you to arrange a refill at a different
-  amount or a different balance to refill below. Saving a card alone adds nothing — a refill has to
-  be arranged either way, and it can only be arranged once a card is saved, because it runs with
-  nobody present. A one-off top-up is not something either route can do; say you will pass that to
-  the team.
+  automatic refills on or off, at any whole-dollar amount and any balance to refill below, with no
+  chat needed. An admin can ask you to arrange the same rule instead. Saving a card alone adds
+  nothing — a refill has to be arranged either way, and it can only be arranged once a card is
+  saved, because it runs with nobody present. A one-off top-up is not something either route can
+  do; say you will pass that to the team.
+- The screen names the card it will charge, by brand and last four digits, so an admin arranging a
+  refill can see which card it lands on. Where the provider cannot be reached the card reads as
+  unknown rather than absent, and the balance beside it is still current.
 - If refills stop after a card is refused, the card is the thing to fix — arranging the refill
   again is what restarts it.
 - Checking state: read the status, which reports whether a card is on file and how much balance is

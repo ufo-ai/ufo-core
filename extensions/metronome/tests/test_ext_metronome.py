@@ -815,6 +815,8 @@ class _Providers:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.default_payment_method: str | None = None
+        self.card_brand = "visa"
+        self.card_last4 = "4242"
         self.stripe_customers: dict[str, str] = {}
         self.metronome_customers: dict[str, str] = {}
         self.hidden_aliases: set[str] = set()
@@ -851,6 +853,14 @@ class _Providers:
                 json={
                     "id": path.rsplit("/", 1)[-1],
                     "invoice_settings": {"default_payment_method": self.default_payment_method},
+                },
+            )
+        if path.startswith("/v1/payment_methods/") and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": path.rsplit("/", 1)[-1],
+                    "card": {"brand": self.card_brand, "last4": self.card_last4},
                 },
             )
         if path == "/v1/payment_intents" and request.method == "POST":
@@ -1934,6 +1944,87 @@ async def test_the_billing_page_answers_an_admin_what_stops_the_workspace(
     assert paid["refused_below_micro_usd"] == 5 * DOLLAR - TOPUP_GRACE_MICRO_USD
 
 
+async def test_the_billing_page_names_the_card_rather_than_answering_yes(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admin arranging a refill is about to charge a particular card, so the screen states which
+    one. A bare 'yes' cannot be checked against the wallet it came from, and the provider is the one
+    that knows — the digits are read from it, never stored here."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_live"
+    providers.card_brand, providers.card_last4 = "mastercard", "1590"
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 10 * DOLLAR, 10 * DOLLAR, "opening")
+        await ctx.store.put(
+            metronome.BILLING_KEY,
+            metronome.BillingRecord(stripe_customer_id="cus_1").model_dump(mode="json"),
+        )
+
+    _status, body = await _read_billing(workspace_id, "owner@example.com")
+
+    assert body["card"] == {"brand": "mastercard", "last4": "1590"}
+
+
+async def test_a_provider_that_will_not_answer_does_not_take_the_page_down(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """This is the one screen a stopped workspace can still read, and what it most needs to state —
+    what is left, and the line turns stopped at — is core's, not the provider's. So a refused card
+    read costs the card and nothing else, and reads as unknown rather than as absent: 'no card'
+    invites saving one, which would be a guess about the provider's own state."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = "pm_live"
+    providers.failing.add("/v1/customers/cus_1")
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 40 * DOLLAR, 40 * DOLLAR, "opening")
+        await ctx.store.put(
+            metronome.BILLING_KEY,
+            metronome.BillingRecord(stripe_customer_id="cus_1").model_dump(mode="json"),
+        )
+
+    status, body = await _read_billing(workspace_id, "owner@example.com")
+
+    assert status == 200
+    assert body["balance_micro_usd"] == 40 * DOLLAR
+    assert body["card"] is None
+    assert body["card_unread"] is True
+
+
+async def test_the_billing_page_lists_the_credits_behind_the_balance(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The balance is one figure with a history: a grant, a card charge, a correction. Both figures
+    ride each row, so a grant reads apart from money the workspace paid. Ordering is
+    `recent_purchases`' own contract and tested there, against instants a test can set — these rows
+    are written a clock tick apart at most, so asserting their order here would test the driver's
+    timestamp resolution."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 100 * DOLLAR, 0, "trial")
+            await credit(connection, workspace_id, 5 * DOLLAR, 5 * DOLLAR, "stripe/pi_1")
+
+    _status, body = await _read_billing(workspace_id, "owner@example.com")
+
+    listed = body["purchases"]
+    assert isinstance(listed, list)
+    assert sorted((row["granted_micro_usd"], row["charged_micro_usd"]) for row in listed) == [
+        (5 * DOLLAR, 5 * DOLLAR),
+        (100 * DOLLAR, 0),
+    ]
+
+
 async def test_the_card_link_sends_the_member_back_to_their_billing_screen(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1952,7 +2043,7 @@ async def test_the_card_link_sends_the_member_back_to_their_billing_screen(
     )
 
     (session,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
-    assert _form(session)["return_url"] == "https://ufo.test/surface/web#/workspace/usage"
+    assert _form(session)["return_url"] == "https://ufo.test/surface/web#/workspace/billing"
 
 
 async def test_a_deploy_with_no_public_base_still_saves_a_card(
