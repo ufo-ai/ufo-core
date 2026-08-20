@@ -150,6 +150,24 @@ CLAIMS = (
         pattern=r'"false" \| "0" => Ok\(None\)',
     ),
     Claim(
+        claim=(
+            "the Slack Connect invitation goes to whoever the grant named, not necessarily "
+            "whoever ends up creating the workspace"
+        ),
+        corpus="references/slack-install.md",
+        phrase="not necessarily whoever ends up creating the workspace",
+        source=SLACK_CONNECT,
+        pattern=(
+            r"pub fn earned_sql\(\) -> String \{\n"
+            r"\s+format!\(\n"
+            r'\s+"select email_domain, email, created_at from \{INVITE_TABLE\} \\\n'
+            r"\s+where consumed_at is not null or expires_at > now\(\) \\\n"
+            r"\s+union all \\\n"
+            r"\s+select email_domain, email, created_at from \{CLAIM_TABLE\} "
+            r'where created_workspace"'
+        ),
+    ),
+    Claim(
         claim="pending is tied to the current Slack signing secret",
         corpus="references/slack-install.md",
         phrase="A new install, a manifest setup, or a signing-secret rotation can all land here",

@@ -32,9 +32,9 @@ them an automatic email, never say one has been sent, and never say anything abo
 channel is created. The paragraph below is your grounding, not material for the reply.
 
 Separately from the customer's own install, the UFO team shares a Slack Connect channel with each new
-customer so the team is reachable. The person who created the workspace is the one who gets the Slack
-Connect invitation — one channel and one invitation per customer, never to teammates who join later
-and never a second time.
+customer so the team is reachable. The invitation goes to the address the team's own invitation
+named, not necessarily whoever ends up creating the workspace — one channel and one invitation per
+customer, never to teammates who join later and never a second time.
 
 ## Failure modes
 
