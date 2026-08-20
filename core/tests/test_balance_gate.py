@@ -7,6 +7,7 @@ from test_spend_caps import (
     _dispatch,
     _insert_parked,
     _seed,
+    _set_cap,
     _status,
 )
 
@@ -21,9 +22,12 @@ from ufo.balance import (
     set_reserve,
 )
 from ufo.db import workspace_tx
+from ufo.hub import Parked
 from ufo.schema import tables
 from ufo.schema.records import BILLING_INTENT_TOOL, TerminalFrame, ToolIntent, Usage
 from ufo.surfaces.admission import Admission
+from ufo.surfaces.hub_tail import PARK_NOTICE, turn_status_frame
+from ufo.workspace import ws
 
 DOLLAR = 1_000_000
 
@@ -423,6 +427,30 @@ async def test_a_spent_balance_still_admits_the_act_that_ends_the_refusal(db: No
     assert await _status(admitted.turn_id) != "cancelled"
 
 
+async def test_a_spent_balance_admits_the_step_before_the_refill(db: None) -> None:
+    """A refill is refused until a card is on file, so reaching the provider is the act that ends
+    the refusal for a workspace that has never paid — and it is the step the billing screen carries
+    for exactly that workspace. The exemption keys on the tool rather than the action, which is what
+    makes this true without a second gate to keep in step; this asserts it rather than leaving it to
+    be read off the gate."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, _agent_id, conversation_id = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=1)
+        await debit(connection, workspace_id, 5 * DOLLAR)
+    portal = ToolIntent(
+        tool=BILLING_INTENT_TOOL,
+        input={"action": "portal", "user_description": "Open the billing portal from the screen."},
+    )
+    admitted = await Admission(dbos=StubDbos(), durable_surfaces=frozenset()).admit_member(
+        workspace_id,
+        conversation_id,
+        portal.model_dump_json(),
+        member_id,
+        intent=portal,
+    )
+    assert await _status(admitted.turn_id) != "cancelled"
+
+
 async def test_the_exemption_is_the_billing_verb_and_nothing_else(db: None) -> None:
     """A prepared intent is cheap, but cheap is not a reason to admit every panel act on an
     overdrawn workspace — an agent edit or a member add would then ride past the balance the same
@@ -441,3 +469,51 @@ async def test_the_exemption_is_the_billing_verb_and_nothing_else(db: None) -> N
     )
     assert await _status(admitted.turn_id) == "cancelled"
     assert (await _terminal(admitted.turn_id)).text == BALANCE_REFUSAL_MESSAGE
+
+
+async def test_the_park_notice_names_the_balance_rather_than_a_cap(db: None) -> None:
+    """A park's reason reaches the live stream and is never stored, so the poll that ends a
+    reconnecting surface's stream has to ask what holds the turn. It held one fixed sentence before,
+    which named a spend cap for every park — so a workspace with no cap ever set read a cause that
+    did not exist, and the fix it named was one it could not perform."""
+    async with workspace_tx() as connection:
+        workspace_id, _member_id, agent_id, conversation_id = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=1)
+        await debit(connection, workspace_id, 5 * DOLLAR)
+        turn_id = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
+    with ws(workspace_id):
+        assert await turn_status_frame(turn_id) == Parked(message=BALANCE_REFUSAL_MESSAGE)
+
+
+async def test_the_park_notice_names_the_cap_that_holds_the_turn(db: None) -> None:
+    """A cap park states the scope and the figure the cap holds, so the member reads the limit they
+    can act on rather than the word 'cap'."""
+    async with workspace_tx() as connection:
+        workspace_id, _member_id, agent_id, conversation_id = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=100)
+        await _set_cap(connection, workspace_id, "workspace", None, 3600, DOLLAR, "park")
+        running = await _insert_running(connection, workspace_id, conversation_id, agent_id, seq=1)
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            running,
+            "claude-opus-4-8",
+            Usage(input_tokens=1_000_000, output_tokens=1_000_000),
+            "attempt",
+        )
+        turn_id = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
+    with ws(workspace_id):
+        frame = await turn_status_frame(turn_id)
+    assert isinstance(frame, Parked)
+    assert "workspace spend cap of $1.00" in frame.message
+
+
+async def test_a_park_no_gate_still_refuses_reads_as_a_pause(db: None) -> None:
+    """Every gate clear means the sweep is about to re-admit it, so the notice states that and
+    claims no cause."""
+    async with workspace_tx() as connection:
+        workspace_id, _member_id, agent_id, conversation_id = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=100)
+        turn_id = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
+    with ws(workspace_id):
+        assert await turn_status_frame(turn_id) == Parked(message=PARK_NOTICE)

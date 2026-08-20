@@ -33,9 +33,10 @@ DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
 CONNECT_ONLY_KINDS = frozenset({"connection"})
 AGENT_SPEC_REQUIRED = frozenset({"model", "internet_access_allowed", "reasoning"})
 INSTALL_LINK = re.compile(r"https://\S+")
-SLACK_INSTALL_STATE = re.compile(r"\{.*\}", re.DOTALL)
+STATED_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 SLACK_INSTALL_LINK_KEY = "authorize_url"
 SLACK_INSTALL_HINT_KEY = "hint"
+BILLING_PORTAL_LINK_KEY = "portal_url"
 
 
 class ApplyIntent(BaseModel):
@@ -145,8 +146,8 @@ class TranscriptIntent(BaseModel):
 class RefillIntent(BaseModel):
     """An admin's standing authority to charge the card on file, given from the billing screen.
 
-    This is the one mutation that screen carries, and it is here rather than only in chat because
-    the workspace that most needs it is the one whose balance refuses every turn. Both figures
+    It is here rather than only in chat because the workspace that most needs it is the one whose
+    balance refuses every turn — the same reason `PaymentMethodIntent` sits beside it. Both figures
     together arrange a refill and neither stops it, which is the shape `manage_billing` action
     'autopay' already takes — the intent dispatches verbatim to that same verb, so the tool's own
     admin gate and its refusals answer, and nothing about who may do this is decided twice."""
@@ -155,6 +156,20 @@ class RefillIntent(BaseModel):
     kind: Literal["billing"]
     amount_dollars: int | None = None
     below_dollars: int | None = None
+
+
+class PaymentMethodIntent(BaseModel):
+    """The portal link that saves a card, asked for from the billing screen.
+
+    A refill is an authority to charge a card, so it is refused until one is on file — and the only
+    other way to put one there is a chat act, which the balance that needs the card refuses. The
+    screen therefore carries the step before the refill as well: both dispatch to `manage_billing`,
+    the one verb a spent balance still admits, so an admin whose workspace has stopped can reach a
+    provider from a screen that still answers. The link is minted per submission and short-lived,
+    which is why nothing about it is stored here."""
+
+    verb: Literal["save_card"]
+    kind: Literal["billing"]
 
 
 class CorrectionIntent(BaseModel):
@@ -258,6 +273,7 @@ class PanelIntent(BaseModel):
         | ConnectSlackIntent
         | CorrectionIntent
         | CredentialIntent
+        | PaymentMethodIntent
         | RefillIntent
         | ToolingIntent
         | TranscriptIntent
@@ -273,6 +289,7 @@ def _tool_intent(
         | ConnectSlackIntent
         | CorrectionIntent
         | CredentialIntent
+        | PaymentMethodIntent
         | RefillIntent
         | ToolingIntent
         | TranscriptIntent
@@ -288,6 +305,14 @@ def _tool_intent(
                     "autopay_dollars": submitted.amount_dollars,
                     "autopay_below_dollars": submitted.below_dollars,
                     "user_description": "Set automatic refills from the billing screen.",
+                },
+            )
+        case PaymentMethodIntent():
+            return ToolIntent(
+                tool="manage_billing",
+                input={
+                    "action": "portal",
+                    "user_description": "Open the billing portal from the billing screen.",
                 },
             )
         case TranscriptIntent():
@@ -431,7 +456,7 @@ def _connect_outcome(
         return _outcome(frame, turn_id)
     match submitted:
         case ConnectSlackIntent():
-            stated_state = SLACK_INSTALL_STATE.search(frame.text)
+            stated_state = STATED_JSON_OBJECT.search(frame.text)
             if stated_state is None:
                 raise RuntimeError("slack_connect answered no install state")
             state = json.loads(stated_state.group())
@@ -442,6 +467,23 @@ def _connect_outcome(
             link = found.group() if found else None
             stated = "" if link else frame.text
     return JSONResponse({"applied": True, "message": stated, "url": link, "turn_id": str(turn_id)})
+
+
+def _portal_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
+    """The provider link `manage_billing` minted, taken off the turn's own answer. The tool states a
+    JSON object and the result arrives inside the wall its `untrusted` declaration renders every
+    result in, so the key is read rather than the first address in the text — the same shape the
+    connect steps read their install link by. A refusal keeps the tool's words: only an admin may
+    reach billing, and that sentence is the answer."""
+    if frame.status != "done":
+        return _outcome(frame, turn_id)
+    stated = STATED_JSON_OBJECT.search(frame.text)
+    if stated is None:
+        raise RuntimeError("manage_billing answered no portal state")
+    link = json.loads(stated.group()).get(BILLING_PORTAL_LINK_KEY)
+    if not isinstance(link, str):
+        raise RuntimeError("manage_billing answered no portal url")
+    return JSONResponse({"applied": True, "message": "", "url": link, "turn_id": str(turn_id)})
 
 
 async def submit_intent(
@@ -548,6 +590,8 @@ async def submit_intent(
                     case Terminal():
                         if isinstance(submitted, ConnectSlackIntent | ConnectGitHubIntent):
                             return _connect_outcome(submitted, frame.frame, admitted.turn_id)
+                        if isinstance(submitted, PaymentMethodIntent):
+                            return _portal_outcome(frame.frame, admitted.turn_id)
                         return _outcome(frame.frame, admitted.turn_id)
                     case Parked():
                         return JSONResponse(

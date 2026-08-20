@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Table, Td, Th, tableFloor } from "@/components/ui/table";
 import {
+  Notice,
   type NoticeState,
   OutcomeNotice,
   Panel,
@@ -369,6 +370,7 @@ function Billing() {
   const [state, setState] = useState<BillingState>({ phase: "unanswered" });
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const [link, setLink] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let live = true;
@@ -406,6 +408,15 @@ function Billing() {
     if (outcome.applied) setReloads((count) => count + 1);
   }
 
+  async function saveCard() {
+    if (busy || !mainAgent) return;
+    setBusy(true);
+    const outcome = await postIntent(mainAgent.id, { verb: "save_card", kind: "billing" });
+    setBusy(false);
+    setLink(outcome.url ?? null);
+    setNotice(outcome.url ? QUIET : outcomeNotice(outcome));
+  }
+
   return (
     <Section title="Billing">
       {report.limited ? (
@@ -423,8 +434,12 @@ function Billing() {
           />
           <OutcomeNotice state={notice} />
           {mainAgent ? (
-            <div className="mt-lg">
-              {rule ? (
+            <div className="mt-lg flex flex-col items-start gap-lg">
+              {!report.card_on_file ? (
+                <Button busy={busy} onClick={saveCard}>
+                  Save a payment method
+                </Button>
+              ) : rule ? (
                 <Button busy={busy} onClick={() => refill(null, null)}>
                   Stop automatic refills
                 </Button>
@@ -436,6 +451,13 @@ function Billing() {
                   {"Refill " + refillRule(REFILL_DOLLARS * 1e6, REFILL_BELOW_DOLLARS * 1e6)}
                 </Button>
               )}
+              {link ? (
+                <Notice>
+                  <a href={link} target="_blank" rel="noopener">
+                    Open the billing portal
+                  </a>
+                </Notice>
+              ) : null}
             </div>
           ) : null}
         </>

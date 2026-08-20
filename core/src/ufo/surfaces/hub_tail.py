@@ -14,6 +14,8 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
+from ufo.accounting import ALLOW, SpendEvaluator, applicable_caps_absent
+from ufo.balance import BALANCE_REFUSAL_MESSAGE, read_headroom
 from ufo.db import workspace_tx
 from ufo.hub import Hub, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.o11y import log
@@ -22,7 +24,7 @@ from ufo.schema.records import PARKED, TerminalFrame
 from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, gate_member
 
 TERMINAL_POLL_SECONDS = 1.0
-PARK_NOTICE = "This turn is parked: over a spend cap. It resumes when the cap is raised."
+PARK_NOTICE = "This turn is paused. It resumes on its own."
 
 
 async def tail_frames(
@@ -83,7 +85,18 @@ async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame
 
 async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
     """The frame that ends a turn's stream: its committed Terminal, or a Parked hold when the turn
-    is parked. None while it is still queued or running."""
+    is parked. None while it is still queued or running.
+
+    A park's reason reaches the live stream and is never stored, so a poll that finds a parked row
+    has to ask what holds it — the same gates the resume sweep re-decides against, in the order
+    that names the stop a member can act on. Asking the gates rather than reading a stored string
+    keeps the words true as the hold changes: a workspace credited since it stopped reads whatever
+    cap still holds it instead of the balance it has already cleared.
+
+    The balance is read as its own line rather than through `BalanceGate`, because the gate's
+    own-key exemption needs the model registry this tail does not hold. A workspace serving itself
+    therefore reads the balance line for the one poll before the sweep resumes it, which overstates
+    the hold for a second and never invents a cause the way one fixed string did for every park."""
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -91,6 +104,8 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
                     tables.turn.c.status,
                     tables.turn.c.terminal,
                     tables.turn.c.workspace_id,
+                    tables.turn.c.agent_id,
+                    tables.turn.c.conversation_id,
                     tables.turn.c.speaker_member_id,
                     tables.turn.c.on_behalf_of_member_id,
                     tables.turn.c.admission_source,
@@ -106,6 +121,25 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
         gate = gate_member(row.speaker_member_id, row.on_behalf_of_member_id)
         if gate is not None and not await Seats(row.workspace_id).admits(connection, gate):
             return Parked(message=SEAT_REVOKED_MESSAGE)
+        headroom = await read_headroom(connection, row.workspace_id)
+        if (
+            headroom is not None
+            and headroom.balance_micro_usd <= headroom.reserve_micro_usd - headroom.grace_micro_usd
+        ):
+            return Parked(message=BALANCE_REFUSAL_MESSAGE)
+        member_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == row.conversation_id
+                )
+            )
+        ).scalar_one_or_none()
+        if not applicable_caps_absent(row.workspace_id, member_id, row.agent_id):
+            decision = await SpendEvaluator(row.workspace_id, member_id, row.agent_id).decide(
+                connection, 0
+            )
+            if decision.outcome != ALLOW:
+                return Parked(message=decision.message)
     return Parked(message=PARK_NOTICE)
 
 

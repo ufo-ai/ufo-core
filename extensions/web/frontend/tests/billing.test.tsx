@@ -162,6 +162,38 @@ test("stopping refills posts both figures as null", async () => {
   await waitFor(() => expect(fact("Automatic refills")).toBe("Off"));
 });
 
+test("a workspace with no card is offered the provider before the refill", async () => {
+  wire({
+    "/workspace/usage": () => json(USAGE),
+    "/ext/metronome/billing": () =>
+      json({ ...LIMITED, card_on_file: false, autopay_micro_usd: null }),
+  });
+  usagePage();
+
+  expect(await screen.findByRole("button", { name: "Save a payment method" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Refill " + RULE })).toBeNull();
+});
+
+test("saving a payment method posts the card verb and states the link it answers", async () => {
+  const posted: unknown[] = [];
+  wire({
+    "/workspace/usage": () => json(USAGE),
+    "/ext/metronome/billing": () =>
+      json({ ...LIMITED, card_on_file: false, autopay_micro_usd: null }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "", url: "https://billing.stripe.test/session/abc" });
+    },
+  });
+  usagePage();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Save a payment method" }));
+
+  expect(posted).toEqual([{ verb: "save_card", kind: "billing" }]);
+  const link = await screen.findByRole("link", { name: "Open the billing portal" });
+  expect(link.getAttribute("href")).toBe("https://billing.stripe.test/session/abc");
+});
+
 test("a workspace with no balance row has no spending limit", async () => {
   wire({
     "/workspace/usage": () => json(USAGE),

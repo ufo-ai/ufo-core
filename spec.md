@@ -525,17 +525,18 @@ and the signed bearer enters as a session cookie through one POST (the gateway's
 card), never a URL. That card is the deploy's one sign-in: the portal takes no bearer from a
 member, so a request reaching it without a session — the bare host `/`, which redirects to the
 surface claiming `SurfaceSpec.home`, or the portal path itself — is sent to `/login` and nothing of
-the shell is served to a stranger. Invoices and payment methods stay chat acts
-(`manage_billing`), and caps have no object kind yet, so the billing view reads — except for the
-one act it must carry. Arranging automatic refills is an authority to charge a card, and the
-workspace that most needs to give it is the one whose balance refuses every turn, so a chat-only
-path is refused exactly when it is needed. The view therefore prepares that single intent, and the
-intent dispatches verbatim to the same `manage_billing` verb an admin speaks, so the tool's own
-admin gate decides who may charge a card and nothing about that authority is decided twice. That
-one verb is the single intent a spent balance still admits: a gate that refused it would refuse the
-only act that ends the refusal. Admitting it costs nothing, because a prepared intent runs no model
-round — the turn dispatches the verb and terminates — so an overdrawn workspace cannot spend
-against it, and no other prepared intent is exempt.
+the shell is served to a stranger. Invoices stay a chat act, and caps have no object kind yet, so
+the billing view reads — except for the two steps that end a refusal. Arranging automatic refills
+is an authority to charge a card, and the workspace that most needs to give it is the one whose
+balance refuses every turn, so a chat-only path is refused exactly when it is needed; a refill is
+also refused until a card is on file, which makes reaching the provider the same act one step
+earlier. The view therefore prepares both, and each dispatches verbatim to the same
+`manage_billing` verb an admin speaks, so the tool's own admin gate decides who may charge a card
+and nothing about that authority is decided twice. That one verb is the only tool a spent balance
+still admits an intent for: a gate that refused it would refuse the acts that end the refusal.
+Admitting it costs nothing, because a prepared intent runs no model round — the turn dispatches the
+verb and terminates — so an overdrawn workspace cannot spend against it, and no other tool is
+exempt.
 
 The agents screen is master-detail: a thin index of the agents themselves beside one selected
 agent's pane — the bare route shows the main agent — with the topology graph as the index's other
