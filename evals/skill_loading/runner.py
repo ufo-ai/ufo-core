@@ -21,8 +21,9 @@ config renders or suppresses member-skill visibility — the turn-message block 
 prompt fold alike — so the `-block-on` and `-block-off` twins of each bias case are two runs of
 the eval stack. Run the `-block-on` cases against the default config, set `member_block = false`
 under `[skills]`, restart serve, and run the `-block-off` twins — `python -m evals --only
-skill_loading` per arm. The runner reads the arm from the same deploy config serve boots from and
-excludes the mismatched twins, so a run can never record a case against the wrong arm; the tag
+skill_loading_member` per arm. The runner reads the arm from the same deploy config serve boots
+from and excludes the mismatched twins, so a run can never record a case against the wrong arm; the
+tag
 joins each case's payload, so the two arms record under different digests and read as a pass-rate
 delta on otherwise identical inputs."""
 
@@ -289,11 +290,16 @@ class SkillLoadRunTarget(Protocol):
     def loadable_skills(self) -> frozenset[str] | None: ...
 
 
-def skill_loading_task(cases: tuple[SkillLoadCase, ...]) -> EvalTask:
+def skill_loading_task(cases: tuple[SkillLoadCase, ...], name: str = "skill_loading") -> EvalTask:
+    """One skill-loading suite under its own task name and digest. The pack cases and the
+    member-seeding cases register as separate tasks at the seeding boundary: a seeded corpus is
+    agent-global, so a task carrying any seeding case is exclusive and its cases cost a full shard
+    slot each — splitting there keeps the pack cases concurrent and each task inside a nightly
+    shard's weight ceiling."""
     digest = digest_payload(
         {
             "runner": "skill-load-case",
-            "task": "skill_loading",
+            "task": name,
             "grader": GRADER_REVISION,
             "deadlineSeconds": LOAD_DEADLINE_SECONDS,
             "cases": [case.payload() for case in cases],
@@ -301,8 +307,8 @@ def skill_loading_task(cases: tuple[SkillLoadCase, ...]) -> EvalTask:
     )
     suite = SkillLoadingSuite(cases=cases, digest=digest)
     return EvalTask(
-        "skill_loading",
-        "skill_loading",
+        name,
+        name,
         digest,
         tuple(case.name for case in cases),
         suite.run,

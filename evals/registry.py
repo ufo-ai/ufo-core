@@ -115,7 +115,8 @@ TASKS: tuple[EvalTask, ...] = (
         simulator_model=SCENARIO_SIMULATOR_MODEL,
     ),
     capability_task("connector_connections", connector_connections.CASES, serial=True),
-    skill_loading_task((*SKILL_LOADING_CASES, *SKILL_MEMBER_CASES)),
+    skill_loading_task(SKILL_LOADING_CASES),
+    skill_loading_task(SKILL_MEMBER_CASES, name="skill_loading_member"),
     skill_selection_task(),
     scenario_task(
         "new_application",

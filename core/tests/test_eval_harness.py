@@ -353,7 +353,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "red_after_green",
         "slack_silence",
         "skill_authoring",
-        "skill_loading",
+        "skill_loading_member",
         "skill_gtm",
     }
 
