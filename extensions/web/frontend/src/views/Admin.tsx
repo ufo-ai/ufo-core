@@ -28,7 +28,7 @@ import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
  *  an agent's surfaces are a list of unknown length, and the act that grants web access is a field
  *  and two buttons, which no fixed track holds at the pitch a row is read at. */
 const AGENT_COLUMNS = [
-  "Agent",
+  "App",
   { label: "Model", fact: true },
   { label: "Public Internet", fact: true },
   "Web Audience",
@@ -140,7 +140,7 @@ export function Admin() {
                   )}
                 </DataTable>
                 <Hint className="m-0">
-                  The plan, invoices, and payment methods are managed with the agent in chat.
+                  The plan, invoices, and payment methods are managed with the app in chat.
                 </Hint>
               </Section>
 
@@ -196,12 +196,12 @@ function AgentSection({
 
   return (
     <>
-      <Section title="Agents">
+      <Section title="Apps">
         <DataTable
           columns={AGENT_COLUMNS}
           rows={agents}
           rowKey={(row) => row.id}
-          empty="This workspace has no agents."
+          empty="This workspace has no apps."
           open={(row) => () => setOpened(row.id)}
           act={() => OPEN}
         >

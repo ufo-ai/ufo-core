@@ -127,7 +127,7 @@ test("New application opens the wizard speaking in the pane, beside the rail the
   expect(sent[0].url).toBe("/surface/web/agents/" + AGENT_ID + "/chat?conversation=new");
   expect(sent[0].body).toBe(OPENING);
   expect(within(wizard).getByText(OPENING)).toBeTruthy();
-  expect(within(wizard).getByLabelText("Message the agent")).toBeTruthy();
+  expect(within(wizard).getByLabelText("Message the app")).toBeTruthy();
   expect(within(await agentIndex()).getByText("Assistant")).toBeTruthy();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -181,7 +181,7 @@ test("a conversation the composer founds after a failed opening send is still th
   const wizard = await openWizard();
   expect(await within(wizard).findByText("Error 503 — try again.")).toBeTruthy();
 
-  await userEvent.type(within(wizard).getByLabelText("Message the agent"), "A finances dashboard.");
+  await userEvent.type(within(wizard).getByLabelText("Message the app"), "A finances dashboard.");
   await userEvent.click(within(wizard).getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -337,7 +337,7 @@ test("the app the last phase creates reaches the rail when the turn settles", as
   await openAgentRow("Research");
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
-  expect(screen.queryByText("No such agent.")).toBeNull();
+  expect(screen.queryByText("No such app.")).toBeNull();
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
@@ -362,11 +362,11 @@ test("the drawer holds the apps index at a phone width, and a pick shuts it", as
   render(<Portal />);
 
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
-  expect(screen.queryByRole("navigation", { name: "Agents" })).toBeNull();
+  expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
-  const index = within(drawer).getByRole("navigation", { name: "Agents" });
+  const index = within(drawer).getByRole("navigation", { name: "Apps" });
   await userEvent.click(within(index).getByRole("button", { name: /^Research/ }));
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
@@ -549,7 +549,7 @@ test("a founding send from the chat screen never blocks the wizard's own", async
   });
   render(<Portal />);
 
-  await userEvent.type(await screen.findByLabelText("Message the agent"), "About our numbers.");
+  await userEvent.type(await screen.findByLabelText("Message the app"), "About our numbers.");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(sent).toEqual(["About our numbers."]));
 
@@ -983,7 +983,7 @@ test("the app pane's header starts a chat with the app it shows, standing with t
   await userEvent.click(act);
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
-  await userEvent.type(await pane.findByLabelText("Message the agent"), "hello");
+  await userEvent.type(await pane.findByLabelText("Message the app"), "hello");
   await userEvent.click(pane.getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(sent.length).toBe(1));

@@ -145,8 +145,8 @@ test("the pool's record states what the row gave up, and attaches to the agent n
   expect(fact("Owner")).toBe("You");
   expect(fact("Connected")).toBe("Jul 1 2026");
 
-  await pick("Agent", "Second");
-  await userEvent.click(screen.getByRole("button", { name: "Attach to agent" }));
+  await pick("App", "Second");
+  await userEvent.click(screen.getByRole("button", { name: "Attach to app" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");
@@ -202,7 +202,7 @@ test("a grant change is admitted into the lane of the agent whose settings hold 
   expect(fact("Owner")).toBe("You");
   expect(fact("Connected")).toBe("Jul 1 2026");
 
-  await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
+  await userEvent.click(screen.getByRole("button", { name: "Share with app" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toContain("/agents/" + AGENT_ID + "/intents");
@@ -347,7 +347,7 @@ test("the agent's own section states what is shared with that agent", async () =
   await openAgentSettings("Assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
-  expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
 });
 
 /** The agent's own dialog holds four reads of it, and the connectors are one of them — reached by

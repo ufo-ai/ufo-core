@@ -223,7 +223,7 @@ test("a wrong-cased permalink reports the bad link instead of opening a new chat
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("This conversation link is not valid.")).toBeTruthy();
-  expect(screen.queryByLabelText("Message the agent")).toBeNull();
+  expect(screen.queryByLabelText("Message the app")).toBeNull();
 });
 
 test("a reload lands on the page and the open artifact the hash names", async () => {

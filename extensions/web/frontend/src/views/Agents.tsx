@@ -308,7 +308,7 @@ export function Agents({
     >
       {/* The list carries the column's scroll so the act below it stands at the bottom edge
           however many apps the workspace holds. */}
-      <nav aria-label="Agents" className="flex min-h-0 flex-1 flex-col gap-sm">
+      <nav aria-label="Apps" className="flex min-h-0 flex-1 flex-col gap-sm">
         <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-px overflow-y-auto px-sm py-0">
           {/* The run in flight, named the way the wizard's own pane is until the conversation has
               a title of its own. While the pane shows it states where the member already is;
@@ -406,7 +406,7 @@ export function Agents({
         />
       ) : (
         <div className="m-auto max-w-empty text-center text-ink-soft">
-          No agent is visible to you.
+          No app is visible to you.
         </div>
       )}
       {shown && !building ? (

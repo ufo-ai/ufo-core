@@ -52,7 +52,7 @@ type GithubCoverage = { api: boolean; git_push: boolean; sources: boolean };
 
 const PROVIDER = { label: "Provider", fact: true };
 const ACCESS = { label: "Access", fact: true };
-const POOL_COLUMNS = [PROVIDER, "Account", ACCESS, "Agents"];
+const POOL_COLUMNS = [PROVIDER, "Account", ACCESS, "Apps"];
 const AGENT_COLUMNS = [PROVIDER, "Account", ACCESS];
 const ATTACH_AGENT = "attach-agent";
 
@@ -195,10 +195,10 @@ function PoolRecord({
       <Facts rows={connectionFacts(entry, viewer)} />
       {entry.owner_email ? (
         <>
-          <Field label="Agent" htmlFor={ATTACH_AGENT}>
+          <Field label="App" htmlFor={ATTACH_AGENT}>
             <Select value={targetAgent} onValueChange={setTargetAgent}>
               <SelectTrigger id={ATTACH_AGENT}>
-                <SelectValue placeholder="Attach to agent" />
+                <SelectValue placeholder="Attach to app" />
               </SelectTrigger>
               <SelectContent>
                 {agents.map((agent) => (
@@ -227,7 +227,7 @@ function PoolRecord({
                 })
               }
             >
-              Attach to agent
+              Attach to app
             </Button>
             {attached ? (
               <Button
@@ -406,7 +406,7 @@ function ConnectorList({
               checked={shared}
               onChange={(event) => setShared(event.target.checked)}
             />
-            <Label htmlFor="connect-shared">Share with agent</Label>
+            <Label htmlFor="connect-shared">Share with app</Label>
           </div>
           <div className="flex justify-end">
             <Button type="submit" variant="send" size="bar" busy={busy}>
@@ -441,7 +441,7 @@ function ConnectorList({
                 })
               }
             >
-              {record.shared ? "Make private" : "Share with agent"}
+              {record.shared ? "Make private" : "Share with app"}
             </Button>
             <ConfirmButton
               verb="Revoke"

@@ -26,7 +26,7 @@ async function streaming() {
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.type(screen.getByLabelText("Message the agent"), "go");
+  await userEvent.type(screen.getByLabelText("Message the app"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   return StreamFake.last();
@@ -610,7 +610,7 @@ test("a send whose answer is not json ends the wait instead of disabling the com
     "/chat": () => new Response("<html>", { status: 200 }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.type(screen.getByLabelText("Message the agent"), "go");
+  await userEvent.type(screen.getByLabelText("Message the app"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();

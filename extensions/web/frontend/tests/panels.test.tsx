@@ -85,7 +85,7 @@ test("the settings page states the agent's facts, renders its schema, and submit
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
-  expect(await screen.findByText("Main agent")).toBeTruthy();
+  expect(await screen.findByText("Main app")).toBeTruthy();
   expect(fact("Installations")).toBe("Portal, Terminal");
   expect(fact("Updated")).toBe("Jul 30 2026");
   expect(fact("Prompt digest")).toBe("abc123");
@@ -281,7 +281,7 @@ test("the agents index states a row's name alone, and leaves the address list to
     />,
   );
 
-  const index = within(await screen.findByRole("navigation", { name: "Agents" }));
+  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
   expect(index.getByText("Main")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
   expect(index.getByText("Private")).toBeTruthy();
@@ -296,7 +296,7 @@ test("a non-admin reads the same index rows", async () => {
     <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  const index = within(await screen.findByRole("navigation", { name: "Agents" }));
+  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
   expect(index.getByText("Main")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
   expect(screen.queryByText("Every member")).toBeNull();
@@ -446,7 +446,7 @@ test("a private grant is shared with the agent from the settings connectors sect
   await openAgentSettings("Assistant", "Connectors");
   expect(await screen.findByText("Only you")).toBeTruthy();
   await pressRow("github");
-  await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
+  await userEvent.click(screen.getByRole("button", { name: "Share with app" }));
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ verb: "apply", kind: "connector_grant", name: "g1" });
 });
@@ -795,7 +795,7 @@ test("a conversation nobody shared offers no opener, and the half stands on the 
   expect(screen.queryAllByRole("menuitemradio")).toEqual([]);
   expect(screen.queryByText("#ops")).toBeNull();
   expect(screen.queryByText("Private channel")).toBeNull();
-  expect(screen.getByLabelText("Message the agent")).toBeTruthy();
+  expect(screen.getByLabelText("Message the app")).toBeTruthy();
 });
 
 test("the sources listing groups a binding's streams and acts on the main agent's lane", async () => {
@@ -930,7 +930,7 @@ test("a member with no rollup sees only their own figure and no workspace sectio
 
   expect(await screen.findByText("All-time tokens")).toBeTruthy();
   expect(screen.getByText("Sandbox requests")).toBeTruthy();
-  expect(screen.queryByText("Agents")).toBeNull();
+  expect(screen.queryByText("Apps")).toBeNull();
   expect(screen.queryByText("Members")).toBeNull();
 });
 
@@ -1184,7 +1184,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
   ).toBeTruthy();
 
   await pressRow("github");
-  await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
+  await userEvent.click(screen.getByRole("button", { name: "Share with app" }));
   await refusedNotice("The provider refuses it.");
   expect(screen.queryByRole("link", { name: "Open the provider consent page" })).toBeNull();
 });
@@ -1250,7 +1250,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
   await screen.findByRole("link", { name: "Open the provider consent page" });
 
   await pressRow("github");
-  await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
+  await userEvent.click(screen.getByRole("button", { name: "Share with app" }));
   await waitFor(() => expect(calls).toBe(2));
   expect(screen.getByRole("link", { name: "Open the provider consent page" })).toBeTruthy();
 });

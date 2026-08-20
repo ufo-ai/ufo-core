@@ -70,11 +70,11 @@ const CONNECT_VERB: Record<string, string> = {
  *  want the agent in that product at all, so that is what the step says. */
 const CONNECT_COPY: Record<string, { title: string; note: string }> = {
   slack: {
-    title: "The agent answers in Slack",
+    title: "The app answers in Slack",
     note: "Mention it in a channel or send it a direct message, and it replies where your team already works.",
   },
   github: {
-    title: "The agent works in your repositories",
+    title: "The app works in your repositories",
     note: "It reads the code and pushes to the repositories the installation grants. You pick which ones.",
   },
 };
@@ -96,7 +96,7 @@ const INVITE_ROWS = 3;
 const STEP_COPY: Record<string, { title: string; note: string }> = {
   [TOOLS_STEP]: {
     title: "What your team uses",
-    note: "Picks are recorded in memory, and the agent reads them on every later turn.",
+    note: "Picks are recorded in memory, and the app reads them on every later turn.",
   },
   [TEAM_STEP]: {
     title: "Invite your team",

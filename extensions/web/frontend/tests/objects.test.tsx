@@ -237,7 +237,7 @@ test("an index carries the name and the two facts a prose-less kind leads with",
   const name = await screen.findByText("daily-brief");
   const row = name.closest("tr");
   expect(row).not.toBeNull();
-  expect(headings()).toEqual(["Name", "Agent", "Last Run At", "Next Run At", ""]);
+  expect(headings()).toEqual(["Name", "App", "Last Run At", "Next Run At", ""]);
   const said = cells("daily-brief");
   expect(said[0]).toBe("daily-briefActive");
   expect(said[1]).toBe("Assistant");
@@ -469,7 +469,7 @@ test("Created by me narrows the read, names its empty scope, and All clears it",
   expect(reads.at(-1)).toContain("mine=true");
   expect(await screen.findByText("You have not created a scheduled task.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
-  expect(headings()).toEqual(["Name", "Agent", "Last Run At", "Next Run At", ""]);
+  expect(headings()).toEqual(["Name", "App", "Last Run At", "Next Run At", ""]);
   expect(
     screen.getByRole("tab", { name: "Created by me" }).getAttribute("aria-selected"),
   ).toBe("true");
@@ -677,7 +677,7 @@ test("the index read across the audience names the agent and leaves the creator 
   mount();
 
   await screen.findByText("daily-brief");
-  expect(headings()).toContain("Agent");
+  expect(headings()).toContain("App");
   expect(headings()).not.toContain("Created By");
   expect(screen.queryByText("mel@example.com")).toBeNull();
 });
@@ -824,7 +824,7 @@ test("an app's Scheduled tab lists that app's tasks, and a row opens inside the 
 
   expect(await within(dialog).findByText("daily-brief")).toBeTruthy();
   expect(listed.every((read) => read.includes("agent=" + AGENT_ID))).toBe(true);
-  expect(within(dialog).queryByRole("columnheader", { name: "Agent" })).toBeNull();
+  expect(within(dialog).queryByRole("columnheader", { name: "App" })).toBeNull();
 
   await openRow("daily-brief");
 
@@ -1046,7 +1046,7 @@ test("the act that writes a task asks which agent runs it, and writes to that la
   mount([AGENT, SECOND]);
 
   await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
-  await pick("Agent", "Second");
+  await pick("App", "Second");
   await userEvent.type(screen.getByLabelText("Name"), "digest");
   await userEvent.click(screen.getByRole("button", { name: "Create" }));
 
@@ -1066,7 +1066,7 @@ test("one agent in the audience is no choice, so the act asks for none", async (
   mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
-  expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
   await userEvent.type(screen.getByLabelText("Name"), "digest");
   await userEvent.click(screen.getByRole("button", { name: "Create" }));
 

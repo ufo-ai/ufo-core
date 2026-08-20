@@ -699,7 +699,7 @@ function RunRow({ run, live }: { run: SubagentRun; live: boolean }) {
           <span className="shrink-0">
             {run.name ||
               (run.profile.startsWith(AGENT_PROFILE)
-                ? "Agent · " + agentName(run.profile.slice(AGENT_PROFILE.length))
+                ? "App · " + agentName(run.profile.slice(AGENT_PROFILE.length))
                 : "Subagent · " + run.profile)}
           </span>
           {current ? (

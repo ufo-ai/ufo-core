@@ -313,7 +313,7 @@ function ObjectIndex({
         );
         const led = shown.slice(0, prose === null ? FACT_LED_FIELDS : LEADING_FIELDS);
         const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
-        if (agentId === null) columns.push({ label: "Agent", fact: true });
+        if (agentId === null) columns.push({ label: "App", fact: true });
         if (owned) columns.push({ label: OWNER_HEADING, sort: OWNER_FIELD, fact: true });
         if (prose !== null) {
           columns.push({ label: heading(prose, payload.spec_schema), sort: prose });
@@ -495,7 +495,7 @@ function NewObject({
       title={"New " + noun(kind)}
       lead={
         agents.length > 1 ? (
-          <Field label="Agent" htmlFor={AGENT_FIELD}>
+          <Field label="App" htmlFor={AGENT_FIELD}>
             <Select value={lane} onValueChange={setLane}>
               <SelectTrigger id={AGENT_FIELD}>
                 <SelectValue />

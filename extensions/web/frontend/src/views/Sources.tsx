@@ -130,7 +130,7 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
     },
   ],
   empty:
-    "Register a source in chat. The agent connects the account or credential it needs as part " +
+    "Register a source in chat. The app connects the account or credential it needs as part " +
     "of the request.",
   actions: (row, { act, busy }) =>
     row.apply === null || row.name === null || !row.own ? null : (

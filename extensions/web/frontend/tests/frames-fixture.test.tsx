@@ -33,7 +33,7 @@ async function streaming() {
   render(
     <App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />,
   );
-  await userEvent.type(screen.getByLabelText("Message the agent"), "go");
+  await userEvent.type(screen.getByLabelText("Message the app"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   return StreamFake.last();

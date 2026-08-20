@@ -41,7 +41,7 @@ export function AgentPicker({
   if (agents.length < 2) return null;
   return (
     <Select value={agentId} onValueChange={onPick}>
-      <SelectTrigger aria-label="Agent" className={cn(BAR_CONTROL, "w-(--container-control-row)")}>
+      <SelectTrigger aria-label="App" className={cn(BAR_CONTROL, "w-(--container-control-row)")}>
         <SelectValue />
       </SelectTrigger>
       <SelectContent

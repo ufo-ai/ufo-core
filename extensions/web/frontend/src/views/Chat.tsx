@@ -718,8 +718,8 @@ function Composer({
           event.currentTarget.form?.requestSubmit();
         }}
         autoComplete="off"
-        placeholder="Message the agent…"
-        aria-label="Message the agent"
+        placeholder="Message the app…"
+        aria-label="Message the app"
       />
       <PromptInputToolbar>
         <PromptInputAttach />

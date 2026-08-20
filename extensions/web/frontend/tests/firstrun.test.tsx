@@ -116,7 +116,7 @@ test("the card's query lands on the first run's own address", async () => {
 
   await waitFor(() => expect(location.hash).toBe("#/first-run"));
   await screen.findByRole("button", { name: "Notion" });
-  expect(screen.queryByPlaceholderText("Message the agent…")).toBeNull();
+  expect(screen.queryByPlaceholderText("Message the app…")).toBeNull();
 });
 
 test("the address opens the first run on its own, with no query at all", async () => {
@@ -140,7 +140,7 @@ test("the tiles are the whole first step: no later step stands until the picks a
   open();
 
   await screen.findByRole("button", { name: "Slack" });
-  expect(screen.queryByRole("heading", { name: "The agent answers in Slack" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "The app answers in Slack" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "Invite your team" })).toBeNull();
 });
 
@@ -151,7 +151,7 @@ test("the picks are recorded through the intent lane, and only what was picked i
   await record("Notion", "Slack");
 
   expect(intents(posted.calls)).toEqual([toolingIntent("notion", "slack")]);
-  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  await screen.findByRole("heading", { name: "The app answers in Slack" });
   expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   // One step stands at a time: the answered step leaves the page rather than sitting above the
@@ -167,7 +167,7 @@ test("picking neither connector skips to the invite step", async () => {
   await record("Notion");
 
   await screen.findByRole("heading", { name: "Invite your team" });
-  expect(screen.queryByRole("heading", { name: "The agent answers in Slack" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "The app answers in Slack" })).toBeNull();
 });
 
 test("each connector picked is its own step, in the order the tiles offer them", async () => {
@@ -177,12 +177,12 @@ test("each connector picked is its own step, in the order the tiles offer them",
   await record("GitHub", "Slack");
 
   // Slack leads because the catalog does, not because it was picked second.
-  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  await screen.findByRole("heading", { name: "The app answers in Slack" });
   expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
-  await screen.findByRole("heading", { name: "The agent works in your repositories" });
+  await screen.findByRole("heading", { name: "The app works in your repositories" });
   expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
 
@@ -202,7 +202,7 @@ test("the foot carries only the acts the step has", async () => {
 
   await record("Slack");
 
-  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  await screen.findByRole("heading", { name: "The app answers in Slack" });
   expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
@@ -220,7 +220,7 @@ test("continue is held closed until the install itself lands, not until the link
 
   await record("Slack", "GitHub");
 
-  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  await screen.findByRole("heading", { name: "The app answers in Slack" });
   expect(commit().disabled).toBe(true);
   await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
 
@@ -229,7 +229,7 @@ test("continue is held closed until the install itself lands, not until the link
   await screen.findByRole("link", { name: "Open the Slack install page" });
   await returning();
   expect(commit().disabled).toBe(true);
-  expect(screen.getByRole("heading", { name: "The agent answers in Slack" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "The app answers in Slack" })).toBeTruthy();
 });
 
 test("the connect step passes itself when the install lands", async () => {
@@ -241,7 +241,7 @@ test("the connect step passes itself when the install lands", async () => {
   });
 
   await record("Slack", "GitHub");
-  await screen.findByRole("heading", { name: "The agent answers in Slack" });
+  await screen.findByRole("heading", { name: "The app answers in Slack" });
   await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
   await screen.findByRole("link", { name: "Open the Slack install page" });
 
@@ -249,7 +249,7 @@ test("the connect step passes itself when the install lands", async () => {
   await returning();
 
   // Nothing was pressed: the member finished on Slack's pages and comes back to the next question.
-  await screen.findByRole("heading", { name: "The agent works in your repositories" });
+  await screen.findByRole("heading", { name: "The app works in your repositories" });
   expect(commit().disabled).toBe(true);
 });
 
@@ -261,7 +261,7 @@ test("a connector the workspace already held waits to be read rather than passin
   await screen.findByText("Slack connected");
   await returning();
 
-  expect(screen.getByRole("heading", { name: "The agent answers in Slack" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "The app answers in Slack" })).toBeTruthy();
   expect(commit().disabled).toBe(false);
 });
 
@@ -278,7 +278,7 @@ test("a step passed by its own install is connected on the way back to it", asyn
   await screen.findByRole("link", { name: "Open the Slack install page" });
   landed = true;
   await returning();
-  await screen.findByRole("heading", { name: "The agent works in your repositories" });
+  await screen.findByRole("heading", { name: "The app works in your repositories" });
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
 
   // The step states what the workspace holds and stands still: passing it again would take the
@@ -313,7 +313,7 @@ test("a step passed while the tab stayed open is settled before the page's own r
   // is the only read that sees it: the page's own read is half a minute behind.
   landed = true;
   await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
-  expect(screen.getByRole("heading", { name: "The agent works in your repositories" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "The app works in your repositories" })).toBeTruthy();
 
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
   await settle();
@@ -395,7 +395,7 @@ test("connecting mints the link on the intent lane, never through the chat", asy
   expect(link.getAttribute("href")).toBe(SLACK_LINK);
   expect(intents(posted.calls).at(-1)).toEqual({ verb: "connect_slack" });
   expect(location.hash).toBe("#/first-run");
-  expect(screen.queryByPlaceholderText("Message the agent…")).toBeNull();
+  expect(screen.queryByPlaceholderText("Message the app…")).toBeNull();
 });
 
 test("a link minted on one connector's step is not shown on the next one's", async () => {
@@ -520,7 +520,7 @@ test("a refused invite states the refusal and adds nobody", async () => {
   await screen.findByText("only a workspace admin can add members");
   expect((screen.getByLabelText("Email 1") as HTMLInputElement).value).toBe("teammate@work.com");
   // The refusal stops the run where it happened rather than handing the member on.
-  expect(screen.queryByPlaceholderText("Message the agent…")).toBeNull();
+  expect(screen.queryByPlaceholderText("Message the app…")).toBeNull();
 });
 
 test("the last act says the picks and the question into the agent's new chat", async () => {
@@ -542,7 +542,7 @@ test("the last act says the picks and the question into the agent's new chat", a
   await waitFor(() => expect(sent.length).toBe(1));
   expect(sent[0].url).toBe("/surface/web/agents/" + AGENT_ID + "/chat?conversation=new");
   expect(sent[0].body).toBe("We use Gmail, Notion. What could you set up for us?");
-  const box = await screen.findByPlaceholderText("Message the agent…");
+  const box = await screen.findByPlaceholderText("Message the app…");
   expect((box as HTMLTextAreaElement).value).toBe("");
   // The page creates no agent: creating one takes a speaking member, and the page never speaks.
   expect(intents(posted.calls)).toEqual([toolingIntent("notion", "gmail")]);

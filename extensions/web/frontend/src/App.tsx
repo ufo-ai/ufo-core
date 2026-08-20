@@ -386,7 +386,7 @@ export function App({ agents, member, onAgents }: AppProps) {
               onOpenChat={() => openNewChat(mainAgent.id)}
             />
           ) : (
-            <PaneNote>No such agent.</PaneNote>
+            <PaneNote>No such app.</PaneNote>
           )}
         </MainAgentProvider>
       </Viewer.Provider>
@@ -887,7 +887,7 @@ function RoutedPane({
   if (route.kind === "agents" || route.kind === "agent") {
     const selected =
       route.kind === "agent" ? (agents.find((entry) => entry.id === route.agentId) ?? null) : null;
-    if (route.kind === "agent" && !selected) return <PaneNote>No such agent.</PaneNote>;
+    if (route.kind === "agent" && !selected) return <PaneNote>No such app.</PaneNote>;
     const shown = selected ?? mainAgent;
     return (
       <Pane>
@@ -917,7 +917,7 @@ function RoutedPane({
   }
   if (route.kind === "conversation-slot") {
     const agent = agents.find((entry) => entry.id === route.agentId);
-    if (!agent) return <PaneNote>No such agent.</PaneNote>;
+    if (!agent) return <PaneNote>No such app.</PaneNote>;
     return (
       <ConversationSlotPane
         agent={agent}
@@ -935,7 +935,7 @@ function RoutedPane({
     const linkedConversation = linked[route.conversationId];
     if (!row && linkedConversation) {
       const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent.id);
-      if (!linkedAgent) return <PaneNote>No such agent.</PaneNote>;
+      if (!linkedAgent) return <PaneNote>No such app.</PaneNote>;
       if (!linkedConversation.readable && !linkedConversation.disclosable) return <NotShared />;
       return (
         <LinkedPane
@@ -990,7 +990,7 @@ function RoutedPane({
     route.kind === "new-chat"
       ? agents.find((entry) => entry.id === route.agentId)
       : (mainAgent ?? undefined);
-  if (!agent) return <PaneNote>No such agent.</PaneNote>;
+  if (!agent) return <PaneNote>No such app.</PaneNote>;
   // One start screen, whichever agent it names. The picker in its own composer renames the agent the
   // first message reaches, and a key carrying that agent would remount the box on every pick — a
   // fresh box holds the draft again but not the member's place in it, and the cursor lands back at
@@ -1127,7 +1127,7 @@ function RailSettings({
               onValueChange={(value) => onSort(value === "agent" ? "agent" : "recency")}
             >
               <DropdownMenuRadioItem value="recency">Recency</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="agent">Agent</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="agent">App</DropdownMenuRadioItem>
             </DropdownMenuRadioGroup>
           </DropdownMenuSubContent>
         </DropdownMenuSub>

@@ -198,10 +198,10 @@ export function Settings({ agent }: { agent: Agent }) {
                 </Button>
               </Group>
             ) : null}
-            <Group title="Agent">
+            <Group title="App">
               <Facts
                 rows={[
-                  { label: "Role", value: ready.agent.main ? "Main agent" : "Agent" },
+                  { label: "Role", value: ready.agent.main ? "Main app" : "App" },
                   {
                     label: "Installations",
                     value: ready.agent.surfaces.length
@@ -315,7 +315,7 @@ export function Settings({ agent }: { agent: Agent }) {
                 />
                 {ready.deploy.sandbox_internet ? null : (
                   <Hint className="m-0 mt-md">
-                    This deploy grants no sandbox public internet — the agent setting narrows a
+                    This deploy grants no sandbox public internet — the app setting narrows a
                     capability that is currently off.
                   </Hint>
                 )}

@@ -44,7 +44,7 @@ test("the agent skills tab renders items without a picker or Refresh", async () 
   expect(await screen.findByText("mine")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
   const panel = within(screen.getByRole("tabpanel"));
-  expect(panel.queryByRole("combobox", { name: "Agent" })).toBeNull();
+  expect(panel.queryByRole("combobox", { name: "App" })).toBeNull();
   expect(panel.queryByRole("button", { name: "Refresh" })).toBeNull();
   expect(panel.queryByRole("columnheader")).toBeNull();
   expect(document.querySelector('[data-part="mark"]')).toBeNull();

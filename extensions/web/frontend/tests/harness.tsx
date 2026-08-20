@@ -244,7 +244,7 @@ export const NO_RUNS =
   "Each scheduled run reports here: the reply it closed with and the files it shared.";
 export const NO_TASKS = "No scheduled task is visible to you.";
 export const NO_TRIGGERS = "No source trigger is visible to you.";
-export const NO_ARTIFACTS = "A file or site an agent makes in a conversation is listed here.";
+export const NO_ARTIFACTS = "A file or site an app makes in a conversation is listed here.";
 
 /** The kind as the surface states it: the fields sorted, because that is the order `PortalKind`
  *  carries them in, and the index leads with the first of them it draws a column for. */
@@ -337,7 +337,7 @@ export async function openRow(name: string): Promise<void> {
 
 /** The agents screen's index column. */
 export function agentIndex(): Promise<HTMLElement> {
-  return screen.findByRole("navigation", { name: "Agents" });
+  return screen.findByRole("navigation", { name: "Apps" });
 }
 
 /** Open one agent from the index: the row is the control, named by the text it carries. */

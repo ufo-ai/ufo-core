@@ -358,7 +358,7 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   expect(mineSaid.closest("[data-role=me]")!.className).toContain("bg-fill");
   for (const said of [agentSaid, mineSaid]) expect(said.className).toContain("wrap-anywhere");
 
-  await userEvent.type(screen.getByLabelText("Message the agent"), "go");
+  await userEvent.type(screen.getByLabelText("Message the app"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "streaming now" });

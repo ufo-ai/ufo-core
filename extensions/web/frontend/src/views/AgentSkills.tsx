@@ -320,7 +320,7 @@ export function AgentSkills({ agent }: { agent: Agent }) {
           <Field
             label="Description"
             htmlFor="skill-description"
-            description="The agent reads this to decide when to load the skill."
+            description="The app reads this to decide when to load the skill."
           >
             <Input
               id="skill-description"

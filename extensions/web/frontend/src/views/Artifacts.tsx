@@ -343,7 +343,7 @@ export function Artifacts({
                 body={
                   query || picked
                     ? "Nothing matches."
-                    : "A file or site an agent makes in a conversation is listed here."
+                    : "A file or site an app makes in a conversation is listed here."
                 }
               />
             );

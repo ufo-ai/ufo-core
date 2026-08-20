@@ -76,5 +76,5 @@ test("the artifact viewer is torn down when the member returns to a conversation
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
-  expect(screen.getByLabelText("Message the agent")).toBeTruthy();
+  expect(screen.getByLabelText("Message the app")).toBeTruthy();
 });

@@ -136,7 +136,7 @@ function otherDimensions(lines: DimensionLine[]): DimensionLine[] {
 function delegation(lines: BreakdownLine[]): BreakdownLine[] {
   return [
     {
-      label: "Agents",
+      label: "Apps",
       tokens: lines.filter((line) => !line.label).reduce((sum, line) => sum + line.tokens, 0),
       priced_micro_usd: lines
         .filter((line) => !line.label)
@@ -287,7 +287,7 @@ function Breakdown({
       <tbody>
         {rows.map((row) => (
           <tr key={row.id ?? row.label}>
-            <Td className="w-full">{row.label || "This agent"}</Td>
+            <Td className="w-full">{row.label || "This app"}</Td>
             <Td className="whitespace-nowrap">{tokenCount(row.tokens)}</Td>
             <Td className="whitespace-nowrap">{percent(row.tokens, tokens)}</Td>
             <Td className="whitespace-nowrap">{money(row.priced_micro_usd)}</Td>
@@ -466,8 +466,8 @@ export function WorkspaceUsage() {
             <Section title="Daily usage"><DailyHistory rows={report.daily} /></Section>
             {payload.workspace ? (
               <>
-                <Section title="Agents">
-                  <Breakdown heading="Agent" rows={payload.workspace.by_agent.map(named)} empty="No agent used model tokens in this range." />
+                <Section title="Apps">
+                  <Breakdown heading="App" rows={payload.workspace.by_agent.map(named)} empty="No app used model tokens in this range." />
                 </Section>
                 <Section title="Delegation">
                   <Breakdown heading="Execution" rows={delegation(report.by_execution)} empty="No model tokens were used in this range." />

@@ -486,7 +486,7 @@ async def submit_intent(
     ):
         detail = await ctx.agent_detail(agent_id)
         if detail is None or detail.name != submitted.name:
-            return JSONResponse({"applied": False, "message": "No such agent."})
+            return JSONResponse({"applied": False, "message": "No such app."})
         submitted = submitted.model_copy(
             update={
                 "spec": {
