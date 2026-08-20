@@ -426,7 +426,13 @@ def test_every_main_push_triggers_deployment() -> None:
         "AWS_REGION": "us-east-1",
         "TF_DIR": "infra/envs/prod",
     }
-    assert "deploy-testing" in str(workflow["concurrency"]["group"])
+    assert "concurrency" not in workflow
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    rollout = jobs["rollout"]
+    assert isinstance(rollout, dict)
+    assert "deploy-testing" in str(rollout["concurrency"]["group"])
+    assert rollout["concurrency"]["cancel-in-progress"] == "false"
 
 
 def test_every_pull_request_has_one_deployment_gate() -> None:
@@ -963,12 +969,31 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     assert client["needs"] == "changes"
     assert client["if"] == "needs.changes.outputs.client_build == 'true'"
 
+    for image_job in ("bundle", "images"):
+        job = jobs[image_job]
+        assert isinstance(job, dict)
+        assert job["needs"] == "changes"
+        assert job["if"] == (
+            "needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request'"
+        )
+    gateway = jobs["gateway"]
+    assert isinstance(gateway, dict)
+    assert gateway["needs"] == ["changes", "client"]
+    assert gateway["if"] == (
+        "${{ !cancelled() && needs.changes.outputs.deploy == 'true' && "
+        "github.event_name != 'pull_request' && "
+        "(needs.client.result == 'success' || needs.client.result == 'skipped') }}"
+    )
+
     rollout = jobs["rollout"]
     assert isinstance(rollout, dict)
-    assert rollout["needs"] == ["changes", "client"]
+    assert rollout["needs"] == ["changes", "client", "bundle", "images", "gateway"]
     assert rollout["if"] == (
         "${{ !cancelled() && needs.changes.outputs.deploy == 'true' && "
-        "(needs.client.result == 'success' || needs.client.result == 'skipped') }}"
+        "(needs.client.result == 'success' || needs.client.result == 'skipped') && "
+        "(needs.bundle.result == 'success' || needs.bundle.result == 'skipped') && "
+        "(needs.images.result == 'success' || needs.images.result == 'skipped') && "
+        "(needs.gateway.result == 'success' || needs.gateway.result == 'skipped') }}"
     )
 
     edge = jobs["edge"]
@@ -1024,6 +1049,7 @@ def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> N
     assert isinstance(changes, dict)
     assert changes["outputs"] == {
         "deploy": "${{ steps.select.outputs.deploy }}",
+        "image_tag": "${{ steps.tag.outputs.tag }}",
         "client_build": "${{ steps.client.outputs.build }}",
         "client_tree": "${{ steps.client.outputs.tree }}",
     }
@@ -1050,18 +1076,40 @@ def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> N
         "github.event_name != 'pull_request' && needs.client.result == 'success'"
     )
     assert download["with"]["path"] == "control/clientbin"
-    reuse = _step("rollout", "Reuse the pushed client binaries")
-    assert reuse["if"] == "github.event_name != 'pull_request' && needs.client.result == 'skipped'"
-    assert reuse["env"] == {"CLIENT_TREE": "${{ needs.changes.outputs.client_tree }}"}
-    assert "docker cp clientbin:/clientbin/. control/clientbin" in reuse["run"]
     push = _step("rollout", "Push the client binaries for this tree")
     assert push["if"] == "github.event_name != 'pull_request' && needs.client.result == 'success'"
     assert push["env"] == {"CLIENT_TREE": "${{ needs.changes.outputs.client_tree }}"}
     assert 'docker push "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE"' in push["run"]
-    gateway = _step("rollout", "Build + push gateway image")
     apply = _step("rollout", "Terraform apply")
-    assert rollout_steps.index(download) < rollout_steps.index(reuse) < rollout_steps.index(gateway)
     assert rollout_steps.index(apply) < rollout_steps.index(push)
+
+    gateway = jobs["gateway"]
+    assert isinstance(gateway, dict)
+    assert gateway["env"] == {
+        "CLIENT_TREE": "${{ needs.changes.outputs.client_tree }}",
+        "IMAGE_TAG": "${{ needs.changes.outputs.image_tag }}",
+    }
+    gateway_steps = gateway["steps"]
+    assert isinstance(gateway_steps, list)
+    gateway_download = next(
+        step for step in gateway_steps if step.get("uses") == "actions/download-artifact@v4"
+    )
+    assert gateway_download["if"] == (
+        "steps.select.outputs.work == 'build' && needs.client.result == 'success'"
+    )
+    assert gateway_download["with"]["path"] == "control/clientbin"
+    reuse = _step("gateway", "Reuse the pushed client binaries")
+    assert reuse["if"] == "steps.select.outputs.work == 'build' && needs.client.result == 'skipped'"
+    assert "docker cp clientbin:/clientbin/. control/clientbin" in reuse["run"]
+    build = next(
+        step for step in gateway_steps if step.get("uses") == "docker/build-push-action@v6"
+    )
+    assert build["with"]["context"] == "control"
+    assert (
+        gateway_steps.index(gateway_download)
+        < gateway_steps.index(reuse)
+        < gateway_steps.index(build)
+    )
 
     script = probe["run"]
     assert isinstance(script, str)
@@ -1119,6 +1167,114 @@ def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> N
     first = tag_of("fn main() {}\n")
     assert tag_of("fn main() { install() }\n") != first
     assert tag_of("fn main() {}\n") == first
+
+
+def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    images = jobs["images"]
+    assert isinstance(images, dict)
+    assert images["strategy"]["matrix"]["include"] == [
+        {"repository": "ufo-cache", "dir": "cache"},
+        {"repository": "ufo-egress", "dir": "egress"},
+        {"repository": "ufo-preview", "dir": "preview"},
+    ]
+    build = next(
+        step for step in images["steps"] if step.get("uses") == "docker/build-push-action@v6"
+    )
+    assert build["if"] == "steps.select.outputs.work == 'build'"
+    assert build["with"]["provenance"] == "false"
+    assert build["with"]["tags"] == (
+        "${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ env.IMAGE_TAG }}"
+    )
+    retag = _step("images", "Retag the built tree")
+    assert retag["if"] == "steps.select.outputs.work == 'retag'"
+
+    select = _step("images", "Select image work")
+    script = select["run"]
+    assert isinstance(script, str)
+    aws = tmp_path / "aws"
+    aws.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  *describe-repositories*) exit "$REPO_EXIT" ;;\n'
+        '  *"imageTag=$IMAGE_TAG"*) exit "$TAG_EXIT" ;;\n'
+        '  *"imageTag=$TREE"*) exit "$TREE_EXIT" ;;\n'
+        "  *) exit 43 ;;\n"
+        "esac\n"
+    )
+    aws.chmod(0o755)
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD:cache"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    def select_work(repo_exit: str, tag_exit: str, tree_exit: str) -> list[str]:
+        output = tmp_path / "github-output"
+        output.write_text("")
+        subprocess.run(
+            ["bash", "-e", "-c", script],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            env={
+                "HOME": str(tmp_path),
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "GITHUB_OUTPUT": str(output),
+                "REPOSITORY": "ufo-cache",
+                "DIR": "cache",
+                "IMAGE_TAG": "shortsha0",
+                "TREE": tree,
+                "REPO_EXIT": repo_exit,
+                "TAG_EXIT": tag_exit,
+                "TREE_EXIT": tree_exit,
+            },
+        )
+        return output.read_text().splitlines()
+
+    assert select_work("1", "0", "0") == [f"tree={tree}", "work=none"]
+    assert select_work("0", "0", "1") == [f"tree={tree}", "work=none"]
+    assert select_work("0", "1", "0") == [f"tree={tree}", "work=retag"]
+    assert select_work("0", "1", "1") == [f"tree={tree}", "work=build"]
+
+    tag = _step("images", "Tag the built tree")
+    assert tag["if"] == "steps.select.outputs.work == 'build'"
+    tag_script = tag["run"]
+    assert isinstance(tag_script, str)
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'if [ -n "$DOCKER_ERROR" ]; then printf \'%s\\n\' "$DOCKER_ERROR" >&2; exit 1; fi\n'
+    )
+    docker.chmod(0o755)
+
+    def tag_tree(error: str) -> int:
+        return subprocess.run(
+            ["bash", "-e", "-c", tag_script],
+            capture_output=True,
+            env={
+                "HOME": str(tmp_path),
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "ECR_REGISTRY": "registry.example",
+                "REPOSITORY": "ufo-cache",
+                "IMAGE_TAG": "shortsha0",
+                "TREE": tree,
+                "DOCKER_ERROR": error,
+            },
+        ).returncode
+
+    assert tag_tree("") == 0
+    assert (
+        tag_tree(
+            "tag invalid: The image tag already exists in the repository "
+            "and cannot be overwritten because the repository is immutable"
+        )
+        == 0
+    )
+    assert tag_tree("denied: not authorized") != 0
 
 
 @pytest.mark.parametrize(
@@ -1430,10 +1586,14 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
     assert "outputs" not in rollout
     rollout_steps = rollout["steps"]
     assert isinstance(rollout_steps, list)
-    image_tag = next(step for step in rollout_steps if step.get("name") == "Image tag")
-    assert "id" not in image_tag
-    assert 'echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"' in image_tag["run"]
-    assert "GITHUB_OUTPUT" not in image_tag["run"]
+    changes = jobs["changes"]
+    assert isinstance(changes, dict)
+    changes_steps = changes["steps"]
+    assert isinstance(changes_steps, list)
+    image_tag = next(step for step in changes_steps if step.get("name") == "Image tag")
+    assert image_tag["id"] == "tag"
+    assert 'echo "tag=$TAG" >> "$GITHUB_OUTPUT"' in image_tag["run"]
+    assert "GITHUB_ENV" not in image_tag["run"]
     sandbox_template = next(
         step for step in rollout_steps if step.get("name") == "Select sandbox template"
     )
@@ -3390,6 +3550,8 @@ def test_deployment_gate_joins_every_selected_result() -> None:
         ),
         ("true", "push", "success", "success", "skipped", "skipped", True),
         ("false", "push", "skipped", "skipped", "skipped", "skipped", True),
+        ("true", "push", "cancelled", "skipped", "skipped", "skipped", True),
+        ("true", "push", "success", "cancelled", "skipped", "skipped", True),
         (
             "true",
             "pull_request",
@@ -3635,7 +3797,10 @@ def test_successful_manual_deploy_records_the_promoted_commit(tmp_path: Path) ->
 
 def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:
     step = _step("deploy", "Report the deploy conclusion to Datadog")
-    assert step["if"] == "always() && github.ref_name == 'main'"
+    assert step["if"] == (
+        "always() && github.ref_name == 'main' && "
+        "needs.rollout.result != 'cancelled' && needs.edge.result != 'cancelled'"
+    )
     assert step["env"] == {
         "DD_CHECK_URL": "https://api.us5.datadoghq.com/api/v1/check_run",
         "DEPLOY_CHECK": "ufo.deploy.main",

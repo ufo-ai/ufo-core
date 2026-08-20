@@ -10,12 +10,6 @@ on:
         required: false
         default: ""
 
-# Serialize deploys; never cancel an in-flight apply. PR runs get a per-PR group so they can
-# never displace a queued deploy.
-concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('deploy-testing-pr-{0}', github.event.pull_request.number) || 'deploy-testing' }}
-  cancel-in-progress: false
-
 permissions:
   id-token: write
   contents: read
@@ -34,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       deploy: ${{ steps.select.outputs.deploy }}
+      image_tag: ${{ steps.tag.outputs.tag }}
       client_build: ${{ steps.client.outputs.build }}
       client_tree: ${{ steps.client.outputs.tree }}
     steps:
@@ -63,9 +58,25 @@ jobs:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Deploys tag the commit short SHA; a PR plans against the newest pushed bundle image so the
+      # aws_ecr_image digest lookup resolves.
+      - name: Image tag
+        id: tag
+        if: steps.select.outputs.deploy == 'true'
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          if [ -z "$TAG" ] && [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            TAG=$(aws ecr describe-images --repository-name ufo --output json \
+              | jq -r '[.imageDetails[] | select(.imageTags != null)] | max_by(.imagePushedAt).imageTags[0] // empty')
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_SHA::8}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       # The binaries of a client tree are pushed once as ufo-clientbin:<git tree hash of client/>;
       # a tag hit means this client source already built, so the five-target build is skipped and
-      # rollout copies the pushed set into the gateway build context. The hash names the content,
+      # the gateway job copies the pushed set into its build context. The hash names the content,
       # so different client source is always a miss and the immutable tag is never contested.
       - name: Select client work
         id: client
@@ -130,10 +141,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  rollout:
-    needs: [changes, client]
-    if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
+  # Bundle image: `ufoctl bundle` freezes the assistant_hosted pack into a build context
+  # (Dockerfile + ufo.toml + ufo.lock), then docker build installs the pinned ufo distribution.
+  # The debugger and portal apps build first so their static pages ride inside the wheel.
+  bundle:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -144,35 +160,19 @@ jobs:
 
       - uses: aws-actions/amazon-ecr-login@v2
 
-      # Deploys tag the commit short SHA; a PR plans against the newest pushed bundle image so the
-      # aws_ecr_image digest lookup resolves.
-      - name: Image tag
-        run: |
-          TAG="${{ inputs.image_tag }}"
-          if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
-            TAG=$(aws ecr describe-images --repository-name ufo --output json \
-              | jq -r '[.imageDetails[] | select(.imageTags != null)] | max_by(.imagePushedAt).imageTags[0] // empty')
-          fi
-          if [ -z "$TAG" ]; then
-            TAG="${GITHUB_SHA::8}"
-          fi
-          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
-
       - uses: astral-sh/setup-uv@v5
-        if: github.event_name != 'pull_request'
         with:
           python-version: "3.12"
 
       - uses: actions/setup-node@v4
-        if: github.event_name != 'pull_request'
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            extensions/debugger/frontend/package-lock.json
+            extensions/web/frontend/package-lock.json
 
-      # Bundle image: `ufoctl bundle` freezes the assistant_hosted pack into a build context
-      # (Dockerfile + ufo.toml + ufo.lock), then docker build installs the pinned ufo distribution.
-      # The debugger and portal apps build first so their static pages ride inside the wheel.
       - name: Build + push bundle image
-        if: github.event_name != 'pull_request'
         run: |
           if aws ecr describe-images --repository-name ufo --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo:$IMAGE_TAG already pushed — skipping"
@@ -186,6 +186,205 @@ jobs:
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
           fi
 
+  # Sandbox cache daemon (RFC 0032), egress proxy (RFC 0035), and preview renderer (RFC 0037):
+  # Rust services rebuilt only when their source changes. Each built image carries two tags — the
+  # deploy's IMAGE_TAG and the git tree hash of its directory — so a deploy whose tree already
+  # built retags the pushed image instead of compiling it again. Images push before the apply that
+  # points the Deployments at this tag: a push afterwards starts the new ReplicaSet's progress
+  # deadline against an image that does not exist yet. The repositories are created by terraform
+  # (ecr.tf), which applies later in rollout — a brand-new environment skips the push on its first
+  # run and the next deploy lands the image.
+  images:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - {repository: ufo-cache, dir: cache}
+          - {repository: ufo-egress, dir: egress}
+          - {repository: ufo-preview, dir: preview}
+    env:
+      IMAGE_TAG: ${{ needs.changes.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Select image work
+        id: select
+        env:
+          REPOSITORY: ${{ matrix.repository }}
+          DIR: ${{ matrix.dir }}
+        run: |
+          TREE=$(git rev-parse "HEAD:$DIR")
+          echo "tree=$TREE" >> "$GITHUB_OUTPUT"
+          if ! aws ecr describe-repositories --repository-names "$REPOSITORY" >/dev/null 2>&1; then
+            echo "$REPOSITORY repository not provisioned yet (terraform apply creates it) — skipping"
+            echo "work=none" >> "$GITHUB_OUTPUT"
+          elif aws ecr describe-images --repository-name "$REPOSITORY" --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "$REPOSITORY:$IMAGE_TAG already pushed — skipping"
+            echo "work=none" >> "$GITHUB_OUTPUT"
+          elif aws ecr describe-images --repository-name "$REPOSITORY" --image-ids imageTag="$TREE" >/dev/null 2>&1; then
+            echo "$REPOSITORY:$TREE already built — retagging"
+            echo "work=retag" >> "$GITHUB_OUTPUT"
+          else
+            echo "work=build" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Retag the built tree
+        if: steps.select.outputs.work == 'retag'
+        run: >
+          docker buildx imagetools create
+          -t "$ECR_REGISTRY/${{ matrix.repository }}:$IMAGE_TAG"
+          "$ECR_REGISTRY/${{ matrix.repository }}:${{ steps.select.outputs.tree }}"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.select.outputs.work == 'build'
+
+      - uses: docker/build-push-action@v6
+        if: steps.select.outputs.work == 'build'
+        with:
+          context: ${{ matrix.dir }}
+          push: true
+          provenance: false
+          tags: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=${{ matrix.repository }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.repository }}
+
+      # After the push so a concurrent deploy of the same tree cannot fail the build: the tag is
+      # immutable and content-addressed, so losing the race means the identical source is already
+      # tagged.
+      - name: Tag the built tree
+        if: steps.select.outputs.work == 'build'
+        env:
+          REPOSITORY: ${{ matrix.repository }}
+          TREE: ${{ steps.select.outputs.tree }}
+        run: |
+          if ! OUTPUT=$(docker buildx imagetools create -t "$ECR_REGISTRY/$REPOSITORY:$TREE" "$ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG" 2>&1); then
+            printf '%s\n' "$OUTPUT" >&2
+            case "$OUTPUT" in
+              *"already exists"*) echo "$REPOSITORY:$TREE pushed by a concurrent deploy" ;;
+              *) exit 1 ;;
+            esac
+          fi
+
+  # The gateway image carries the ufo-control binary and the client binaries it serves, so its
+  # sources are the control tree and the client tree, joined as one tag: a deploy whose pair
+  # already built retags the pushed image instead of compiling it again.
+  gateway:
+    needs: [changes, client]
+    if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    env:
+      CLIENT_TREE: ${{ needs.changes.outputs.client_tree }}
+      IMAGE_TAG: ${{ needs.changes.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Select image work
+        id: select
+        run: |
+          SOURCES="$(git rev-parse HEAD:control)-$CLIENT_TREE"
+          echo "sources=$SOURCES" >> "$GITHUB_OUTPUT"
+          if aws ecr describe-images --repository-name ufo-control --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "ufo-control:$IMAGE_TAG already pushed — skipping"
+            echo "work=none" >> "$GITHUB_OUTPUT"
+          elif aws ecr describe-images --repository-name ufo-control --image-ids imageTag="$SOURCES" >/dev/null 2>&1; then
+            echo "ufo-control:$SOURCES already built — retagging"
+            echo "work=retag" >> "$GITHUB_OUTPUT"
+          else
+            echo "work=build" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Retag the built sources
+        if: steps.select.outputs.work == 'retag'
+        run: >
+          docker buildx imagetools create
+          -t "$ECR_REGISTRY/ufo-control:$IMAGE_TAG"
+          "$ECR_REGISTRY/ufo-control:${{ steps.select.outputs.sources }}"
+
+      # The five client binaries land as clientbin/<target>/<binary> in the gateway build
+      # context, where the Dockerfile copies them under UFO_CLIENT_BIN_DIR.
+      - uses: actions/download-artifact@v4
+        if: steps.select.outputs.work == 'build' && needs.client.result == 'success'
+        with:
+          pattern: clientbin-*
+          merge-multiple: true
+          path: control/clientbin
+
+      - name: Reuse the pushed client binaries
+        if: steps.select.outputs.work == 'build' && needs.client.result == 'skipped'
+        run: |
+          docker create --name clientbin "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE" noop
+          docker cp clientbin:/clientbin/. control/clientbin
+          docker rm clientbin
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.select.outputs.work == 'build'
+
+      - uses: docker/build-push-action@v6
+        if: steps.select.outputs.work == 'build'
+        with:
+          context: control
+          push: true
+          provenance: false
+          tags: ${{ env.ECR_REGISTRY }}/ufo-control:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=ufo-control
+          cache-to: type=gha,mode=max,scope=ufo-control
+
+      - name: Tag the built sources
+        if: steps.select.outputs.work == 'build'
+        env:
+          SOURCES: ${{ steps.select.outputs.sources }}
+        run: |
+          if ! OUTPUT=$(docker buildx imagetools create -t "$ECR_REGISTRY/ufo-control:$SOURCES" "$ECR_REGISTRY/ufo-control:$IMAGE_TAG" 2>&1); then
+            printf '%s\n' "$OUTPUT" >&2
+            case "$OUTPUT" in
+              *"already exists"*) echo "ufo-control:$SOURCES pushed by a concurrent deploy" ;;
+              *) exit 1 ;;
+            esac
+          fi
+
+  rollout:
+    needs: [changes, client, bundle, images, gateway]
+    if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && (needs.client.result == 'success' || needs.client.result == 'skipped') && (needs.bundle.result == 'success' || needs.bundle.result == 'skipped') && (needs.images.result == 'success' || needs.images.result == 'skipped') && (needs.gateway.result == 'success' || needs.gateway.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    # Serialize applies; never cancel an in-flight one. Image builds run outside the group — they
+    # are tag-guarded and idempotent — so a queued deploy builds while the previous one applies.
+    # PR runs get a per-PR group so they can never displace a queued deploy.
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('deploy-testing-pr-{0}', github.event.pull_request.number) || 'deploy-testing' }}
+      cancel-in-progress: false
+    env:
+      IMAGE_TAG: ${{ needs.changes.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: astral-sh/setup-uv@v5
+        if: github.event_name != 'pull_request'
+        with:
+          python-version: "3.12"
+
       - name: Select sandbox template
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
@@ -198,84 +397,13 @@ jobs:
           test -n "$E2B_TEMPLATES"
           echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"
 
-      # The five client binaries land as clientbin/<target>/<binary> in the gateway build
-      # context, where the Dockerfile copies them under UFO_CLIENT_BIN_DIR.
+      # Staged for the ufo-clientbin push after the apply.
       - uses: actions/download-artifact@v4
         if: github.event_name != 'pull_request' && needs.client.result == 'success'
         with:
           pattern: clientbin-*
           merge-multiple: true
           path: control/clientbin
-
-      - name: Reuse the pushed client binaries
-        if: github.event_name != 'pull_request' && needs.client.result == 'skipped'
-        env:
-          CLIENT_TREE: ${{ needs.changes.outputs.client_tree }}
-        run: |
-          docker create --name clientbin "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE" noop
-          docker cp clientbin:/clientbin/. control/clientbin
-          docker rm clientbin
-
-      - name: Build + push gateway image
-        if: github.event_name != 'pull_request'
-        run: |
-          if aws ecr describe-images --repository-name ufo-control --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
-            echo "ufo-control:$IMAGE_TAG already pushed — skipping"
-          else
-            docker build -f control/Dockerfile -t "$ECR_REGISTRY/ufo-control:$IMAGE_TAG" control
-            docker push "$ECR_REGISTRY/ufo-control:$IMAGE_TAG"
-          fi
-
-      # Sandbox cache daemon (RFC 0032): a Rust binary built from `cache/`, run as the proxy pod's
-      # cache sidecar. The repository is created by terraform (ecr.tf), which applies later in this
-      # job — so the build waits for it to exist rather than pushing into a repo that isn't there yet.
-      # Once provisioned it builds every deploy so the image is ready before the cache is enabled.
-      - name: Build + push cache image
-        if: github.event_name != 'pull_request'
-        run: |
-          if ! aws ecr describe-repositories --repository-names ufo-cache >/dev/null 2>&1; then
-            echo "ufo-cache repository not provisioned yet (terraform apply creates it) — skipping"
-          elif aws ecr describe-images --repository-name ufo-cache --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
-            echo "ufo-cache:$IMAGE_TAG already pushed — skipping"
-          else
-            docker build -f cache/Dockerfile -t "$ECR_REGISTRY/ufo-cache:$IMAGE_TAG" cache
-            docker push "$ECR_REGISTRY/ufo-cache:$IMAGE_TAG"
-          fi
-
-      # Egress proxy (RFC 0035): the Rust data-plane MITM proxy built from `egress/`, run as the
-      # sandbox-proxy pod's main container in place of `ufoctl proxy`. Pushed before the apply that
-      # points the Deployment at this tag: a push afterwards starts the new ReplicaSet's progress
-      # deadline against an image that does not exist yet, and the pods sit unable to pull while that
-      # deadline burns. The repository is created by terraform (ecr.tf), so a brand-new environment
-      # skips the push on its first run and the next deploy lands the image.
-      - name: Build + push egress image
-        if: github.event_name != 'pull_request'
-        run: |
-          if ! aws ecr describe-repositories --repository-names ufo-egress >/dev/null 2>&1; then
-            echo "ufo-egress repository not provisioned yet (terraform apply creates it) — skipping"
-          elif aws ecr describe-images --repository-name ufo-egress --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
-            echo "ufo-egress:$IMAGE_TAG already pushed — skipping"
-          else
-            docker build -f egress/Dockerfile -t "$ECR_REGISTRY/ufo-egress:$IMAGE_TAG" egress
-            docker push "$ECR_REGISTRY/ufo-egress:$IMAGE_TAG"
-          fi
-
-      # Preview service (RFC 0037): the Rust document rasterizer built from `preview/`, its own
-      # Deployment. Pushed before the apply for the same reason as egress, and it is the image that
-      # made the reason concrete — built last and slowest, it left ufo-preview unpullable for most of
-      # the Deployment's 10-minute progress deadline and failed the rollout wait. The Deployment is
-      # gated by preview_enabled, so a disabled env builds the image but runs nothing.
-      - name: Build + push preview image
-        if: github.event_name != 'pull_request'
-        run: |
-          if ! aws ecr describe-repositories --repository-names ufo-preview >/dev/null 2>&1; then
-            echo "ufo-preview repository not provisioned yet (terraform apply creates it) — skipping"
-          elif aws ecr describe-images --repository-name ufo-preview --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
-            echo "ufo-preview:$IMAGE_TAG already pushed — skipping"
-          else
-            docker build -f preview/Dockerfile -t "$ECR_REGISTRY/ufo-preview:$IMAGE_TAG" preview
-            docker push "$ECR_REGISTRY/ufo-preview:$IMAGE_TAG"
-          fi
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -569,6 +697,14 @@ jobs:
           PRODUCTION_ACCESS_RESULT: ${{ needs.production_access.result }}
         run: |
           test "$CHANGES_RESULT" = "success"
+          # A rollout or edge job displaced from its concurrency group was superseded: the newer
+          # queued deploy ships a descendant of this commit.
+          case "$ROLLOUT_RESULT $EDGE_RESULT" in
+            *cancelled*)
+              echo "Superseded by a newer deploy."
+              exit 0
+              ;;
+          esac
           case "$DEPLOY_SELECTED" in
             true)
               test "$ROLLOUT_RESULT" = "success"
@@ -595,7 +731,7 @@ jobs:
           esac
 
       - name: Report the deploy conclusion to Datadog
-        if: always() && github.ref_name == 'main'
+        if: always() && github.ref_name == 'main' && needs.rollout.result != 'cancelled' && needs.edge.result != 'cancelled'
         env:
           DD_CHECK_URL: https://api.us5.datadoghq.com/api/v1/check_run
           DEPLOY_CHECK: ufo.deploy.main
