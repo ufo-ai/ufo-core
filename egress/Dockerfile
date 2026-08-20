@@ -20,11 +20,14 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --locked
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --locked \
+    && cp target/release/ufo-egress /usr/local/bin/ufo-egress
 
 FROM debian:stable-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /build/target/release/ufo-egress /usr/local/bin/ufo-egress
+COPY --from=build /usr/local/bin/ufo-egress /usr/local/bin/ufo-egress
 ENTRYPOINT ["ufo-egress"]
