@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import UUID, uuid4
@@ -7260,27 +7260,20 @@ def test_every_shape_a_tool_free_checkpoint_can_render() -> None:
     assert writing.report(300.0) == "Preparing the response · 5m in"
 
 
-PROGRESS_ARMING_LEAD = timedelta(seconds=0.5)
-"""How far ahead of the arming a turn's start is dated where no test states an age. A reporter reads
-the clock once at startup to decide whether its first post can be the turn's first, and these tests
-compress the ladder's base interval to tens of milliseconds — less than the database work between
-the arming call and that read — so a turn started "now" can read as one already past its first
-checkpoint and post bare. A start dated a moment ahead holds the first interval in front of the
-reporter whatever the machine is doing, and leaves the ladder behind it as short as it was."""
-
-
 async def _arm_followers(
-    workspace_id: UUID, turn_id: UUID, hub: InProcessHub, age: timedelta = -PROGRESS_ARMING_LEAD
+    workspace_id: UUID, turn_id: UUID, hub: InProcessHub, age: timedelta = timedelta(0)
 ) -> None:
     """Arm the turn's followers the way the turn's own execution does: fire the Slack manifest's
     `user_prompt_submit` hook through the real chain, with the loop's tailer bound to this hub. The
     chain wants a credential key set; the bot token itself resolves through the bound workspace.
 
-    The turn is reported as having started `age` ago. A first execution fires this within a second
-    of admission, which is what the default's lead stands in for — these tests compress the ladder
-    to tens of milliseconds, so the real row's age would read as a resume — and a test exercising a
-    resumed run passes the wait the member has actually had. The resolution is asserted clean
-    because the event gates the turn: a handler that raises here would deny it.
+    The turn is reported as having started `age` ago, and the surface module's clock is held on
+    the arming instant while the chain runs, so the reporter's arming stamp reads exactly `age`
+    after the turn's start whatever the chain's own latency costs. These tests compress the
+    first-checkpoint window to tens of milliseconds, which the real chain on a loaded worker can
+    out-wait — the held clock is what makes first-post footers a decision instead of a race. A
+    test exercising a resumed run passes the wait the member has actually had. The resolution is
+    asserted clean because the event gates the turn: a handler that raises here would deny it.
     """
     with ws(workspace_id):
         turn, agent, audience = await _load_turn(turn_id)
@@ -7291,13 +7284,24 @@ async def _arm_followers(
             audience=audience,
             public_base_url=PUBLIC_BASE_URL,
         )
-        resolution = await chain.fire(
-            "user_prompt_submit",
-            UserPromptSubmit(text=turn.inbound),
-            turn.model_copy(update={"created_at": datetime.now(UTC) - age}),
-            agent,
-            turn.speaker_member_id,
-        )
+        moment = datetime.now(UTC)
+
+        class _ArmingInstant(datetime):
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> datetime:
+                return moment if tz is not None else moment.replace(tzinfo=None)
+
+        slack.datetime = _ArmingInstant
+        try:
+            resolution = await chain.fire(
+                "user_prompt_submit",
+                UserPromptSubmit(text=turn.inbound),
+                turn.model_copy(update={"created_at": moment - age}),
+                agent,
+                turn.speaker_member_id,
+            )
+        finally:
+            slack.datetime = datetime
     assert resolution.denied is None
 
 
@@ -8136,6 +8140,41 @@ async def test_an_unpriced_first_progress_post_carries_the_footers_links_alone(
     footer = _footers(_progress_posts(recorder))[0]
     assert footer == await _debug_footer(workspace_id, "C1:100.5", turn_id, None)
     assert footer is not None and "$" not in footer
+
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(task, timeout=10)
+
+
+async def test_the_first_posts_footer_survives_slow_arming(db: None, tmp_path, monkeypatch) -> None:
+    """Whether a post is the turn's first is decided by the reporter's arming stamp against the
+    turn's start, and these tests compress the first-checkpoint window to tens of milliseconds — so
+    on a loaded worker the real hook chain out-waited the window and the turn's first post lost its
+    footer. Arming under an injected delay longer than any real chain proves the decision does not
+    race the wall clock."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    turn_id = await _progress_turn(
+        monkeypatch, workspace_id, tmp_path, recorder, hub, speaker_email=OPERATOR_OWNER_EMAIL
+    )
+    armed = slack._track_progress
+
+    def delayed(*args: object, **kwargs: object) -> None:
+        time.sleep(0.7)
+        armed(*args, **kwargs)
+
+    monkeypatch.setattr(slack, "_track_progress", delayed)
+    await _arm_followers(workspace_id, turn_id, hub)
+    task = slack._PROGRESS_TASKS[turn_id]
+
+    await hub.publish(turn_id, SkillLoad(skill="postgres/migrations"))
+    deadline = time.monotonic() + 10
+    while not _progress_posts(recorder):
+        assert time.monotonic() < deadline, "the delayed reporter never reached a checkpoint"
+        await asyncio.sleep(0.01)
+
+    footer = _footers(_progress_posts(recorder))[0]
+    assert footer == await _debug_footer(workspace_id, "C1:100.5", turn_id, None)
 
     await _finish_turn(turn_id, "migrated")
     await asyncio.wait_for(task, timeout=10)
