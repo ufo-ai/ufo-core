@@ -2593,6 +2593,7 @@ class SurfaceContext:
         limit: int,
         cursor: "ListingCursor | None" = None,
         agent_id: UUID | None = None,
+        turn_id: UUID | None = None,
     ) -> "ListingPage[ScheduledRun]":
         """One keyset page of the turns that fired on their own — scheduled admissions — newest
         first, reporting into conversations whose content this reader reads: the workspace-shared
@@ -2607,8 +2608,11 @@ class SurfaceContext:
         well and shared none published nothing and is no row here; its conversation holds it. A
         failure is always a row, because how a fire went wrong is itself the report. `limit`
         therefore counts rows a feed draws, and the page's `older` cursor promises a row behind
-        it."""
+        it. `turn_id` narrows the page to one run — a permalink's read — under the same fence, so
+        a run outside the audience reads as an empty page."""
         query = self._scheduled_runs(member_id, agent_id)
+        if turn_id is not None:
+            query = query.where(tables.turn.c.id == turn_id)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(

@@ -125,8 +125,10 @@ test("a story is what a run made or how it went wrong, never what it said", asyn
 
   const preview = screen.getByRole("img", { name: "the queue" });
   expect(preview.getAttribute("src")).toBe("/dl/queue.png?preview");
-  expect(preview.closest("a")?.getAttribute("href")).toBe("/dl/queue.png");
-  expect(screen.getByText("brief.pdf").closest("a")?.getAttribute("href")).toBe("/dl/brief.pdf");
+  expect(preview.closest("a")).toBeNull();
+  expect(preview.closest("button")).toBeTruthy();
+  expect(screen.getByText("brief.pdf").closest("a")).toBeNull();
+  expect(screen.getByText("brief.pdf").closest("button")).toBeTruthy();
   expect(await screen.findByText("Two blockers cleared.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   expect(screen.queryByText("notes.md")).toBeNull();
@@ -136,7 +138,9 @@ test("a story is what a run made or how it went wrong, never what it said", asyn
   const threads = screen.getAllByRole("link", { name: "Slack" });
   expect(threads[0].textContent).toBe("Slack ↗");
   expect(threads[0].getAttribute("href")).toBe(RUN.source);
-  expect(screen.getAllByText(/ago$/).length).toBeGreaterThan(0);
+  const stamps = screen.getAllByText(/ago$/);
+  expect(stamps.length).toBeGreaterThan(0);
+  expect(stamps[0].closest("a")?.getAttribute("href")).toBe("#/radar?open=run%2F" + RUN.turn_id);
 
   expect(screen.getByText("Failed")).toBeTruthy();
   expect(screen.getByText("The roll-up source timed out.")).toBeTruthy();
@@ -259,4 +263,85 @@ test("the feed walks older pages by cursor", async () => {
 
   expect(await screen.findByText("Stopped")).toBeTruthy();
   expect(reads.some((read) => read.includes("after=older%7Cx"))).toBe(true);
+});
+
+test("a permalink pins the feed to its one report, and the way back is offered", async () => {
+  const reads: string[] = [];
+  wire({
+    "/workspace/radar": (url) => {
+      reads.push(url);
+      return url.includes("turn=")
+        ? json({ runs: [RUN], older: null })
+        : json({ runs: [RUN, FAILED_RUN], older: null });
+    },
+    "/dl/notes.md": () => new Response("# Standup\n\nTwo blockers cleared."),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="radar" place={{ open: "run/" + RUN.turn_id }} />
+    </MainAgentProvider>,
+  );
+
+  expect(await screen.findByRole("heading", { level: 3, name: "Standup" })).toBeTruthy();
+  expect(reads[0]).toContain("turn=" + RUN.turn_id);
+  expect(screen.queryByText("The roll-up source timed out.")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "All reports" }));
+  expect(await screen.findByText("The roll-up source timed out.")).toBeTruthy();
+  expect(reads.some((read) => !read.includes("turn="))).toBe(true);
+});
+
+test("a permalink that resolves no readable run states it", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [], older: null }) });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="radar" place={{ open: "run/" + RUN.turn_id }} />
+    </MainAgentProvider>,
+  );
+
+  expect(
+    await screen.findByText("This report does not exist or is not shared with you."),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: "All reports" })).toBeTruthy();
+});
+
+test("a shared picture opens full with its download", async () => {
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/dl/notes.md": () => new Response("# Standup\n\nAll clear."),
+  });
+  mountRadarSection();
+
+  await userEvent.click(await screen.findByRole("img", { name: "the queue" }));
+
+  const sheet = screen.getByRole("dialog");
+  expect(within(sheet).getByText("queue.png")).toBeTruthy();
+  const download = within(sheet).getByRole("link", { name: "Download" });
+  expect(download.getAttribute("href")).toBe("/dl/queue.png");
+  expect(download.getAttribute("download")).toBe("queue.png");
+  const full = within(sheet).getByRole("img", { name: "the queue" });
+  expect(full.getAttribute("src")).toBe("/dl/queue.png?preview");
+  expect(full.className).toContain("object-contain");
+
+  await userEvent.click(within(sheet).getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("a shared file with no picture opens on its name with its download", async () => {
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/dl/notes.md": () => new Response("# Standup\n\nAll clear."),
+  });
+  mountRadarSection();
+
+  const chip = await screen.findByText("brief.pdf");
+  await userEvent.click(chip.closest("button") as HTMLElement);
+
+  const sheet = screen.getByRole("dialog");
+  expect(
+    within(sheet).getByText("No preview for this file type. Download it to open it."),
+  ).toBeTruthy();
+  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
+    "/dl/brief.pdf",
+  );
 });

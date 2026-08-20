@@ -3812,6 +3812,75 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
     assert anonymous.status_code == 401
 
 
+async def test_radar_permalink_reads_one_run(web: tuple[AsyncClient, UUID, UUID]) -> None:
+    """`turn` pins the feed to exactly one run under the same audience fence: the reader gets that
+    run alone with no cursors, a run outside their audience reads as an empty page, and a token
+    that names no turn is refused."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
+    shared_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="slack/radar-permalink",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    fired = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
+    pinned = await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        shared_conversation,
+        text="12 items",
+        fired=fired,
+        artifact=("queue.png", "image/png"),
+    )
+    await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        shared_conversation,
+        seq=2,
+        text="later",
+        fired=fired + timedelta(minutes=5),
+        artifact=("later.md", "text/markdown"),
+    )
+    private_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=f"{agent_id}/m@example.com/{uuid4().hex}",
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+    )
+    private_run = await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        private_conversation,
+        key=f"pin-private:{uuid4()}",
+        text="private",
+        fired=fired + timedelta(minutes=1),
+        artifact=("mine.md", "text/markdown"),
+    )
+    page = (
+        await client.get(
+            f"{RADAR_PATH}?turn={pinned}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+        )
+    ).json()
+    assert [run["turn_id"] for run in page["runs"]] == [str(pinned)]
+    assert page["older"] is None
+    assert page["newer"] is None
+    fenced = (
+        await client.get(
+            f"{RADAR_PATH}?turn={private_run}", headers={"cookie": f"{SESSION_COOKIE}={token_n}"}
+        )
+    ).json()
+    assert fenced["runs"] == []
+    malformed = await client.get(
+        f"{RADAR_PATH}?turn=nonsense", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert malformed.status_code == 400
+
+
 async def test_radar_pages_by_keyset(
     web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1,7 +1,9 @@
 import { useLayoutEffect, useState } from "react";
 
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Filter } from "@/components/ui/filter";
 import { Reveal } from "@/components/ui/reveal";
+import { Sheet } from "@/components/ui/sheet";
 import { ARTIFACT_TEXT_BYTES, useTextArtifact } from "@/kernel/artifact";
 import { useBeside } from "@/kernel/beside";
 import { ObjectDetail, ObjectPane, type ObjectAddress } from "@/kernel/objects";
@@ -9,10 +11,11 @@ import { Pager, type Placement } from "@/kernel/pager";
 import { PageHeader, PageToolbar } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { slackLink } from "@/lib/audience";
+import { cn } from "@/lib/cn";
 import { useAgents } from "@/lib/mainAgent";
 import { Markdown } from "@/lib/markdown";
 import { Moment, day } from "@/lib/moments";
-import { agentHash, chatHash } from "@/lib/route";
+import { agentHash, chatHash, sectionHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
 /** What stands on the radar: the feed of what ran on its own leads, and the two kinds of standing
@@ -27,6 +30,7 @@ const FAMILIES = [
 
 const TASK_KIND = "scheduled_task";
 const OBJECT_PREFIX = "object/";
+const RUN_PREFIX = "run/";
 
 type RadarArtifact = {
   filename: string;
@@ -134,6 +138,9 @@ function Lead({ value, onPlace }: { value: string; onPlace: (place: Placement) =
   );
 }
 
+/** The feed, or — when the place carries a run's own address, which is what a story's dateline
+ *  links — the one story that address names, with the whole feed one press away. A pinned page
+ *  that answers no run says so: the run is gone or was never this reader's to read. */
 function Feed({
   place,
   onPlace,
@@ -141,17 +148,35 @@ function Feed({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
+  const pinned = place.open?.startsWith(RUN_PREFIX)
+    ? place.open.slice(RUN_PREFIX.length)
+    : null;
   const params = new URLSearchParams();
-  if (place.after) params.set("after", place.after);
+  if (pinned) params.set("turn", pinned);
+  else if (place.after) params.set("after", place.after);
   const state = usePanelRead<RadarPayload>(
     "/workspace/radar" + (params.size ? "?" + params.toString() : ""),
   );
   return (
     <Panel state={state} shape="cards">
       {(payload) => {
+        const back = pinned ? (
+          <Button variant="row" onClick={() => onPlace({ open: undefined })}>
+            All reports
+          </Button>
+        ) : null;
         if (!payload.runs.length)
           return (
-            <PanelBlank body="Each scheduled run reports here: the reply it closed with and the files it shared." />
+            <>
+              <PanelBlank
+                body={
+                  pinned
+                    ? "This report does not exist or is not shared with you."
+                    : "Each scheduled run reports here: the reply it closed with and the files it shared."
+                }
+              />
+              {back ? <div className="mt-4xl">{back}</div> : null}
+            </>
           );
         return (
           <>
@@ -172,9 +197,7 @@ function Feed({
                 </section>
               ))}
             </div>
-            <div className="mt-4xl">
-              <Pager payload={payload} onPlace={onPlace} />
-            </div>
+            <div className="mt-4xl">{back ?? <Pager payload={payload} onPlace={onPlace} />}</div>
           </>
         );
       }}
@@ -259,7 +282,9 @@ function Story({
         </p>
       ) : null}
       <p className="m-0 flex flex-wrap gap-x-lg font-mono text-mono text-ink-soft">
-        <Moment at={run.fired_at} />
+        <a href={sectionHash("radar", { open: RUN_PREFIX + run.turn_id })} className={out}>
+          <Moment at={run.fired_at} />
+        </a>
         <a href={chatHash(run.conversation_id)} className={out}>
           Conversation
         </a>
@@ -352,9 +377,11 @@ function Report({
   );
 }
 
-/** A file the run shared: its picture where one exists, else its name and size — either way the
- *  signed link opens it, and a file whose link is not minted is named without one. */
+/** A file the run shared: its picture where one exists, else its name and size — pressing either
+ *  opens the file full beside the feed with its download, and a file whose link is not minted is
+ *  named without one. */
 function Shared({ artifact }: { artifact: RadarArtifact }) {
+  const [open, setOpen] = useState(false);
   const card = artifact.preview_url ? (
     <img
       loading="lazy"
@@ -370,13 +397,68 @@ function Shared({ artifact }: { artifact: RadarArtifact }) {
   );
   if (!artifact.url) return card;
   return (
-    <a
-      href={artifact.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="block no-underline hover:opacity-muted-soft"
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="block cursor-pointer border-0 bg-transparent p-0 text-left hover:opacity-muted-soft"
+      >
+        {card}
+      </button>
+      {open ? <FileSheet artifact={artifact} onClose={() => setOpen(false)} /> : null}
+    </>
+  );
+}
+
+/** The pressed file at full size: its picture — the file itself when it is an image, the first
+ *  rendered page when it is a document — under its name and the download that fetches the file
+ *  itself. A file with no picture is stated as such; the download still answers. */
+function FileSheet({ artifact, onClose }: { artifact: RadarArtifact; onClose: () => void }) {
+  const meta = [artifact.subject, artifact.media_type, formatSize(artifact.size_bytes)]
+    .filter((part) => part)
+    .join(" · ");
+  return (
+    <Sheet
+      open
+      onClose={onClose}
+      title={artifact.filename}
+      actions={
+        <a
+          href={artifact.url ?? ""}
+          download={artifact.filename}
+          className={cn(buttonVariants({ variant: "send" }), "shrink-0 no-underline")}
+        >
+          Download
+        </a>
+      }
     >
-      {card}
-    </a>
+      <div className="font-mono text-small text-ink-soft">{meta}</div>
+      {artifact.preview_url || artifact.media_type.startsWith("image/") ? (
+        <FullPicture artifact={artifact} />
+      ) : (
+        <div className="font-mono text-small text-ink-soft">
+          No preview for this file type. Download it to open it.
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+function FullPicture({ artifact }: { artifact: RadarArtifact }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <div className="font-mono text-small text-ink-soft">
+        The image did not load. Its link may have expired — reload the page.
+      </div>
+    );
+  }
+  return (
+    <img
+      alt={artifact.subject || artifact.filename}
+      src={artifact.preview_url ?? artifact.url ?? ""}
+      onError={() => setFailed(true)}
+      className="max-h-(--media-tall) max-w-full object-contain"
+    />
   );
 }

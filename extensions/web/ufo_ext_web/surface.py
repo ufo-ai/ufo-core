@@ -3071,7 +3071,10 @@ async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
     that ceiling, and every older run, reads behind the `older` cursor, which pages
     `RADAR_MIN_RUNS` at a time. Both counts are counts of runs that reported — the rows the feed
     draws — so a day of fires that published nothing costs the page nothing and no page reads
-    empty while a run remains behind it."""
+    empty while a run remains behind it.
+
+    `turn` pins the page to exactly one run — the permalink read — with no cursors; a run the
+    reader's audience refuses reads as an empty page."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -3092,12 +3095,22 @@ async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
             return Response("invalid agent", status_code=400)
         if not audience.allows(agent_id):
             return Response("unknown agent", status_code=404)
-    limit = RADAR_MIN_RUNS
-    if cursor is None:
-        midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-        today = await ctx.count_scheduled_runs_since(member_id, midnight, agent_id=agent_id)
-        limit = min(max(RADAR_MIN_RUNS, today), RADAR_MAX_RUNS)
-    page = await ctx.list_scheduled_runs(member_id, limit=limit, cursor=cursor, agent_id=agent_id)
+    raw_turn = request.query_params.get("turn", "").strip()
+    if raw_turn:
+        try:
+            turn_id = UUID(raw_turn)
+        except ValueError:
+            return Response("invalid turn", status_code=400)
+        page = await ctx.list_scheduled_runs(member_id, limit=1, turn_id=turn_id)
+    else:
+        limit = RADAR_MIN_RUNS
+        if cursor is None:
+            midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+            today = await ctx.count_scheduled_runs_since(member_id, midnight, agent_id=agent_id)
+            limit = min(max(RADAR_MIN_RUNS, today), RADAR_MAX_RUNS)
+        page = await ctx.list_scheduled_runs(
+            member_id, limit=limit, cursor=cursor, agent_id=agent_id
+        )
     task_names = await _radar_task_names(ctx, audience, member_id, page.rows)
     return JSONResponse(
         {

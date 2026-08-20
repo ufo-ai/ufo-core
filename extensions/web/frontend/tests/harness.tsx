@@ -35,10 +35,16 @@ export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
   );
 }
 
-export function PlacedSection({ section }: { section: Section }) {
+export function PlacedSection({
+  section,
+  place = {},
+}: {
+  section: Section;
+  place?: WorkspacePlace;
+}) {
   const [placed, setPlaced] = useState<{ section: Section; place: WorkspacePlace }>({
     section,
-    place: {},
+    place,
   });
   if (placed.section !== section) setPlaced({ section, place: {} });
   return (
