@@ -20,9 +20,6 @@ from ufo.accounting import (
     SpendReport as SpendReport,
 )
 from ufo.accounting import (
-    SubjectTotal as SubjectTotal,
-)
-from ufo.accounting import (
     UsageExport as UsageExport,
 )
 from ufo.accounting import (
