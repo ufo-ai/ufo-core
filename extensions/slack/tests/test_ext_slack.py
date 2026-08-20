@@ -7281,6 +7281,9 @@ def test_every_shape_a_tool_free_checkpoint_can_render() -> None:
     assert writing.report(300.0) == "Preparing the response · 5m in"
 
 
+ARMING_READ_BUDGET_SECONDS = 30.0
+
+
 async def _arm_followers(
     workspace_id: UUID, turn_id: UUID, hub: InProcessHub, age: timedelta = timedelta(0)
 ) -> None:
@@ -7295,6 +7298,10 @@ async def _arm_followers(
     out-wait — the held clock is what makes first-post footers a decision instead of a race. A
     test exercising a resumed run passes the wait the member has actually had. The resolution is
     asserted clean because the event gates the turn: a handler that raises here would deny it.
+
+    The thread-mirror read is held open the same way: its production budget resolves a slow read
+    to a turn running unfollowed, which on a loaded worker would silently arm nothing — here a
+    slow read slows the arm instead of losing it.
     """
     with ws(workspace_id):
         turn, agent, audience = await _load_turn(turn_id)
@@ -7313,6 +7320,8 @@ async def _arm_followers(
                 return moment if tz is not None else moment.replace(tzinfo=None)
 
         slack.datetime = _ArmingInstant
+        shipped_budget = slack.THREAD_MIRROR_READ_SECONDS
+        slack.THREAD_MIRROR_READ_SECONDS = ARMING_READ_BUDGET_SECONDS
         try:
             resolution = await chain.fire(
                 "user_prompt_submit",
@@ -7323,6 +7332,7 @@ async def _arm_followers(
             )
         finally:
             slack.datetime = datetime
+            slack.THREAD_MIRROR_READ_SECONDS = shipped_budget
     assert resolution.denied is None
 
 
@@ -7551,6 +7561,46 @@ async def test_a_turn_shorter_than_the_first_interval_posts_no_progress(
     await asyncio.wait_for(task, timeout=10)
 
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+
+
+async def test_the_followers_arm_even_when_the_mirror_read_outwaits_its_budget(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Arming reads the thread mirror under a budget that in production resolves a slow read to a
+    turn running unfollowed. The rig holds that budget open the way it holds the arming clock, so a
+    loaded worker slows the arm instead of losing it — the reporter these tests hand frames to is
+    armed by decision, not by winning a race."""
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "THREAD_MIRROR_READ_SECONDS", 0.05)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    unhurried_get = slack.ScopedStore.get
+
+    async def outwaited_get(self: slack.ScopedStore, key: str) -> slack.JsonValue | None:
+        await asyncio.sleep(0.2)
+        return await unhurried_get(self, key)
+
+    monkeypatch.setattr(slack.ScopedStore, "get", outwaited_get)
+    await _arm_followers(workspace_id, turn_id, hub)
+    task = slack._PROGRESS_TASKS[turn_id]
+
+    await _finish_turn(turn_id, "hi")
+    await asyncio.wait_for(task, timeout=10)
 
 
 RESUME_FRAME_SETTLE_SECONDS = 0.2
