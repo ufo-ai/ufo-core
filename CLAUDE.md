@@ -219,9 +219,11 @@ as a portfolio, not a single bet:
   migration adds only the columns its unit wires; later units bring their own migrations.
 - **A new migration's id is a UTC stamp** — scaffold it with `uv run ufoctl new-migration <slug>`,
   which writes `core/src/ufo/schema/migrations/versions/<YYYYMMDDHHMMSS>_<slug>.py` carrying that
-  stamp as `revision` and core's head as `down_revision`. The id carries no ordering —
+  stamp as `revision` and core's head as `down_revision`, and rewrites `versions/HEAD` so two
+  racing migration branches conflict at merge instead of forking main. The id carries no ordering —
   `down_revision` does, and the single-head gate is the guard. When another branch's migration
-  merges first, repoint `down_revision` at the new head and keep the stamp.
+  merges first, repoint `down_revision` at the new head, rewrite `versions/HEAD`, and keep the
+  stamp.
 - Prove the chain end-to-end: realistic input → durable state → a user or agent can use it.
 - Failed experiments are reverted in the same session, with the revert committed.
 - Docs (spec.md, README.md) update in the same commit as the architectural change they

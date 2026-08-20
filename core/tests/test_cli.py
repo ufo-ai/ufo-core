@@ -14,7 +14,9 @@ from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
 from ufo.cli import (
+    CORE_VERSIONS_DIR,
     DEFAULT_CONFIG,
+    MIGRATION_HEAD_FILENAME,
     BrowserHandoff,
     _load_dotenv,
     init,
@@ -114,6 +116,30 @@ def test_new_migration_stamps_the_id_and_chains_onto_core_head(
     body = written[0].read_text()
     assert f'revision: str = "{stamp}"' in body
     assert f'down_revision: str | None = "{core_migration_head()}"' in body
+
+
+def test_new_migration_advances_the_head_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The head file is the merge tripwire: two branches chaining onto the same parent both rewrite
+    its one line, so the second merge conflicts on GitHub instead of forking main's graph."""
+    monkeypatch.setattr("ufo.cli.CORE_VERSIONS_DIR", tmp_path)
+
+    result = CliRunner().invoke(new_migration, ["probe_ledger_split"])
+
+    assert result.exit_code == 0, result.output
+    [written] = tmp_path.glob("*.py")
+    assert (tmp_path / MIGRATION_HEAD_FILENAME).read_text() == f"{written.stem.split('_')[0]}\n"
+
+
+def test_head_file_names_the_graphs_core_head() -> None:
+    """The file is derived from the graph, so only this assertion keeps it honest: a migration
+    added or repointed without rewriting it lands here, not in a teammate's merge conflict."""
+    recorded = (CORE_VERSIONS_DIR / MIGRATION_HEAD_FILENAME).read_text()
+    assert recorded == f"{core_migration_head()}\n", (
+        f"{CORE_VERSIONS_DIR / MIGRATION_HEAD_FILENAME} must hold core's head "
+        f"{core_migration_head()} — rewrite it in the change that moved the head"
+    )
 
 
 @pytest.mark.parametrize("slug", ["Ledger Split", "ledger-split", "0114_ledger"])

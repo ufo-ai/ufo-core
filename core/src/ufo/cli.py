@@ -84,6 +84,7 @@ search_provider = "perplexity"
 public_base_url = "http://localhost:8710"
 """
 CORE_VERSIONS_DIR = MIGRATIONS_DIR / "versions"
+MIGRATION_HEAD_FILENAME = "HEAD"
 MIGRATION_STAMP = "%Y%m%d%H%M%S"
 MIGRATION_FILE_MODE = 0o644
 MIGRATION_SLUG = re.compile(r"[a-z][a-z0-9_]*")
@@ -323,7 +324,9 @@ def new_migration(slug: str) -> None:
     The stamp is the id, so two branches open the same day never claim the same one and neither has
     to be renumbered to land. The id carries no ordering: `down_revision` does, and this writes
     core's head right now. When another branch's migration merges first, repoint `down_revision` at
-    the new head and keep the stamp — the single-head gate is what catches a fork."""
+    the new head and keep the stamp — the single-head gate is what catches a fork. The rewrite of
+    `versions/HEAD` is what makes two racing migration branches conflict at merge instead of
+    forking main."""
     head = core_migration_head()
     stamp = datetime.now(UTC).strftime(MIGRATION_STAMP)
     with contained_file(f"{stamp}_{slug}.py", CORE_VERSIONS_DIR) as target:
@@ -331,6 +334,8 @@ def new_migration(slug: str) -> None:
             MIGRATION_TEMPLATE.format(revision=stamp, down_revision=head), MIGRATION_FILE_MODE
         )
         click.echo(f"wrote {target.path} — revision {stamp}, down_revision {head}")
+    with contained_file(MIGRATION_HEAD_FILENAME, CORE_VERSIONS_DIR) as head_file:
+        head_file.replace_text(f"{stamp}\n", MIGRATION_FILE_MODE)
 
 
 @main.command()

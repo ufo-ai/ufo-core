@@ -393,8 +393,9 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     the db↔loader↔context cycle (the loader reaches core through the same context that binds to this
     module).
 
-    Two files claiming one revision id are one graph node, so the graph is validated before any DDL
-    runs."""
+    Two files claiming one revision id are one graph node, and a location with two heads is a fork
+    that would stamp both and wedge every migrate after the fork is linearized — so the graph is
+    validated before any DDL runs."""
     from ufo.ext.loader import migration_locations
 
     config = AlembicConfig()
@@ -403,12 +404,22 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     config.set_main_option("version_locations", os.pathsep.join(locations))
     config.set_main_option("path_separator", "os")
     config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    scripts = ScriptDirectory.from_config(config)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            ScriptDirectory.from_config(config).get_heads()
+            heads = scripts.get_heads()
     except UserWarning as error:
         raise RuntimeError("a duplicate migration revision collapses into one node") from error
+    heads_by_location: dict[Path, list[str]] = {}
+    for head in heads:
+        heads_by_location.setdefault(Path(scripts.get_revision(head).path).parent, []).append(head)
+    for location, revisions in heads_by_location.items():
+        if len(revisions) > 1:
+            raise RuntimeError(
+                f"migration graph forked: {location} has heads {sorted(revisions)}; "
+                "repoint down_revision at the branch head"
+            )
     command.upgrade(config, "heads")
     if url.startswith("sqlite"):
         _seal_sqlite_journal(url)

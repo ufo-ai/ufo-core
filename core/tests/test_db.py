@@ -454,6 +454,40 @@ def test_apply_migrations_rejects_duplicate_revision_ids(
         apply_migrations(f"sqlite+aiosqlite:///{tmp_path / 'probe.db'}")
 
 
+FORK_PROBE = """\"\"\"fork probe\"\"\"
+
+revision: str = "{revision}"
+down_revision: str | None = {down_revision}
+branch_labels: tuple[str, ...] | None = None
+depends_on: str | None = None
+
+
+def upgrade() -> None:
+    pass
+
+
+def downgrade() -> None:
+    pass
+"""
+
+
+def test_apply_migrations_rejects_forked_heads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two revisions chained onto one parent fork the branch: `upgrade heads` would stamp both,
+    and once the fork is later linearized every migrate fails on the overlapping stamp rows."""
+    probe = tmp_path / "probe_versions"
+    probe.mkdir()
+    (probe / "base.py").write_text(FORK_PROBE.format(revision="probe_base", down_revision="None"))
+    for name in ("probe_a", "probe_b"):
+        (probe / f"{name}.py").write_text(
+            FORK_PROBE.format(revision=name, down_revision='"probe_base"')
+        )
+    monkeypatch.setattr("ufo.ext.loader.migration_locations", lambda pack: (str(probe),))
+    with pytest.raises(RuntimeError, match="forked"):
+        apply_migrations(f"sqlite+aiosqlite:///{tmp_path / 'probe.db'}")
+
+
 def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None:
     """The migration seam's schema invariant: each extension's version location layers over
     core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head per
