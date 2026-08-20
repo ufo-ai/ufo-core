@@ -6532,6 +6532,53 @@ async def test_credential_prompts_stream_pending_and_fulfill_privately(
     assert turns == 1
 
 
+async def test_transcript_reload_still_offers_the_pending_connect_handoff(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The reload draws the same connect control the live stream drew, at the same memoized URL —
+    the reply told the member to press it, and the consent window's own focus round-trip is what
+    re-reads the transcript. A deploy without a connect flow serves the transcript without it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    flow = ConnectFlow(
+        providers={"github": ConnectProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="https://ufo.example.test/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(
+            status="done",
+            text="Use the connection control.",
+            connect_request=ConnectRequest(provider="github", requester_member_id=member_id),
+        ),
+    )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        streamed = dict(await _collect_events(client, token, turn_id))
+        loaded = await client.get(
+            f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+            headers=cookie,
+        )
+    finally:
+        install_connect_flow(None)
+    assert loaded.status_code == 200
+    url = loaded.json()["connect"]["url"]
+    assert url.startswith("https://oauth.example.test/authorize")
+    assert streamed["connect"]["url"] == url
+    unbrokered = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+    assert unbrokered.status_code == 200
+    assert "connect" not in unbrokered.json()
+
+
 async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],

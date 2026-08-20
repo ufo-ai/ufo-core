@@ -240,8 +240,9 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
 
   /** The reply this turn settles into, carrying what the turn still asks of the member, what it
    *  shared, and what it created: the question stands under the words that asked it, a file on the
-   *  words that shared it, and an app's card on the words that made it, so the reply is recorded
-   *  for any of them alone even when the turn wrote nothing else. */
+   *  words that shared it, an app's card on the words that made it, and the connect control on the
+   *  words that posted it, so the reply is recorded for any of them alone even when the turn wrote
+   *  nothing else. */
   const record = () =>
     updateChat(chatKey, (state) => {
       const live = state.live;
@@ -250,6 +251,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       if (
         !live ||
         (!live.text &&
+          !live.connectUrl &&
           !live.subagents.length &&
           !live.files.length &&
           !live.apps.length &&
@@ -595,6 +597,20 @@ export function resyncChat(target: ChatTarget): void {
   void refreshTranscript(target);
 }
 
+/** The reply the transcript's open connect handoff rides: the newest turn's, which is the last
+ *  assistant message — the same bubble the live stream folded the control into — or a wordless
+ *  reply of its own when that turn's words all became steps. */
+function withConnect(messages: Bubble[], url: string): Bubble[] {
+  for (let at = messages.length - 1; at >= 0; at -= 1) {
+    if (messages[at].role === "assistant") {
+      return messages.map((message, index) =>
+        index === at ? { ...message, connectUrl: url } : message,
+      );
+    }
+  }
+  return [...messages, { role: "assistant", text: "", connectUrl: url }];
+}
+
 export async function refreshTranscript(
   target: ChatTarget,
   onlyIfEmpty = false,
@@ -632,9 +648,10 @@ export async function refreshTranscript(
     if (!onlyIfEmpty && (current.busy || current.turn)) return current;
     const question = current.handoffs.question ?? null;
     const running = ("turn" in payload && payload.turn) || null;
+    const connect = ("connect" in payload && payload.connect) || null;
     return {
       ...current,
-      messages: payload.messages,
+      messages: connect ? withConnect(payload.messages, connect.url) : payload.messages,
       earlier: payload.earlier ?? 0,
       fault: null,
       busy: running ? true : current.busy,

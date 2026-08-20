@@ -186,6 +186,8 @@ export type Transcript = {
   earlier?: number;
   turn?: string;
   credentials?: CredentialRequest | null;
+  /** The private connect control the newest turn still offers, at the URL that turn memoized. */
+  connect?: { url: string } | null;
 };
 
 export type SchemaProperty = {

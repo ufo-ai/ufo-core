@@ -405,6 +405,56 @@ test("a connect frame offers the consent link, and a connect_error states the fa
   expect(await screen.findByText("The provider refused the request.")).toBeTruthy();
 });
 
+test("the consent link stands after the page re-reads the transcript", async () => {
+  const stream = await streaming();
+  stream.emit("connect", { url: "https://consent.example/go" });
+  await screen.findByRole("link", { name: "Connect account" });
+  stream.emit("terminal", {
+    status: "done",
+    text: "Authorize it.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1,
+  });
+  await screen.findByText("Authorize it.");
+
+  // Pressing the link is itself what re-reads the transcript: the consent window takes the focus
+  // and gives it back, and the re-read serves the same open handoff the stream drew.
+  wire({
+    "/transcript": () =>
+      json({
+        messages: [
+          { role: "user", text: "go" },
+          { role: "assistant", text: "Authorize it, says the record." },
+        ],
+        connect: { url: "https://consent.example/go" },
+      }),
+  });
+  act(() => {
+    window.dispatchEvent(new Event("focus"));
+  });
+
+  await screen.findByText("Authorize it, says the record.");
+  const link = await screen.findByRole("link", { name: "Connect account" });
+  expect(link.getAttribute("href")).toBe("https://consent.example/go");
+});
+
+test("a connect turn that ends wordless keeps the control it posted", async () => {
+  const stream = await streaming();
+  stream.emit("tool", { tool: "connect_account", preview: "" });
+  stream.emit("connect", { url: "https://consent.example/go" });
+  await screen.findByRole("link", { name: "Connect account" });
+
+  // The reply was cut into the steps, so the terminal states no words — the control and the steps
+  // are all the turn left, and they are what the member acts on.
+  stream.emit("terminal", { status: "done", text: "", model: "opus", tokens: 5, cost_micro_usd: 1 });
+  await delivered();
+
+  const link = screen.getByRole("link", { name: "Connect account" });
+  expect(link.getAttribute("href")).toBe("https://consent.example/go");
+  expect(screen.getByText("Completed 1 step")).toBeTruthy();
+});
+
 test("consent opens in a window this page owns, so its return page can close itself", async () => {
   const stream = await streaming();
   const consent = { focus: vi.fn() };

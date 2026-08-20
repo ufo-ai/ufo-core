@@ -1835,23 +1835,33 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         if turn.terminal is None:
             payload["turn"] = str(turn.id)
         else:
-            payload.update(await _open_handoffs(ctx, turn.id, turn.terminal))
+            payload.update(await _open_handoffs(ctx, turn.id, member_id, turn.terminal))
     return JSONResponse(payload)
 
 
 async def _open_handoffs(
-    ctx: SurfaceContext, turn_id: UUID, terminal: TerminalFrame
+    ctx: SurfaceContext, turn_id: UUID, member_id: UUID, terminal: TerminalFrame
 ) -> dict[str, object]:
     """What the conversation's newest committed turn still asks of the member, so a reload
     re-renders the same affordances the live stream drew: credential prompts still awaiting
-    values. A question, a shared file, and the card of an app the turn created are not among
-    them — each rides the reply it belongs to, which is where the member answers one, reads
-    another, and opens the third."""
+    values, and the private connect control an open handoff still offers — at the URL the turn
+    memoized, so the reload and the stream name one control. Pressing that control is itself what
+    re-reads this projection (the consent window's focus round-trip), so a reload that dropped it
+    would take the control away the moment it was used. A request another member spoke, one whose
+    seal expired, or a deploy with no connect flow serves the transcript without it. A question,
+    a shared file, and the card of an app the turn created are not among the handoffs — each rides
+    the reply it belongs to, which is where the member answers one, reads another, and opens the
+    third."""
     handoffs: dict[str, object] = {}
     if terminal.credential_request is not None:
         prompts = await _pending_prompts(ctx, terminal.credential_request)
         if prompts is not None:
             handoffs["credentials"] = prompts
+    if terminal.connect_request is not None:
+        try:
+            handoffs["connect"] = {"url": await ctx.connect_url(turn_id, member_id)}
+        except ConnectRequestInvalid:
+            pass
     return handoffs
 
 
