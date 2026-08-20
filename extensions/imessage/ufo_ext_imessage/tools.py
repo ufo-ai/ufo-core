@@ -1,3 +1,4 @@
+import io
 import json
 import re
 import secrets
@@ -7,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 from uuid import uuid4
 
+import segno
 from pydantic import BaseModel, Field, field_validator
 
 from ufo.sdk.surfaces import AddressClaimState
@@ -25,6 +27,10 @@ from ufo_ext_imessage.surface import (
 E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
 PHONE_CLAIM_MINUTES = 30
 PHONE_CLAIM_TTL = timedelta(minutes=PHONE_CLAIM_MINUTES)
+OPT_IN_QR_FILENAME = "opt-in.png"
+OPT_IN_QR_CAPTION = "Scan with that phone to open the message."
+OPT_IN_QR_SCALE = 10
+OPT_IN_QR_BORDER = 2
 
 
 def opt_in_link(assigned_phone_number: str, opt_in_code: str) -> str:
@@ -32,6 +38,17 @@ def opt_in_link(assigned_phone_number: str, opt_in_code: str) -> str:
     message a shared line needs before it can message that phone. `sms:` is the only scheme Apple
     documents, and the `?&body=` form is the one Photon's own redirect ships."""
     return f"sms:{assigned_phone_number}?&body={quote(f'{OPT_IN_TEXT} {opt_in_code}')}"
+
+
+def opt_in_qr(assigned_phone_number: str, opt_in_code: str) -> bytes:
+    """The same prefilled message as a QR, so a member reading this in a desktop chat points a
+    phone camera at it instead of retyping the code. `SMSTO:` is the payload a phone camera opens
+    Messages from; the `sms:` URI the link uses is not read as consistently."""
+    image = io.BytesIO()
+    segno.make(f"SMSTO:{assigned_phone_number}:{OPT_IN_TEXT} {opt_in_code}", error="m").save(
+        image, kind="png", scale=OPT_IN_QR_SCALE, border=OPT_IN_QR_BORDER
+    )
+    return image.getvalue()
 
 
 class ImessageConnectInput(BaseModel):
@@ -65,7 +82,8 @@ def _opt_in_result(assigned_phone_number: str, opt_in_code: str) -> ToolResult:
     return _result(
         "pending",
         f'Text "{opt_in_text}" to {assigned_phone_number} from that phone within '
-        f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter.",
+        f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
+        "Scan the attached image with that phone to open the message.",
         assigned_phone_number=assigned_phone_number,
         opt_in_text=opt_in_text,
         opt_in_link=opt_in_link(assigned_phone_number, opt_in_code),
@@ -126,4 +144,9 @@ class ImessageConnect:
             )
             if not await ctx.ext.store.put_if(key, claim.model_dump(mode="json"), expected=stored):
                 return _result("not_connected", "The phone connection changed. Ask again.")
+        await ctx.share_artifact(
+            OPT_IN_QR_FILENAME,
+            opt_in_qr(claim.assigned_phone_number, claim.opt_in_code),
+            OPT_IN_QR_CAPTION,
+        )
         return _opt_in_result(claim.assigned_phone_number, claim.opt_in_code)

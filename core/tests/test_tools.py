@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+import sqlalchemy as sa
 from pydantic import BaseModel, ValidationError
 
 from ufo.audience import (
@@ -19,7 +20,8 @@ from ufo.audience import (
     foreign_room_audience,
     room_audience,
 )
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.db import workspace_tx
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.local import LocalCarrier
@@ -30,6 +32,7 @@ from ufo.sandbox.session import (
     SandboxSpec,
     workspace_path,
 )
+from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillCard, SkillRegistry
 from ufo.subjects import member_subject
@@ -39,8 +42,16 @@ from ufo.tools.builtins import (
     SHARE_PREFLIGHT_CMD,
     _file_tool_result,
 )
-from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext, ToolResult
+from ufo.tools.context import (
+    SHARED_BYTES_LIMIT,
+    Spawn,
+    SpawnResult,
+    SubagentStatus,
+    ToolContext,
+    ToolResult,
+)
 from ufo.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
+from ufo.workspace import ws
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 ARTIFACT_SECRET = "tools-test-secret"
@@ -990,3 +1001,96 @@ def test_the_audience_seal_holds_for_every_audience_and_speaker(
 
     assert ctx.read_subjects == frozenset(subjects)
     assert str(ctx.effective_audience) == write_to
+
+
+async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
+    db: None, tmp_path: Path
+) -> None:
+    """A tool that computes an image itself has no sandbox file to preflight, so the size is bounded
+    at the call and the row is the same one `share_file` writes — which is what every surface
+    already uploads from."""
+    workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="cli",
+                queue_key="share-bytes",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="render it",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    ctx = ToolContext(
+        sandbox=None,
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
+        turn=Turn(
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            seq=1,
+            status="running",
+            inbound="render it",
+            created_at=datetime(2026, 8, 20, tzinfo=UTC),
+        ),
+        agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+        spawn=None,
+        speaker_member_id=None,
+        audience=conversation_audience(None),
+        artifact_token_secret="secret",
+    )
+    with ws(workspace_id):
+        await ctx.share_artifact("card.png", b"\x89PNG the bytes", "A caption.")
+        with pytest.raises(ValueError, match="exceeds"):
+            await ctx.share_artifact("huge.png", b"x" * (SHARED_BYTES_LIMIT + 1))
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.shared_artifact.c.turn_id,
+                        tables.shared_artifact.c.filename,
+                        tables.shared_artifact.c.subject,
+                        tables.shared_artifact.c.media_type,
+                        tables.shared_artifact.c.size_bytes,
+                        tables.shared_artifact.c.blob_key,
+                    )
+                )
+            ).one()
+        stored = await ctx.blob.get(row.blob_key)
+    assert row.turn_id == turn_id
+    assert row.filename == "card.png"
+    assert row.subject == "A caption."
+    assert row.media_type == "image/png"
+    assert row.size_bytes == len(b"\x89PNG the bytes")
+    assert stored == b"\x89PNG the bytes"

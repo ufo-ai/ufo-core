@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import threading
 from collections.abc import AsyncGenerator
@@ -12,6 +13,7 @@ from uuid import UUID, uuid4
 import grpc
 import httpx
 import pytest
+import segno
 import sqlalchemy as sa
 import ufo_ext_imessage.cloud as cloud
 import ufo_ext_imessage.surface as surface_module
@@ -49,6 +51,10 @@ from ufo_ext_imessage.surface import (
     queue_key,
 )
 from ufo_ext_imessage.tools import (
+    OPT_IN_QR_BORDER,
+    OPT_IN_QR_CAPTION,
+    OPT_IN_QR_FILENAME,
+    OPT_IN_QR_SCALE,
     PHONE_CLAIM_MINUTES,
     ImessageConnect,
     ImessageConnectInput,
@@ -250,20 +256,50 @@ def _message(
     )
 
 
-def _tool_context(workspace_id: UUID, member_id: UUID) -> ToolContext:
+async def _tool_context(workspace_id: UUID, member_id: UUID, root: Path) -> ToolContext:
+    """A tool call inside a real turn: the connect tool shares the opt-in QR as an artifact of the
+    turn it runs in, which is a row like any other."""
+    turn = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=await _agent_of(workspace_id),
+        seq=1,
+        status="running",
+        inbound="Connect my phone.",
+        created_at=datetime.now(UTC),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=turn.conversation_id,
+                workspace_id=workspace_id,
+                agent_id=turn.agent_id,
+                surface="web",
+                queue_key=str(turn.conversation_id),
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn.id,
+                workspace_id=workspace_id,
+                conversation_id=turn.conversation_id,
+                agent_id=turn.agent_id,
+                seq=turn.seq,
+                status=turn.status,
+                inbound=turn.inbound,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     return ToolContext(
         sandbox=None,
-        blob=None,
-        turn=Turn(
-            id=uuid4(),
-            workspace_id=workspace_id,
-            conversation_id=uuid4(),
-            agent_id=uuid4(),
-            seq=1,
-            status="running",
-            inbound="Connect my phone.",
-            created_at=datetime.now(UTC),
-        ),
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=root)),
+        turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=member_id,
@@ -280,6 +316,30 @@ def _tool_context(workspace_id: UUID, member_id: UUID) -> ToolContext:
 
 async def _owned() -> bool:
     return True
+
+
+async def _agent_of(workspace_id: UUID) -> UUID:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+
+async def _shared_artifacts() -> list[tuple[str, str, str | None, str]]:
+    async with workspace_tx() as connection:
+        return [
+            (row.filename, row.media_type, row.subject, row.blob_key)
+            for row in await connection.execute(
+                sa.select(
+                    tables.shared_artifact.c.filename,
+                    tables.shared_artifact.c.media_type,
+                    tables.shared_artifact.c.subject,
+                    tables.shared_artifact.c.blob_key,
+                ).order_by(tables.shared_artifact.c.created_at)
+            )
+        ]
 
 
 async def _claim(
@@ -357,7 +417,7 @@ async def _member(workspace_id: UUID, email: str) -> UUID:
     return member_id
 
 
-async def test_a_project_change_requires_an_admin_then_rebinds(db: None) -> None:
+async def test_a_project_change_requires_an_admin_then_rebinds(db: None, tmp_path: Path) -> None:
     workspace_id, admin_id = await _seed()
     member_id = await _member(workspace_id, "other@example.com")
 
@@ -367,8 +427,8 @@ async def test_a_project_change_requires_an_admin_then_rebinds(db: None) -> None
             return "project:new"
 
     provider = NewProjectProvider()
-    admin = _tool_context(workspace_id, admin_id)
-    member = _tool_context(workspace_id, member_id)
+    admin = await _tool_context(workspace_id, admin_id, tmp_path)
+    member = await _tool_context(workspace_id, member_id, tmp_path)
     with ws(workspace_id):
         assert admin.ext is not None
         await admin.ext.installations.bind(SURFACE_IMESSAGE, "project:old")
@@ -773,7 +833,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     phone = "+14155550123"
     provider = RecordingProvider()
     tool = ImessageConnect(provider=lambda: provider)
-    tool_context = _tool_context(workspace_id, member_id)
+    tool_context = await _tool_context(workspace_id, member_id, tmp_path)
     dbos = StubDbos()
     context = _context(workspace_id, tmp_path, dbos)
     args = ImessageConnectInput(phone_number=phone, user_description="Connect my phone.")
@@ -787,7 +847,8 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
         "state": "pending",
         "instruction": (
             f'Text "{opt_in_text}" to +14085550123 from that phone within '
-            f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter."
+            f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
+            "Scan the attached image with that phone to open the message."
         ),
         "assigned_phone_number": "+14085550123",
         "opt_in_text": opt_in_text,
@@ -833,10 +894,11 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
         conversation = (
             await connection.execute(
                 sa.select(
+                    tables.conversation.c.id,
                     tables.conversation.c.member_id,
                     tables.conversation.c.queue_key,
                     tables.conversation.c.surface_label,
-                )
+                ).where(tables.conversation.c.surface == SURFACE_IMESSAGE)
             )
         ).one()
         turns = (
@@ -845,7 +907,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
                     tables.turn.c.inbound,
                     tables.turn.c.speaker_member_id,
                     tables.turn.c.context,
-                )
+                ).where(tables.turn.c.conversation_id == conversation.id)
             )
         ).all()
         writebacks = (
@@ -875,12 +937,44 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     ]
 
 
-async def test_an_expired_claim_can_move_to_another_member(db: None) -> None:
+async def test_the_pending_result_shares_the_opt_in_as_a_qr(db: None, tmp_path: Path) -> None:
+    """The code never has to be typed: the QR carries the same prefilled message the link does, so
+    a member reading the reply on a desktop scans it with the phone they are connecting."""
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    provider = RecordingProvider()
+    tool_context = await _tool_context(workspace_id, member_id, tmp_path)
+    with ws(workspace_id):
+        assert tool_context.ext is not None
+        await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
+        result = await ImessageConnect(provider=lambda: provider).run(
+            tool_context,
+            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+        )
+        stored = await tool_context.ext.store.get(claim_key(member_id, phone))
+        shared = await _shared_artifacts()
+        image = await tool_context.blob.get(shared[0][3])
+    claim = PendingClaim.model_validate(stored)
+    answered = json.loads(result.content[0].text)
+    expected = io.BytesIO()
+    segno.make(f"SMSTO:+14085550123:UFO {claim.opt_in_code}", error="m").save(
+        expected, kind="png", scale=OPT_IN_QR_SCALE, border=OPT_IN_QR_BORDER
+    )
+    assert answered["state"] == "pending"
+    assert answered["instruction"].endswith(
+        "Scan the attached image with that phone to open the message."
+    )
+    assert [row[:3] for row in shared] == [(OPT_IN_QR_FILENAME, "image/png", OPT_IN_QR_CAPTION)]
+    assert image.startswith(b"\x89PNG")
+    assert image == expected.getvalue()
+
+
+async def test_an_expired_claim_can_move_to_another_member(db: None, tmp_path: Path) -> None:
     workspace_id, first_member_id = await _seed()
     second_member_id = await _member(workspace_id, "second@example.com")
     phone = "+14155550123"
     provider = RecordingProvider()
-    tool_context = _tool_context(workspace_id, second_member_id)
+    tool_context = await _tool_context(workspace_id, second_member_id, tmp_path)
     await _claim(workspace_id, first_member_id, phone, expires_in=timedelta(minutes=-1))
     with ws(workspace_id):
         assert tool_context.ext is not None
@@ -896,7 +990,8 @@ async def test_an_expired_claim_can_move_to_another_member(db: None) -> None:
         "state": "pending",
         "instruction": (
             f'Text "{opt_in_text}" to +14085550123 from that phone within '
-            f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter."
+            f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
+            "Scan the attached image with that phone to open the message."
         ),
         "assigned_phone_number": "+14085550123",
         "opt_in_text": opt_in_text,
@@ -910,7 +1005,7 @@ async def test_an_expired_claim_can_move_to_another_member(db: None) -> None:
     assert provider.sends == []
 
 
-async def test_a_concurrent_claim_write_is_not_overwritten(db: None) -> None:
+async def test_a_concurrent_claim_write_is_not_overwritten(db: None, tmp_path: Path) -> None:
     """The fleet row admits one claimant, so the remaining race is this member's own second run.
     The store write is conditional on what it read, so the code the member was already given
     stands and the loser says to ask again rather than handing out a code that proves nothing."""
@@ -926,7 +1021,7 @@ async def test_a_concurrent_claim_write_is_not_overwritten(db: None) -> None:
             return await super().assign_line(phone_number, idempotency_key)
 
     provider = RacingProvider()
-    tool_context = _tool_context(workspace_id, member_id)
+    tool_context = await _tool_context(workspace_id, member_id, tmp_path)
     with ws(workspace_id):
         assert tool_context.ext is not None
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
@@ -943,13 +1038,13 @@ async def test_a_concurrent_claim_write_is_not_overwritten(db: None) -> None:
     assert provider.sends == []
 
 
-async def test_connect_answers_a_phone_the_surface_already_knows(db: None) -> None:
+async def test_connect_answers_a_phone_the_surface_already_knows(db: None, tmp_path: Path) -> None:
     workspace_id, member_id = await _seed()
     other_member_id = await _member(workspace_id, "second@example.com")
     phone = "+14155550123"
     other_phone = "+16505550123"
     provider = RecordingProvider()
-    tool_context = _tool_context(workspace_id, member_id)
+    tool_context = await _tool_context(workspace_id, member_id, tmp_path)
     await _linked(workspace_id, member_id, phone)
     await _linked(workspace_id, other_member_id, other_phone)
     tool = ImessageConnect(provider=lambda: provider)
@@ -977,12 +1072,14 @@ async def test_connect_answers_a_phone_the_surface_already_knows(db: None) -> No
     assert provider.sends == []
 
 
-async def test_connect_refuses_a_phone_another_member_is_connecting(db: None) -> None:
+async def test_connect_refuses_a_phone_another_member_is_connecting(
+    db: None, tmp_path: Path
+) -> None:
     workspace_id, first_member_id = await _seed()
     second_member_id = await _member(workspace_id, "second@example.com")
     phone = "+14155550123"
     provider = RecordingProvider()
-    tool_context = _tool_context(workspace_id, second_member_id)
+    tool_context = await _tool_context(workspace_id, second_member_id, tmp_path)
     await _claim(workspace_id, first_member_id, phone)
     with ws(workspace_id):
         assert tool_context.ext is not None
@@ -1007,7 +1104,7 @@ async def test_an_unreadable_row_is_dropped_and_never_parks_the_surface(
     workspace_id, member_id = await _seed()
     phone = "+14155550123"
     provider = RecordingProvider()
-    tool_context = _tool_context(workspace_id, member_id)
+    tool_context = await _tool_context(workspace_id, member_id, tmp_path)
     context = _context(workspace_id, tmp_path, StubDbos())
     surface = ImessageSurface(provider=lambda: provider)
     unreadable = {"member_id": str(member_id)}
@@ -1393,7 +1490,7 @@ async def test_one_shared_line_serves_every_workspace_and_member(db: None, tmp_p
     assert await listener.cursor("project:other") is None
 
 
-async def test_a_second_workspace_connects_on_the_same_project(db: None) -> None:
+async def test_a_second_workspace_connects_on_the_same_project(db: None, tmp_path: Path) -> None:
     """One project per deploy is not one workspace per deploy: the installation the workspaces share
     routes nobody, so each admin binds it and each member claims their own phone."""
     first_workspace, first_admin = await _seed()
@@ -1410,7 +1507,7 @@ async def test_a_second_workspace_connects_on_the_same_project(db: None) -> None
                 json.loads(
                     (
                         await tool.run(
-                            _tool_context(workspace_id, admin_id),
+                            await _tool_context(workspace_id, admin_id, tmp_path),
                             ImessageConnectInput(
                                 phone_number=phone, user_description="Connect my phone."
                             ),

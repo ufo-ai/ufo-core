@@ -31,6 +31,7 @@ tool gets `ext=None`."""
 import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -38,7 +39,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
 from ufo.accounting import record_image_usage, record_video_usage
-from ufo.artifact_url import ARTIFACT_KEY_PREFIX
+from ufo.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
 from ufo.audience import SHARED_AUDIENCE, Audience, audience_subjects, conversation_audience
 from ufo.blob import S3BlobStore, WorkspaceBlobStore
 from ufo.browser import CdpProvider, FindCompleter
@@ -60,6 +61,7 @@ from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
 from ufo.subjects import member_subject
 from ufo.workspace import ws_current
 
+SHARED_BYTES_LIMIT = 256 * 1024
 PREVIEW_SIZE_TIMEOUT_SECONDS = 30
 PREVIEW_PUT_TTL_SECONDS = 900
 PREVIEW_PUT_TIMEOUT_SECONDS = 300
@@ -406,6 +408,33 @@ class ToolContext:
         async with workspace_tx() as connection:
             await record_video_usage(
                 connection, self.turn.workspace_id, self.turn.id, model, videos, micro_usd
+            )
+
+    async def share_artifact(self, filename: str, data: bytes, subject: str | None = None) -> None:
+        """Hand the member one file this call rendered in-process, as a shared artifact of this
+        turn — the same rows `share_file` writes for a produced workspace file, so every surface
+        delivers it by the path it already uploads artifacts through. For bytes a tool computed
+        itself: nothing runs in the sandbox and nothing is measured there, so the size is bounded
+        here at the call."""
+        if len(data) > SHARED_BYTES_LIMIT:
+            raise ValueError(f"shared artifact {filename!r} exceeds {SHARED_BYTES_LIMIT} bytes")
+        key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{filename}"
+        await self.blob.put(key, data)
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    id=uuid4(),
+                    turn_id=self.turn.id,
+                    blob_key=key,
+                    workspace_id=self.turn.workspace_id,
+                    filename=filename,
+                    subject=subject,
+                    media_type=artifact_media_type(filename),
+                    size_bytes=len(data),
+                    created_at=now,
+                    updated_at=now,
+                )
             )
 
     async def speaker_is_admin(self) -> bool:

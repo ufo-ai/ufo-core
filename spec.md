@@ -777,8 +777,10 @@ identity with `auth.test`.
 
 iMessage setup is one chat tool. An admin binds the deploy's Spectrum project to the workspace;
 each signed-in member claims an E.164 phone number. The tool registers the phone with Spectrum,
-records the claim, and returns the assigned line with the claim's random six-character `UFO <code>`
-and an `sms:` link carrying it; a phone the surface already knows answers `connected` instead, and a
+records the claim, and returns the assigned line with the claim's random six-character `UFO <code>`,
+an `sms:` link carrying it, and the same prefilled message shared as a QR, so the code is never
+typed: one tap on the phone reading the reply, one scan from any other screen. A phone the surface
+already knows answers `connected` instead, and a
 phone another member holds or is claiming is refused. Only a direct message from the claimed phone
 within half an hour proves control, read past case, spacing and punctuation; a bare `UFO`, another
 claim's code, or a late one completes nothing and is answered with what to do next, and an opt-out
