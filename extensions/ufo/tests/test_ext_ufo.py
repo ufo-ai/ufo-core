@@ -1065,14 +1065,15 @@ async def test_an_unsend_refuses_a_body_and_a_bad_id(
 
 async def test_a_stop_founds_the_next_turn_on_the_message_already_sent(
     ufo: tuple[AsyncClient, UUID],
-    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     """Esc after a mid-turn send: the cancel ends the running turn and the message the member had
     already sent founds the next one. The stop's own tail ends on an immediate `poll` because the
     conversation moved on, and the reconnect resumes on the new turn — whose first frame names the
-    arrival, so the row the client held as pending settles as the new turn's own message."""
+    arrival, so the row the client held as pending settles as the new turn's own message, ahead of
+    the answer the turn goes on to give. The reconnect rides the turn to that answer: a terminal
+    published over the engine's shoulder would race the turn's own, and whichever landed second
+    would be the one the assertion happened to miss."""
     client, workspace_id = ufo
-    hub = runtime[1]
     member_id = await _seed_member(workspace_id, "owner@example.com")
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     conversation_id = await _linked_conversation(client, workspace_id, token)
@@ -1102,14 +1103,12 @@ async def test_a_stop_founds_the_next_turn_on_the_message_already_sent(
     assert new_turn.status in ("queued", "running")
     assert new_turn.inbound == "do this instead"
 
-    held = asyncio.ensure_future(_post(client, "main", token, b""))
-    await _tailing(hub, new_turn.id)
-    await hub.publish(
-        new_turn.id, Terminal(frame=TerminalFrame(status="done", text="Done instead."))
-    )
-    resumed = await held
-    assert ["absorbed", str(arrival)] in resumed
-    assert resumed.index(["absorbed", str(arrival)]) < resumed.index(["say", "Done instead."])
+    resumed = await _post(client, "main", token, b"")
+
+    assert resumed[0] == ["absorbed", str(arrival)]
+    answer = "".join(f for verb, *rest in resumed if verb == "txt" for f in rest)
+    assert "echo:" in answer
+    assert ["ask", ">"] in resumed
 
 
 async def test_a_stop_with_no_live_turn_resumes_the_tail(ufo: tuple[AsyncClient, UUID]) -> None:
