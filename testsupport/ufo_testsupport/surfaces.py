@@ -14,7 +14,7 @@ from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 EMPTY_SKILL_REGISTRY = SkillRegistry({})
 
 
-async def no_user_skills() -> tuple[RuntimeSkill, ...]:
+async def no_member_skills() -> tuple[RuntimeSkill, ...]:
     return ()
 
 

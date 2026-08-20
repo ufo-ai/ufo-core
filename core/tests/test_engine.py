@@ -162,6 +162,7 @@ from ufo.skills.runtime import (
     CORE_SKILL_REGISTRY,
     LoadedSkills,
     RuntimeSkill,
+    SkillCard,
     SkillRegistry,
     loaded_context,
 )
@@ -3529,11 +3530,13 @@ def _load_round(call_id: str, name: str, result: str) -> tuple[Message, Message]
     )
 
 
-def test_the_skill_tracker_seeds_only_from_intact_load_skill_results() -> None:
+async def test_the_skill_tracker_seeds_only_from_intact_load_skill_results() -> None:
     """What seeds the tracker for a turn: a `load_skill` call whose result the window still carries
     whole. A result the dispatch step offloaded is skipped — its workflow was cut off — and so is a
     header that arrived in some other tool's output, which mounts nothing and proves nothing."""
-    body = loaded_context(CORE_SKILL_REGISTRY.closure("sandbox"))
+    body = loaded_context(
+        await CORE_SKILL_REGISTRY.materialize(CORE_SKILL_REGISTRY.closure("sandbox"))
+    )
     window = (
         *_load_round("s1", "sandbox", body),
         Message(
@@ -3563,7 +3566,7 @@ def test_the_skill_tracker_seeds_only_from_intact_load_skill_results() -> None:
     assert tracker.in_context == set()
 
 
-def test_a_skill_body_quoting_the_header_format_marks_nothing_loaded() -> None:
+async def test_a_skill_body_quoting_the_header_format_marks_nothing_loaded() -> None:
     """A `SKILL.md` body is member-authored text. One that quotes the header format — a skill
     teaching how a load renders, say — marks only itself: what a load put in context comes from the
     registry, so the quoted skill's own load is never suppressed and its workflow reaches the
@@ -3579,7 +3582,11 @@ def test_a_skill_body_quoting_the_header_format_marks_nothing_loaded() -> None:
             "office-docx": RuntimeSkill(name="office-docx", description="d", instructions="DOCX"),
         }
     )
-    window = _load_round("s1", "create-skill", loaded_context(registry.closure("create-skill")))
+    window = _load_round(
+        "s1",
+        "create-skill",
+        loaded_context(await registry.materialize(registry.closure("create-skill"))),
+    )
     tracker = LoadedSkills()
 
     tracker.reseed(_loaded_skill_closures(window, registry))
@@ -3633,6 +3640,29 @@ def test_a_load_the_registry_cannot_resolve_reseeds_without_raising() -> None:
     assert tracker.in_context == set()
 
 
+def test_the_tracker_reseeds_member_loads_from_cards_without_reading_a_row() -> None:
+    """`_loaded_skill_closures` runs on every round, so a member skill's load reseeds from its
+    routing card alone — a materializer that reads a row here would put the corpus back on the hot
+    path. A member name the projection no longer carries resolves to nothing, never a raise."""
+
+    async def never(name: str) -> RuntimeSkill | None:
+        raise AssertionError("reseed touched a stored row")
+
+    registry = CORE_SKILL_REGISTRY.with_member(
+        (SkillCard(name="greet", description="say hi", depends=("sandbox",)),), never
+    )
+    window = (
+        *_load_round("s1", "greet", "# Skill: greet\n\nGREET BODY"),
+        *_load_round("s2", "departed-member-skill", "# Skill: departed-member-skill\n\nBODY"),
+    )
+    tracker = LoadedSkills()
+
+    tracker.reseed(_loaded_skill_closures(window, registry))
+
+    assert tracker.in_context == {"greet", "sandbox"}
+    assert tracker.asked_for == {"greet"}
+
+
 async def test_a_load_of_a_dependency_an_earlier_load_pulled_costs_no_workflow(
     db: None, tmp_path: Path
 ) -> None:
@@ -3664,7 +3694,10 @@ async def test_a_preloaded_skill_counts_as_already_in_context(db: None, tmp_path
     instructions a second time."""
     turn = await _seed_turn("queued", None)
     model = SkillLoadRoundsModel(names=("sandbox",))
-    engine = replace(_engine(turn, model, tmp_path), preload=CORE_SKILL_REGISTRY.closure("sandbox"))
+    engine = replace(
+        _engine(turn, model, tmp_path),
+        preload=await CORE_SKILL_REGISTRY.materialize(CORE_SKILL_REGISTRY.closure("sandbox")),
+    )
 
     frame = await engine.run()
 
@@ -5576,6 +5609,63 @@ async def test_done_turn_persists_the_system_string_and_injected_context(
     assert bare_stored.system == bare_model.seen_system[0]
     assert bare_stored.system == stored.system
     assert bare_stored.injected is None
+
+
+async def test_member_skill_block_joins_the_injected_context_after_hook_text(
+    db: None, tmp_path: Path
+) -> None:
+    """The saved-skills block rides the founding user message inside the one injected-context
+    wall, after whatever the hooks injected — never the system prompt, so a member's saved skills
+    cannot move the cached prefix. An engine handed no block renders no wall at all."""
+    recalled = "<recalled_memory>the vault code is 4821</recalled_memory>"
+
+    async def recall(ctx: HookContext) -> HookOutcome:
+        return InjectContext(text=recalled)
+
+    chain = HookChain(
+        hooks={
+            "user_prompt_submit": (
+                BoundHook(
+                    spec=HookSpec(event="user_prompt_submit", handler=recall),
+                    ext=context_for("probe", frozenset()),
+                ),
+            )
+        },
+        audience=conversation_audience(None),
+    )
+    block = "<saved_skills>\n- invoice-review: Load when reconciling an invoice.\n</saved_skills>"
+    turn = await _seed_turn("queued", None)
+    model = CapturingModel()
+    engine = replace(_engine(turn, model, tmp_path), hooks=chain, member_skill_block=block)
+
+    frame = await engine.run()
+
+    assert frame is not None and frame.status == "done"
+    submitted = (
+        f"<context>\nmessage_ref: {turn.id}\ntime: Thursday 2026-07-09 18:32 UTC\n</context>\nhi"
+    )
+    founding = f"{submitted}\n\n<injected_context>\n{recalled}\n\n{block}\n</injected_context>"
+    assert model.seen[0][-1].content == founding
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert stored.injected == f"{recalled}\n\n{block}"
+    assert block not in model.seen_system[0]
+
+
+async def test_member_skill_block_walls_alone_when_no_hook_injects(
+    db: None, tmp_path: Path
+) -> None:
+    block = "<saved_skills>\n- invoice-review: Load when reconciling an invoice.\n</saved_skills>"
+    turn = await _seed_turn("queued", None)
+    model = CapturingModel()
+    engine = replace(_engine(turn, model, tmp_path), member_skill_block=block)
+
+    frame = await engine.run()
+
+    assert frame is not None and frame.status == "done"
+    content = model.seen[0][-1].content
+    assert isinstance(content, str)
+    assert content.endswith(f"<injected_context>\n{block}\n</injected_context>")
 
 
 @dataclass(frozen=True, repr=False)

@@ -1125,7 +1125,7 @@ class SurfaceContext:
     _deploy_sandbox_internet: bool
     _models: tuple[str, ...]
     _skills: SkillRegistry
-    _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
+    _member_skill_listing: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
     _declared_slots: tuple[DeclaredSlot, ...]
     _ambient_reply: AmbientReplyClassifier
     _key_slot_for: Callable[[str], str | None] | None = None
@@ -2141,22 +2141,39 @@ class SurfaceContext:
 
     async def agent_skills(self, agent_id: UUID) -> tuple[PortalSkill, ...]:
         """The selected agent's loadable skills — exactly the composition a turn loads (the deploy
-        registry merged with the agent's saved skills, base winning on a name collision) as the
-        system prompt's `{{skill_index}}` renders it: top-level skills in registration order,
-        member-authored ones appended last. One answer to "what skills does this agent load", never
-        a second derivation."""
+        registry with the agent's saved skills as its member tier, deploy winning on a name
+        collision): top-level deploy skills in registration order, member-authored ones appended
+        last. The member tier arrives whole from one provider read (`materialize_all`) — a corrupt
+        row is the provider's to skip with a log, and a saved name a deploy skill shadows drops
+        here exactly as `with_member` refuses it on a turn."""
         with bind_agent(agent_id):
-            merged = self._skills.merged_with(await self._user_skills())
-        deploy_names = frozenset(self._skills.by_name)
-        return tuple(
-            PortalSkill(
-                name=skill.name,
-                description=skill.description,
-                origin="deploy" if skill.name in deploy_names else "member",
-                instructions=skill.instructions,
-            )
-            for skill in merged.by_name.values()
-            if skill.parent is None
+            saved = await self._member_skill_listing()
+        member_skills = []
+        for skill in saved:
+            if skill.name in self._skills.by_name:
+                log("skill.member_shadow_refused", skill=skill.name)
+                continue
+            member_skills.append(skill)
+        return (
+            *(
+                PortalSkill(
+                    name=skill.name,
+                    description=skill.description,
+                    origin="deploy",
+                    instructions=skill.instructions,
+                )
+                for skill in self._skills.by_name.values()
+                if skill.parent is None
+            ),
+            *(
+                PortalSkill(
+                    name=skill.name,
+                    description=skill.description,
+                    origin="member",
+                    instructions=skill.instructions,
+                )
+                for skill in member_skills
+            ),
         )
 
     @property

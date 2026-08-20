@@ -45,9 +45,9 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import (
     member_object_registry,
+    member_skill_listing,
     memory_search,
     skill_registry,
-    turn_runtime_skills,
 )
 from ufo.hub import InProcessHub
 from ufo.indexing import TextChunker
@@ -216,7 +216,7 @@ def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=DEPLOY_SKILLS,
-        user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
+        member_skill_listing=lambda: member_skill_listing(manifests, credentials, index, embed),
         objects=member_object_registry(manifests),
         memory=memory_search(manifests, None, index, embed) if with_memory else None,
     )
@@ -449,11 +449,12 @@ async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:
     mine = await client.get(f"/surface/web/agents/{agent_a}/skills", headers=headers)
     listed = mine.json()["skills"]
     with ws(workspace_id), bind_agent(agent_a):
-        saved = await UserSkillStore(ctx=context_for("skill_create", frozenset())).load_all()
-        expected = DEPLOY_SKILLS.merged_with(saved).index()
-    assert [(skill["name"], skill["description"]) for skill in listed] == list(expected)
+        cards = await UserSkillStore(ctx=context_for("skill_create", frozenset())).cards()
+    expected = [*DEPLOY_SKILLS.index(), *((card.name, card.description) for card in cards)]
+    assert [(skill["name"], skill["description"]) for skill in listed] == expected
     by_name = {skill["name"]: skill for skill in listed}
     assert by_name["release-notes"]["origin"] == "member"
+    assert by_name["release-notes"]["instructions"] == "Write tersely."
     assert all(skill["origin"] == "deploy" for skill in listed if skill["name"] != "release-notes")
     assert CHILD_SKILL.name in DEPLOY_SKILLS.by_name
     assert CHILD_SKILL.name not in by_name

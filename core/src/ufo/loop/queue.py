@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
 from ufo.accounting import workspace_owns_the_key
+from ufo.activity import SKILL_LOAD_TOOL, SKILL_SEARCH_TOOL
 from ufo.agent_scope import agent
 from ufo.agent_setup import setup_skill
 from ufo.audience import Audience, parse_audience
@@ -29,7 +30,7 @@ from ufo.ext.loader import (
     connector_clis,
     injecting_slots,
     turn_hooks,
-    turn_runtime_skills,
+    turn_member_skills,
     turn_tools,
 )
 from ufo.ext.manifest import CredentialSlot, Manifest, SubagentProfile
@@ -91,6 +92,7 @@ from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
     INTENT_ADMISSION,
+    INTERNAL_ADMISSION,
     SCHEDULED_ADMISSION,
     TERMINAL_ERROR_MESSAGE_MAX_CHARS,
     TURN_QUEUE_NAME,
@@ -102,7 +104,15 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.search import SearchProvider
-from ufo.skills.runtime import LoadedSkill, SkillRegistry, mount_skill
+from ufo.skills.runtime import LoadedSkill, SkillCard, SkillRegistry, mount_skill
+from ufo.skills.selection import (
+    SKILL_QUERY_MAX_CHARS,
+    SKILL_TOP_K,
+    MemberVisibility,
+    member_visibility,
+    prompt_index,
+    select_top_k,
+)
 from ufo.tools.context import Spawn, UnknownSubagentProfile
 from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.workspace import ws
@@ -110,6 +120,82 @@ from ufo.workspace import ws
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
+SKILL_OWNER_KIND = "skill"
+SKILL_SHADOW_TIMEOUT_SECONDS = 4.0
+
+
+def _member_skill_turn(turn: Turn) -> bool:
+    """The turns the saved-skills block renders on — exactly the turns memory's recall_hook injects
+    on (the extension's user_prompt_submit gate): every turn except a speakerless root admitted
+    INTERNAL_ADMISSION, a machine fold with no topical text. A prepared intent fires no
+    user_prompt_submit at all, so it sits outside both gates by construction; the shadow selector
+    keys on the same turns, so its evidence covers every turn the block could have served."""
+    if turn.admission_source == INTENT_ADMISSION:
+        return False
+    return not (
+        turn.speaker_member_id is None
+        and turn.admission_source == INTERNAL_ADMISSION
+        and turn.parent_turn_id is None
+    )
+
+
+def _member_skill_block(turn: Turn, view: MemberVisibility, enabled: bool) -> str:
+    """The saved-skills block this turn's founding message carries — the one-pass view's block on a
+    recall-parity turn while the config switch holds, so an eval stack can ablate it (the bias
+    ablation family in evals/skill_loading). A tier below the fold carries an empty block in the
+    view itself: it lists in the prompt instead."""
+    if not enabled or not _member_skill_turn(turn):
+        return ""
+    return view.block
+
+
+def _prompt_skill_index(skills: SkillRegistry, enabled: bool) -> tuple[tuple[str, str], ...]:
+    """What `{{skill_index}}` renders this turn: the fold-aware index while the member tier is
+    enabled, the deploy tier alone when the ablation switch is off — off, member skills reach the
+    model only through `skill_search`."""
+    return prompt_index(skills) if enabled else skills.index()
+
+
+_shadow_selection_tasks: set[asyncio.Task[None]] = set()
+
+
+def _fire_shadow_selection(
+    index: IndexBackend, embed: EmbedClient, turn: Turn, cards: tuple[SkillCard, ...]
+) -> None:
+    """Launch the shadow selector for one member turn — fire-and-forget, so the turn never waits on
+    it; the held reference keeps the task alive until it logs or gives up."""
+    task = asyncio.create_task(_shadow_skill_selection(index, embed, turn, cards))
+    _shadow_selection_tasks.add(task)
+    task.add_done_callback(_shadow_selection_tasks.discard)
+
+
+async def _shadow_skill_selection(
+    index: IndexBackend, embed: EmbedClient, turn: Turn, cards: tuple[SkillCard, ...]
+) -> None:
+    """Score both retrieval legs against one member turn's inbound and log what each would have
+    injected — the vector leg's promote-or-delete evidence. Bounded and best-effort: every failure
+    is a log line, never a turn's problem."""
+    try:
+        async with asyncio.timeout(SKILL_SHADOW_TIMEOUT_SECONDS):
+            [embedding] = await embed.embed((turn.inbound[:SKILL_QUERY_MAX_CHARS],))
+            hits = await index.vector(
+                embedding,
+                subjects=frozenset({f"agent:{turn.agent_id}"}),
+                owner_kind=SKILL_OWNER_KIND,
+                limit=SKILL_TOP_K,
+            )
+        log(
+            "skill.shadow_selection",
+            turn_id=str(turn.id),
+            lexical=[card.name for card in select_top_k(turn.inbound, cards)],
+            vector=[hit.owner_id.partition(":")[2] for hit in hits],
+        )
+    except Exception as error:
+        log(
+            "skill.shadow_selection_failed",
+            turn_id=str(turn.id),
+            error_class=type(error).__name__,
+        )
 
 
 def _agent_tools(
@@ -124,18 +210,22 @@ def _agent_tools(
     primitive — a repository checkout bound to an admitted comparison is not a tool the workspace's
     general agent may reach. An allowlist *is* the naming: a specialist that declares the checkout
     holds it, and holds nothing else. So the primitive is reachable exactly where a declaration
-    says so, and the agent that never mentions it can neither hold it nor ask for it.
+    says so, and the agent that never mentions it can neither hold it nor ask for it. The one
+    structural pair rides along: an allowlist naming `load_skill` also resolves `skill_search`,
+    exactly as a subagent profile's does — a loader without its search would be directed at names
+    it cannot reach.
 
     An allowlist governs what a model may call, so it does not reach a prepared intent, which takes
     no model round: the panel's verb dispatches verbatim under the submitting member's authority,
     admitted through the panel's own gate. Filtering that lane would refuse every panel mutation on
     an agent that carries an allowlist — including the `connect_account` and `request_credentials`
     that give it authority in the first place."""
-    return (
-        tuple(tool for tool in all_tools if not tool.profile_only)
-        if allowed is None or admission == INTENT_ADMISSION
-        else tuple(tool for tool in all_tools if tool.name in allowed)
-    )
+    if allowed is None or admission == INTENT_ADMISSION:
+        return tuple(tool for tool in all_tools if not tool.profile_only)
+    names = set(allowed)
+    if SKILL_LOAD_TOOL in names:
+        names.add(SKILL_SEARCH_TOOL)
+    return tuple(tool for tool in all_tools if tool.name in names)
 
 
 def _resolve_profile(registry: SubagentRegistry, turn_id: str, name: str) -> SubagentProfile:
@@ -162,6 +252,8 @@ def _subagent_tools(
     allowed = set(profile.tool_names)
     if not profile.isolated_tools:
         allowed.update(grants)
+    if SKILL_LOAD_TOOL in allowed:
+        allowed.add(SKILL_SEARCH_TOOL)
     selected = tuple(
         tool
         for tool in all_tools
@@ -432,23 +524,24 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 audience=audience,
                 public_base_url=runtime.config.connect.public_base_url,
             )
+            member_cards, materialize_member = await turn_member_skills(
+                runtime.manifests, runtime.credentials, runtime.index, runtime.embed
+            )
             skills = runtime.skills.merged_with(
                 (
-                    *await turn_runtime_skills(
-                        runtime.manifests, runtime.credentials, runtime.index, runtime.embed
-                    ),
                     await spawn_catalog_skill(
                         runtime.subagents,
                         turn.speaker_member_id or turn.on_behalf_of_member_id,
                     ),
                 )
-            )
+            ).with_member(member_cards, materialize_member)
             sections = tuple(
                 (section.name, section.body)
                 for manifest in runtime.manifests
                 for section in manifest.prompt_sections
             )
         preload: tuple[LoadedSkill, ...] = ()
+        member_skill_block = ""
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
             tools = ToolRegistry(_agent_tools(all_tools, agent.tools, turn.admission_source))
@@ -457,10 +550,15 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             )
             if waiting is not None:
                 skills = skills.merged_with((waiting,))
+            cards = tuple(skills.member_cards.values())
+            view = member_visibility(turn.inbound, cards)
+            member_skill_block = _member_skill_block(turn, view, runtime.config.skills.member_block)
+            if _member_skill_turn(turn) and cards and not view.catalog_fits:
+                _fire_shadow_selection(runtime.index, runtime.embed, turn, cards)
             system_prompt = render_system_prompt(
                 agent.prompt,
                 sections,
-                skills=skills.index(),
+                skills=_prompt_skill_index(skills, runtime.config.skills.member_block),
                 knowledge_cutoff=runtime.registry.spec(resolved.model).knowledge_cutoff,
             )
             max_rounds = MAIN_ROUND_LIMIT
@@ -471,9 +569,20 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         else:
             profile = _resolve_profile(runtime.subagents, turn_id, turn.subagent_profile)
             payload = json.loads(turn.inbound) if turn.seq == 1 else {}
-            preload = skills.closure(*(payload.get("preload_skills") or ()))
+            preload = await skills.materialize(
+                skills.closure(*(payload.get("preload_skills") or ()))
+            )
+            member_skill_block = _member_skill_block(
+                turn,
+                member_visibility(turn.inbound, tuple(skills.member_cards.values())),
+                runtime.config.skills.member_block,
+            )
             resolved = Agent(
-                prompt=subagent_system_prompt(profile, skills=skills.index(), preload=preload),
+                prompt=subagent_system_prompt(
+                    profile,
+                    skills=_prompt_skill_index(skills, runtime.config.skills.member_block),
+                    preload=preload,
+                ),
                 model=runtime.registry.resolve(profile.model or agent.model),
                 reasoning=agent.reasoning,
             )
@@ -587,6 +696,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             attempt=attempt,
             max_rounds=max_rounds,
             skills=skills,
+            member_skill_block=member_skill_block,
             preload=preload,
             output_model=output_model,
             adoption=AdoptionReplay(

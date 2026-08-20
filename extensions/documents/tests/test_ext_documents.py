@@ -49,13 +49,13 @@ def test_documents_skills_parse_and_index() -> None:
 
 def test_pdf_pulls_its_design_foundations_dependency() -> None:
     registry = skill_registry((documents.manifest(),))
-    assert [entry.skill.name for entry in registry.closure("pdf")] == ["pdf", "design-foundations"]
+    assert [ref.card.name for ref in registry.closure("pdf")] == ["pdf", "design-foundations"]
 
 
 def test_office_pptx_and_theme_factory_pull_design_foundations() -> None:
     registry = skill_registry((documents.manifest(),))
     for name in ("office-pptx", "theme-factory"):
-        closure = [entry.skill.name for entry in registry.closure(name)]
+        closure = [ref.card.name for ref in registry.closure(name)]
         assert closure == [name, "design-foundations"]
 
 
@@ -71,20 +71,21 @@ async def test_loading_a_dependent_mounts_every_file_in_its_closure(dependent: s
         async def write_file(self, path: str, content: bytes) -> None:
             written[path] = content
 
-    for entry in registry.closure(dependent):
+    loaded = await registry.materialize(registry.closure(dependent))
+    for entry in loaded:
         await mount_skill(_Sandbox(), entry.skill)
 
     for reference in ("color", "typography", "dataviz"):
         assert f"/workspace/.skills/design-foundations/references/{reference}.md" in written
     expected = {
         f"{entry.skill.mount_root()}/{path}"
-        for entry in registry.closure(dependent)
+        for entry in loaded
         for path in entry.skill.mounted_files()
     }
     assert written.keys() == expected
 
 
-def test_every_design_foundations_path_a_dependent_cites_is_one_it_mounts() -> None:
+async def test_every_design_foundations_path_a_dependent_cites_is_one_it_mounts() -> None:
     """A citation naming a file that the load does not mount is a dead end the agent cannot follow.
     Every `.skills/design-foundations/...` path written in a dependent's own files must resolve to a
     path that dependent's closure actually mounts."""
@@ -92,7 +93,7 @@ def test_every_design_foundations_path_a_dependent_cites_is_one_it_mounts() -> N
     for name in DESIGN_FOUNDATIONS_DEPENDENTS:
         mounted = {
             f"{entry.skill.mount_root()}/{path}"
-            for entry in registry.closure(name)
+            for entry in await registry.materialize(registry.closure(name))
             for path in entry.skill.mounted_files()
         }
         skill = registry.named(name)

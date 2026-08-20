@@ -37,7 +37,7 @@ from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.artifact_url import verify_artifact_url
@@ -738,7 +738,7 @@ async def ufo(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
@@ -771,7 +771,7 @@ async def shared_ufo(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
         yield client
@@ -1520,7 +1520,7 @@ async def ufo_delivering_artifacts(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
@@ -1777,7 +1777,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     foreign = _mint(SECRET, workspace_id, "late@example.com", _future())

@@ -48,7 +48,7 @@ from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 from ufo_testsupport.tables import reset_workspace_data
 from ufo_testsupport.workflows import drain_workflows
@@ -417,7 +417,7 @@ def terminal_server(
             ("auto", "claude-opus-4-8", "claude-sonnet-5"),
             ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
-            user_skills=no_user_skills,
+            member_skill_listing=no_member_skills,
         )
         server = _ThreadedServer(app, port)
         server.start()

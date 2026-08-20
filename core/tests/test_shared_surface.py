@@ -13,7 +13,7 @@ from starlette.responses import Response, StreamingResponse
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
@@ -103,7 +103,7 @@ def _site_link_app(tmp_path: Path, ingress_public_url: str | None) -> FastAPI:
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     return app
 
@@ -139,7 +139,7 @@ def _app(tmp_path: Path) -> FastAPI:
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     return app
 
@@ -172,7 +172,7 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     return app
 

@@ -22,7 +22,7 @@ from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
     UNREACHED_STOPPER,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.blob import FilesystemBlobStore
@@ -141,7 +141,7 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         _declared_slots=(),
         _artifact_token_secret="",
         _skills=EMPTY_SKILL_REGISTRY,
-        _user_skills=no_user_skills,
+        _member_skill_listing=no_member_skills,
         _public_base_url=None,
         _home_surface=None,
         _ingress_public_url=None,

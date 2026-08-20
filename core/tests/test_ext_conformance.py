@@ -28,7 +28,7 @@ from ufo_ext_memory.store import MemoryStore, PageIndexer
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.agent_scope import agent
@@ -802,7 +802,7 @@ async def test_sample_skill_parses_indexes_and_mounts_with_its_script() -> None:
         async def write_file(self, path: str, content: bytes) -> None:
             written[path] = content
 
-    for entry in registry.closure(sample.SKILL_NAME):
+    for entry in await registry.materialize(registry.closure(sample.SKILL_NAME)):
         await mount_skill(_Recorder(), entry.skill)
 
     root = f"/workspace/.skills/{sample.SKILL_NAME}"
@@ -1497,7 +1497,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     body = json.dumps(
         {"external_id": "ext-1", "email": email, "message": "hello", "inbound_text": "note!"}
@@ -1627,7 +1627,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     body = json.dumps({"external_id": "ext-live-1", "message": "hello"})
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:

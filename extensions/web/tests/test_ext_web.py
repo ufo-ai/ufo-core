@@ -90,7 +90,7 @@ from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_runn
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 
 import ufo.db
@@ -109,7 +109,7 @@ from ufo.credentials import (
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
+from ufo.ext.loader import member_object_registry, member_skill_listing, skill_registry
 from ufo.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT,
     CONVERSATION_TITLE_CHARS,
@@ -1070,7 +1070,7 @@ async def web(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=lambda: turn_runtime_skills(
+        member_skill_listing=lambda: member_skill_listing(
             (skill_create_manifest(),),
             CredentialStore(fernet=CREDENTIAL_FERNET),
             DefaultIndex(transaction=workspace_tx),
@@ -9933,7 +9933,7 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
         sandbox_sizes=("small", "medium", "large"),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
@@ -10029,7 +10029,7 @@ async def test_settings_reports_the_deploy_internet_ceiling_when_granted(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         seen = await client.get(

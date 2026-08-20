@@ -60,6 +60,7 @@ from ufo.ext.manifest import (
     HookSpec,
     InjectContext,
     Manifest,
+    MemberSkillsSpec,
     MemorySearchProviderSpec,
     ModifyInput,
     ModifyOutput,
@@ -81,6 +82,8 @@ from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import (
     CORE_SKILLS_BY_NAME,
     RuntimeSkill,
+    SkillCard,
+    SkillMaterializer,
     SkillRegistry,
     discover_skills,
 )
@@ -603,27 +606,73 @@ def turn_subagent_grants(manifests: tuple[Manifest, ...]) -> dict[str, frozenset
     return {profile: frozenset(names) for profile, names in grants.items()}
 
 
-async def turn_runtime_skills(
+async def turn_member_skills(
+    manifests: tuple[Manifest, ...],
+    credential_store: CredentialStore | None,
+    index: IndexBackend | None = None,
+    embed: EmbedClient | None = None,
+) -> tuple[tuple[SkillCard, ...], SkillMaterializer]:
+    """The bound agent's member tier: every active extension's saved-skill routing cards, in load
+    order, and one materializer that routes a name back to the provider that contributed it (an
+    unknown name answers None). Each provider runs under the turn's workspace and agent scope with
+    its ExtensionContext. An extension providing member skills without a credential key set fails
+    loud; a name two providers both claim keeps the first and drops the rest with a log — a
+    duplicate row may never cost the agent its turns."""
+    cards: list[SkillCard] = []
+    providers: dict[str, tuple[MemberSkillsSpec, ExtensionContext]] = {}
+    for manifest in manifests:
+        if manifest.member_skills is None:
+            continue
+        if credential_store is None:
+            raise RuntimeError(
+                f"extension {manifest.name!r} provides member skills but no credential key is set"
+            )
+        declared = frozenset(slot.name for slot in manifest.credentials)
+        context = context_for(manifest.name, declared, index, embed)
+        for card in await manifest.member_skills.cards(context):
+            if card.name in providers:
+                log("skill.member_card_collision", skill=card.name, extension=manifest.name)
+                continue
+            providers[card.name] = (manifest.member_skills, context)
+            cards.append(card)
+
+    async def materialize(name: str) -> RuntimeSkill | None:
+        provided = providers.get(name)
+        if provided is None:
+            return None
+        spec, context = provided
+        return await spec.materialize(context, name)
+
+    return tuple(cards), materialize
+
+
+async def member_skill_listing(
     manifests: tuple[Manifest, ...],
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
 ) -> tuple[RuntimeSkill, ...]:
-    """Every runtime skill active extensions provide for the bound agent, flattened in load order.
-    Each provider runs under the turn's workspace and agent scope with its ExtensionContext. An
-    extension providing runtime skills without a credential key set fails loud."""
-    skills: list[RuntimeSkill] = []
+    """Every provider's member skills materialized whole — the portal's agent-skills listing read:
+    one store read per provider through `materialize_all`, a corrupt row skipped by the provider
+    with a log rather than failing the page. The same credential gate as `turn_member_skills`, and
+    the same collision rule: a name two providers claim keeps the first, so the listing shows
+    exactly what a turn can load."""
+    listed: dict[str, RuntimeSkill] = {}
     for manifest in manifests:
-        if manifest.runtime_skills is None:
+        if manifest.member_skills is None:
             continue
         if credential_store is None:
             raise RuntimeError(
-                f"extension {manifest.name!r} provides runtime skills but no credential key is set"
+                f"extension {manifest.name!r} provides member skills but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
         context = context_for(manifest.name, declared, index, embed)
-        skills.extend(await manifest.runtime_skills(context))
-    return tuple(skills)
+        for skill in await manifest.member_skills.materialize_all(context):
+            if skill.name in listed:
+                log("skill.member_card_collision", skill=skill.name, extension=manifest.name)
+                continue
+            listed[skill.name] = skill
+    return tuple(listed.values())
 
 
 DEFAULT_BACKEND = "default"

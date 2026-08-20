@@ -15,7 +15,7 @@ from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
     UNREACHED_STOPPER,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.audience import conversation_audience
@@ -91,7 +91,7 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
         _declared_slots=(),
         _artifact_token_secret="",
         _skills=EMPTY_SKILL_REGISTRY,
-        _user_skills=no_user_skills,
+        _member_skill_listing=no_member_skills,
         _public_base_url=None,
         _home_surface=None,
         _ingress_public_url=None,

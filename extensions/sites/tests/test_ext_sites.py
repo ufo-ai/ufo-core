@@ -243,7 +243,7 @@ async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> No
     assert child.name == "website-building/webapp"
     assert child.parent == "website-building"
 
-    assert [entry.skill.name for entry in registry.closure("website-building/webapp")] == [
+    assert [ref.card.name for ref in registry.closure("website-building/webapp")] == [
         "website-building/webapp",
         "website-building",
     ]
@@ -254,7 +254,7 @@ async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> No
         async def write_file(self, path: str, content: bytes) -> None:
             written[path] = content
 
-    for entry in registry.closure("website-building/webapp"):
+    for entry in await registry.materialize(registry.closure("website-building/webapp")):
         await mount_skill(_Sandbox(), entry.skill)
 
     assert "/workspace/.skills/website-building/SKILL.md" in written

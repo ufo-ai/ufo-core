@@ -23,7 +23,7 @@ from ufo_ext_debugger.manifest import manifest as debugger_manifest
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.blob import FilesystemBlobStore
@@ -105,7 +105,7 @@ async def debug(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
         yield client, blob, sandboxes

@@ -251,7 +251,7 @@ def test_data_skills_parse_and_index() -> None:
 
 def test_data_visualization_pulls_design_foundations() -> None:
     registry = skill_registry((documents.manifest(), repl.manifest()))
-    assert [entry.skill.name for entry in registry.closure("data-visualization")] == [
+    assert [ref.card.name for ref in registry.closure("data-visualization")] == [
         "data-visualization",
         "design-foundations",
     ]

@@ -93,7 +93,18 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   the model registry at serve so the models a member can pin stay documented from the same records
   the runtime routes and bills on (RFC 0018); an extension's skills ride its manifest; a pack may
   add pack-level skills of its own (see Packs).
-  Member-authored skills persist for the bound agent and join only that agent's registry.
+  Member-authored skills persist for the bound agent and join only that agent's registry — as its
+  **member tier**. A small tier (card lines within a 4,000-char fold) lists in `<available_skills>`
+  beside the deploy tier; past the fold the index carries the deploy tier alone (core, pack,
+  generated), byte-identical across workspaces, so at the sizes where invalidation matters a skill
+  save never invalidates a cached prompt prefix. Past the fold, member skills reach the model as a
+  bounded block in the turn message, on exactly the turns memory recall injects on — pinned skills
+  first, every card while they fit, then lexical top-k as
+  full lines with the rest as bare names and a count — rendered from **routing cards** (name,
+  description, depends, pinned; columns written at save), so no turn decodes a skill's stored files
+  except the one `load_skill` names. `skill_search` searches every card and returns rows, never
+  bodies; a vector retrieval leg runs shadow-only until measurement promotes or deletes it
+  (RFC 0038).
   Every-turn content belongs in the system prompt, situational/long content in skills; skills carry
   workflows, never restated tool docs (the tool's description is authoritative). `load_skill` mounts
   each skill's files and injects its `SKILL.md` without the frontmatter, under a header that says

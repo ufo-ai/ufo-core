@@ -31,7 +31,7 @@ from ufo.sandbox.session import (
     workspace_path,
 )
 from ufo.schema.records import Agent, Turn
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillRegistry
+from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillCard, SkillRegistry
 from ufo.subjects import member_subject
 from ufo.tools.builtins import (
     BUILTIN_TOOLS,
@@ -194,6 +194,7 @@ def test_registry_schemas_cover_every_tool() -> None:
         "ask_user",
         "request_credentials",
         "load_skill",
+        "skill_search",
         "connect_account",
         "cancel_spawn",
         "message_spawn",
@@ -670,6 +671,96 @@ async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path)
     with pytest.raises(ValueError, match="unknown skill 'nope'"):
         await _load_skill(ctx, "nope")
+
+
+def _member_tier(*skills: RuntimeSkill, missing: tuple[SkillCard, ...] = ()) -> SkillRegistry:
+    """The member tier as a turn composes it: cards projected from the given skills, and a
+    materializer standing in for the extension's store — the assertions run against the real
+    closure, materialize, mount, and render logic."""
+    rows = {skill.name: skill for skill in skills}
+
+    async def materialize(name: str) -> RuntimeSkill | None:
+        return rows.get(name)
+
+    cards = (*(skill.card() for skill in skills), *missing)
+    return CORE_SKILL_REGISTRY.with_member(cards, materialize)
+
+
+async def test_load_skill_mounts_a_member_skill_from_its_materialized_row(tmp_path: Path) -> None:
+    saved = RuntimeSkill(
+        name="greet",
+        description="say hi",
+        instructions="GREET BODY",
+        files=(("notes.md", b"kept"),),
+        raw_skill_md="---\nname: greet\ndescription: say hi\n---\nGREET BODY\n",
+    )
+    sandbox = FakeSandbox()
+    ctx = replace(make_context(sandbox, tmp_path), skills=_member_tier(saved))
+
+    text = (await _load_skill(ctx, "greet")).content[0].text
+
+    assert "# Skill: greet\n\nGREET BODY" in text
+    assert sandbox.files["/workspace/.skills/greet/SKILL.md"] == saved.raw_skill_md.encode()
+    assert sandbox.files["/workspace/.skills/greet/notes.md"] == b"kept"
+
+
+async def test_load_skill_of_a_vanished_member_row_fails_loud(tmp_path: Path) -> None:
+    ctx = replace(
+        make_context(FakeSandbox(), tmp_path),
+        skills=_member_tier(missing=(SkillCard(name="gone", description="d"),)),
+    )
+    with pytest.raises(ValueError, match="skill 'gone' is no longer available"):
+        await _load_skill(ctx, "gone")
+
+
+async def test_skill_search_ranks_matches_across_both_tiers(tmp_path: Path) -> None:
+    saved = RuntimeSkill(
+        name="invoice-review",
+        description="Load when a member asks to reconcile an invoice.",
+        instructions="i",
+    )
+    ctx = replace(make_context(FakeSandbox(), tmp_path), skills=_member_tier(saved))
+
+    result = await run(
+        "skill_search", ctx, query="reconcile an invoice", user_description="finding a skill"
+    )
+
+    lines = result.content[0].text.splitlines()
+    assert lines[0] == "invoice-review: Load when a member asks to reconcile an invoice."
+    assert not result.is_error
+    assert all(":" in line for line in lines)
+    deploy_hit = await run(
+        "skill_search", ctx, query="sandbox container commands", user_description="finding a skill"
+    )
+    assert deploy_hit.content[0].text.splitlines()[0].startswith("sandbox: ")
+
+
+async def test_skill_search_with_no_match_answers_the_searchable_total(tmp_path: Path) -> None:
+    ctx = make_context(FakeSandbox(), tmp_path)
+    result = await run("skill_search", ctx, query="zzzznothing", user_description="finding a skill")
+    total = len(ctx.skills.all_cards())
+    assert result.content[0].text == f"No matches among {total} loadable skills."
+
+
+async def test_skill_search_clamps_its_limit_and_truncates_lines(tmp_path: Path) -> None:
+    crowd = tuple(
+        RuntimeSkill(
+            name=f"billing-{i}", description="Load when billing " + "x" * 300, instructions="i"
+        )
+        for i in range(12)
+    )
+    ctx = replace(make_context(FakeSandbox(), tmp_path), skills=_member_tier(*crowd))
+
+    tool = REGISTRY.get("skill_search")
+    with pytest.raises(ValidationError):
+        tool.input_model.model_validate(
+            {"query": "billing", "limit": 9, "user_description": "finding a skill"}
+        )
+
+    result = await run("skill_search", ctx, query="billing", user_description="finding a skill")
+    lines = result.content[0].text.splitlines()
+    assert len(lines) == 8
+    assert all(len(line) <= 200 for line in lines)
 
 
 async def test_cancel_spawn_cancels_and_reports_status(tmp_path: Path) -> None:

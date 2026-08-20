@@ -22,7 +22,7 @@ from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
     UNREACHED_STOPPER,
-    no_user_skills,
+    no_member_skills,
 )
 
 import ufo.ext.surface as surface_module
@@ -278,7 +278,7 @@ def _context(
         _declared_slots=(),
         _artifact_token_secret="artifact-token-secret",
         _skills=EMPTY_SKILL_REGISTRY,
-        _user_skills=no_user_skills,
+        _member_skill_listing=no_member_skills,
         _public_base_url="https://ufo.example.test",
         _home_surface="web",
         _ingress_public_url="https://sites.example.test",

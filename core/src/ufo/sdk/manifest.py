@@ -148,6 +148,9 @@ from ufo.ext.manifest import (
     Manifest as Manifest,
 )
 from ufo.ext.manifest import (
+    MemberSkillsSpec as MemberSkillsSpec,
+)
+from ufo.ext.manifest import (
     MemorySearchProviderSpec as MemorySearchProviderSpec,
 )
 from ufo.ext.manifest import (

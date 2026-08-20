@@ -1,5 +1,5 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn,
-ask_user, request_credentials, load_skill, connect_account,
+ask_user, request_credentials, load_skill, skill_search, connect_account,
 cancel_spawn, message_spawn.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
@@ -26,7 +26,9 @@ seals which slots the speaking owner will fill and ends the turn; a capable surf
 values privately and fulfillment lands them in the encrypted store, never the transcript.
 `load_skill` mounts a skill's `SKILL.md` and assets — and those of the whole chain it `depends` on —
 into the workspace, and returns each one's workflow followed by one tree of everything mounted; the
-system prompt's `<available_skills>` block is its complete per-turn index.
+system prompt's `<available_skills>` block indexes the deploy tier and a member turn's
+`<saved_skills>` block the agent's saved skills. `skill_search` ranks every loadable skill's
+routing card by keyword and returns matching lines, the reach into whatever neither block shows.
 `cancel_spawn` and `message_spawn` reach `ctx.subagents`, the same
 Subagents workflow that backs `spawn`, to cancel a running child or queue it a follow-up message
 that runs as its next turn — scoped to the children this turn
@@ -62,6 +64,7 @@ from ufo.sandbox.session import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
 from ufo.skills.runtime import loaded_context, mount_skill
+from ufo.skills.selection import SKILL_LINE_MAX_CHARS, lexical_score
 from ufo.tools.context import (
     AmbiguousSpawnTarget,
     ImageContent,
@@ -311,7 +314,16 @@ class SpawnInput(BaseModel):
 class LoadSkillInput(BaseModel):
     name: str = Field(
         description="The skill name, e.g. 'office/pptx', 'data/visualization'. Choose from the "
-        "system prompt's <available_skills> index."
+        "system prompt's <available_skills> index, a <saved_skills> block, or a skill_search "
+        "result."
+    )
+
+
+class SkillSearchInput(BaseModel):
+    query: str = Field(description="Keywords naming the task or capability to find a skill for.")
+    limit: int = Field(default=8, ge=1, le=8, description="Maximum results.")
+    user_description: str = Field(
+        description="What you are looking for, in plain language for the activity timeline."
     )
 
 
@@ -969,17 +981,41 @@ async def ask_user_handler(ctx: ToolContext, args: AskUserCall) -> ToolResult:
 
 
 async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult:
-    """Resolve the named skill and the full chain of what it `depends` on, mount every one's files
-    into the workspace under `.skills/<name>/`, and return each one's `SKILL.md` workflow — the
-    asked-for skill first, so its workflow leads — closing with one tree of everything mounted. A
-    workflow the context already holds is named in one note instead of injected again, while its
-    files still mount, so re-loading is cheap and self-healing rather than an error. An unknown name
-    fails loud as a recoverable tool error."""
-    loaded = ctx.skills.closure(args.name)
+    """Resolve the named skill and the full chain of what it `depends` on over routing cards,
+    materialize each one's files — a deploy skill from the registry, a member skill read from its
+    stored row — mount them into the workspace under `.skills/<name>/`, and return each one's
+    `SKILL.md` workflow — the asked-for skill first, so its workflow leads — closing with one tree
+    of everything mounted. A workflow the context already holds is named in one note instead of
+    injected again, while its files still mount, so re-loading is cheap and self-healing rather
+    than an error. An unknown name fails loud as a recoverable tool error."""
+    loaded = await ctx.skills.materialize(ctx.skills.closure(args.name))
     for entry in loaded:
         await mount_skill(ctx.sandbox, entry.skill)
     text = loaded_context(loaded, ctx.loaded_skills.in_context)
     return ToolResult(content=(TextContent(text=text),))
+
+
+SKILL_SEARCH_NO_MATCH = "No matches among {total} loadable skills."
+
+
+async def skill_search_handler(ctx: ToolContext, args: SkillSearchInput) -> ToolResult:
+    """Rank every loadable skill's routing card — deploy and member alike — by the lexical scorer
+    the member block uses, and return the matching `name: description` lines, never a body. Zero
+    matches answers with the searchable total, so the caller knows the corpus was searched rather
+    than empty."""
+    cards = ctx.skills.all_cards()
+    ranked = sorted(
+        ((lexical_score(args.query, card), card) for card in cards),
+        key=lambda scored: scored[0],
+        reverse=True,
+    )
+    matched = [card for score, card in ranked if score > 0][: args.limit]
+    if not matched:
+        return ToolResult(
+            content=(TextContent(text=SKILL_SEARCH_NO_MATCH.format(total=len(cards))),)
+        )
+    lines = "\n".join(f"{card.name}: {card.description}"[:SKILL_LINE_MAX_CHARS] for card in matched)
+    return ToolResult(content=(TextContent(text=lines),))
 
 
 CONNECT_ACCOUNT_DIRECTIVE = (
@@ -1238,6 +1274,17 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=LoadSkillInput,
         handler=load_skill_handler,
+        parallel_safe=True,
+    ),
+    ToolDef(
+        name="skill_search",
+        description=(
+            "Search every loadable skill by keyword and get back matching `name: description` "
+            "lines to pass to load_skill. Use it when the task might have a skill the visible "
+            "indexes do not show."
+        ),
+        input_model=SkillSearchInput,
+        handler=skill_search_handler,
         parallel_safe=True,
     ),
     ToolDef(

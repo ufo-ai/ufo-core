@@ -49,7 +49,9 @@ from evals.skill_authoring.catalog import CASES as SKILL_AUTHORING_CASES
 from evals.skill_authoring.runner import skill_authoring_task
 from evals.skill_gtm import CASES as SKILL_GTM_CASES
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
+from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
 from evals.skill_loading.runner import skill_loading_task
+from evals.skill_selection.runner import skill_selection_task
 from evals.slack_silence import CASES as SLACK_SILENCE_CASES
 from evals.slack_silence import slack_silence_task
 
@@ -113,7 +115,8 @@ TASKS: tuple[EvalTask, ...] = (
         simulator_model=SCENARIO_SIMULATOR_MODEL,
     ),
     capability_task("connector_connections", connector_connections.CASES, serial=True),
-    skill_loading_task(SKILL_LOADING_CASES),
+    skill_loading_task((*SKILL_LOADING_CASES, *SKILL_MEMBER_CASES)),
+    skill_selection_task(),
     scenario_task(
         "new_application",
         new_application.SCENARIOS,

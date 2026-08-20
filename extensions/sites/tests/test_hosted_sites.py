@@ -57,7 +57,7 @@ from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
@@ -247,7 +247,7 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
             DEPLOY_MODELS,
             ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
-            user_skills=no_user_skills,
+            member_skill_listing=no_member_skills,
             objects=member_object_registry(
                 manifests,
                 public_base_url=PUBLIC_BASE_URL,

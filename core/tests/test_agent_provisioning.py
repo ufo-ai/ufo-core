@@ -411,11 +411,29 @@ async def _unreached(ctx: object, args: object) -> object:
     raise AssertionError("the filter never dispatches")
 
 
-TOOLS = (_tool("read"), _tool("checkout_code_review", profile_only=True))
+TOOLS = (
+    _tool("read"),
+    _tool("checkout_code_review", profile_only=True),
+    _tool("load_skill"),
+    _tool("skill_search"),
+)
 
 
 def test_an_agent_naming_no_allowlist_runs_the_member_facing_set() -> None:
-    assert [tool.name for tool in _agent_tools(TOOLS, None, MEMBER_ADMISSION)] == ["read"]
+    assert [tool.name for tool in _agent_tools(TOOLS, None, MEMBER_ADMISSION)] == [
+        "read",
+        "load_skill",
+        "skill_search",
+    ]
+
+
+def test_an_allowlist_naming_load_skill_also_resolves_skill_search() -> None:
+    selected = _agent_tools(TOOLS, ("load_skill",), MEMBER_ADMISSION)
+    assert {tool.name for tool in selected} == {"load_skill", "skill_search"}
+
+
+def test_an_allowlist_without_load_skill_never_gains_skill_search() -> None:
+    assert [tool.name for tool in _agent_tools(TOOLS, ("read",), MEMBER_ADMISSION)] == ["read"]
 
 
 def test_an_allowlist_reaches_the_primitive_it_names() -> None:
@@ -433,7 +451,7 @@ def test_a_prepared_intent_runs_past_the_allowlist() -> None:
     refuse every panel mutation on itself, `connect_account` and `request_credentials` included —
     the two that would give it an account or a key."""
     selected = _agent_tools(TOOLS, ("checkout_code_review",), INTENT_ADMISSION)
-    assert [tool.name for tool in selected] == ["read"]
+    assert [tool.name for tool in selected] == ["read", "load_skill", "skill_search"]
 
 
 async def _conversation(workspace_id: UUID, agent_id: UUID) -> UUID:

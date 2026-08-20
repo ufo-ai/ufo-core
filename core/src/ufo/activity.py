@@ -6,6 +6,7 @@ from ufo.hub import SkillLoad, ToolCall
 from ufo.models.interface import ToolUseBlock
 
 SKILL_LOAD_TOOL = "load_skill"
+SKILL_SEARCH_TOOL = "skill_search"
 TOOL_CALL_PREVIEW_CHARS = 200
 
 

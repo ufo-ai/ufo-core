@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.activity import SKILL_LOAD_TOOL
@@ -257,7 +257,7 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     mounted = {route.path for route in app.routes}
     for spec in manifest.surfaces:

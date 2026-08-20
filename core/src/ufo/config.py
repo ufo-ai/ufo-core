@@ -149,6 +149,15 @@ class MemoryConfig(BaseModel):
     embed_backend: str | None = None
 
 
+class SkillsConfig(BaseModel):
+    """`member_block` renders the bound agent's saved-skill cards into each member turn's injected
+    context. Off, member skills stay loadable through `skill_search` and `load_skill` but no turn
+    suggests them — the ablation arm the suggestion-bias evals run against."""
+
+    model_config = ConfigDict(extra="forbid")
+    member_block: bool = True
+
+
 class O11yConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     otlp_endpoint: str | None = None
@@ -339,6 +348,7 @@ class Config(BaseModel):
     serve: ServeConfig = ServeConfig()
     connect: ConnectConfig = ConnectConfig()
     memory: MemoryConfig = MemoryConfig()
+    skills: SkillsConfig = SkillsConfig()
     o11y: O11yConfig = O11yConfig()
     sandbox: SandboxConfig = SandboxConfig()
     ext: ExtConfig = ExtConfig()

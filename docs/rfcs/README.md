@@ -36,6 +36,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0036](0036-control-plane-rust.md) | Control plane in Rust — its own ledgers, a core RPC for core's tables | implemented |
 | [0037](0037-preview-service.md) | Preview service — document rasterization out of the sandbox | accepted |
 | [0038](0038-invitation-delivery.md) | Invitation delivery — one mail API, our words | accepted |
+| [0038](0038-skill-retrieval.md) | Skill retrieval — routing cards, tiered visibility, and retrieval proven in shadow | implemented |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working

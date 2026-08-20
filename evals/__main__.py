@@ -105,6 +105,7 @@ from evals.memory_ingestion.runner import MemoryIngestionRun, load_memory_ingest
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
+from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
 from evals.skill_loading.runner import skill_loading_task
 from evals.turn_logs import TurnLogCollector
 from evals.wandr.runner import (
@@ -135,10 +136,14 @@ from ufo.ext.loader import (
     index_backend,
     load_manifests,
     skill_registry,
-    turn_runtime_skills,
+    turn_subagents,
 )
 from ufo.governance import prompt_digest
+from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.prompts.render import render_system_prompt
+from ufo.loop.spawn_catalog import spawn_catalog_skill
+from ufo.loop.subagents import SubagentRegistry
+from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.registry import ModelRegistry, model_registry
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, ReasoningEffort
@@ -680,9 +685,15 @@ async def _run(
             with ws(workspace_id), agent(agent_id):
                 loadable_skills: frozenset[str] | None = None
                 if any(task.suite == "skill_loading" for task in tasks):
-                    loadable_skills = frozenset(skill_registry(manifests).by_name)
-                    generated = await turn_runtime_skills(manifests, credentials)
-                    loadable_skills |= frozenset(skill.name for skill in generated)
+                    loadable_skills = frozenset(
+                        skill_registry(manifests, (model_catalog_skill(registry),)).by_name
+                    )
+                    subagents = SubagentRegistry(
+                        (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
+                    )
+                    loadable_skills |= frozenset(
+                        ((await spawn_catalog_skill(subagents, None)).name,)
+                    )
                     async with workspace_tx() as connection:
                         main_agent = (
                             await connection.execute(
@@ -944,7 +955,7 @@ def _model_leg(
 
 
 def _skill_loading_subset(names: tuple[str, ...]) -> EvalTask:
-    by_name = {case.name: case for case in SKILL_LOADING_CASES}
+    by_name = {case.name: case for case in (*SKILL_LOADING_CASES, *SKILL_MEMBER_CASES)}
     missing = tuple(name for name in names if name not in by_name)
     if missing:
         raise ValueError(f"unknown skill_loading case: {', '.join(missing)}")

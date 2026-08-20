@@ -19,7 +19,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_web.manifest import manifest as web_manifest
-from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY
+from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY, no_member_skills
 
 from ufo.audience import conversation_audience
 from ufo.bearer import mint_token
@@ -42,7 +42,6 @@ from ufo.seed import (
     KitchenSink,
 )
 from ufo.serve import _mount_shared_surfaces
-from ufo.skills.runtime import RuntimeSkill
 from ufo.transcript import transcript_key
 from ufo.workspace import ws
 
@@ -93,10 +92,6 @@ async def _seed_workspace() -> tuple[UUID, UUID, UUID]:
     return workspace_id, agent_id, member_id
 
 
-async def _no_user_skills() -> tuple[RuntimeSkill, ...]:
-    return ()
-
-
 def _mount(blob: FilesystemBlobStore, tmp_path: Path) -> FastAPI:
     app = FastAPI()
     _mount_shared_surfaces(
@@ -120,7 +115,7 @@ def _mount(blob: FilesystemBlobStore, tmp_path: Path) -> FastAPI:
         ("auto", "claude-opus-4-8"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=skill_registry((web_manifest(),)),
-        user_skills=_no_user_skills,
+        member_skill_listing=no_member_skills,
     )
     return app
 

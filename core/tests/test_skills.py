@@ -2,7 +2,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from cryptography.fernet import Fernet
 
+from ufo.credentials import CredentialStore
+from ufo.ext.context import ExtensionContext
+from ufo.ext.loader import member_skill_listing, turn_member_skills
+from ufo.ext.manifest import Manifest, MemberSkillsSpec
 from ufo.sandbox.containment import ContainmentError
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
@@ -11,9 +16,11 @@ from ufo.skills.runtime import (
     CORE_SKILL_REGISTRY,
     CORE_SKILLS,
     SUGGESTION_LIMIT,
+    LoadedRef,
     LoadedSkill,
     LoadedSkills,
     RuntimeSkill,
+    SkillCard,
     SkillRegistry,
     discover_skills,
     loaded_context,
@@ -81,6 +88,12 @@ def test_skill_named_unknown_fails_loud_and_suggests_only_the_closest() -> None:
         CORE_SKILL_REGISTRY.named("ghost")
 
 
+def test_skill_named_unknown_fails_loud_without_enumerating_the_registry() -> None:
+    with pytest.raises(ValueError, match="unknown skill 'ghost'") as caught:
+        CORE_SKILL_REGISTRY.named("ghost")
+    assert "sandbox" not in str(caught.value)
+
+
 def test_parse_reads_frontmatter_body_and_bundled_files(tmp_path: Path) -> None:
     skill_dir = _write_skill(tmp_path, "probe", "a probe skill", "Do the thing.")
     (skill_dir / "helper.py").write_bytes(b"print('hi')")
@@ -111,7 +124,7 @@ def test_closure_leads_with_the_asked_for_skill_then_its_dependencies(tmp_path: 
     base = parse_skill(_write_skill(tmp_path, "base", "base skill", "base body"))
     leaf = parse_skill(_write_skill(tmp_path, "leaf", "leaf skill", "leaf body", depends=("base",)))
     registry = SkillRegistry({"base": base, "leaf": leaf})
-    assert [entry.skill.name for entry in registry.closure("leaf")] == ["leaf", "base"]
+    assert [ref.card.name for ref in registry.closure("leaf")] == ["leaf", "base"]
 
 
 def test_prompt_body_is_a_header_naming_the_skill_and_its_workflow(tmp_path: Path) -> None:
@@ -128,7 +141,7 @@ def test_prompt_body_is_a_header_naming_the_skill_and_its_workflow(tmp_path: Pat
     assert "base" not in body
 
 
-def test_a_pulled_skills_header_names_the_skill_that_pulled_it(tmp_path: Path) -> None:
+async def test_a_pulled_skills_header_names_the_skill_that_pulled_it(tmp_path: Path) -> None:
     """The agent can tell the workflow it asked for from the ones that rode along: a dependency's
     header names its puller, and down a chain each hop names the link above it."""
     for name, dep in (("a", "b"), ("b", "c")):
@@ -136,7 +149,10 @@ def test_a_pulled_skills_header_names_the_skill_that_pulled_it(tmp_path: Path) -
     _write_skill(tmp_path, "c", "c skill", "c body")
     registry = SkillRegistry({name: parse_skill(tmp_path / name) for name in "abc"})
 
-    headers = [entry.prompt_body().splitlines()[0] for entry in registry.closure("a")]
+    headers = [
+        entry.prompt_body().splitlines()[0]
+        for entry in await registry.materialize(registry.closure("a"))
+    ]
 
     assert headers == [
         "# Skill: a",
@@ -145,7 +161,7 @@ def test_a_pulled_skills_header_names_the_skill_that_pulled_it(tmp_path: Path) -
     ]
 
 
-def test_loaded_context_closes_with_one_tree_for_the_whole_closure(tmp_path: Path) -> None:
+async def test_loaded_context_closes_with_one_tree_for_the_whole_closure(tmp_path: Path) -> None:
     """Every workflow first, then a single tree of everything mounted — not a tree per skill. Only
     `SKILL.md` content is injected; a bundled file appears as a path and nothing more."""
     base_dir = _write_skill(tmp_path, "base", "base skill", "base body")
@@ -155,7 +171,7 @@ def test_loaded_context_closes_with_one_tree_for_the_whole_closure(tmp_path: Pat
     (leaf_dir / "scripts" / "run.py").write_text("print(1)")
     registry = SkillRegistry({"base": parse_skill(base_dir), "leaf": parse_skill(leaf_dir)})
 
-    text = loaded_context(registry.closure("leaf"))
+    text = loaded_context(await registry.materialize(registry.closure("leaf")))
 
     assert text.count("Mounted files:") == 1
     assert "BUNDLED CONTENT" not in text
@@ -173,14 +189,16 @@ def test_loaded_context_closes_with_one_tree_for_the_whole_closure(tmp_path: Pat
     )
 
 
-def test_a_skill_already_in_context_costs_a_note_instead_of_its_workflow(tmp_path: Path) -> None:
+async def test_a_skill_already_in_context_costs_a_note_instead_of_its_workflow(
+    tmp_path: Path,
+) -> None:
     """A repeat load: every file still mounts and the tree still names the whole closure, but the
     workflow the model is already reading is not sent a second time."""
     base_dir = _write_skill(tmp_path, "base", "base skill", "BASE BODY")
     leaf_dir = _write_skill(tmp_path, "leaf", "leaf skill", "LEAF BODY", depends=("base",))
     registry = SkillRegistry({"base": parse_skill(base_dir), "leaf": parse_skill(leaf_dir)})
 
-    text = loaded_context(registry.closure("leaf"), {"leaf", "base"})
+    text = loaded_context(await registry.materialize(registry.closure("leaf")), {"leaf", "base"})
 
     assert "BODY" not in text
     assert "# Skill:" not in text
@@ -188,7 +206,7 @@ def test_a_skill_already_in_context_costs_a_note_instead_of_its_workflow(tmp_pat
     assert "/workspace/.skills/\n  base/\n    SKILL.md\n  leaf/\n    SKILL.md" in text
 
 
-def test_a_dependency_already_in_context_still_injects_the_asked_for_workflow(
+async def test_a_dependency_already_in_context_still_injects_the_asked_for_workflow(
     tmp_path: Path,
 ) -> None:
     """Suppression is per skill inside one closure: loading a skill whose dependency is already in
@@ -197,7 +215,7 @@ def test_a_dependency_already_in_context_still_injects_the_asked_for_workflow(
     leaf_dir = _write_skill(tmp_path, "leaf", "leaf skill", "LEAF BODY", depends=("base",))
     registry = SkillRegistry({"base": parse_skill(base_dir), "leaf": parse_skill(leaf_dir)})
 
-    text = loaded_context(registry.closure("leaf"), {"base"})
+    text = loaded_context(await registry.materialize(registry.closure("leaf")), {"base"})
 
     assert "# Skill: leaf\n\nLEAF BODY" in text
     assert "BASE BODY" not in text
@@ -226,10 +244,10 @@ def test_loaded_skills_reseed_replaces_rather_than_accumulates() -> None:
     kept = RuntimeSkill(name="kept", description="d", instructions="body")
     tracker = LoadedSkills()
 
-    tracker.reseed(((LoadedSkill(skill=gone),),))
+    tracker.reseed(((LoadedRef(card=gone.card()),),))
     assert tracker.in_context == {"gone"}
 
-    tracker.reseed(((LoadedSkill(skill=kept),),))
+    tracker.reseed(((LoadedRef(card=kept.card()),),))
     assert tracker.in_context == {"kept"}
     assert tracker.asked_for == {"kept"}
 
@@ -241,7 +259,9 @@ def test_loaded_skills_drain_yields_the_asked_for_names_and_empties_the_tracker(
     leaf = RuntimeSkill(name="leaf", description="d", instructions="LEAF", depends=("base",))
     base = RuntimeSkill(name="base", description="d", instructions="BASE")
     tracker = LoadedSkills()
-    tracker.reseed(((LoadedSkill(skill=leaf), LoadedSkill(skill=base, dependency_of="leaf")),))
+    tracker.reseed(
+        ((LoadedRef(card=leaf.card()), LoadedRef(card=base.card(), dependency_of="leaf")),)
+    )
 
     assert tracker.drain() == ("leaf",)
     assert tracker.in_context == set()
@@ -256,7 +276,7 @@ def test_closure_follows_a_dependency_chain_to_its_end(tmp_path: Path) -> None:
         _write_skill(tmp_path, name, f"{name} skill", f"{name} body", depends=(dep,))
     _write_skill(tmp_path, "d", "d skill", "d body")
     chain = SkillRegistry({name: parse_skill(tmp_path / name) for name in "abcd"})
-    assert [entry.skill.name for entry in chain.closure("a")] == ["a", "b", "c", "d"]
+    assert [ref.card.name for ref in chain.closure("a")] == ["a", "b", "c", "d"]
 
     looped = SkillRegistry(
         {
@@ -264,11 +284,11 @@ def test_closure_follows_a_dependency_chain_to_its_end(tmp_path: Path) -> None:
             "y": RuntimeSkill(name="y", description="y", instructions="y", depends=("x",)),
         }
     )
-    assert [entry.skill.name for entry in looped.closure("x")] == ["x", "y"]
+    assert [ref.card.name for ref in looped.closure("x")] == ["x", "y"]
 
 
 def test_closure_of_a_core_skill_returns_it() -> None:
-    assert [entry.skill.name for entry in CORE_SKILL_REGISTRY.closure("sandbox")] == ["sandbox"]
+    assert [ref.card.name for ref in CORE_SKILL_REGISTRY.closure("sandbox")] == ["sandbox"]
 
 
 def test_discover_registers_a_parent_and_its_nested_child_by_path_form(tmp_path: Path) -> None:
@@ -303,7 +323,7 @@ def test_nesting_alone_pulls_no_parent_and_the_index_hides_the_child(tmp_path: P
     parent_dir = _write_skill(tmp_path, "site", "a parent skill", "p")
     _write_nested_child(parent_dir, "app", "a child skill", "c")
     registry = SkillRegistry(discover_skills(parent_dir))
-    assert [entry.skill.name for entry in registry.closure("site/app")] == ["site/app"]
+    assert [ref.card.name for ref in registry.closure("site/app")] == ["site/app"]
     assert registry.index() == (("site", "a parent skill"),)
 
 
@@ -311,7 +331,7 @@ def test_a_nested_child_that_declares_its_parent_pulls_it(tmp_path: Path) -> Non
     parent_dir = _write_skill(tmp_path, "site", "a parent skill", "p")
     _write_nested_child(parent_dir, "app", "a child skill", "c", depends=("site",))
     registry = SkillRegistry(discover_skills(parent_dir))
-    assert [entry.skill.name for entry in registry.closure("site/app")] == ["site/app", "site"]
+    assert [ref.card.name for ref in registry.closure("site/app")] == ["site/app", "site"]
 
 
 async def test_mount_writes_a_nested_child_under_its_parent_path(tmp_path: Path) -> None:
@@ -361,7 +381,7 @@ async def test_a_load_mounts_every_file_of_every_skill_it_pulls(tmp_path: Path) 
     registry = SkillRegistry({name: parse_skill(tmp_path / name) for name in ("base", "leaf")})
     sandbox = _RecordingSandbox()
 
-    for entry in registry.closure("leaf"):
+    for entry in await registry.materialize(registry.closure("leaf")):
         await mount_skill(sandbox, entry.skill)
 
     assert set(sandbox.files) == {
@@ -382,10 +402,10 @@ async def test_loading_a_skill_then_pulling_it_as_a_dependency_remounts_it_clean
     registry = SkillRegistry({name: parse_skill(tmp_path / name) for name in ("base", "leaf")})
     sandbox = _RecordingSandbox()
 
-    for entry in registry.closure("base"):
+    for entry in await registry.materialize(registry.closure("base")):
         await mount_skill(sandbox, entry.skill)
     first = dict(sandbox.files)
-    for entry in registry.closure("leaf"):
+    for entry in await registry.materialize(registry.closure("leaf")):
         await mount_skill(sandbox, entry.skill)
 
     assert first.items() <= sandbox.files.items()
@@ -425,7 +445,7 @@ def test_a_dependency_cycle_resolves_each_skill_once_however_it_is_shaped() -> N
         )
 
     def loaded(reg: SkillRegistry, name: str) -> list[str]:
-        return [entry.skill.name for entry in reg.closure(name)]
+        return [ref.card.name for ref in reg.closure(name)]
 
     assert loaded(registry(s=("s",)), "s") == ["s"]
     assert loaded(registry(x=("y",), y=("x",)), "x") == ["x", "y"]
@@ -435,7 +455,7 @@ def test_a_dependency_cycle_resolves_each_skill_once_however_it_is_shaped() -> N
 
     mutual = registry(x=("y",), y=("x",))
     both = mutual.closure("x", "y")
-    assert [entry.skill.name for entry in both] == ["x", "y"]
+    assert [ref.card.name for ref in both] == ["x", "y"]
     assert [entry.dependency_of for entry in both] == [None, None]
 
 
@@ -452,11 +472,14 @@ def test_a_named_skill_is_never_labelled_a_dependency_of_another_named_skill() -
 
     for names in (("leaf", "base"), ("base", "leaf")):
         loaded = registry.closure(*names)
-        assert {entry.skill.name for entry in loaded} == {"leaf", "base"}
+        assert {ref.card.name for ref in loaded} == {"leaf", "base"}
         assert [entry.dependency_of for entry in loaded] == [None, None]
 
     pulled = registry.closure("leaf")
-    assert [(e.skill.name, e.dependency_of) for e in pulled] == [("leaf", None), ("base", "leaf")]
+    assert [(ref.card.name, ref.dependency_of) for ref in pulled] == [
+        ("leaf", None),
+        ("base", "leaf"),
+    ]
 
 
 def test_closure_of_no_names_is_empty() -> None:
@@ -505,15 +528,17 @@ def test_parse_skill_content_rejects_a_name_that_does_not_match_its_directory() 
         parse_skill_content("mismatch", files)
 
 
-def test_merged_with_appends_user_skills_beside_the_core_floor() -> None:
-    user = RuntimeSkill(name="greet", description="a user skill", instructions="say hi")
-    merged = CORE_SKILL_REGISTRY.merged_with((user,))
-    assert merged.named("greet") is user
+def test_merged_with_appends_generated_skills_beside_the_core_floor() -> None:
+    generated = RuntimeSkill(
+        name="model-catalog", description="a generated skill", instructions="g"
+    )
+    merged = CORE_SKILL_REGISTRY.merged_with((generated,))
+    assert merged.named("model-catalog") is generated
     assert set(CORE_SKILL_NAMES) <= set(merged.by_name)
-    assert ("greet", "a user skill") in merged.index()
+    assert ("model-catalog", "a generated skill") in merged.index()
 
 
-def test_merged_with_never_lets_a_user_skill_shadow_a_core_skill() -> None:
+def test_merged_with_never_lets_a_generated_skill_shadow_a_core_skill() -> None:
     impostor = RuntimeSkill(name="sandbox", description="hijacked", instructions="evil")
     merged = CORE_SKILL_REGISTRY.merged_with((impostor,))
     assert merged.named("sandbox") is CORE_SKILL_REGISTRY.named("sandbox")
@@ -593,3 +618,190 @@ async def test_mount_refuses_a_planted_symlink_inside_the_mount(tmp_path: Path) 
         await mount_skill(session, skill)
 
     assert list(outside.iterdir()) == []
+
+
+def _member_registry(
+    *cards: SkillCard, rows: dict[str, RuntimeSkill] | None = None
+) -> tuple[SkillRegistry, list[str]]:
+    stored = rows if rows is not None else {}
+    calls: list[str] = []
+
+    async def materialize(name: str) -> RuntimeSkill | None:
+        calls.append(name)
+        return stored.get(name)
+
+    return CORE_SKILL_REGISTRY.with_member(cards, materialize), calls
+
+
+def test_closure_resolves_member_cards_without_touching_a_stored_body() -> None:
+    registry, calls = _member_registry(
+        SkillCard(name="greet", description="say hi", depends=("farewell",)),
+        SkillCard(name="farewell", description="say bye"),
+    )
+
+    refs = registry.closure("greet")
+
+    assert [(ref.card.name, ref.dependency_of) for ref in refs] == [
+        ("greet", None),
+        ("farewell", "greet"),
+    ]
+    assert calls == []
+
+
+def test_member_closure_pulls_a_deploy_dependency_and_survives_a_cycle() -> None:
+    registry, _calls = _member_registry(
+        SkillCard(name="ship", description="d", depends=("sandbox", "review")),
+        SkillCard(name="review", description="d", depends=("ship",)),
+    )
+
+    refs = registry.closure("ship")
+
+    assert [(ref.card.name, ref.dependency_of) for ref in refs] == [
+        ("ship", None),
+        ("sandbox", "ship"),
+        ("review", "ship"),
+    ]
+
+
+async def test_materialize_reads_member_rows_and_deploy_skills_in_closure_order() -> None:
+    greet = RuntimeSkill(name="greet", description="say hi", instructions="HI")
+    registry, calls = _member_registry(
+        SkillCard(name="greet", description="say hi", depends=("sandbox",)),
+        rows={"greet": greet},
+    )
+
+    loaded = await registry.materialize(registry.closure("greet"))
+
+    assert [(entry.skill.name, entry.dependency_of) for entry in loaded] == [
+        ("greet", None),
+        ("sandbox", "greet"),
+    ]
+    assert loaded[0].skill is greet
+    assert loaded[1].skill is CORE_SKILL_REGISTRY.named("sandbox")
+    assert calls == ["greet"]
+
+
+async def test_materialize_of_a_vanished_member_row_fails_loud_naming_the_skill() -> None:
+    registry, _calls = _member_registry(SkillCard(name="gone", description="d"))
+    with pytest.raises(ValueError, match="skill 'gone' is no longer available"):
+        await registry.materialize(registry.closure("gone"))
+
+
+def test_with_member_never_lets_a_member_card_shadow_a_deploy_skill() -> None:
+    registry, _calls = _member_registry(
+        SkillCard(name="sandbox", description="hijacked"),
+        SkillCard(name="greet", description="say hi"),
+    )
+
+    assert set(registry.member_cards) == {"greet"}
+    assert registry.named("sandbox").description != "hijacked"
+
+
+def test_merged_with_evicts_a_member_card_a_generated_skill_now_shadows() -> None:
+    registry, _calls = _member_registry(SkillCard(name="setup", description="member text"))
+    generated = RuntimeSkill(name="setup", description="deploy setup", instructions="g")
+
+    merged = registry.merged_with((generated,))
+
+    assert merged.named("setup") is generated
+    assert "setup" not in merged.member_cards
+    assert merged.materializer is registry.materializer
+
+
+def test_index_excludes_member_cards_and_includes_generated_skills() -> None:
+    generated = RuntimeSkill(name="model-catalog", description="the models", instructions="g")
+    base, _calls = _member_registry(SkillCard(name="greet", description="say hi"))
+    registry = base.merged_with((generated,))
+
+    index = dict(registry.index())
+
+    assert "greet" not in index
+    assert index["model-catalog"] == "the models"
+    assert set(CORE_SKILL_NAMES) <= set(index)
+
+
+def test_known_names_and_all_cards_span_both_tiers() -> None:
+    registry, _calls = _member_registry(SkillCard(name="greet", description="say hi"))
+
+    assert registry.known_names() == frozenset(CORE_SKILL_REGISTRY.by_name) | {"greet"}
+    cards = registry.all_cards()
+    assert cards[-1] == SkillCard(name="greet", description="say hi")
+    assert {card.name for card in cards} == registry.known_names()
+
+
+def test_an_unknown_member_name_suggests_the_closest_without_enumerating() -> None:
+    registry, _calls = _member_registry(
+        SkillCard(name="deploy-frontend", description="d"),
+        SkillCard(name="unrelated", description="d"),
+    )
+    with pytest.raises(ValueError, match="unknown skill 'deploy-frontnd'") as caught:
+        registry.closure("deploy-frontnd")
+    assert "deploy-frontend" in str(caught.value)
+    assert "unrelated" not in str(caught.value)
+
+
+def _provider_manifest(
+    name: str, *skills: RuntimeSkill, cards: tuple[SkillCard, ...] | None = None
+) -> Manifest:
+    rows = {skill.name: skill for skill in skills}
+
+    async def provider_cards(ctx: ExtensionContext) -> tuple[SkillCard, ...]:
+        return cards if cards is not None else tuple(skill.card() for skill in skills)
+
+    async def materialize(ctx: ExtensionContext, requested: str) -> RuntimeSkill | None:
+        return rows.get(requested)
+
+    async def materialize_all(ctx: ExtensionContext) -> tuple[RuntimeSkill, ...]:
+        return tuple(rows.values())
+
+    return Manifest(
+        name=name,
+        version="0",
+        member_skills=MemberSkillsSpec(
+            cards=provider_cards, materialize=materialize, materialize_all=materialize_all
+        ),
+    )
+
+
+_STORE = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+GREET = RuntimeSkill(name="greet", description="say hi", instructions="HI")
+FAREWELL = RuntimeSkill(name="farewell", description="say bye", instructions="BYE")
+
+
+async def test_turn_member_skills_collects_cards_and_routes_materialization() -> None:
+    cards, materialize = await turn_member_skills((_provider_manifest("one", GREET),), _STORE)
+    assert cards == (GREET.card(),)
+    assert await materialize("greet") is GREET
+    assert await materialize("unknown") is None
+
+
+async def test_turn_member_skills_without_a_credential_key_fails_loud() -> None:
+    with pytest.raises(RuntimeError, match="no credential key"):
+        await turn_member_skills((_provider_manifest("one", GREET),), None)
+
+
+async def test_a_cross_provider_name_collision_keeps_the_first_and_drops_the_rest() -> None:
+    impostor = RuntimeSkill(name="greet", description="other greet", instructions="OTHER")
+    manifests = (
+        _provider_manifest("first", GREET, FAREWELL),
+        _provider_manifest("second", impostor),
+    )
+
+    cards, materialize = await turn_member_skills(manifests, _STORE)
+
+    assert cards == (GREET.card(), FAREWELL.card())
+    assert await materialize("greet") is GREET
+
+
+async def test_member_skill_listing_materializes_every_provider_whole() -> None:
+    impostor = RuntimeSkill(name="greet", description="other greet", instructions="OTHER")
+    manifests = (
+        _provider_manifest("first", GREET, FAREWELL),
+        _provider_manifest("second", impostor),
+    )
+
+    listed = await member_skill_listing(manifests, _STORE)
+
+    assert listed == (GREET, FAREWELL)
+    with pytest.raises(RuntimeError, match="no credential key"):
+        await member_skill_listing(manifests, None)

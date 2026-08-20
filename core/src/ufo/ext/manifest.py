@@ -44,7 +44,7 @@ from ufo.sandbox.session import Carrier
 from ufo.sandbox.terminal import TerminalTransport
 from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
-from ufo.skills.runtime import RuntimeSkill
+from ufo.skills.runtime import RuntimeSkill, SkillCard
 from ufo.sources.sync import PageChange, SourceBackend
 from ufo.tools.registry import ToolDef
 
@@ -607,10 +607,20 @@ class SkillSpec:
     path: Path
 
 
-RuntimeSkillProvider = Callable[[ExtensionContext], Awaitable[tuple[RuntimeSkill, ...]]]
-"""A per-turn source of the bound agent's runtime skills. Core calls it under the turn's workspace
-and agent scope with the extension's ExtensionContext, then merges the result into that turn's
-SkillRegistry. It is not a boot-time registration because member-authored skills are agent state."""
+@dataclass(frozen=True)
+class MemberSkillsSpec:
+    """A source of the bound agent's member-authored skills, in three verbs: `cards` answers the
+    turn's routing set (name, description, depends, pinned — never file bytes), `materialize`
+    parses one named skill's stored files into the `RuntimeSkill` a load mounts, and
+    `materialize_all` reads every saved skill whole in one store read — the portal's listing
+    projection, where a corrupt row is skipped with a log rather than failing the page. Core calls
+    each under the turn's workspace and agent scope with the extension's ExtensionContext and
+    merges the cards into that turn's SkillRegistry as its member tier. It is not a boot-time
+    registration because member-authored skills are agent state."""
+
+    cards: Callable[[ExtensionContext], Awaitable[tuple[SkillCard, ...]]]
+    materialize: Callable[[ExtensionContext, str], Awaitable[RuntimeSkill | None]]
+    materialize_all: Callable[[ExtensionContext], Awaitable[tuple[RuntimeSkill, ...]]]
 
 
 @dataclass(frozen=True)
@@ -651,7 +661,7 @@ class Manifest:
     prompt_sections: tuple[PromptSection, ...] = ()
     agents: tuple[AgentProvision, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()
-    runtime_skills: RuntimeSkillProvider | None = None
+    member_skills: MemberSkillsSpec | None = None
     subagent_tool_grants: tuple[SubagentToolGrant, ...] = ()
     surfaces: tuple[SurfaceSpec, ...] = ()
     models: tuple[ModelSpec, ...] = ()

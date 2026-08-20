@@ -39,7 +39,8 @@ from ufo.loop.subagents import (
 from ufo.o11y import current_traceparent
 from ufo.schema import tables
 from ufo.schema.records import AskQuestion, AskUserInput, TerminalFrame, Turn, turn_id_for
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill
+from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill, SkillCard
+from ufo.skills.selection import prompt_index
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.builtins import BUILTIN_TOOLS, SPAWN_BACKGROUND_DIRECTIVE, _spawn_handles
 from ufo.tools.context import (
@@ -264,7 +265,9 @@ def test_subagent_prompt_reads_a_preloaded_skills_braces_as_content() -> None:
     assert "{{ message }}" in prompt
 
 
-def test_subagent_prompt_uses_the_turns_complete_skill_index() -> None:
+def test_subagent_prompt_renders_the_deploy_skill_index_it_is_given() -> None:
+    """The child's `{{skill_index}}` is the deploy tier the turn passed — member skills never
+    render here; they reach a child only through `preload_skills`."""
     profile = SubagentProfile(
         name="slotted",
         prompt="do the task\n\n{{skill_index}}",
@@ -273,10 +276,58 @@ def test_subagent_prompt_uses_the_turns_complete_skill_index() -> None:
         output_model=_Finding,
     )
     prompt = subagent_system_prompt(
-        profile, skills=(("extension-skill", "A workspace-specific workflow."),)
+        profile, skills=(("extension-skill", "A deploy-provided workflow."),)
     )
-    assert "extension-skill: A workspace-specific workflow." in prompt
+    assert "extension-skill: A deploy-provided workflow." in prompt
     assert "- sandbox:" not in prompt
+
+
+def test_a_folded_member_tier_lists_in_a_subagent_prompt() -> None:
+    """A child's `{{skill_index}}` renders the same fold-aware index the parent's prompt carries:
+    a member tier small enough to fold lists beside the deploy skills, same line format."""
+
+    async def materialize(name: str) -> None:
+        return None
+
+    registry = CORE_SKILL_REGISTRY.with_member(
+        (SkillCard(name="invoice-review", description="Load when reconciling an invoice."),),
+        materialize,
+    )
+    profile = SubagentProfile(
+        name="slotted",
+        prompt="do the task\n\n{{skill_index}}",
+        tool_names=(),
+        input_model=_Task,
+        output_model=_Finding,
+    )
+
+    prompt = subagent_system_prompt(profile, skills=prompt_index(registry))
+
+    assert "- invoice-review: Load when reconciling an invoice." in prompt
+    assert "- sandbox:" in prompt
+
+
+def test_a_profile_holding_load_skill_also_gets_skill_search() -> None:
+    """The pair is structural: wherever a profile's tool set resolves load_skill, skill_search
+    joins it, so a child that can load from the tail can also find the tail."""
+    by_name = {tool.name: tool for tool in BUILTIN_TOOLS}
+    pool = (by_name["load_skill"], by_name["skill_search"], by_name["read"])
+
+    capable = replace(_profile("capable"), tool_names=("load_skill",))
+    assert {tool.name for tool in _subagent_tools(pool, capable, frozenset())} == {
+        "load_skill",
+        "skill_search",
+    }
+
+    granted = replace(_profile("granted"), tool_names=("read",))
+    assert {tool.name for tool in _subagent_tools(pool, granted, frozenset({"load_skill"}))} == {
+        "read",
+        "load_skill",
+        "skill_search",
+    }
+
+    plain = replace(_profile("plain"), tool_names=("read",))
+    assert {tool.name for tool in _subagent_tools(pool, plain, frozenset())} == {"read"}
 
 
 def test_skill_capable_subagent_requires_a_skill_index_slot() -> None:

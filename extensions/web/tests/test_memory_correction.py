@@ -32,7 +32,7 @@ from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.bearer import mint_token
@@ -230,7 +230,7 @@ async def memory_web(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        member_skill_listing=no_member_skills,
         memory=memory_search(manifests, None, index, embed),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:

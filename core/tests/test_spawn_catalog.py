@@ -158,7 +158,7 @@ async def test_the_catalog_stands_on_its_own_in_the_index(db: None) -> None:
     with ws(workspace_id):
         catalog = await spawn_catalog_skill(SubagentRegistry(CORE_SUBAGENT_PROFILES), None)
     registry = skill_registry((), (catalog,))
-    assert [s.skill.name for s in registry.closure(SPAWN_CATALOG_SKILL_NAME)] == [
+    assert [ref.card.name for ref in registry.closure(SPAWN_CATALOG_SKILL_NAME)] == [
         SPAWN_CATALOG_SKILL_NAME
     ]
     assert (SPAWN_CATALOG_SKILL_NAME, SPAWN_CATALOG_DESCRIPTION) in registry.index()

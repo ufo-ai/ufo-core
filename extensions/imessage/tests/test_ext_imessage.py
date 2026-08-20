@@ -58,7 +58,7 @@ from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
     UNREACHED_STOPPER,
-    no_user_skills,
+    no_member_skills,
 )
 
 from ufo.ambient_reply import AmbientReplyClassifier
@@ -225,7 +225,7 @@ def _context(workspace_id: UUID, tmp_path: Path, dbos: StubDbos) -> SurfaceConte
         _deploy_sandbox_internet=False,
         _models=("auto", "claude-opus-4-8"),
         _skills=EMPTY_SKILL_REGISTRY,
-        _user_skills=no_user_skills,
+        _member_skill_listing=no_member_skills,
         _declared_slots=(),
         _ambient_reply=UNREACHED_AMBIENT_REPLY,
     )

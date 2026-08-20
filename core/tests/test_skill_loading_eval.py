@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from evals.harness.mounts import MountObservation
 from evals.skill_loading.catalog import CASES
+from evals.skill_loading.member import CASES as MEMBER_CASES
 from evals.skill_loading.runner import (
     SkillLoadCase,
     SkillLoadingSuite,
@@ -81,6 +82,35 @@ def test_forbidden_child_alongside_its_expected_parent_fails() -> None:
     )
     assert not passed
     assert "child" in reason
+
+
+NO_LOAD_CASE = SkillLoadCase(
+    "no-load",
+    "What time is it in Lisbon?",
+    forbidden=("office-pptx", "office-xlsx"),
+    expects_no_load=True,
+)
+
+
+def test_no_load_case_fails_immediately_on_a_forbidden_mount() -> None:
+    passed, reason = skill_load_verdict(
+        NO_LOAD_CASE, _observed(mounted=("office-pptx",), status="running")
+    )
+    assert not passed
+    assert "office-pptx" in reason
+    assert "no skill load was warranted" in reason
+
+
+def test_no_load_case_passes_at_its_own_terminal_without_a_mount() -> None:
+    passed, reason = skill_load_verdict(NO_LOAD_CASE, _observed(status="done"))
+    assert passed
+    assert "without mounting" in reason
+
+
+def test_no_load_case_still_running_at_the_deadline_fails() -> None:
+    passed, reason = skill_load_verdict(NO_LOAD_CASE, _observed(status="running"))
+    assert not passed
+    assert "still running at the deadline" in reason
 
 
 def test_terminal_without_mount_fails() -> None:
@@ -194,7 +224,7 @@ async def test_attempt_for_a_cancelled_turn_carries_no_trajectory() -> None:
 
 
 def test_catalog_names_are_unique() -> None:
-    names = [case.name for case in CASES]
+    names = [case.name for case in (*CASES, *MEMBER_CASES)]
     assert len(names) == len(set(names))
 
 

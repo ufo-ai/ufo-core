@@ -4,14 +4,17 @@ description: "Load when a member asks to create, edit, repair, or save a reusabl
 ---
 # Create Skill
 
-A saved skill belongs to the current agent. Later turns of this agent see it in
-`<available_skills>` and can load it; another agent in the same workspace does not. Each agent may
-own a different skill under the same name. A saved skill never replaces a built-in skill.
+A saved skill belongs to the current agent. Later turns of this agent list it in
+`<available_skills>` while the saved set is small, otherwise in the turn's `<saved_skills>` block;
+`skill_search` finds any saved skill and `load_skill` loads it. Another agent in the same workspace
+does not see it. Each agent may own a different skill under the same name. A saved skill never
+replaces a built-in skill.
 
 ## Author
 
 1. Identify the behavior worth making repeatable and the member phrases that should load it. Check
-   `<available_skills>` for overlap. Ask only when a missing choice would change the workflow.
+   `<available_skills>`, `<saved_skills>`, and `skill_search` for overlap. Ask only when a missing
+   choice would change the workflow.
 2. Choose a lowercase slug. Write `/workspace/<name>/SKILL.md`; its first characters must be `---`.
 3. Use exactly this frontmatter shape:
 

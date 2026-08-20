@@ -19,7 +19,7 @@ a prefix repeated once per bundled file. A workflow already in the context is no
 time: `LoadedSkills` tracks what the window holds, so a repeat load re-mounts the files and names
 the skill in one line instead of paying for its instructions again."""
 
-from collections.abc import Container, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 from pathlib import Path, PurePosixPath
@@ -50,6 +50,20 @@ def skill_mount_root(name: str) -> str:
 
 
 @dataclass(frozen=True)
+class SkillCard:
+    """One skill's routing datum: what selection, search, and closure resolution walk — never the
+    workflow body. A card and a `RuntimeSkill` are two concepts, not two forms of one: the card is
+    projected to columns where a member skill is saved, and the `RuntimeSkill` for that skill
+    exists only inside a load, materialized from its stored files. `pinned` is the member's
+    always-show mark; deploy skills carry no pin."""
+
+    name: str
+    description: str
+    depends: tuple[str, ...] = ()
+    pinned: bool = False
+
+
+@dataclass(frozen=True)
 class RuntimeSkill:
     """One parsed skill: its identity and workflow from the frontmatter/body, the raw `SKILL.md`
     mounted verbatim (no round-trip drift), and any bundled asset files. `name` is the registry
@@ -70,6 +84,11 @@ class RuntimeSkill:
 
     def mount_root(self) -> str:
         return skill_mount_root(self.name)
+
+    def card(self) -> SkillCard:
+        """This skill's routing view — what closure resolution and search walk for a deploy skill,
+        so both tiers resolve over one shape."""
+        return SkillCard(name=self.name, description=self.description, depends=self.depends)
 
 
 @dataclass(frozen=True)
@@ -94,6 +113,16 @@ class LoadedSkill:
         return f"{SKILL_HEADER_PREFIX}{self.skill.name}{pulled}\n\n{self.skill.instructions}"
 
 
+@dataclass(frozen=True)
+class LoadedRef:
+    """One skill in a resolved load, by its routing card — what `closure` yields before any body is
+    read. `dependency_of` names the skill whose `depends` pulled it, `None` when the agent asked for
+    it by name; `materialize` turns a ref into the `LoadedSkill` a mount needs."""
+
+    card: SkillCard
+    dependency_of: str | None = None
+
+
 @dataclass(eq=False)
 class LoadedSkills:
     """Which skills' workflows the model's context already holds, so `load_skill` never pays for the
@@ -108,11 +137,13 @@ class LoadedSkills:
     asked_for: set[str] = field(default_factory=set)
 
     def reseed(
-        self, loads: Iterable[tuple[LoadedSkill, ...]], preloaded: tuple[LoadedSkill, ...] = ()
+        self, loads: Iterable[tuple[LoadedRef, ...]], preloaded: tuple[LoadedSkill, ...] = ()
     ) -> None:
         """Replace the tracker with the skills the given loads put in front of the model — one
         registry closure per load, the same entries `loaded_context` rendered for it, so what the
-        tracker claims is what the model was handed rather than what some text says.
+        tracker claims is what the model was handed rather than what some text says. Each load is a
+        card closure, never materialized bodies: the tracker needs names, and re-reading a member
+        skill's stored files on every round would put the corpus back on the hot path.
 
         `preloaded` is a subagent's `preload_skills` closure. Those workflows render into the
         child's system prompt rather than a tool result, and unlike a transcript body they outlive
@@ -121,9 +152,9 @@ class LoadedSkills:
         self.reset()
         for entries in loads:
             for entry in entries:
-                self.in_context.add(entry.skill.name)
+                self.in_context.add(entry.card.name)
                 if entry.dependency_of is None:
-                    self.asked_for.add(entry.skill.name)
+                    self.asked_for.add(entry.card.name)
         self.in_context.update(entry.skill.name for entry in preloaded)
 
     def drain(self) -> tuple[str, ...]:
@@ -238,72 +269,145 @@ CORE_SKILLS_BY_NAME = _load_core_skills(CORE_SKILLS_ROOT)
 CORE_SKILLS: tuple[RuntimeSkill, ...] = tuple(CORE_SKILLS_BY_NAME.values())
 
 
+SkillMaterializer = Callable[[str], Awaitable[RuntimeSkill | None]]
+
+
 @dataclass(frozen=True)
 class SkillRegistry:
-    """Every skill a turn can load — core's plus each active pack's contributed skills (parents and
-    their nested children), keyed by registry name — built once per boot by the loader from the
-    active manifests. `load_skill` resolves what one load pulls through `closure`; the system
-    prompt's `{{skill_index}}` renders `index`. A name collision (a pack shadowing another skill) is
-    refused where the registry is built, so a lookup here is always unambiguous."""
+    """Every skill a turn can load, in two tiers. The deploy tier (`by_name`) is core's skills plus
+    each active pack's contributed skills and any generated skills — nothing a member action
+    changes, so the system prompt's `{{skill_index}}` renders `index()` over it byte-identically
+    across workspaces. The member tier (`member_cards`) is the bound agent's saved skills as
+    routing cards, joined per turn by `with_member`: `closure` resolves over cards from both tiers,
+    and `materialize` turns a resolved closure into mountable skills — deploy from `by_name`,
+    member through the `materializer`, which reads exactly the named rows. A name collision (a pack
+    shadowing another skill) is refused where the deploy tier is built, so a lookup here is always
+    unambiguous."""
 
     by_name: dict[str, RuntimeSkill]
+    member_cards: dict[str, SkillCard] = field(default_factory=dict)
+    materializer: SkillMaterializer | None = None
 
     def named(self, name: str) -> RuntimeSkill:
         try:
             return self.by_name[name]
         except KeyError as error:
-            close = get_close_matches(name, self.by_name, n=SUGGESTION_LIMIT)
-            suggestion = f" (closest: {', '.join(close)})" if close else ""
-            raise ValueError(f"unknown skill {name!r}{suggestion}") from error
+            raise self._unknown(name) from error
 
-    def closure(self, *names: str) -> tuple[LoadedSkill, ...]:
-        """One load of the named skills: every name first in the order given, then the transitive
-        `depends` of each, once apiece and paired with the skill that pulled it. `depends` is the
-        only pull — a child skill reaches its parent by declaring it, never by nesting — so this is
-        both the set mounted and the order injected, the asked-for workflows leading. A named skill
-        is always direct, never labelled a dependency, even when another named skill also depends on
-        it: seeding every name before the walk is what makes that hold whatever order they arrive
-        in. Claiming a skill before walking its dependencies keeps the walk cycle-safe, so a
-        member-authored cycle (A↔B, or a self-dep) yields each skill once, not a RecursionError."""
-        loaded: dict[str, LoadedSkill] = {
-            name: LoadedSkill(skill=self.named(name)) for name in dict.fromkeys(names)
+    def _unknown(self, name: str) -> ValueError:
+        close = get_close_matches(name, sorted(self.known_names()), n=SUGGESTION_LIMIT)
+        hint = f" (closest: {', '.join(close)})" if close else ""
+        return ValueError(f"unknown skill {name!r}{hint}")
+
+    def _card(self, name: str) -> SkillCard:
+        deploy = self.by_name.get(name)
+        if deploy is not None:
+            return deploy.card()
+        member = self.member_cards.get(name)
+        if member is None:
+            raise self._unknown(name)
+        return member
+
+    def known_names(self) -> frozenset[str]:
+        """Every name a load can resolve — the deploy tier plus the member cards. The claimable-name
+        set a save checks a new skill against."""
+        return frozenset(self.by_name) | frozenset(self.member_cards)
+
+    def all_cards(self) -> tuple[SkillCard, ...]:
+        """Every loadable skill's routing card, deploy tier first — what `skill_search` scores."""
+        return (
+            *(skill.card() for skill in self.by_name.values()),
+            *self.member_cards.values(),
+        )
+
+    def closure(self, *names: str) -> tuple[LoadedRef, ...]:
+        """One load of the named skills, resolved over routing cards — never a stored body: every
+        name first in the order given, then the transitive `depends` of each, once apiece and
+        paired with the skill that pulled it. `depends` is the only pull — a child skill reaches
+        its parent by declaring it, never by nesting — so this is both the set mounted and the
+        order injected, the asked-for workflows leading. A named skill is always direct, never
+        labelled a dependency, even when another named skill also depends on it: seeding every name
+        before the walk is what makes that hold whatever order they arrive in. Claiming a skill
+        before walking its dependencies keeps the walk cycle-safe, so a member-authored cycle
+        (A↔B, or a self-dep) yields each skill once, not a RecursionError."""
+        refs: dict[str, LoadedRef] = {
+            name: LoadedRef(card=self._card(name)) for name in dict.fromkeys(names)
         }
 
-        def add(skill: RuntimeSkill, dependency_of: str | None) -> None:
-            if skill.name in loaded:
+        def add(card: SkillCard, dependency_of: str | None) -> None:
+            if card.name in refs:
                 return
-            loaded[skill.name] = LoadedSkill(skill=skill, dependency_of=dependency_of)
-            for dependency in skill.depends:
-                add(self.named(dependency), skill.name)
+            refs[card.name] = LoadedRef(card=card, dependency_of=dependency_of)
+            for dependency in card.depends:
+                add(self._card(dependency), card.name)
 
         for name in dict.fromkeys(names):
-            for dependency in self.named(name).depends:
-                add(self.named(dependency), name)
-        return tuple(loaded.values())
+            for dependency in refs[name].card.depends:
+                add(self._card(dependency), name)
+        return tuple(refs.values())
+
+    async def materialize(self, refs: Sequence[LoadedRef]) -> tuple[LoadedSkill, ...]:
+        """The mountable skills a resolved closure names, in closure order: a deploy skill from
+        `by_name`, a member skill through the materializer — one stored-row read per name, the only
+        place a member skill's bytes are touched. A member ref whose row vanished between the card
+        projection and this read fails loud naming the skill."""
+        loaded: list[LoadedSkill] = []
+        for ref in refs:
+            name = ref.card.name
+            skill = self.by_name.get(name)
+            if skill is None and self.materializer is not None:
+                skill = await self.materializer(name)
+            if skill is None:
+                raise ValueError(f"skill {name!r} is no longer available")
+            if skill.name != name:
+                raise ValueError(f"materializing {name!r} returned skill {skill.name!r}")
+            loaded.append(LoadedSkill(skill=skill, dependency_of=ref.dependency_of))
+        return tuple(loaded)
 
     def index(self) -> tuple[tuple[str, str], ...]:
-        """The loadable-skill index the `{{skill_index}}` slot renders: each TOP-LEVEL skill's name
-        and description, in registration order (core first, then packs in load order). Child skills
-        are reached through their parent's instructions, not this index."""
+        """The loadable-skill index the `{{skill_index}}` slot renders: each TOP-LEVEL deploy
+        skill's name and description, in registration order (core first, then packs in load order).
+        Child skills are reached through their parent's instructions, not this index; member skills
+        render into the turn message, never here, so a save cannot move the system prompt."""
         return tuple(
             (skill.name, skill.description)
             for skill in self.by_name.values()
             if skill.parent is None
         )
 
-    def merged_with(self, user_skills: tuple[RuntimeSkill, ...]) -> "SkillRegistry":
-        """This registry (core + active packs) plus a workspace's saved user-skills, appended last.
-        A user-skill is user-controlled text mounted into the agent's own context, so it may never
-        shadow a core or pack skill: the base always wins on a name collision and the user-skill is
-        dropped with a log. The save path refuses a colliding name up front, so this guard is the
-        structural backstop that makes the no-shadow invariant hold even against a stale row."""
+    def merged_with(self, generated: tuple[RuntimeSkill, ...]) -> "SkillRegistry":
+        """This registry plus deploy-controlled generated skills (the spawn catalog, the setup
+        skill), appended to the deploy tier. The base wins on a name collision and the newcomer is
+        dropped with a log; a member card colliding with a name added here is dropped the same way,
+        so the deploy tier always shadows the member tier whatever order the turn composed them."""
         by_name = dict(self.by_name)
-        for skill in user_skills:
+        for skill in generated:
             if skill.name in by_name:
-                log("skill.user_shadow_refused", skill=skill.name)
+                log("skill.generated_shadow_refused", skill=skill.name)
                 continue
             by_name[skill.name] = skill
-        return SkillRegistry(by_name)
+        member_cards = dict(self.member_cards)
+        for name in self.member_cards:
+            if name in by_name:
+                log("skill.member_shadow_refused", skill=name)
+                del member_cards[name]
+        return SkillRegistry(by_name, member_cards=member_cards, materializer=self.materializer)
+
+    def with_member(
+        self, cards: Sequence[SkillCard], materialize: SkillMaterializer
+    ) -> "SkillRegistry":
+        """This registry with the bound agent's saved skills as its member tier. A member skill is
+        member-controlled text mounted into the agent's own context, so it may never shadow a
+        deploy skill: the deploy tier always wins on a name collision and the card is dropped with
+        a log. The save path refuses a colliding name up front, so this guard is the structural
+        backstop that makes the no-shadow invariant hold even against a stale row."""
+        member_cards: dict[str, SkillCard] = {}
+        for card in cards:
+            if card.name in self.by_name:
+                log("skill.member_shadow_refused", skill=card.name)
+                continue
+            member_cards[card.name] = card
+        return SkillRegistry(self.by_name, member_cards=member_cards, materializer=materialize)
 
 
 CORE_SKILL_REGISTRY = SkillRegistry(dict(CORE_SKILLS_BY_NAME))

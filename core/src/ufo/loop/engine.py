@@ -144,7 +144,7 @@ from ufo.schema.records import (
 )
 from ufo.search import SearchProvider
 from ufo.seats import SEAT_REVOKED_MESSAGE, Seats
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, SkillRegistry
+from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedRef, LoadedSkill, SkillRegistry
 from ufo.tools.context import (
     ImageContent,
     Spawn,
@@ -617,10 +617,11 @@ def _meter_dispatch(
 
 def _loaded_skill_closures(
     messages: tuple[Message, ...], skills: SkillRegistry
-) -> Iterator[tuple[LoadedSkill, ...]]:
-    """What each completed `load_skill` in the window put in front of the model: the registry
-    closure of the name the call asked for, which is exactly the entries `loaded_context` injected
-    for it. Read from the call's own input and the registry, never from the result's prose — a
+) -> Iterator[tuple[LoadedRef, ...]]:
+    """What each completed `load_skill` in the window put in front of the model: the registry's
+    card closure of the name the call asked for — the same names `loaded_context` injected for it,
+    resolved without touching a stored body, since this runs on the hot path of every round. Read
+    from the call's own input and the registry, never from the result's prose — a
     `SKILL.md` body is member-authored text that may quote the `# Skill:` header format, and reading
     headers back would let one skill's body mark another skill as in context and silently suppress
     its real load.
@@ -960,6 +961,7 @@ class TurnEngine:
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
     skills: SkillRegistry = CORE_SKILL_REGISTRY
+    member_skill_block: str = ""
     preload: tuple[LoadedSkill, ...] = ()
     output_model: Contract | None = None
     adoption: AdoptionReplay = field(default_factory=AdoptionReplay)
@@ -1069,6 +1071,7 @@ class TurnEngine:
                     self.turn.speaker_member_id,
                 )
             pending_guard = not self.turn.spawned
+            injected = inbound.injected
             if inbound.denied is not None:
                 denial = await self._commit(
                     "done",
@@ -1099,8 +1102,9 @@ class TurnEngine:
                         member_id=self.turn.speaker_member_id,
                         rendered=founding,
                     )
-                if inbound.injected:
-                    rendered = INJECTED_CONTEXT.format(content=founding, injected=inbound.injected)
+                injected = "\n\n".join(part for part in (injected, self.member_skill_block) if part)
+                if injected:
+                    rendered = INJECTED_CONTEXT.format(content=founding, injected=injected)
                     messages = (*messages[:-1], Message(role="user", content=rendered))
             change_paths: dict[str, None] = {}
             while True:
@@ -1151,7 +1155,7 @@ class TurnEngine:
                     messages = (*final_messages, Message(role="assistant", content=answer))
                     continue
                 if frame.status == "done":
-                    await self._persist_transcript(final_messages, answer, system, inbound.injected)
+                    await self._persist_transcript(final_messages, answer, system, injected)
                 else:
                     await self._persist_inbound(tuple(arrival_log), founding_denial)
                 await self._record_workspace_changes(tuple(change_paths))

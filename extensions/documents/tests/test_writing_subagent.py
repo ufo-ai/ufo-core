@@ -28,12 +28,12 @@ def test_the_pinned_model_is_registered_and_called_on_the_surface_that_takes_too
     assert spec.api_surface == "responses"
 
 
-def test_every_spawn_starts_with_the_writing_drafts_workflow_in_hand() -> None:
+async def test_every_spawn_starts_with_the_writing_drafts_workflow_in_hand() -> None:
     task = subagent.WritingTask.model_validate({"objective": "draft the announcement"})
     assert task.preload_skills == ("writing-drafts",)
 
     registry = skill_registry((documents.manifest(),))
-    preload = registry.closure(*task.preload_skills)
+    preload = await registry.materialize(registry.closure(*task.preload_skills))
     assert [entry.skill.name for entry in preload] == ["writing-drafts"]
 
     prompt = subagent_system_prompt(subagent.WRITING_PROFILE, preload=preload)

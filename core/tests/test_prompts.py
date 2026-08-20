@@ -14,12 +14,15 @@ from ufo.loop.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
     DELIVERY_REGISTER_BLOCK,
     SHELL,
+    RenderedPrompt,
     render_skill_index,
     render_system_prompt,
     render_template,
     rendered_prompt,
 )
 from ufo.models.catalog import CORE_MODEL_SPECS
+from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillCard, SkillRegistry
+from ufo.skills.selection import prompt_index
 
 SHELL_FIXTURE = "You are {{agent-prompt}}.\n\n{{skill_index}}\n\n{{sections}}"
 BROWSER_FIXTURE = "You browse the web. Cite what you find.\n\n{{sections}}"
@@ -186,12 +189,50 @@ def test_skill_index_renders_a_block_and_is_empty_without_skills() -> None:
     assert "- memory: store facts" in block
 
 
-def test_main_prompt_renders_the_complete_per_turn_skill_index() -> None:
+def test_main_prompt_renders_the_deploy_skill_index() -> None:
     skills = (("first", "First workflow."), ("second", "Second workflow."))
     prompt = render_system_prompt("A", (), skills=skills, knowledge_cutoff="2026-01").content
     assert "<available_skills>" in prompt
     assert "</available_skills>" in prompt
     assert all(f"- {name}: {description}" in prompt for name, description in skills)
+
+
+async def _materialize_nothing(name: str) -> None:
+    return None
+
+
+def _member_registry(count: int, stem: str = "saved") -> SkillRegistry:
+    return CORE_SKILL_REGISTRY.with_member(
+        tuple(
+            SkillCard(name=f"{stem}-{i:04d}", description=f"Load when a member asks about {i}.")
+            for i in range(count)
+        ),
+        _materialize_nothing,
+    )
+
+
+def _render(registry: SkillRegistry) -> RenderedPrompt:
+    return render_system_prompt("A", (), skills=prompt_index(registry), knowledge_cutoff="2026-01")
+
+
+def test_member_cards_past_the_fold_never_move_the_rendered_system_prompt() -> None:
+    """The cache-invariance contract above the fold: a large member tier renders into the turn
+    message, so the system prompt is byte-identical whether the agent has zero saved skills or
+    thousands — at the sizes where invalidation matters, a save can never invalidate a
+    conversation's cached prefix."""
+    assert _render(_member_registry(0)).content == _render(_member_registry(2000)).content
+    assert _render(_member_registry(0)).digest == _render(_member_registry(2000)).digest
+
+
+def test_a_folded_member_tier_lists_in_the_system_prompt() -> None:
+    """Below the fold the member tier lists like a deploy skill — two different small sets render
+    two different prompts, and that repetition-free listing is the intended trade at this size."""
+    invoice = _member_registry(1, stem="invoice")
+    holiday = _member_registry(1, stem="holiday")
+
+    assert "- invoice-0000: Load when a member asks about 0." in _render(invoice).content
+    assert _render(invoice).content != _render(holiday).content
+    assert _render(invoice).content != _render(_member_registry(0)).content
 
 
 def test_an_unresolved_slot_in_a_section_fails_loud() -> None:
