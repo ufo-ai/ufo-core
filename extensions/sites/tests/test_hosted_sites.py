@@ -14,7 +14,9 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 import pytest
@@ -22,6 +24,7 @@ import sqlalchemy as sa
 import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from PIL import Image
 from sqlalchemy.exc import IntegrityError
 from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.manifest import manifest as sites_manifest
@@ -45,6 +48,8 @@ from ufo_ext_sites.surface import (
 from ufo_ext_sites.tools import (
     APP_SERVE_PORT,
     DEPLOY_WEBSITE_TOOL,
+    PREVIEW_HEIGHT,
+    PREVIEW_WIDTH,
     PUBLISH_WEBSITE_TOOL,
     SET_HOMEPAGE_TOOL,
 )
@@ -55,8 +60,9 @@ from ufo_testsupport.surfaces import (
     no_user_skills,
 )
 
+from ufo.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
@@ -64,6 +70,7 @@ from ufo.ext.context import context_for
 from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.ext.loader import member_object_registry, turn_tools
 from ufo.hub import InProcessHub
+from ufo.image_previews import ImagePreviewGrant
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.ingress_token import (
@@ -88,6 +95,7 @@ from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
 TOKEN_SECRET = "sites-surface-token-secret"
+ARTIFACT_SECRET = "sites-artifact-url-secret"
 PUBLIC_BASE_URL = "https://ufo.example.test"
 DEPLOY_MODELS = ("auto", "claude-opus-4-8")
 INGRESS_HOST = "sites.example.test"
@@ -118,6 +126,43 @@ class FakeSandbox:
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+
+def _png(color: str) -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (PREVIEW_WIDTH, PREVIEW_HEIGHT), color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+PAGE_PNG = _png("white")
+
+
+@dataclass
+class ShootingSandbox:
+    """Stands in for the member's container on a deploy whose page really is photographed: every
+    command succeeds and answers the shot's byte count, and reading the shot back hands over one
+    real PNG.
+
+    It answers the same thing to every command, so it records and asserts nothing about what the
+    tools said. What the deploy did with the bytes is the contract: the row it wrote and the picture
+    the store now holds."""
+
+    png: bytes = PAGE_PNG
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        return ExecResult(stdout=str(len(self.png)), stderr="", exit_code=0)
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        async def bytes_of() -> AsyncIterator[bytes]:
+            yield self.png
+
+        return bytes_of()
 
 
 @dataclass(frozen=True)
@@ -196,14 +241,18 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
             sandboxes,
             InProcessHub(),
             dbos_client,
-            "",
+            ARTIFACT_SECRET,
             PUBLIC_BASE_URL,
             ingress_public_url,
             DEPLOY_MODELS,
             ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
             user_skills=no_user_skills,
-            objects=member_object_registry(manifests, public_base_url=PUBLIC_BASE_URL),
+            objects=member_object_registry(
+                manifests,
+                public_base_url=PUBLIC_BASE_URL,
+                artifact_token_secret=ARTIFACT_SECRET,
+            ),
         )
         return AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL)
 
@@ -277,16 +326,23 @@ async def _seed_conversation(
 
 
 def _tool(
-    name: str, audience: Audience, public_base_url: str | None = PUBLIC_BASE_URL
+    name: str,
+    audience: Audience,
+    public_base_url: str | None = PUBLIC_BASE_URL,
+    blob: WorkspaceBlobStore | None = None,
 ) -> tuple[ToolDef, ToolContext]:
     """One real tool and the context the engine dispatches it with, its extension bound."""
     tools, ext_by_tool = turn_tools(
-        (sites_manifest(),), None, audience=audience, public_base_url=public_base_url
+        (sites_manifest(),),
+        None,
+        audience=audience,
+        public_base_url=public_base_url,
+        artifact_token_secret=ARTIFACT_SECRET,
     )
     tool = next(entry for entry in tools if entry.name == name)
     return tool, ToolContext(
         sandbox=FakeSandbox(),
-        blob=FilesystemBlobStore(root=Path("/nonexistent")),
+        blob=blob or WorkspaceBlobStore(backend=FilesystemBlobStore(root=Path("/nonexistent"))),
         turn=Turn(
             id=uuid4(),
             workspace_id=uuid4(),
@@ -301,7 +357,7 @@ def _tool(
         spawn=_unavailable_spawn,
         speaker_member_id=None,
         audience=audience,
-        artifact_token_secret="",
+        artifact_token_secret=ARTIFACT_SECRET,
         public_base_url=public_base_url,
         ext=ext_by_tool.get(name),
     )
@@ -315,16 +371,19 @@ def _bind(
     *,
     serving_conversation_id: UUID | None = None,
     subagent_profile: str | None = None,
+    sandbox: FakeSandbox | ShootingSandbox | None = None,
 ) -> ToolContext:
     """The turn and the sandbox it runs in, bound together. `serving_conversation_id` is the
     conversation whose sandbox is answering — the turn's own unless this is a subagent turn, which
-    runs in the sandbox of the turn that spawned it."""
+    runs in the sandbox of the turn that spawned it. `sandbox` is which stand-in answers that
+    container's commands: the plain one, or the one that photographs the page."""
     return replace(
         ctx,
-        sandbox=FakeSandbox(
+        sandbox=replace(
+            sandbox or FakeSandbox(),
             handle=SandboxHandle(
                 conversation_id=serving_conversation_id or conversation_id, container_id="c1"
-            )
+            ),
         ),
         turn=ctx.turn.model_copy(
             update={
@@ -355,8 +414,10 @@ async def _deploy(
     *,
     site: str = SITE,
     visibility: str | None = None,
+    sandbox: FakeSandbox | ShootingSandbox | None = None,
+    blob: WorkspaceBlobStore | None = None,
 ) -> dict[str, object]:
-    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience, blob=blob)
     args: dict[str, object] = {
         "project_path": "/workspace/dist",
         "site_name": site,
@@ -366,7 +427,9 @@ async def _deploy(
         args["visibility"] = visibility
     with ws(workspace.id):
         return await _dispatch(
-            tool, _bind(ctx, workspace, conversation_id, speaker_member_id), **args
+            tool,
+            _bind(ctx, workspace, conversation_id, speaker_member_id, sandbox=sandbox),
+            **args,
         )
 
 
@@ -1204,6 +1267,117 @@ async def test_the_portal_index_carries_each_site_s_link(deployment: Deployment)
     assert row["site_url"] == hosted["site_url"]
 
 
+def _preview_claims(url: str, secret: str) -> ImagePreviewGrant | None:
+    """The grant a published preview link proves, read the way the artifact route reads it."""
+    parsed = urlsplit(url)
+    artifact_id, filename = parsed.path.removeprefix(f"/{ARTIFACT_KEY_PREFIX}").split("/")
+    query = parse_qs(parsed.query)
+    claims = verify_artifact_url(
+        secret,
+        artifact_id,
+        filename,
+        query["exp"][0],
+        query["sig"][0],
+        query["preview"][0],
+        query["ws"][0],
+        datetime.now(UTC),
+    )
+    return claims.preview
+
+
+async def test_a_deploy_photographs_the_page_and_the_row_carries_the_picture(
+    db: None, tmp_path: Path
+) -> None:
+    """The producer half, end to end: the deploy stores the shot under the artifact namespace, the
+    row records the key and exact size, and the listing publishes a preview link that really grants
+    that picture. Without the capture the row has nothing to publish, and without the publish the
+    card has nothing to draw."""
+    workspace = await _seed_workspace()
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blobs"))
+
+    await _deploy(
+        workspace, conversation_id, audience, creator_id, sandbox=ShootingSandbox(), blob=blob
+    )
+
+    (row,) = await _stored(workspace)
+    assert row.preview_blob_key.startswith(ARTIFACT_KEY_PREFIX)
+    assert row.preview_blob_key.endswith(f"/{SITE}.png")
+    assert row.preview_size_bytes == len(PAGE_PNG)
+    with ws(workspace.id):
+        assert await blob.get(row.preview_blob_key) == PAGE_PNG
+        listed = await _verb("object_list", workspace, conversation_id, creator_id, kind=SITE_KIND)
+
+    (listed_row,) = listed["objects"]
+    preview_url = listed_row["preview_url"]
+    assert preview_url.startswith(f"{PUBLIC_BASE_URL}/{ARTIFACT_KEY_PREFIX}")
+    assert _preview_claims(preview_url, ARTIFACT_SECRET) == ImagePreviewGrant(
+        media_type="image/png", size_bytes=len(PAGE_PNG)
+    )
+
+
+async def test_a_site_whose_page_never_drew_is_hosted_and_keeps_the_picture_it_had(
+    db: None, tmp_path: Path
+) -> None:
+    """A picture is decoration, so a container that draws none still hosts the site and the listing
+    simply omits the field. A re-deploy that fails to draw keeps the picture the site already has
+    rather than blanking the card."""
+    workspace = await _seed_workspace()
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blobs"))
+
+    await _deploy(workspace, conversation_id, audience, creator_id, site="drawn", blob=blob)
+    with ws(workspace.id):
+        blank = await _verb("object_list", workspace, conversation_id, creator_id, kind=SITE_KIND)
+    (blank_row,) = blank["objects"]
+    assert "preview_url" not in blank_row
+
+    await _deploy(
+        workspace,
+        conversation_id,
+        audience,
+        creator_id,
+        site="drawn",
+        sandbox=ShootingSandbox(),
+        blob=blob,
+    )
+    (photographed,) = await _stored(workspace)
+    await _deploy(workspace, conversation_id, audience, creator_id, site="drawn", blob=blob)
+
+    (row,) = await _stored(workspace)
+    assert row.preview_blob_key == photographed.preview_blob_key
+    assert row.preview_size_bytes == len(PAGE_PNG)
+
+
+async def test_the_portal_index_carries_the_site_s_picture(
+    deployment: Deployment, tmp_path: Path
+) -> None:
+    """The consumer's read: the artifacts screen draws a site's band from the row this route
+    answers, so the picture has to arrive on that row rather than only in the registry."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blobs"))
+    await _deploy(
+        workspace, conversation_id, audience, creator_id, sandbox=ShootingSandbox(), blob=blob
+    )
+
+    read = await client.get(
+        f"/surface/web/objects/site?agent={workspace.agent_id}", headers=_cookie(creator_token)
+    )
+
+    assert read.status_code == 200
+    (row,) = read.json()["objects"]
+    assert _preview_claims(row["preview_url"], ARTIFACT_SECRET) == ImagePreviewGrant(
+        media_type="image/png", size_bytes=len(PAGE_PNG)
+    )
+
+
 async def test_the_site_kind_refuses_create_naming_the_deploy(db: None) -> None:
     workspace = await _seed_workspace()
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
@@ -1504,6 +1678,109 @@ async def test_publish_leaves_the_members_site_alone_when_it_cannot_come_up(db: 
             )
         (row,) = await _stored(workspace)
         assert row.name == "marketing"
+
+
+@dataclass(frozen=True)
+class StoppedShotSandbox:
+    """A sandbox that serves the new bytes and then never comes back from the shot — what a turn
+    ending inside the render looks like from here. Chromium is given `PREVIEW_TIMEOUT_SECONDS`, so
+    the render is the deploy's longest step and the one a turn is likeliest to be cut short in."""
+
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        if "--screenshot" in command:
+            raise RuntimeError("the turn ended while the page was drawing")
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+
+async def test_a_deploy_stopped_inside_the_shot_has_already_moved_the_ports_row(db: None) -> None:
+    """The photograph runs after the registration, not between the serve and it. The serve has
+    already killed the member's previous server and put this deploy's bytes on the port, and
+    registering is the only thing that retires the site that port belonged to — so a deploy cut
+    short inside the render leaves the new name registered and the displaced one gone, rather than
+    an older link answering with the new deploy's bytes."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    await _deploy(workspace, conversation_id, audience, member_id, site="marketing")
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    stopped = replace(
+        _bind(ctx, workspace, conversation_id, member_id),
+        sandbox=StoppedShotSandbox(
+            handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
+        ),
+    )
+
+    with ws(workspace.id), pytest.raises(RuntimeError, match="while the page was drawing"):
+        await _dispatch(
+            tool,
+            stopped,
+            project_path="/workspace/dist",
+            site_name="pricing",
+            entry_point="index.html",
+        )
+
+    (row,) = await _stored(workspace)
+    assert row.name == "pricing"
+    assert row.port == APP_SERVE_PORT
+    assert row.preview_blob_key is None
+
+
+@dataclass(frozen=True)
+class RefusedShotSandbox:
+    """A sandbox where the shot's own name cannot be cleared — the containment guard's refusal,
+    which is what a link planted at that path looks like from here. The server log clears normally,
+    so the deploy really reaches the shot."""
+
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if args[0].endswith(".png"):
+            return ExecResult(stdout="", stderr="that path is not contained", exit_code=1)
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+
+async def test_a_shot_path_the_guard_refuses_still_hosts_the_site(db: None) -> None:
+    """Clearing the shot's name is the render's own first step and it can be refused, so it answers
+    like every other undrawn shot: logged, no preview, site hosted. The site is already registered
+    by then, so raising here would report a failure for a deploy that really is serving."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    refused = replace(
+        _bind(ctx, workspace, conversation_id, member_id),
+        sandbox=RefusedShotSandbox(
+            handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
+        ),
+    )
+
+    with ws(workspace.id):
+        hosted = await _dispatch(
+            tool,
+            refused,
+            project_path="/workspace/dist",
+            site_name=SITE,
+            entry_point="index.html",
+        )
+
+    assert hosted["site_name"] == SITE
+    (row,) = await _stored(workspace)
+    assert row.name == SITE
+    assert row.preview_blob_key is None
 
 
 async def test_deployed_site_reaches_its_authenticated_conversation_slot(

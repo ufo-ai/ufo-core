@@ -112,6 +112,16 @@ def _summary(site: HostedSite, visibility: Visibility) -> str:
     return f"{site.name} · {visibility} · sandbox port {site.port}"
 
 
+def _preview_url(scoped: ExtensionContext, site: HostedSite) -> str | None:
+    """The signed link to the picture this site's last deploy captured, or None for a site whose
+    deploy captured none — one standing since before the capture, or one whose render failed. The
+    link carries the same raster grant a shared file's picture is served through, so the portal
+    draws it with no route of its own."""
+    if site.preview_blob_key is None or site.preview_size_bytes is None:
+        return None
+    return scoped.image_preview_url(site.preview_blob_key, site.preview_size_bytes)
+
+
 @dataclass(frozen=True)
 class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
     """Read, re-gate, and unhost handlers over the workspace's registered sites. Ownership is the
@@ -165,6 +175,11 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                     {}
                     if site.homepage_agent_id is None
                     else {"homepage_agent": str(site.homepage_agent_id)}
+                )
+                | (
+                    {}
+                    if (preview := _preview_url(scoped, site)) is None
+                    else {"preview_url": preview}
                 ),
             )
             for name, site in named.items()
@@ -285,7 +300,9 @@ SITE_OBJECT = ObjectKind(
         "workspace or public. "
         "Each listed site carries its creator (`owner_email`) and its hosted `site_url`, the link "
         "absent only on a deploy that configures "
-        "no public base URL and therefore hosts no reachable link. Listings filter and order on "
+        "no public base URL and therefore hosts no reachable link. A site whose last deploy "
+        "photographed its page carries `preview_url` too — the signed link to that picture. "
+        "Listings filter and order on "
         "`conversation`, `created_at`, `visibility`, and `mine` — filter on this conversation's "
         "id for the sites it hosts, or order by `created_at` desc for the newest. "
         "A site bound as an agent's homepage by set_homepage carries `homepage_agent` — that "
@@ -310,6 +327,7 @@ SITE_OBJECT = ObjectKind(
             "visibility",
             "mine",
             "site_url",
+            "preview_url",
             "owner_email",
             "homepage_agent",
         }

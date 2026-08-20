@@ -18,7 +18,7 @@ core's artifact route verifies, and both read the one deploy secret."""
 
 import mimetypes
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import cast
 from urllib.parse import quote
@@ -29,6 +29,7 @@ from ufo.image_previews import (
     RASTER_IMAGE_SUFFIXES,
     ImagePreviewGrant,
     RasterImageMediaType,
+    raster_image_media_type,
 )
 from ufo.token_signing import sign_detached, verify_detached
 
@@ -111,6 +112,37 @@ def mint_artifact_url(
     url = f"/{ARTIFACT_KEY_PREFIX}{artifact_id}/{quote(filename, safe='')}"
     url += f"?exp={expires_at}&ws={workspace_id}&sig={signature}"
     return url if not preview_value else f"{url}&preview={quote(preview_value, safe='')}"
+
+
+def mint_image_preview_url(
+    secret: str,
+    public_base_url: str | None,
+    blob_key: str,
+    size_bytes: int | None,
+    *,
+    workspace_id: UUID,
+) -> str | None:
+    """The absolute signed link that renders one stored picture inline, or None when its type, size,
+    or delivery is ineligible.
+
+    The blob key names the picture's type, so the grant the route validates against is read off the
+    bytes it will serve rather than off anything a caller declares. Every producer of an inline
+    picture mints through here — a shared file's raster and an extension row's own preview alike —
+    so one answer says which bytes the preview route will serve inline."""
+    if not secret or not public_base_url:
+        return None
+    media_type = raster_image_media_type(blob_key)
+    if media_type is None or size_bytes is None or size_bytes > IMAGE_PREVIEW_MAX_BYTES:
+        return None
+    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+    path = mint_artifact_url(
+        secret,
+        blob_key,
+        expires_at,
+        workspace_id=workspace_id,
+        preview=ImagePreviewGrant(media_type=media_type, size_bytes=size_bytes),
+    )
+    return f"{public_base_url.rstrip('/')}{path}"
 
 
 def verify_artifact_url(

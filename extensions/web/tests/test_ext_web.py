@@ -4092,6 +4092,7 @@ async def test_site_index_answers_through_the_kinds_own_gate(
         "homepage_agent",
         "mine",
         "owner_email",
+        "preview_url",
         "site_url",
         "visibility",
     ]

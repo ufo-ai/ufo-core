@@ -18,13 +18,19 @@ runs a build command and lists what it produced. `start_server`, `deploy_website
 reachable server rather than a race. The served URL is `http://localhost:<port>` inside the sandbox,
 which the browser tools and js_repl reach to validate the page.
 
-`deploy_website` and `publish_website` then register that port as a hosted site and return its
-`site_url` — the frame a member opens, gated on the site's visibility. Hosting a site is registering
-the port the readiness probe just proved, so nothing moves: a re-deploy of the same name updates the
-port in place and the link never changes. Visibility defaults from the conversation's audience; an
-explicit argument overrides that default, but only for the site's creator and only on a turn with a
-live speaker, because choosing who can open a site is a disclosure act. `start_server` registers
-nothing, since a scratch server is not a deliverable.
+`deploy_website` and `publish_website` then register that port as a hosted site, returning its
+`site_url` — the frame a member opens, gated on the site's visibility — and photograph the page it
+answers with the sandbox's own headless chromium afterwards, storing the PNG as the site's preview.
+The picture is what the artifacts view draws the site's card with, and it is taken at deploy time
+because the page and a browser are both inside that one container at that one moment; it is taken
+after the registration because registering is what retires the site this deploy displaced from the
+port, and a render is long enough for a turn to end inside. A render that fails leaves the site
+hosted with the picture it already had. Hosting a site is registering the port the readiness probe
+just proved, so nothing moves: a re-deploy of the same name updates the port in place and the link
+never changes. Visibility defaults from the conversation's audience; an explicit argument
+overrides that default, but only for the site's creator and only on a turn with a live speaker,
+because choosing who can open a site is a disclosure act. `start_server` registers nothing, since a
+scratch server is not a deliverable.
 
 `set_homepage` binds one hosted site as the acting agent's homepage — the pointer the portal reads.
 The frame gates a homepage's viewers on the agent's visibility rather than the site's, so who may
@@ -37,6 +43,7 @@ import shlex
 
 from pydantic import BaseModel, Field, model_validator
 
+from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.objects import site_object_name
@@ -60,6 +67,29 @@ LOG_TAIL_TIMEOUT_SECONDS = 15
 SERVER_LOG = f"{TOOL_OUTPUT_DIR}/server-{{port}}.log"
 DEPLOY_LOG = f"{TOOL_OUTPUT_DIR}/deploy-{{port}}.log"
 PUBLISH_LOG = f"{TOOL_OUTPUT_DIR}/publish-{{port}}.log"
+PREVIEW_SHOT = f"{TOOL_OUTPUT_DIR}/preview-{{port}}.png"
+PREVIEW_WIDTH = 1200
+PREVIEW_HEIGHT = 900
+PREVIEW_TIMEOUT_SECONDS = 90
+PREVIEW_DETAIL_CHARS = 500
+BROWSER_COMMANDS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
+PREVIEW_SHOT_CMD = (
+    "for browser in " + " ".join(BROWSER_COMMANDS) + "; do\n"
+    '  command -v "$browser" >/dev/null 2>&1 || continue\n'
+    '  exec "$browser" --headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu \\\n'
+    "    --hide-scrollbars --virtual-time-budget={budget} "
+    "--window-size={width},{height} \\\n"
+    "    --user-data-dir={profile} --screenshot={shot} {url}\n"
+    "done\n"
+    'printf %s "no chromium in this sandbox" >&2; exit 1'
+)
+PREVIEW_PROFILE_DIR = "/tmp/ufo-site-preview"
+"""Outside the workspace and outside the persistent browser's own profile: a one-shot chromium takes
+the profile lock for its run, and sharing the directory the sandbox's standing DevTools browser
+holds would fail whichever started second."""
+PREVIEW_TIME_BUDGET_MS = 5000
+"""How much page time the shot lets run before it draws: a page whose scripts never settle would
+otherwise hold the shot open to its own deadline."""
 LOG_CLEAR_PROG = """
 import sys
 from containment import ContainmentError, contained_file
@@ -187,7 +217,7 @@ def _json_result(payload: dict[str, object]) -> ToolResult:
     return ToolResult(content=(TextContent(text=json.dumps(payload)),))
 
 
-async def _free_log(ctx: ToolContext, log: str) -> None:
+async def _free_log(ctx: ToolContext, log_path: str) -> None:
     """Leave the log's name holding nothing, so the server's redirect is the thing that creates it.
 
     A shell redirect follows a symlink and truncates what it points at, and the log's name is one a
@@ -201,15 +231,15 @@ async def _free_log(ctx: ToolContext, log: str) -> None:
     Noclobber covers the redirect alone. The port cleanup writes to `/dev/null` and `command` is the
     model's own, free to redirect where it likes; the background job keeps the setting it was forked
     with, so restoring it in the parent cannot reach the redirect already made."""
-    result = await ctx.sandbox.python(LOG_CLEAR_PROG, log, WORKSPACE_DIR)
+    result = await ctx.sandbox.python(LOG_CLEAR_PROG, log_path, WORKSPACE_DIR)
     if result.exit_code != 0:
-        raise RuntimeError(result.stderr.strip() or f"cannot clear {log}")
+        raise RuntimeError(result.stderr.strip() or f"cannot clear {log_path}")
 
 
 async def _serve(
-    ctx: ToolContext, command: str, project: str, port: int, log: str
+    ctx: ToolContext, command: str, project: str, port: int, log_path: str
 ) -> dict[str, object]:
-    await _free_log(ctx, log)
+    await _free_log(ctx, log_path)
     port_cleanup = (
         f"(fuser -k {port}/tcp 2>/dev/null; "
         f"lsof -ti tcp:{port} 2>/dev/null | xargs -r kill 2>/dev/null) || true; sleep 1"
@@ -238,14 +268,14 @@ async def _serve(
     result = await ctx.sandbox.bash(
         f"cd {shlex.quote(project)} && {port_cleanup}\n"
         f"set -C\n"
-        f"nohup {command} >{shlex.quote(log)} 2>&1 &\n"
+        f"nohup {command} >{shlex.quote(log_path)} 2>&1 &\n"
         f"set +C\n"
         f"{readiness_probe}",
         timeout_s=READINESS_TIMEOUT_SECONDS + 5,
     )
     if result.exit_code != 0:
         tail = await ctx.sandbox.bash(
-            f"tail -n {LOG_TAIL_LINES} {shlex.quote(log)} 2>/dev/null || true",
+            f"tail -n {LOG_TAIL_LINES} {shlex.quote(log_path)} 2>/dev/null || true",
             timeout_s=LOG_TAIL_TIMEOUT_SECONDS,
         )
         if tail.stdout:
@@ -253,10 +283,63 @@ async def _serve(
         if result.timed_out_after_s is not None:
             raise RuntimeError(
                 f"the server never answered on port {port}: the sandbox stopped the start after "
-                f"{result.timed_out_after_s}s and {log} holds nothing"
+                f"{result.timed_out_after_s}s and {log_path} holds nothing"
             )
         raise RuntimeError(result.stderr or result.stdout)
-    return {"url": f"http://localhost:{port}", "port": port, "log": log}
+    return {"url": f"http://localhost:{port}", "port": port, "log": log_path}
+
+
+async def _illustrate(ctx: ToolContext, name: str, port: int) -> None:
+    """Photograph the page the registration just published, and write the picture onto its row.
+
+    The renderer and the bytes are both local at this one moment: the site answers on the sandbox's
+    own loopback and the sandbox image carries chromium, so one headless run draws the page and core
+    takes the PNG from there into the artifact namespace. A picture the member never asked for is
+    not worth a deploy, so a sandbox with no chromium, a page that will not draw, a shot path that
+    cannot be cleared, and a store that cannot take the bytes each leave the site hosted with the
+    picture it already had and say why in the log.
+
+    This runs after `_host`, not between the serve and it. The shot is a long, failure-capable step
+    — `PREVIEW_TIMEOUT_SECONDS` of chromium — and `register` is the only thing that retires the site
+    this deploy displaced from the port, so a turn that ends inside the render has to find that row
+    already moved. The picture therefore lands in a write of its own, which touches nothing but the
+    preview columns.
+
+    The shot's name is emptied through the containment guard first, exactly as a server log is: it
+    sits in a directory the agent writes, and chromium's own create would follow a link planted
+    there."""
+    if ctx.ext is None:
+        raise RuntimeError("the website tools dispatched without their ExtensionContext")
+    shot = PREVIEW_SHOT.format(port=port)
+    try:
+        await _free_log(ctx, shot)
+    except RuntimeError as refused:
+        log("site_preview.undrawn", site=name, detail=str(refused)[:PREVIEW_DETAIL_CHARS])
+        return
+    drawn = await ctx.sandbox.bash(
+        PREVIEW_SHOT_CMD.format(
+            budget=PREVIEW_TIME_BUDGET_MS,
+            width=PREVIEW_WIDTH,
+            height=PREVIEW_HEIGHT,
+            profile=shlex.quote(PREVIEW_PROFILE_DIR),
+            shot=shlex.quote(shot),
+            url=shlex.quote(f"http://127.0.0.1:{port}"),
+        ),
+        timeout_s=PREVIEW_TIMEOUT_SECONDS,
+    )
+    if drawn.exit_code != 0:
+        log(
+            "site_preview.undrawn",
+            site=name,
+            detail=(drawn.stderr.strip() or drawn.stdout.strip())[:PREVIEW_DETAIL_CHARS],
+        )
+        return
+    preview = await ctx.store_preview(shot, name)
+    if preview is None:
+        return
+    await HostedSites(ctx.ext.store.workspace_id, ctx.ext.transaction).set_preview(
+        ctx.sandbox.handle.conversation_id, name, preview
+    )
 
 
 async def _refuse_before_serving(
@@ -306,7 +389,8 @@ async def _host(
 ) -> dict[str, object]:
     """Register the port a deploy just left serving as a hosted site, and describe the link it
     answers on. The refusals ran in `_refuse_before_serving`; `register` asks the same set again
-    here, since this is the write and a concurrent deploy may have moved since.
+    here, since this is the write and a concurrent deploy may have moved since. The picture of that
+    page arrives afterwards, in `_illustrate`'s own write.
 
     The site is registered against the conversation whose sandbox is serving it, which is the one
     the handle names rather than the one this turn belongs to. For a member's own turn they are the
@@ -356,18 +440,19 @@ async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult:
 async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
     port = args.port or START_SERVER_PORT
     project = workspace_path(args.project_path)
-    log = workspace_path(args.log_file or SERVER_LOG.format(port=port))
-    served = await _serve(ctx, args.command, project, port, log)
+    log_path = workspace_path(args.log_file or SERVER_LOG.format(port=port))
+    served = await _serve(ctx, args.command, project, port, log_path)
     return _json_result({**served, "project_path": project})
 
 
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
     name = await _refuse_before_serving(ctx, args.site_name, APP_SERVE_PORT, args.visibility)
     command = f"python3 -m http.server {APP_SERVE_PORT} --bind 0.0.0.0"
-    log = DEPLOY_LOG.format(port=APP_SERVE_PORT)
+    deploy_log = DEPLOY_LOG.format(port=APP_SERVE_PORT)
     project = workspace_path(args.project_path)
-    served = await _serve(ctx, command, project, APP_SERVE_PORT, log)
+    served = await _serve(ctx, command, project, APP_SERVE_PORT, deploy_log)
     hosted = await _host(ctx, name, APP_SERVE_PORT, args.visibility)
+    await _illustrate(ctx, name, APP_SERVE_PORT)
     return _json_result({**served, **hosted, "entry_point": args.entry_point})
 
 
@@ -382,9 +467,10 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
             raise RuntimeError(install.stderr or install.stdout)
     command = args.run_command or f"python3 -m http.server {APP_SERVE_PORT} --bind 0.0.0.0"
     project = workspace_path(args.project_path if args.run_command else args.dist_path)
-    log = PUBLISH_LOG.format(port=APP_SERVE_PORT)
-    served = await _serve(ctx, command, project, APP_SERVE_PORT, log)
+    publish_log = PUBLISH_LOG.format(port=APP_SERVE_PORT)
+    served = await _serve(ctx, command, project, APP_SERVE_PORT, publish_log)
     hosted = await _host(ctx, name, APP_SERVE_PORT, args.visibility)
+    await _illustrate(ctx, name, APP_SERVE_PORT)
     return _json_result({**served, **hosted})
 
 

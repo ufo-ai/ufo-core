@@ -375,6 +375,7 @@ def run() -> None:
             index,
             embed,
             public_base_url=config.connect.public_base_url,
+            artifact_token_secret=artifact_secret,
         ),
     )
     _assert_no_reserved_routes(app)

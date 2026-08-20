@@ -415,6 +415,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 runtime.embed,
                 audience=audience,
                 public_base_url=runtime.config.connect.public_base_url,
+                artifact_token_secret=runtime.artifact_token_secret,
                 scheduled_member_id=(
                     turn.on_behalf_of_member_id
                     if turn.admission_source == SCHEDULED_ADMISSION

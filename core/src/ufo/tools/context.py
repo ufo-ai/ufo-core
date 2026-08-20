@@ -23,20 +23,24 @@ on only for a `side_effecting` tool: its dedup key against a cross-attempt resum
 write's header, a spawned child's identity — so the effect applies at most once; a read tool gets
 `None`. `meter_images` and `meter_videos` book what a paid image or video generation cost onto this
 turn's ledger: metering is core's, so a provider extension prices its own call and writes it through
-here. An extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a
-builtin tool gets `ext=None`."""
+here. `store_preview` takes a picture a tool rendered inside the sandbox into the artifact
+namespace, which core alone names, so the row it illustrates can carry a signed preview link. An
+extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin
+tool gets `ext=None`."""
 
+import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
 from ufo.accounting import record_image_usage, record_video_usage
+from ufo.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.audience import SHARED_AUDIENCE, Audience, audience_subjects, conversation_audience
-from ufo.blob import WorkspaceBlobStore
+from ufo.blob import S3BlobStore, WorkspaceBlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
 from ufo.contracts import ValidatedJson
@@ -55,6 +59,11 @@ from ufo.seats import member_is_admin
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
 from ufo.subjects import member_subject
 from ufo.workspace import ws_current
+
+PREVIEW_SIZE_TIMEOUT_SECONDS = 30
+PREVIEW_PUT_TTL_SECONDS = 900
+PREVIEW_PUT_TIMEOUT_SECONDS = 300
+PREVIEW_DETAIL_CHARS = 500
 
 
 class TextContent(BaseModel):
@@ -246,6 +255,15 @@ class ConnectorConnection:
 
 
 @dataclass(frozen=True)
+class StoredPreview:
+    """A picture stored beside the row it illustrates: the blob key it landed under and its exact
+    size, the two values a signed preview grant is minted over."""
+
+    blob_key: str
+    size_bytes: int
+
+
+@dataclass(frozen=True)
 class ToolContext:
     sandbox: SandboxSession
     blob: WorkspaceBlobStore
@@ -312,6 +330,50 @@ class ToolContext:
         if acting is None:
             return subjects
         return subjects | {member_subject(acting)}
+
+    async def store_preview(self, sandbox_path: str, name: str) -> StoredPreview | None:
+        """Store a picture a tool rendered inside the sandbox as a preview blob, and answer the key
+        and size the tool's own row records. None when there is nothing readable at that path.
+
+        The key is core's to name: the signed preview route serves the artifact namespace alone, so
+        a picture addressable through it is one core placed there. The bytes go straight from the
+        sandbox to the store — an S3 store takes them on a presigned PUT core mints for this one
+        key, curled from inside the container, and a filesystem dev store takes the same file as a
+        stream — so a render never crosses this process. The size is measured in the sandbox before
+        either, which is also what proves the render landed.
+
+        A picture is decoration, so an unreadable render is reported and answered with None rather
+        than raised: the caller's own work has already succeeded by the time it renders one."""
+        sized = await self.sandbox.bash(
+            f"wc -c < {shlex.quote(sandbox_path)}", timeout_s=PREVIEW_SIZE_TIMEOUT_SECONDS
+        )
+        measured = sized.stdout.strip()
+        if sized.exit_code != 0 or not measured.isdigit():
+            log(
+                "preview.unsized",
+                path=sandbox_path,
+                detail=(sized.stderr.strip() or measured)[:PREVIEW_DETAIL_CHARS],
+            )
+            return None
+        key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{name}.png"
+        match self.blob.backend:
+            case S3BlobStore():
+                put_url = await self.blob.presigned_put_unmeasured(key, PREVIEW_PUT_TTL_SECONDS)
+                put = await self.sandbox.bash(
+                    f"curl -sS --fail-with-body -T {shlex.quote(sandbox_path)} "
+                    f"--url {shlex.quote(put_url)}",
+                    timeout_s=PREVIEW_PUT_TIMEOUT_SECONDS,
+                )
+                if put.exit_code != 0:
+                    log(
+                        "preview.put_failed",
+                        path=sandbox_path,
+                        detail=(put.stdout.strip() or put.stderr.strip())[:PREVIEW_DETAIL_CHARS],
+                    )
+                    return None
+            case _:
+                await self.blob.put_stream(key, self.sandbox.read_file(sandbox_path))
+        return StoredPreview(blob_key=key, size_bytes=int(measured))
 
     def source_reader(self) -> SourceReader:
         """Who is asking for a source's synced pages: this turn's agent, the member speaking right

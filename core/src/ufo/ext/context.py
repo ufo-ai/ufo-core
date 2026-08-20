@@ -33,6 +33,7 @@ from ufo.accounting import (
     workspace_owns_the_key,
 )
 from ufo.agent_scope import agent, agent_current
+from ufo.artifact_url import mint_image_preview_url
 from ufo.audience import (
     SHARED_AUDIENCE,
     Audience,
@@ -1046,10 +1047,27 @@ class ExtensionContext:
     member_context_read_allowed: bool = False
     scheduled_member_id: UUID | None = None
     member_context_blob: WorkspaceBlobStore | None = None
+    artifact_token_secret: str = ""
 
     @property
     def workspace_id(self) -> UUID:
         return self.store.workspace_id
+
+    def image_preview_url(self, blob_key: str, size_bytes: int) -> str | None:
+        """The signed link that renders one picture an extension's own row stores, or None when this
+        deploy mints no artifact links or the key and size are not an eligible raster.
+
+        The URL opens the same signed preview route a shared file's picture is served through, so a
+        kind listing rows a member reads publishes a link the portal draws directly. Signing stays
+        core's: the deploy secret and the artifact key namespace both live here, and an extension
+        holds neither."""
+        return mint_image_preview_url(
+            self.artifact_token_secret,
+            self.public_base_url,
+            blob_key,
+            size_bytes,
+            workspace_id=self.workspace_id,
+        )
 
     def home_url(self, fragment: str = "") -> str | None:
         """A link into the deploy's browser portal, or None when this deploy has no public base or
@@ -2634,6 +2652,7 @@ def context_for(
     *,
     audience: Audience = SHARED_AUDIENCE,
     public_base_url: str | None = None,
+    artifact_token_secret: str = "",
     home_surface: str | None = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
@@ -2644,7 +2663,9 @@ def context_for(
     attributed to — required wherever a resolver is wired, so a metered call can never reach the
     `ufo.model_*` series unattributed.
     `public_base_url` is the deploy's externally reachable base, which a
-    kind listing rows a member opens needs and cannot reach any other way. A `tailer` lets a handler
+    kind listing rows a member opens needs and cannot reach any other way, and
+    `artifact_token_secret` is what a link into the artifact namespace is signed with — a kind whose
+    row carries a picture mints its preview link over the two. A `tailer` lets a handler
     firing inside a turn watch that turn's frames — the one seam a hook's own side-channel work
     reads the loop through. `probes` is the off-turn sandbox exec, wired only where a handler runs
     outside every turn: a tool or in-turn hook already holds the turn's own sandbox."""
@@ -2678,4 +2699,5 @@ def context_for(
         member_context_read_allowed=member_context_read,
         scheduled_member_id=scheduled_member_id,
         member_context_blob=member_context_blob if member_context_read else None,
+        artifact_token_secret=artifact_token_secret,
     )

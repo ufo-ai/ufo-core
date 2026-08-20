@@ -2,9 +2,10 @@
 
 A site is `(workspace, conversation, name)` — the conversation that built it owns the name, so two
 conversations may each serve a `dashboard` and neither takes the other's link. The row carries the
-sandbox port its bytes come from, who created it, and the visibility every viewer is gated on;
-re-deploying the same name updates the port and keeps whatever visibility the site already has, so
-a member's choice in the frame survives the next deploy.
+sandbox port its bytes come from, who created it, the visibility every viewer is gated on, and the
+picture of the page its last deploy captured; re-deploying the same name updates the port and keeps
+whatever visibility the site already has, so a member's choice in the frame survives the next
+deploy.
 
 The registry is reached from two places that hold no common context — a tool handler through its
 `ExtensionContext` and the frame through its `SurfaceContext` — so it takes the transaction and the
@@ -29,6 +30,7 @@ from ufo.sdk.audience import (
     audience_member,
     parse_audience,
 )
+from ufo.sdk.tools import StoredPreview
 
 type Visibility = Literal["private", "workspace", "public"]
 type Transaction = Callable[[], AbstractAsyncContextManager[AsyncConnection]]
@@ -54,6 +56,8 @@ hosted_site = sa.Table(
     sa.Column("creator_member_id", sa.Uuid, nullable=False),
     sa.Column("generation", sa.Uuid, nullable=False, default=uuid4),
     sa.Column("homepage_agent_id", sa.Uuid, nullable=True),
+    sa.Column("preview_blob_key", sa.Text, nullable=True),
+    sa.Column("preview_size_bytes", sa.Integer, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
@@ -123,7 +127,8 @@ def visibility_level(value: str) -> Visibility:
 @dataclass(frozen=True)
 class HostedSite:
     """One registered site: its conversation-scoped identity, the sandbox port serving it, who
-    created it, and the visibility its frame gates every viewer on."""
+    created it, the visibility its frame gates every viewer on, and the picture of the page its last
+    deploy captured — the blob key and exact size a signed preview link is minted over."""
 
     conversation_id: UUID
     name: str
@@ -132,6 +137,8 @@ class HostedSite:
     creator_member_id: UUID
     generation: UUID
     homepage_agent_id: UUID | None
+    preview_blob_key: str | None
+    preview_size_bytes: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -162,7 +169,11 @@ class HostedSites:
         authorization rule and a re-deploy is not a way around it. Without one, an existing site
         keeps the visibility it has — so a teammate re-deploying never resets what the creator
         chose — and a new site takes the conversation audience's default. The name arrives already
-        slugged by `site_name`, because its caller needs it to mint the link before it writes."""
+        slugged by `site_name`, because its caller needs it to mint the link before it writes.
+
+        The preview columns are left as they are: the picture is taken after this write and lands
+        through `set_preview`, so a re-deploy keeps the picture the site already had until its own
+        render answers."""
         async with self.transaction() as connection:
             displaced = await self._refuse(
                 connection, conversation_id, name, port, creator_member_id, visibility, may_unhost
@@ -208,6 +219,28 @@ class HostedSites:
         if registered is None:
             raise RuntimeError(f"site {name!r} vanished as it was registered")
         return registered
+
+    async def set_preview(self, conversation_id: UUID, name: str, preview: StoredPreview) -> None:
+        """Write the picture a deploy photographed of its page onto the site's row.
+
+        Its own write, after `register`: the render is what a deploy can end inside, and the row is
+        what decides which name serves the port, so the registration cannot wait behind a picture.
+        A site unhosted or renamed off the port while the shot was drawing matches nothing here and
+        keeps the picture it had, which is what a failed render leaves too."""
+        async with self.transaction() as connection:
+            await connection.execute(
+                sa.update(hosted_site)
+                .where(
+                    hosted_site.c.workspace_id == self.workspace_id,
+                    hosted_site.c.conversation_id == conversation_id,
+                    hosted_site.c.name == name,
+                )
+                .values(
+                    preview_blob_key=preview.blob_key,
+                    preview_size_bytes=preview.size_bytes,
+                    updated_at=sa.func.now(),
+                )
+            )
 
     async def read(self, conversation_id: UUID, name: str) -> HostedSite | None:
         async with self.transaction() as connection:
@@ -425,6 +458,8 @@ class HostedSites:
             hosted_site.c.creator_member_id,
             hosted_site.c.generation,
             hosted_site.c.homepage_agent_id,
+            hosted_site.c.preview_blob_key,
+            hosted_site.c.preview_size_bytes,
             hosted_site.c.created_at,
             hosted_site.c.updated_at,
         )
@@ -445,6 +480,8 @@ def _site(row: sa.Row) -> HostedSite:
         creator_member_id=row.creator_member_id,
         generation=row.generation,
         homepage_agent_id=row.homepage_agent_id,
+        preview_blob_key=row.preview_blob_key,
+        preview_size_bytes=row.preview_size_bytes,
         created_at=_aware(row.created_at),
         updated_at=_aware(row.updated_at),
     )

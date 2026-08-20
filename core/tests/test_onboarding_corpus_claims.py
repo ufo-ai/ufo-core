@@ -332,7 +332,7 @@ CLAIMS = (
         corpus="references/capabilities.md",
         phrase="the agent hosts it and shares a permanent link instead of a file to\ndownload",
         source=SITES_TOOLS,
-        pattern=r"register that port as a hosted site and return its\n`site_url`",
+        pattern=r"register that port as a hosted site, returning its\s+`site_url`",
     ),
     Claim(
         claim="an expiry stops a scheduled task from running again",

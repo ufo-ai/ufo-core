@@ -131,7 +131,7 @@ function siteCard(row: ObjectRow, viewer: string | null): Card {
     ]
       .filter((part) => part)
       .join(" · "),
-    image: null,
+    image: typeof row.preview_url === "string" ? row.preview_url : null,
     link: typeof row.site_url === "string" ? row.site_url : null,
     file: null,
   };

@@ -14,6 +14,9 @@ from ufo.tools.context import (
     ImageContent as ImageContent,
 )
 from ufo.tools.context import (
+    StoredPreview as StoredPreview,
+)
+from ufo.tools.context import (
     TextContent as TextContent,
 )
 from ufo.tools.context import (

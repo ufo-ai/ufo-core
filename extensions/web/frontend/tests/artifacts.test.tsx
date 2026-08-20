@@ -22,6 +22,7 @@ import {
 
 const TEXT_URL = "/dl/notes.txt";
 const DOCS_URL = "https://ufo.example/surface/sites/signed-docs";
+const DOCS_PREVIEW_URL = "/artifacts/1f0d/docs.png?preview=image%2Fpng%3A5148";
 
 const DOCS = {
   name: "docs-abc",
@@ -728,6 +729,18 @@ test("a site is a card carrying its date, type, visibility, and summary", async 
   const band = card.querySelector('[data-part="mark"]');
   expect(band?.className).toContain("h-(--size-band)");
   expect(band?.getAttribute("aria-hidden")).toBe("true");
+  expect(band?.querySelector("img")).toBeNull();
+});
+
+test("a site's captured page fills its band", async () => {
+  shelf([{ ...DOCS, preview_url: DOCS_PREVIEW_URL }], []);
+  open();
+
+  const card = (await screen.findAllByRole("listitem"))[0];
+  const band = card.querySelector('[data-part="mark"]') as HTMLElement;
+  const image = band.querySelector("img") as HTMLImageElement;
+  expect(image.getAttribute("src")).toBe(DOCS_PREVIEW_URL);
+  expect(image.getAttribute("alt")).toBe("");
 });
 
 test("a site with a link opens it in a new tab, and one without draws no Open", async () => {

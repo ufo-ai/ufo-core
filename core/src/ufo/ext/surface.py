@@ -63,7 +63,11 @@ from ufo.accounting import (
 from ufo.agent_scope import agent as bind_agent
 from ufo.agent_setup import AgentSetup, pending_setup
 from ufo.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
-from ufo.artifact_url import ARTIFACT_URL_TTL_SECONDS, mint_artifact_url
+from ufo.artifact_url import (
+    ARTIFACT_URL_TTL_SECONDS,
+    mint_artifact_url,
+    mint_image_preview_url,
+)
 from ufo.audience import (
     Audience,
     audience_member,
@@ -94,11 +98,7 @@ from ufo.grants import (
     installed_connect_flow,
 )
 from ufo.hub import LiveFrame, SkillLoad, ToolCall
-from ufo.image_previews import (
-    IMAGE_PREVIEW_MAX_BYTES,
-    ImagePreviewGrant,
-    raster_image_media_type,
-)
+from ufo.image_previews import raster_image_media_type
 from ufo.listings import page_of, page_query
 from ufo.models.interface import Message
 from ufo.o11y import emit_metric, log, warn
@@ -1320,9 +1320,8 @@ class SurfaceContext:
         Two files reach this: one that is already an image, previewed off its own bytes, and one the
         sandbox rasterized a first page for at share time, previewed off that second blob. Either
         way the grant names a raster type and an exact size, so the route serves the bytes inline
-        only after they prove to be that picture."""
-        if not self._artifact_token_secret or not self._public_base_url:
-            return None
+        only after they prove to be that picture. The row's own declared type has to agree with the
+        key it names, so a document row whose filename says `pdf` never grants a picture."""
         if artifact.preview_blob_key is not None:
             blob_key = artifact.preview_blob_key
             declared = artifact.preview_media_type
@@ -1331,23 +1330,15 @@ class SurfaceContext:
             blob_key = artifact.blob_key
             declared = artifact.media_type
             size_bytes = artifact.size_bytes
-        media_type = raster_image_media_type(blob_key)
-        if (
-            media_type is None
-            or media_type != declared
-            or size_bytes is None
-            or size_bytes > IMAGE_PREVIEW_MAX_BYTES
-        ):
+        if raster_image_media_type(blob_key) != declared:
             return None
-        expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
-        path = mint_artifact_url(
+        return mint_image_preview_url(
             self._artifact_token_secret,
+            self._public_base_url,
             blob_key,
-            expires_at,
+            size_bytes,
             workspace_id=self.workspace_id,
-            preview=ImagePreviewGrant(media_type=media_type, size_bytes=size_bytes),
         )
-        return f"{self._public_base_url.rstrip('/')}{path}"
 
     def ingress_url(self, conversation_id: UUID, port: int, entry_path: str) -> str | None:
         """The URL that opens one conversation's sandbox port in a browser at `entry_path`, or None
