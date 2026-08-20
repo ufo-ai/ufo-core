@@ -122,7 +122,6 @@ FLOOR_KEY = "ship_floor"
 
 BILLING_KEY = "billing"
 BILLING_TIMEOUT_SECONDS = 30
-PAYMENT_METHOD_UPDATE_FLOW = "payment_method_update"
 MANAGE_BILLING_TOOL = "manage_billing"
 
 MANAGE_BILLING_DESCRIPTION = (
@@ -575,27 +574,6 @@ async def _stripe(
             f"stripe {path} failed ({response.status_code}): {response.text}",
             response.status_code,
         )
-    return response.json()
-
-
-async def _metronome(
-    config: BillingConfig,
-    method: str,
-    path: str,
-    transport: httpx.AsyncBaseTransport | None,
-    body: dict[str, object] | None = None,
-    params: dict[str, str] | None = None,
-    idempotency_key: str | None = None,
-) -> dict[str, object]:
-    headers = {"Authorization": f"Bearer {config.metronome_bearer_token}"}
-    if idempotency_key is not None:
-        headers["Idempotency-Key"] = idempotency_key
-    async with httpx.AsyncClient(timeout=BILLING_TIMEOUT_SECONDS, transport=transport) as http:
-        response = await http.request(
-            method, f"{METRONOME_API}{path}", json=body, params=params, headers=headers
-        )
-    if not response.is_success:
-        raise MetronomeError(f"metronome {path} failed ({response.status_code}): {response.text}")
     return response.json()
 
 
