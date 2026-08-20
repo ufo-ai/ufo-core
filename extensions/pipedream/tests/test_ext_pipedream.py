@@ -381,6 +381,21 @@ async def test_oauth_route_start_leg_redirects_to_connect_link(
     assert error[provider.OUTCOME_PARAM] == [provider.OUTCOME_FAILED]
 
 
+async def test_oauth_route_start_leg_keeps_the_consent_in_one_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hosted Connect Link opens the provider's consent in a second window unless told
+    otherwise (`<base target="_blank">`, popup mode). `popups=false` pins its redirect mode, so
+    the one window the member opened rides to the provider and back through this bridge."""
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
+    ctx = context_for(pipedream_manifest.NAME, frozenset())
+    query = f"provider={PROVIDER}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    link_query = parse_qs(urlparse(response.headers["location"]).query)
+    assert link_query[provider.CONNECT_LINK_POPUPS_PARAM] == ["false"]
+
+
 async def test_oauth_route_start_leg_rides_the_shared_client_when_no_custom_one_is_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

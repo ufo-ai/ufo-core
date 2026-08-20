@@ -130,6 +130,9 @@ services:
       # never per workspace. The search backend is a per-workspace key instead
       # (`ufoctl credential set perplexity_api_key`), so it takes no variable here.
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
+      PIPEDREAM_PROJECT_ID: ${PIPEDREAM_PROJECT_ID:-}
+      PIPEDREAM_CLIENT_ID: ${PIPEDREAM_CLIENT_ID:-}
+      PIPEDREAM_CLIENT_SECRET: ${PIPEDREAM_CLIENT_SECRET:-}
       # Billing is opt-in locally: UFO_DEV_PACK=assistant_billing adds the metronome extension, and
       # these three settings are what its tool and shippers read. Point them at a Metronome SANDBOX
       # token and a Stripe TEST-MODE key — the flow creates real objects in the accounts they name.

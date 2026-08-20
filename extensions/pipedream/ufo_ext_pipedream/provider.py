@@ -30,6 +30,7 @@ OUTCOME_CONNECTED = "connected"
 OUTCOME_FAILED = "failed"
 CONNECT_LINK_APP_PARAM = "app"
 CONNECT_LINK_OAUTH_APP_PARAM = "oauthAppId"
+CONNECT_LINK_POPUPS_PARAM = "popups"
 REDIRECT_STATUS = 302
 FAILED_CONSENT_STATUS = 502
 
@@ -71,7 +72,9 @@ class PipedreamOAuthProvider:
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
     """The browser bridge, both legs. Start leg (no outcome marker yet): mint a Connect token for
     this sealed state's external user with both return legs pinned to this route, and redirect the
-    member to the hosted Connect Link scoped to the provider's app. Return leg
+    member to the hosted Connect Link scoped to the provider's app — in redirect mode
+    (`popups=false`), so the one window the member opened rides through the provider's consent and
+    back instead of the hosted page spawning a popup it then outlives. Return leg
     (`outcome=connected`): resolve that user's account and redirect its id to core; core retrieves
     the exact account and reasserts its owner and app. A failed consent is answered loud, never by
     re-minting consent. The sealed `state` and core `callback` ride through untouched, so the grant
@@ -107,7 +110,10 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
         ),
         error_redirect_uri=f"{bridge}?{urlencode({**ride_through, OUTCOME_PARAM: OUTCOME_FAILED})}",
     )
-    link = f"{token.connect_link_url}&{urlencode({CONNECT_LINK_APP_PARAM: spec.app})}"
+    link = (
+        f"{token.connect_link_url}&"
+        f"{urlencode({CONNECT_LINK_APP_PARAM: spec.app, CONNECT_LINK_POPUPS_PARAM: 'false'})}"
+    )
     oauth_app_id = os.environ.get(spec.custom_oauth_env) if spec.custom_oauth_env else None
     if oauth_app_id:
         link = f"{link}&{urlencode({CONNECT_LINK_OAUTH_APP_PARAM: oauth_app_id})}"
