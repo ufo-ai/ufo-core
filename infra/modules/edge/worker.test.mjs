@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
@@ -77,6 +78,86 @@ test("the browser page links the product favicon and holds no copy of it", () =>
     /<link rel="icon" href="\/favicon-dark\.svg" type="image\/svg\+xml" media="\(prefers-color-scheme: dark\)" \/>/,
   );
   assert.doesNotMatch(LANDING_PAGE, /data:image\/svg\+xml/);
+});
+
+// What an unfurler reads: the tags, and then one absolute URL it fetches with no session. Every
+// value it draws is held here, because a card is invisible in the product and only ever seen in
+// somebody else's Slack.
+const SHARE_CARD = "https://ufo.ai/share/og-home.jpg";
+
+function shareTags(page) {
+  const tags = {};
+  for (const [, kind, name, content] of page.matchAll(
+    /<meta (property|name)="((?:og|twitter):[^"]+)" content="([^"]*)" \/>/g,
+  )) {
+    tags[name] = { kind, content };
+  }
+  return tags;
+}
+
+test("the page hands an unfurler a titled card at an absolute https URL", async () => {
+  const tags = shareTags(LANDING_PAGE);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(tags).map(([name, { content }]) => [name, content])),
+    {
+      "og:type": "website",
+      "og:site_name": "UFO",
+      "og:url": "https://ufo.ai/",
+      "og:title": "UFO — Go further.",
+      "og:description": "UFO. Go further.",
+      "og:image": SHARE_CARD,
+      "og:image:width": "1200",
+      "og:image:height": "630",
+      "og:image:type": "image/jpeg",
+      "og:image:alt": "Go further. — three figures under a dark sky, the UFO mark above them.",
+      "twitter:card": "summary_large_image",
+      "twitter:title": "UFO — Go further.",
+      "twitter:description": "UFO. Go further.",
+      "twitter:image": SHARE_CARD,
+    },
+  );
+  // The `og:` names are properties and the `twitter:` ones are names; a tag written the other way
+  // is dropped by the crawler that reads it.
+  for (const [name, { kind }] of Object.entries(tags)) {
+    assert.equal(kind, name.startsWith("og:") ? "property" : "name", name);
+  }
+  // The unfurl and the tab must say the same thing, and the page keeps one canonical home.
+  assert.match(LANDING_PAGE, /<title>UFO — Go further\.<\/title>/);
+  assert.match(LANDING_PAGE, /<meta name="description" content="UFO\. Go further\." \/>/);
+  assert.match(LANDING_PAGE, /<link rel="canonical" href="https:\/\/ufo\.ai\/" \/>/);
+  // Absolute and https, because a crawler resolves it against nothing.
+  const card = new URL(tags["og:image"].content);
+  assert.equal(card.protocol, "https:");
+  // And it is the card this repository holds, where the gateway compiles it in from.
+  const committed = await readFile(
+    new URL(`../../..${card.pathname.replace("/share/", "/control/src/assets/")}`, import.meta.url),
+  );
+  assert.deepEqual(committed.subarray(0, 3), Buffer.from([0xff, 0xd8, 0xff]));
+});
+
+// A crawler is not a CLI: the text card would unfurl as a wall of ASCII, so the unfurlers get the
+// document with the tags in it.
+test("a link unfurler is served the page rather than the terminal card", async () => {
+  for (const ua of [
+    "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
+    "Twitterbot/1.0",
+    "facebookexternalhit/1.1",
+    "LinkedInBot/1.0",
+  ]) {
+    const reply = await request("https://flyingobject.ai/", { ua });
+    assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.match(await reply.text(), /<meta property="og:image" content="[^"]+" \/>/);
+  }
+});
+
+// The cards themselves are the gateway's, compiled in beside /login/logo.png. The worker claims no
+// path under /share/, so both fall through to the apex origin that serves them.
+test("the card paths are left to the apex origin", async () => {
+  for (const path of ["/share/og-home.jpg", "/share/og-site.jpg"]) {
+    const reply = await request(`https://flyingobject.ai${path}`, { ua: "Slackbot 1.0" });
+    assert.equal(reply.status, 200);
+    assert.equal(await reply.text(), `origin:https://flyingobject.ai${path}`);
+  }
 });
 
 test("favicons serve the exact light and dark product marks", async () => {

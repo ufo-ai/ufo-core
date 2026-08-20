@@ -38,8 +38,12 @@ from ufo_ext_sites.store import (
 )
 from ufo_ext_sites.surface import (
     FRAME_PATH,
+    GENERIC_SHARE_TITLE,
     LOGIN_PATH,
     SESSION_COOKIE,
+    SHARE_CARD_ALT,
+    SHARE_CARD_URL,
+    SHARE_DESCRIPTION,
     UNCONFIGURED_BODY,
     VISIBILITY_BADGES,
     SiteHostingUnconfigured,
@@ -460,6 +464,18 @@ def _csrf(body: str) -> str:
     found = re.search(r'name=csrf value="([^"]+)"', body)
     assert found is not None, body
     return found.group(1)
+
+
+def _head_tags(body: str) -> dict[str, str]:
+    """The `og:`/`twitter:` tags an unfurler reads, by name. Only the head is read: what the page
+    shows a viewer who passed the gate is not what a crawler is told."""
+    head = body.partition("<style")[0]
+    return {
+        name: value.strip('"')
+        for name, value in re.findall(
+            r'<meta (?:property|name)=((?:og|twitter):[\w:]+) content=("[^"]*"|[^>]+)>', head
+        )
+    }
 
 
 @pytest.mark.parametrize(
@@ -1006,6 +1022,77 @@ async def test_an_unauthenticated_viewer_is_sent_to_sign_in_unless_the_site_is_p
     assert public.status_code == 200
     assert INGRESS_HOST in _embedded(public.text)
     assert "not signed in" not in public.text
+
+
+async def test_the_frame_head_carries_the_card_and_names_only_a_public_site(
+    deployment: Deployment,
+) -> None:
+    """A link unfurler passes no gate, so every tag it reads is published to whoever holds the link:
+    the card is always drawn, and the site's own name is in the title only while the site is public.
+    The card is an absolute https URL on the brand's apex — a site's own bytes are `no-store` behind
+    a session, so they could never be an `og:image`."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    link = str((await _deploy(workspace, conversation_id, audience, creator_id))["site_url"])
+
+    frame = await client.get(link, headers=_cookie(creator_token))
+    private = _head_tags(frame.text)
+    assert private["og:title"] == GENERIC_SHARE_TITLE
+    assert private["twitter:title"] == GENERIC_SHARE_TITLE
+    assert SITE not in " ".join(private.values())
+    # The page the creator reads still names their own site; only the crawler's half is generic.
+    assert f"<title>{SITE}</title>" in frame.text
+
+    # An anonymous viewer of a non-public site gets the sign-in page, which is also the page an
+    # unfurler gets, so it carries the same generic card rather than nothing at all.
+    anonymous = _head_tags((await client.get(link)).text)
+    assert anonymous["og:title"] == GENERIC_SHARE_TITLE
+    assert anonymous["og:image"] == SHARE_CARD_URL
+    assert SITE not in " ".join(anonymous.values())
+
+    flipped = await client.post(
+        f"{link}/visibility",
+        data={"visibility": "public", "csrf": _csrf(frame.text)},
+        headers=_cookie(creator_token),
+    )
+    assert flipped.status_code == 303
+
+    opened = _head_tags((await client.get(link)).text)
+    assert opened == {
+        "og:type": "website",
+        "og:site_name": "UFO",
+        "og:url": link,
+        "og:title": SITE,
+        "og:description": SHARE_DESCRIPTION,
+        "og:image": SHARE_CARD_URL,
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:image:type": "image/jpeg",
+        "og:image:alt": SHARE_CARD_ALT,
+        "twitter:card": "summary_large_image",
+        "twitter:title": SITE,
+        "twitter:description": SHARE_DESCRIPTION,
+        "twitter:image": SHARE_CARD_URL,
+    }
+    for card in (private["og:image"], anonymous["og:image"], opened["og:image"]):
+        assert card.startswith("https://")
+    assert opened["og:url"].startswith(f"{PUBLIC_BASE_URL}{FRAME_PATH}/")
+
+
+async def test_a_deep_link_unfurls_as_the_bare_site_link(deployment: Deployment) -> None:
+    """An unfurl of a deep link names the site's front door rather than the page the link opened, so
+    one site has one canonical address wherever it is shared from."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    link = str((await _deploy(workspace, conversation_id, audience, creator_id))["site_url"])
+
+    deep = await client.get(f"{link}/pricing", headers=_cookie(creator_token))
+    assert deep.status_code == 200
+    assert _head_tags(deep.text)["og:url"] == link
 
 
 async def test_an_unknown_or_forged_token_is_the_same_404_as_a_hidden_site(

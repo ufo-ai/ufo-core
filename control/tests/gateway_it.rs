@@ -19,8 +19,9 @@ use ufo_control::invite::InviteCodes;
 use ufo_control::shared::SharedWorkspaces;
 use ufo_control::store::OnboardStore;
 use ufo_control::web::{
-    ILLUSTRATION_BYTES, ILLUSTRATION_PATH, LOGIN_PAGE, LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH,
-    ONBOARD_SESSION_COOKIE,
+    ASSET_CACHE, ILLUSTRATION_BYTES, ILLUSTRATION_PATH, LOGIN_PAGE, LOGO_PATH, LOGO_PNG_BYTES,
+    LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE, SHARE_HOME_BYTES, SHARE_HOME_PATH, SHARE_SITE_BYTES,
+    SHARE_SITE_PATH,
 };
 use ufo_control::workos::{Verifier, WorkosVerifier, CONSOLE_CODE};
 
@@ -212,6 +213,33 @@ async fn the_sign_in_illustration_is_served_as_a_webp() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "image/webp");
     assert_eq!(response.bytes().await.unwrap().as_ref(), ILLUSTRATION_BYTES);
+}
+
+#[tokio::test]
+async fn the_share_cards_are_served_anonymously_and_cached_for_good() {
+    // What a link unfurler needs is the whole contract here: it carries no session, follows no
+    // redirect, and reads one absolute URL. A card answered any other way is no card at all.
+    let rig = rig(vec![], vec![], true).await;
+    for (path, card) in [
+        (SHARE_HOME_PATH, SHARE_HOME_BYTES),
+        (SHARE_SITE_PATH, SHARE_SITE_BYTES),
+    ] {
+        let response = client()
+            .get(format!("{}{path}", rig.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(response.headers()["content-type"], "image/jpeg");
+        assert_eq!(response.headers()["cache-control"], ASSET_CACHE);
+        assert!(
+            response.headers().get("set-cookie").is_none(),
+            "{path} binds a session"
+        );
+        let bytes = response.bytes().await.unwrap();
+        assert_eq!(bytes.as_ref(), card);
+        assert!(bytes.starts_with(b"\xff\xd8\xff"), "{path} is not a jpeg");
+    }
 }
 
 #[tokio::test]

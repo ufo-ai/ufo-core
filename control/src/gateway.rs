@@ -26,7 +26,8 @@ use crate::store::{OnboardClaim, OnboardStore};
 use crate::token;
 use crate::web::{
     parse_directives, ASSET_CACHE, ILLUSTRATION_BYTES, ILLUSTRATION_PATH, LOGIN_PAGE, LOGO_BYTES,
-    LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE, WEB_CHANNEL,
+    LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE, SHARE_HOME_BYTES,
+    SHARE_HOME_PATH, SHARE_SITE_BYTES, SHARE_SITE_PATH, WEB_CHANNEL,
 };
 use crate::workos::{
     console_signin_page, open_session, pack_state, seal_session, unpack_state, AuthCarry, Verifier,
@@ -455,6 +456,8 @@ pub fn router(state: GatewayState) -> Router {
         .route(LOGO_PATH, get(logo))
         .route(LOGO_PNG_PATH, get(logo_png))
         .route(ILLUSTRATION_PATH, get(illustration))
+        .route(SHARE_HOME_PATH, get(share_home))
+        .route(SHARE_SITE_PATH, get(share_site))
         .route(AUTH_START_PATH, get(auth_start))
         .route(AUTH_CALLBACK_PATH, get(auth_callback))
         .route("/v1/onboard/web", post(onboard_web))
@@ -579,6 +582,29 @@ async fn illustration() -> Response {
             (header::CACHE_CONTROL, ASSET_CACHE),
         ],
         ILLUSTRATION_BYTES,
+    )
+        .into_response()
+}
+
+/// The card a link unfurler draws for the marketing page. Nothing on this deploy fetches it: an
+/// unfurler reads the page's `og:image` and comes here anonymously, so the route takes no session and
+/// answers the same bytes to everyone.
+async fn share_home() -> Response {
+    share(SHARE_HOME_BYTES)
+}
+
+/// The same card for a hosted site's frame page, which names this absolute URL from the app host.
+async fn share_site() -> Response {
+    share(SHARE_SITE_BYTES)
+}
+
+fn share(card: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, ASSET_CACHE),
+        ],
+        card,
     )
         .into_response()
 }

@@ -26,7 +26,13 @@ session it buys consults no `hosted_site` row — so narrowing a site's visibili
 stops new viewers, not one already inside. Because the two origins differ, the embedded site's
 scripts reach neither the selector, the session cookie, nor any app route, and the `sandbox` list
 keeps them from navigating the member's tab away; the visibility `POST` still carries a CSRF token
-bound to the viewer's own session, so a cross-site form cannot flip a site the creator owns."""
+bound to the viewer's own session, so a cross-site form cannot flip a site the creator owns.
+
+The head carries the brand's share card, so a link pasted into a chat unfurls as a picture rather
+than one bare line. The site's own name reaches that head only when the site is public: the crawler
+that reads these tags carries no session and passes no gate, so a name in them is published to
+whoever holds the link. Every other level gets a generic title naming neither the site nor its
+workspace."""
 
 import hashlib
 import html
@@ -73,6 +79,12 @@ IFRAME_SANDBOX = (
     "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads "
     "allow-pointer-lock"
 )
+SHARE_CARD_URL = "https://ufo.ai/share/og-site.jpg"
+SHARE_CARD_WIDTH = "1200"
+SHARE_CARD_HEIGHT = "630"
+SHARE_CARD_ALT = "Made with UFO — three figures under a dark sky, the UFO mark above them."
+GENERIC_SHARE_TITLE = "A site on UFO"
+SHARE_DESCRIPTION = "A site made with UFO."
 VISIBILITY_LABELS: dict[Visibility, str] = {
     "private": "Only me",
     "workspace": "Workspace members",
@@ -156,10 +168,19 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
     site = await _resolve(ctx, request)
     if site is None:
         return _not_found()
+    frame_path = f"{FRAME_PATH}/{request.path_params[TOKEN_PARAM]}"
+    base = ctx.public_base_url
+    # A link unfurler is unauthenticated, so whatever the head says is public by definition: the
+    # site's own name goes in the card only when the site itself is public. A homepage follows its
+    # agent, whose levels stop at `workspace`, so it is never named either.
+    share = _share_tags(
+        site.name if site.homepage_agent_id is None and site.visibility == "public" else None,
+        f"{base.rstrip('/')}{frame_path}" if base else None,
+    )
     viewer = await _viewer(ctx, request)
     if site.homepage_agent_id is not None:
         if viewer is None:
-            return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE))
+            return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE, share))
         agent = next((a for a in await ctx.list_agents() if a.id == site.homepage_agent_id), None)
         if agent is None:
             return _not_found()
@@ -171,7 +192,7 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
             return _not_found()
     else:
         if site.visibility != "public" and viewer is None:
-            return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE))
+            return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE, share))
         if (
             site.visibility == "private"
             and viewer != site.creator_member_id
@@ -188,9 +209,10 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
         and viewer == site.creator_member_id
         else ""
     )
-    frame_path = f"{FRAME_PATH}/{request.path_params[TOKEN_PARAM]}"
     return HTMLResponse(
-        _frame_page(site, embedded, frame_path, csrf, bare=site.homepage_agent_id is not None)
+        _frame_page(
+            site, embedded, frame_path, csrf, share, bare=site.homepage_agent_id is not None
+        )
     )
 
 
@@ -266,16 +288,52 @@ def _not_found() -> Response:
     return PlainTextResponse(NOT_FOUND_BODY, status_code=404)
 
 
-def _page(title: str, style: str, body: str) -> str:
+def _page(title: str, style: str, body: str, share: str) -> str:
     return (
         "<!doctype html><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width, initial-scale=1">'
-        f"<title>{title}</title><style>{style}</style>{body}"
+        f"<title>{title}</title>{share}<style>{style}</style>{body}"
+    )
+
+
+def _share_tags(name: str | None, canonical: str | None) -> str:
+    """What a link unfurler draws for this site: the brand's card, and a title that names the site
+    only when `name` is given — the caller decides that from the site's visibility, never from the
+    viewer's session, because the crawler reading these tags carries none and may republish whatever
+    it reads. The card is the gateway's own asset on the apex, which is the one origin here that
+    answers an anonymous image request and caches it: a site's own bytes are `private, no-store`
+    behind a session, so they can never be an `og:image`. A deploy with no `[connect]
+    public_base_url` has no canonical link to name, and omits `og:url` rather than guessing one."""
+    url = ""
+    if canonical:
+        url = f'<meta property=og:url content="{html.escape(canonical, quote=True)}">'
+    title = html.escape(name or GENERIC_SHARE_TITLE, quote=True)
+    return (
+        "<meta property=og:type content=website>"
+        "<meta property=og:site_name content=UFO>"
+        f"{url}"
+        f'<meta property=og:title content="{title}">'
+        f'<meta property=og:description content="{SHARE_DESCRIPTION}">'
+        f'<meta property=og:image content="{SHARE_CARD_URL}">'
+        f"<meta property=og:image:width content={SHARE_CARD_WIDTH}>"
+        f"<meta property=og:image:height content={SHARE_CARD_HEIGHT}>"
+        "<meta property=og:image:type content=image/jpeg>"
+        f'<meta property=og:image:alt content="{SHARE_CARD_ALT}">'
+        "<meta name=twitter:card content=summary_large_image>"
+        f'<meta name=twitter:title content="{title}">'
+        f'<meta name=twitter:description content="{SHARE_DESCRIPTION}">'
+        f'<meta name=twitter:image content="{SHARE_CARD_URL}">'
     )
 
 
 def _frame_page(
-    site: HostedSite, embedded: str | None, frame_path: str, csrf: str, *, bare: bool = False
+    site: HostedSite,
+    embedded: str | None,
+    frame_path: str,
+    csrf: str,
+    share: str,
+    *,
+    bare: bool = False,
 ) -> str:
     """The site inside the app's own chrome: its name, the creator's selector or a viewer's badge,
     and the site itself at its own origin, freshly addressed every render. A homepage renders
@@ -291,7 +349,9 @@ def _frame_page(
 
     `frame_path` is the token's own address rather than the address this request arrived at: the
     selector posts to `<frame_path>/visibility`, and a deep link's path would otherwise trail into
-    that action and name a route no method serves."""
+    that action and name a route no method serves. `share` is the head's card for a link unfurler,
+    already gated on visibility by the caller — the `<title>` a viewer reads is the site's name
+    whatever its level, because that viewer passed the gate; a crawler passed nothing."""
     control = (
         _selector(site.visibility, frame_path, csrf)
         if csrf
@@ -305,11 +365,12 @@ def _frame_page(
         else f"<main><p>{UNCONFIGURED_BODY}</p></main>"
     )
     if bare:
-        return _page(html.escape(site.name), _STYLE + _FRAME_STYLE, site_view)
+        return _page(html.escape(site.name), _STYLE + _FRAME_STYLE, site_view, share)
     return _page(
         html.escape(site.name),
         _STYLE + _FRAME_STYLE,
         f"<header><span class=name>{html.escape(site.name)}</span>{control}</header>{site_view}",
+        share,
     )
 
 
