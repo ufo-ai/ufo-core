@@ -4,16 +4,20 @@ description: Load when the member asks to prepare, review, or approve items from
 ---
 # Daily brief
 
-## Scheduled edition
+## Editions
 
-Call `sweep_newspaper` exactly once. Treat its result as the complete bounded input for this
-edition. Do not use other private sources.
+A scheduled edition collects first: call `sweep_newspaper` exactly once and treat its result as
+the complete bounded input. When the member supplies the collected material, or says not to
+collect, that material is the complete bounded input: format it and call no tools — no
+`sweep_newspaper`, no `update_todo_list`, no `memory_update`. Either way, use no other private
+sources.
 
 Rank items by member impact, urgency, and how much the new information changes the next action.
 Prefer a specific unfinished commitment over general activity. Prefer a changed decision or stale
 assumption over a routine update. Keep at most eight items and 6,000 characters.
 
-Use only these headings, in this order, and omit empty sections:
+Use only these headings, each rendered as a markdown `##` line (`## Work to finish`), in this
+order:
 
 - Work to finish
 - Things you may have missed
@@ -22,11 +26,15 @@ Use only these headings, in this order, and omit empty sections:
 - Drafts
 - Coverage
 
+Write a heading only when it has at least one item. Drop an empty section entirely — no heading,
+no placeholder, no "none".
+
 Keep supplied internal references and public URLs with the item they support. Do not add an
 unsupported fact or hide missing scout coverage.
 
-Draft at most three tasks and three memories. A draft is a proposal, not approval. Never call
-`update_todo_list` or `memory_update` during a scheduled edition.
+Draft at most three tasks and three memories. A draft is a proposal, not approval. Preparing an
+edition never calls `update_todo_list` or `memory_update`; only member approval in a later turn
+does.
 
 ## Scout roles
 
