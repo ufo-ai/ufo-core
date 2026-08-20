@@ -15,6 +15,7 @@ from evals.harness.capability import (
     DescribedGrader,
     Grader,
 )
+from evals.harness.memory_fence import forget_workspace_memory
 from ufo.agents import AGENT_KIND
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
@@ -26,6 +27,7 @@ FIRST_RUN_SKILL = "first-run"
 APPLICATION_SKILL = "create-application"
 ASK_TOOL = "ask_user"
 APPLY_TOOL = "object_apply"
+EXTERNAL_TOOLS_TOOL = "list_external_tools"
 LIST_TOOL = "object_list"
 LOAD_TOOL = "load_skill"
 MEMORY_TOOL = "memory_search"
@@ -116,7 +118,16 @@ def _four_recipe_offer_scorer() -> Grader:
 
 def _recipe_interview_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        memory, applications, loaded = _context_indexes(output)
+        _, applications, loaded = _context_indexes(output)
+        connectors = [
+            index
+            for index, call in enumerate(output.calls)
+            if call.succeeded
+            and (
+                call.name == EXTERNAL_TOOLS_TOOL
+                or (call.name == LIST_TOOL and call.input.get("kind") == "connector_grant")
+            )
+        ]
         reads = [
             index
             for index, call in enumerate(output.calls)
@@ -129,8 +140,8 @@ def _recipe_interview_scorer() -> Grader:
             for index, call in enumerate(output.calls)
             if call.name == ASK_TOOL and call.succeeded
         ]
-        if not memory or not applications:
-            return CapabilityVerdict(False, "did not read workspace context")
+        if not applications or not connectors:
+            return CapabilityVerdict(False, "did not read applications and connector context")
         if FIRST_RUN_SKILL not in loaded or APPLICATION_SKILL not in loaded:
             return CapabilityVerdict(False, "did not load both first-run and create-application")
         if len(reads) != 1:
@@ -138,7 +149,7 @@ def _recipe_interview_scorer() -> Grader:
         if len(asks) != 1:
             return CapabilityVerdict(False, f"asked {len(asks)} times, expected one interview")
         ask_index, ask = asks[0]
-        if max(memory[0], applications[0], loaded[APPLICATION_SKILL], reads[0]) > ask_index:
+        if max(applications[0], connectors[0], loaded[APPLICATION_SKILL], reads[0]) > ask_index:
             return CapabilityVerdict(False, "opened the interview before reading its recipe")
         questions = ask.input.get("questions")
         if not isinstance(questions, list) or not 3 <= len(questions) <= 4:
@@ -161,7 +172,8 @@ def _recipe_interview_scorer() -> Grader:
         )
 
     return DescribedGrader(
-        "reads the selected recipe, then opens one prefilled application interview",
+        "reads application and connector context plus the selected recipe, then opens one "
+        "prefilled application interview",
         grade,
     )
 
@@ -223,6 +235,7 @@ async def _answer_interview(_output: CapabilityOutput) -> str | None:
 
 def _without_prior_application() -> CapabilitySeed:
     async def seed(workspace_id: UUID, _agent_id: UUID, _blob: BlobStore) -> None:
+        await forget_workspace_memory()
         async with workspace_tx() as connection:
             prior = (
                 await connection.execute(
