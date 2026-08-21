@@ -13,7 +13,17 @@ import {
   workspaceHash,
 } from "@/lib/route";
 
-import { AGENT, CHAT_ROW, CONVO_ID, MEMBER, json, useStreamFake, viewCard, wire } from "./harness";
+import {
+  goTo,
+  json,
+  useStreamFake,
+  viewCard,
+  wire,
+  AGENT,
+  CHAT_ROW,
+  CONVO_ID,
+  MEMBER,
+} from "./harness";
 
 const OLDER = {
   id: "a1",
@@ -92,7 +102,14 @@ function serve() {
 }
 
 test("a workspace tab and a section carry the same place and parse back to it", () => {
-  const place = { kind: "fact", after: "c2", q: "roadmap", chip: "Workspace", open: OLDER_KEY };
+  const place = {
+    kind: "fact",
+    after: "c2",
+    q: "roadmap",
+    chip: "Workspace",
+    face: "table",
+    open: OLDER_KEY,
+  };
   expect(parseHash(workspaceHash("sources", place))).toEqual({
     kind: "workspace",
     view: "sources",
@@ -291,12 +308,12 @@ test("a search term typed and not submitted does not follow the member to the ne
   serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("tab", { name: "Sources" }));
+  await goTo("Sources");
   await userEvent.type(await screen.findByLabelText("Search sources"), "rss");
   expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("rss");
   expect(location.hash).not.toContain("q=");
 
-  await userEvent.click(screen.getByRole("tab", { name: "Credentials" }));
+  await goTo("Credentials");
 
   const box = (await screen.findByLabelText("Search credentials")) as HTMLInputElement;
   expect(box.value).toBe("");
@@ -322,9 +339,9 @@ test("a tab click releases the filters, so returning starts unfiltered", async (
 
   expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("rss");
 
-  await userEvent.click(screen.getByRole("tab", { name: "Team" }));
+  await goTo("Team");
   await waitFor(() => expect(location.hash).toBe("#/workspace/team"));
-  await userEvent.click(screen.getByRole("tab", { name: "Sources" }));
+  await goTo("Sources");
 
   await waitFor(() => expect(location.hash).toBe("#/workspace/sources"));
   expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
@@ -439,8 +456,8 @@ test("a placement from a pane the member already left never writes its dead plac
 
   await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
   await waitFor(() => expect(release).not.toBeNull());
-  await userEvent.click(screen.getByRole("tab", { name: "Team" }));
-  await userEvent.click(screen.getByRole("tab", { name: "Sources" }));
+  await goTo("Team");
+  await goTo("Sources");
   await waitFor(() => expect(location.hash).toBe("#/workspace/sources"));
 
   release!(json({ applied: true, message: "Resync queued." }));
@@ -522,7 +539,7 @@ test("an intent resolving after the member leaves never rewrites where they went
 
   await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
   await waitFor(() => expect(release).not.toBeNull());
-  await userEvent.click(screen.getByRole("tab", { name: "Team" }));
+  await goTo("Team");
   await waitFor(() => expect(location.hash).toBe("#/workspace/team"));
 
   release!(json({ applied: true, message: "Resync queued." }));

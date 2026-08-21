@@ -159,3 +159,36 @@ export function DropdownMenuRadioItem({
     </DropdownMenuPrimitive.RadioItem>
   );
 }
+
+/** The name over the items it heads. It is a caption rather than an item: no row height, no fill
+ *  under the pointer, no press — a line that answers the pointer is a line the member reads as
+ *  pickable, and this one only says what the options below it are. It takes the register the table
+ *  heads take, so a name over a set reads the same wherever the portal states one. */
+export function DropdownMenuLabel({
+  className,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.Label>) {
+  return (
+    <DropdownMenuPrimitive.Label
+      data-slot="dropdown-menu-label"
+      className={cn("px-sm pt-sm pb-2xs text-label text-ink-soft", className)}
+      {...props}
+    />
+  );
+}
+
+/** The rule between two groups of items. It reaches the popup's own edges rather than stopping at
+ *  the padding the items stand in, so the menu is parted in two instead of carrying a short line
+ *  inside one column of rows. */
+export function DropdownMenuSeparator({
+  className,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.Separator>) {
+  return (
+    <DropdownMenuPrimitive.Separator
+      data-slot="dropdown-menu-separator"
+      className={cn("-mx-sm my-sm h-px bg-edge", className)}
+      {...props}
+    />
+  );
+}

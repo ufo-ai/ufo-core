@@ -83,7 +83,6 @@ function mount(declaration: ListingSpec<Payload, Row>, place: Placement = {}) {
     return (
       <MainAgentProvider agents={[AGENT]}>
         <TabbedPane
-          title="Probe"
           group="probe"
           tabs={["probe"] as const}
           views={views}

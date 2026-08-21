@@ -1,3 +1,10 @@
+import {
+  IconFile,
+  IconFileSpreadsheet,
+  IconFileText,
+  IconFileTypePdf,
+  IconPhoto,
+} from "@tabler/icons-react";
 import { useEffect, useState } from "react";
 
 import { Markdown } from "@/lib/markdown";
@@ -9,11 +16,41 @@ const ARTIFACT_HTML_BYTES = 256 * 1024;
 const MARKDOWN_MEDIA_TYPE = "text/markdown";
 const HTML_MEDIA_TYPE = "text/html";
 const CSV_MEDIA_TYPE = "text/csv";
+const PDF_MEDIA_TYPE = "application/pdf";
 const HTML_CSP =
   "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\">";
 
 export function isTextMedia(mediaType: string): boolean {
   return mediaType.startsWith("text/") || mediaType === "application/json";
+}
+
+const SPREADSHEET_MEDIA_TYPES = new Set([
+  CSV_MEDIA_TYPE,
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+]);
+
+const DOCUMENT_MEDIA_PREFIXES = ["text/", "application/vnd.openxmlformats-officedocument"];
+const DOCUMENT_MEDIA_TYPES = new Set(["application/json", "application/msword"]);
+
+/** What a file with no picture of its own is drawn as: one glyph for the family its media type
+ *  falls in. The families are the ones the listing narrows by — image, document, everything else —
+ *  so a member who filters to Documents sees the glyph they filtered on, and a spreadsheet and a
+ *  page are told apart inside that family rather than sharing one mark. A file the map does not
+ *  place takes the plain sheet, which claims nothing about what is in it. */
+export function MediaIcon({ mediaType }: { mediaType: string }) {
+  if (mediaType.startsWith("image/")) return <IconPhoto className="size-icon" aria-hidden />;
+  if (mediaType === PDF_MEDIA_TYPE) return <IconFileTypePdf className="size-icon" aria-hidden />;
+  if (SPREADSHEET_MEDIA_TYPES.has(mediaType))
+    return <IconFileSpreadsheet className="size-icon" aria-hidden />;
+  const document =
+    DOCUMENT_MEDIA_TYPES.has(mediaType) ||
+    DOCUMENT_MEDIA_PREFIXES.some((prefix) => mediaType.startsWith(prefix));
+  return document ? (
+    <IconFileText className="size-icon" aria-hidden />
+  ) : (
+    <IconFile className="size-icon" aria-hidden />
+  );
 }
 
 /** The fetched slice as RFC 4180 rows: a quoted field holds commas and newlines, a doubled quote

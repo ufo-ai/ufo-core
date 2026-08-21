@@ -2,20 +2,25 @@ import { useEffect, useState } from "react";
 
 import { Search } from "@/components/ui/field";
 import type { Placement } from "@/kernel/pager";
-import { BANDS, Page, PageActs, PageHeader, PageToolbar, Pane } from "@/kernel/pane";
+import { BANDS, COLUMN, Page, PageActs, PageHeader, Pane } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
+import { cn } from "@/lib/cn";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
-import { TabPanel, TabRow } from "@/kernel/tabs";
 import type { PaneView } from "@/views/registry";
 
-/** A destination the sidebar reaches: a title, a tab array, and one registry. Workspace, Customize
- *  and each top-level section differ in nothing else, so they are one shell — a second copy would
- *  be a second answer to what opening a row does to history. A destination holding one view draws
- *  no strip, because the pane is then the page and a strip of one names what the `<h1>` above it
- *  already said. The header carries the search over the whole destination; the filter that narrows
- *  the records to a family stays with them. */
+/** A destination the sidebar reaches: a tab array and one registry. Workspace, Customize and each
+ *  top-level section differ in nothing else, so they are one shell — a second copy would be a
+ *  second answer to what opening a row does to history. The band names the view the member is on
+ *  and moves between the views beside it, so there is no strip: a destination's own name and the
+ *  way out of it are one control rather than a heading with a row of pills repeating it. The
+ *  header carries the search over the whole destination; the filter that narrows the records to a
+ *  family stays with them.
+ *
+ *  Everything the shell draws stands in one `COLUMN`, the measure a conversation is read at. The
+ *  heading, the controls and the records share it, so the page reads as one column rather than as
+ *  a title stranded at an edge above centred records — and a member moving between a conversation
+ *  and a destination finds the column where they left it. */
 export function TabbedPane<Tab extends string>({
-  title,
   group,
   tabs,
   views,
@@ -23,7 +28,6 @@ export function TabbedPane<Tab extends string>({
   place,
   onPlace,
 }: {
-  title: string;
   group: string;
   tabs: readonly Tab[];
   views: Record<Tab, PaneView>;
@@ -48,9 +52,12 @@ export function TabbedPane<Tab extends string>({
   return (
     <Pane>
       <Page>
+        <div className={cn(COLUMN, BANDS)}>
         {headed ? null : (
           <PageHeader
-            title={title}
+            title={views[view].label}
+            siblings={tabs.map((name) => ({ label: views[name].label, value: name }))}
+            onPick={(name) => onPlace(name as Tab, {}, "push")}
             search={
               search ? (
                 <PaneSearch
@@ -64,31 +71,10 @@ export function TabbedPane<Tab extends string>({
             action={<span ref={setAct} className="contents" />}
           />
         )}
-        {tabs.length > 1 ? (
-          <>
-            <PageToolbar>
-              <TabRow
-                group={group}
-                tabs={tabs}
-                current={view}
-                label={(name) => views[name].label}
-                onPick={(name) => onPlace(name, {}, "push")}
-              />
-            </PageToolbar>
-            <TabPanel
-              group={group}
-              current={view}
-              className={BANDS}
-              data-testid={group}
-            >
-              {registered}
-            </TabPanel>
-          </>
-        ) : (
-          <div className={BANDS} data-testid={group}>
-            {registered}
-          </div>
-        )}
+        <div className={BANDS} data-testid={group}>
+          {registered}
+        </div>
+        </div>
       </Page>
     </Pane>
   );

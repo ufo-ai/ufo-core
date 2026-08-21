@@ -6,36 +6,38 @@ import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
 import {
+  destination,
+  fact,
+  goTo,
+  json,
+  objectIndex,
+  openAgentRow,
+  openAgentSettings,
+  opened,
+  owned,
+  pick,
+  pressRow,
+  refusedNotice,
+  useStreamFake,
+  viewCard,
+  wire,
   AGENT,
   AGENT_ID,
   CHAT_ROW,
   CONVO_ID,
   FRESH,
   MEMBER,
+  NO_ARTIFACTS,
+  NO_RUNS,
   PlacedWorkspace,
   SECOND,
   SECOND_ID,
-  NO_ARTIFACTS,
-  NO_RUNS,
   SETTINGS,
   SITE_KIND,
   StreamFake,
   TASK_KIND,
   TRIGGER_KIND,
   TURN_ID,
-  fact,
-  json,
-  openAgentSettings,
-  objectIndex,
-  opened,
-  owned,
-  pick,
-  refusedNotice,
-  useStreamFake,
-  openAgentRow,
-  pressRow,
-  viewCard,
-  wire,
 } from "./harness";
 beforeEach(() => {
   useStreamFake();
@@ -150,7 +152,7 @@ test("the settings usage fact opens the workspace usage tab", async () => {
   await userEvent.click(await screen.findByRole("link", { name: "Workspace usage" }));
 
   await waitFor(() => expect(location.hash).toBe("#/workspace/usage"));
-  expect(screen.getByRole("tab", { name: "Usage" }).getAttribute("aria-selected")).toBe("true");
+  expect(destination()).toBe("Usage");
   expect(await screen.findByText("No spend cap is set on you.")).toBeTruthy();
 });
 
@@ -985,7 +987,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
     "true",
   );
 
-  await userEvent.click(await screen.findByRole("tab", { name: "Memory" }));
+  await goTo("Memory");
   expect(location.hash).toBe("#/workspace/memory");
   expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
     "true",
@@ -1276,8 +1278,11 @@ test("every container that stacks bands states the one gap between them", async 
     <App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  const panel = await screen.findByRole("tabpanel");
+  const panel = await screen.findByTestId("workspace");
   expect(panel.className).toContain("gap-6xl");
-  const page = panel.parentElement;
-  expect(page?.className).toContain("gap-6xl");
+  /* The column the shell is read in stacks the bands, and the page under it stacks the column. */
+  const column = panel.parentElement;
+  expect(column?.className).toContain("gap-6xl");
+  expect(column?.className).toContain("max-w-page");
+  expect(column?.parentElement?.className).toContain("gap-6xl");
 });

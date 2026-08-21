@@ -24,7 +24,6 @@ export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
   if (placed.view !== view) setPlaced({ view, place: {} });
   return (
     <TabbedPane
-      title="Workspace"
       group="workspace"
       tabs={WORKSPACE_TABS}
       views={WORKSPACE_VIEWS}
@@ -49,7 +48,6 @@ export function PlacedSection({
   if (placed.section !== section) setPlaced({ section, place: {} });
   return (
     <TabbedPane
-      title={SECTION_VIEWS[section].label}
       group="section"
       tabs={[section]}
       views={SECTION_VIEWS}
@@ -58,6 +56,19 @@ export function PlacedSection({
       onPlace={(next, place) => setPlaced({ section: next, place })}
     />
   );
+}
+
+/** The destination's own name is the control that moves between destinations, so a test changing
+ *  destination presses the name and picks out of the menu under it, exactly as a member does. */
+export async function goTo(label: string) {
+  const heading = await screen.findByRole("heading", { level: 1 });
+  await userEvent.click(within(heading).getByRole("button"));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: label }));
+}
+
+/** The destination the shell is standing on, which its heading names. */
+export function destination(): string {
+  return screen.getByRole("heading", { level: 1 }).textContent ?? "";
 }
 
 export class StreamFake {
@@ -397,7 +408,7 @@ export async function viewCard(name: string): Promise<HTMLElement> {
     .map((node) => node.closest("li"))
     .find((entry) => entry);
   if (!card) throw new Error("no card named " + name);
-  return within(card).getByRole("button", { name: "View" });
+  return within(card).getByRole("button");
 }
 
 /** The width the portal is read at. The one number here that is not a token, because no token

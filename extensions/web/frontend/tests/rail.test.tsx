@@ -21,25 +21,26 @@ import {
 } from "@/lib/rail";
 
 import {
-  AGENT,
-  AGENT_ID,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
   atPhoneWidth,
-  NO_ARTIFACTS,
-  SECOND,
-  SECOND_ID,
-  SETTINGS,
-  TURN_ID,
-  SITE_KIND,
-  TASK_KIND,
-  TRIGGER_KIND,
+  destination,
   json,
   objectIndex,
   openAgentRow,
   useStreamFake,
   wire,
+  AGENT,
+  AGENT_ID,
+  CHAT_ROW,
+  CONVO_ID,
+  MEMBER,
+  NO_ARTIFACTS,
+  SECOND,
+  SECOND_ID,
+  SETTINGS,
+  SITE_KIND,
+  TASK_KIND,
+  TRIGGER_KIND,
+  TURN_ID,
 } from "./harness";
 
 beforeEach(() => {
@@ -1127,8 +1128,7 @@ test("the sidebar marks the destination the member is in and leaves the others o
 
   await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
   expect(marked()).toEqual(["Workspace"]);
-  expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Team" }).getAttribute("aria-selected")).toBe("true");
+  await waitFor(() => expect(destination()).toBe("Team"));
 
   await userEvent.click(rail.getByRole("button", { name: "Artifacts" }));
   await waitFor(() => expect(marked()).toEqual(["Artifacts"]));

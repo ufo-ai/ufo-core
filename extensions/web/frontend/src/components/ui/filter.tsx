@@ -17,7 +17,13 @@ export type Segment = FilterOption & { id?: string; controls?: string };
  *  boundary the row does not have, and the same act then looks like two different controls
  *  depending on which screen it is on. It carries the roving tabindex `role="tablist"` requires:
  *  one press reaches the row, then left and right move the choice and carry the focus, wrapping at
- *  each end. */
+ *  each end.
+ *
+ *  The pill is drawn only once the row has been measured. It has no resting place to be drawn in
+ *  before that — a pill given zeros for its first paint slides out of the row's left corner and
+ *  grows into the picked choice, which states a change of choice on a screen the member has only
+ *  just opened. Mounting it already placed skips that: a transition animates a box that moves, and
+ *  a box drawn where it belongs the first time has not moved. */
 export function Segmented({
   label,
   segments,
@@ -30,7 +36,12 @@ export function Segmented({
   onPick: (value: string) => void;
 }) {
   const list = useRef<HTMLDivElement>(null);
-  const [pill, setPill] = useState({ left: 0, top: 0, width: 0, height: 0 });
+  const [pill, setPill] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
   useLayoutEffect(() => {
     const row = list.current;
     const active = row?.querySelector<HTMLElement>('[aria-selected="true"]');
@@ -66,14 +77,16 @@ export function Segmented({
         "max-narrow:flex-wrap",
       )}
     >
-      <span
-        aria-hidden
-        className={cn(
-          "absolute rounded-full bg-fill",
-          "transition-[left,top,width,height] duration-100 ease-control motion-reduce:transition-none",
-        )}
-        style={{ left: pill.left, top: pill.top, width: pill.width, height: pill.height }}
-      />
+      {pill ? (
+        <span
+          aria-hidden
+          className={cn(
+            "absolute rounded-full bg-fill",
+            "transition-[left,top,width,height] duration-100 ease-control motion-reduce:transition-none",
+          )}
+          style={{ left: pill.left, top: pill.top, width: pill.width, height: pill.height }}
+        />
+      ) : null}
       {segments.map((segment, index) => {
         const active = value === segment.value;
         return (

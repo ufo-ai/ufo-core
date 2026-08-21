@@ -1,9 +1,11 @@
+import { IconWorldWww } from "@tabler/icons-react";
 import { useState, type ReactNode } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Filter, Segmented } from "@/components/ui/filter";
+import { Segmented } from "@/components/ui/filter";
 import { Sheet } from "@/components/ui/sheet";
-import { ArtifactText, isTextMedia } from "@/kernel/artifact";
+import { Lede, Td, TdFact } from "@/components/ui/table";
+import { ArtifactText, MediaIcon, isTextMedia } from "@/kernel/artifact";
 import { useBeside } from "@/kernel/beside";
 import { CardGrid } from "@/kernel/cards";
 import {
@@ -14,7 +16,14 @@ import {
   type ObjectRow,
 } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
-import { PageToolbar } from "@/kernel/pane";
+import {
+  FacetMenu,
+  PageToolbar,
+  ToolbarRule,
+  ViewSwitch,
+  type Face,
+  type FacetGroup,
+} from "@/kernel/pane";
 import {
   Panel,
   PanelBlank,
@@ -23,6 +32,7 @@ import {
   usePanelRead,
   type PanelState,
 } from "@/kernel/panel";
+import { DataTable } from "@/kernel/table";
 import { ownerLabel, slackLink, useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
@@ -31,9 +41,6 @@ import { chatHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
 const SITE_KIND = "site";
-const CURSOR_SEPARATOR = "|";
-
-const CURSOR_OLDER = "older";
 
 const OBJECT_PREFIX = "object/";
 const NOT_FOUND = 404;
@@ -43,17 +50,37 @@ const MEDIA: Record<string, string> = {
   Documents: "document",
   Other: "other",
 };
+
+/** Every narrowing the shelf offers, by the axis a member thinks in. A site and a shared file are
+ *  read from different places and share no facts, so which of the two a member wants is its own
+ *  question — asked once, above the file types, rather than as a fourth entry in a list of media
+ *  kinds it does not belong in. */
+const FACETS: FacetGroup[] = [
+  { label: "Kind", options: [{ label: SITE_FAMILY, value: SITE_FAMILY }] },
+  {
+    label: "File type",
+    options: Object.keys(MEDIA).map((family) => ({ label: family, value: family })),
+  },
+];
 const FAMILIES = [SITE_FAMILY, ...Object.keys(MEDIA)];
+
+/** What the member picked, or the default the screen opens on. Every one of these reads its value
+ *  off the place and nowhere else, so a screen opened fresh stands on its defaults — the leading
+ *  choice of each control, at rest — and a screen opened from a link stands exactly where the link
+ *  says. A choice held anywhere but the address would open one member's first screen on another
+ *  member's last one, and no link could carry it. */
+function asFace(value: string | undefined): Face {
+  return value === "table" ? value : "tiles";
+}
 
 type Scope = "created" | "all";
 
-const SCOPE_KEY = "artifacts-scope";
 const SCOPE_SEGMENTS = [
   { label: "All", value: "all" },
   { label: "Created by me", value: "created" },
 ];
 
-function asScope(value: string | null): Scope {
+function asScope(value: string | undefined): Scope {
   return value === "created" ? value : "all";
 }
 
@@ -83,7 +110,8 @@ type SitesPayload = { objects: ObjectRow[] };
 /** One card of the shelf. A site and a shared file are two families of the one thing the member
  *  came for — what the agents produced — so they are read down one grid, newest first whichever
  *  family a card belongs to. `time` is what that order is taken on: a record the shelf cannot date
- *  sorts last rather than sorting arbitrarily. */
+ *  sorts last rather than sorting arbitrarily. `type` is the one short fact the two families
+ *  share, and it is what the table's own column compares straight down. */
 type Card = {
   key: string;
   name: string;
@@ -91,6 +119,7 @@ type Card = {
   status: ReactNode;
   body: string | null;
   meta: string;
+  type: string;
   image: string | null;
   link: string | null;
   file: Artifact | null;
@@ -107,6 +136,14 @@ function isImage(entry: Artifact): boolean {
 
 function visibilityLabel(visibility: string) {
   return visibility.charAt(0).toUpperCase() + visibility.slice(1);
+}
+
+/** The one short word a file's type reduces to, which is what the member recognises it by: the
+ *  subtype of the media type, with the vendor prefixes an office format carries dropped. The full
+ *  media type stays in the viewer, where there is room to state it exactly. */
+function typeLabel(mediaType: string): string {
+  const subtype = mediaType.split("/")[1] ?? mediaType;
+  return subtype.split(/[.+]/).pop() ?? subtype;
 }
 
 /** One stamp as the order reads it. A record with no date, or a date the shelf cannot read, takes
@@ -131,6 +168,7 @@ function siteCard(row: ObjectRow, viewer: string | null): Card {
     ]
       .filter((part) => part)
       .join(" · "),
+    type: "Site",
     image: typeof row.preview_url === "string" ? row.preview_url : null,
     link: typeof row.site_url === "string" ? row.site_url : null,
     file: null,
@@ -144,14 +182,14 @@ const FINGERPRINT_MEDIA = new Set([
   "text/x-patch",
 ]);
 
-/** A shaped text file's band is its fingerprint: the content renders at reading width — markdown
+/** A shaped text file's tile is its fingerprint: the content renders at reading width — markdown
  *  as the document it is, a csv as its table, json and a patch as their characters — and scales to
- *  the edge of legibility, so the band holds a dense picture of the page rather than one
+ *  the edge of legibility, so the tile holds a dense picture of the page rather than one
  *  full-sized opening line. It reads the same link the viewer reads whole, the one preview an
  *  already-shared file can grow without a re-render; plain text stays pictureless, since it has no
- *  shape a fingerprint would carry. The fingerprint is `inert`: the band is decoration, so nothing
- *  in it takes a press or the keyboard, and the band's own overflow crops it. */
-function bandExcerpt(file: Artifact | null): ReactNode {
+ *  shape a fingerprint would carry. The fingerprint is `inert`: the tile is decoration, so nothing
+ *  in it takes a press or the keyboard, and the tile's own overflow crops it. */
+function tileExcerpt(file: Artifact | null): ReactNode {
   if (!file?.url || !FINGERPRINT_MEDIA.has(file.media_type)) return null;
   return (
     <div inert className="w-(--size-fingerprint) origin-top-left scale-(--scale-fingerprint)">
@@ -173,6 +211,7 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
     status: <Moment at={entry.created_at} />,
     body: entry.subject,
     meta: ownerLabel(entry.owner_email, viewer),
+    type: typeLabel(entry.media_type),
     image: entry.preview_url ?? (isImage(entry) ? entry.url : null),
     link: null,
     file: entry,
@@ -183,62 +222,36 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
  *  continues. A deploy with no sites extension answers the site read with a 404, which is a family
  *  that does not exist here rather than a fault — every other refusal is stated.
  *
- *  The sites arrive whole on every read, so a page keeps only the ones made inside its own window,
- *  and the windows have to tile: a site between the oldest file of one page and the newest file of
- *  the next belongs to exactly one of them, never to neither. The foot of the window is this page's
- *  oldest file and the top is the position the cursor names — the last row of the page above, which
- *  is that page's foot — so the two meet on one value and a record at it stands on the upper page
- *  alone. The first page is open at the top and the last is open at the foot. */
-/** The moment a page starts under, read from the cursor that opened it: `side|created_at|item_id`.
- *  Only a cursor walking older names this — it is the last row of the page above, so this page
- *  holds what is older than it. A cursor walking newer names the row *below* this page, which
- *  bounds its foot and says nothing about its top; read as a top it would put the whole window
- *  under this page's own oldest file and leave no site standing anywhere. A page whose top is
- *  unnamed — the newest page, or one walked back into from below — is open at the top, so a site
- *  can stand on two pages while the member walks backwards but can never stand on none. */
-function startsUnder(after: string | undefined): number {
-  const [side, stamp] = (after ?? "").split(CURSOR_SEPARATOR);
-  const at = Date.parse(stamp ?? "");
-  return side === CURSOR_OLDER && !Number.isNaN(at) ? at : Number.POSITIVE_INFINITY;
-}
-
+ *  The sites arrive whole on every read, and a shelf mixing them into a walk of files has to say
+ *  which page each one stands on. They stand on the newest: a site is a place that goes on being
+ *  worked on rather than a file dated once, so the top of the shelf is where a member looks for
+ *  it, and the family's own narrowing lists every one of them at any depth. Which page is the
+ *  newest is read off the files payload rather than off the cursor in the address — a member who
+ *  walked back up to the top is on the newest page and carries a cursor saying so, and a shelf
+ *  judging by the cursor alone would drop the sites the moment they walked back to them. */
 function shelf(
   sites: PanelState<SitesPayload>,
   files: PanelState<FilesPayload>,
   viewer: string | null,
-  after: string | undefined,
+  onSites: boolean,
   scope: Scope,
 ): PanelState<Shelf> {
   if (files.phase !== "ready") return files;
   if (sites.phase === "loading") return sites;
   if (sites.phase === "failed" && sites.status !== NOT_FOUND) return sites;
-  const artifacts = files.payload.artifacts;
-  const oldestFile = Math.min(...artifacts.map((entry) => Date.parse(entry.created_at)));
-  const older = Boolean(files.payload.older);
-  const under = startsUnder(after);
-  const standing =
-    sites.phase === "ready"
+  const shown =
+    sites.phase === "ready" && (onSites || !files.payload.newer)
       ? sites.payload.objects.filter((row) => {
-          if (scope !== "all") {
-            const owned = viewer !== null && row[OWNER_FIELD] === viewer;
-            if ((scope === "created") !== owned) return false;
-          }
-          const at = moment(typeof row.created_at === "string" ? row.created_at : null);
-          return at < under && (!older || at >= oldestFile);
+          if (scope === "all") return true;
+          return viewer !== null && row[OWNER_FIELD] === viewer;
         })
       : [];
   const cards = [
-    ...standing.map((row) => siteCard(row, viewer)),
-    ...artifacts.map((entry) => fileCard(entry, viewer)),
+    ...shown.map((row) => siteCard(row, viewer)),
+    ...files.payload.artifacts.map((entry) => fileCard(entry, viewer)),
   ];
   cards.sort((left, right) => (left.time < right.time ? 1 : left.time > right.time ? -1 : 0));
-  return {
-    phase: "ready",
-    payload: {
-      cards,
-      files: files.payload,
-    },
-  };
+  return { phase: "ready", payload: { cards, files: files.payload } };
 }
 
 function objectAt(open: string | undefined): ObjectAddress | null {
@@ -257,13 +270,8 @@ export function Artifacts({
 }) {
   const mainAgent = useMainAgent();
   const viewer = useViewer();
-  const [scope, setScope] = useState<Scope>(() => asScope(localStorage.getItem(SCOPE_KEY)));
-  const holdScope = (value: string) => {
-    const next = asScope(value);
-    setScope(next);
-    localStorage.setItem(SCOPE_KEY, next);
-    onPlace({ after: undefined });
-  };
+  const scope = asScope(place.scope);
+  const face = asFace(place.face);
   const query = place.q ?? "";
   const picked = place.chip ?? "";
   const media = MEDIA[picked];
@@ -286,11 +294,12 @@ export function Artifacts({
       ? null
       : "/workspace/artifacts" + (fileParams.size ? "?" + fileParams.toString() : ""),
   );
+  const onSites = picked === SITE_FAMILY;
   const state = shelf(
     mainAgent && !media ? held : NO_SITES,
-    picked === SITE_FAMILY ? NO_FILES : walked,
+    onSites ? NO_FILES : walked,
     viewer,
-    place.after,
+    onSites,
     scope,
   );
 
@@ -311,102 +320,142 @@ export function Artifacts({
 
   const unknown = Boolean(picked) && !FAMILIES.includes(picked);
   const absent = held.phase === "failed" && held.status === NOT_FOUND;
-  const families = absent ? Object.keys(MEDIA) : FAMILIES;
+  const facets = absent ? FACETS.filter((group) => group.label !== "Kind") : FACETS;
 
   return (
     <>
       {state.phase === "loading" ? null : (
         <PageToolbar>
-          <Segmented label="Scope" segments={SCOPE_SEGMENTS} value={scope} onPick={holdScope} />
-          <Filter
-            options={families.map((family) => ({ label: family, value: family }))}
-            value={picked}
-            onChange={(value) => onPlace({ chip: value || undefined, after: undefined })}
+          <Segmented
+            label="Scope"
+            segments={SCOPE_SEGMENTS}
+            value={scope}
+            onPick={(value) =>
+              onPlace({ scope: value === "all" ? undefined : value, after: undefined })
+            }
           />
           {state.phase === "failed" && place.after ? (
-            <Button
-              variant="row"
-              onClick={() => onPlace({ after: undefined, open: undefined })}
-            >
+            <Button variant="row" onClick={() => onPlace({ after: undefined, open: undefined })}>
               First page
             </Button>
           ) : null}
+          <span className="ml-auto flex shrink-0 items-center gap-sm max-narrow:ml-0">
+            <FacetMenu
+              groups={facets}
+              value={picked}
+              onPick={(value) => onPlace({ chip: value || undefined, after: undefined })}
+            />
+            <ToolbarRule />
+            <ViewSwitch
+              face={face}
+              onPick={(next) => onPlace({ face: next === "tiles" ? undefined : next })}
+            />
+          </span>
         </PageToolbar>
       )}
       <Section>
-      <Panel state={state} shape="cards">
-        {(payload) => {
-          if (unknown) return <PanelBlank body="That filter is not available." />;
-          if (!payload.cards.length)
+        <Panel state={state} shape={face === "table" ? "table" : "cards"}>
+          {(payload) => {
+            if (unknown) return <PanelBlank body="That filter is not available." />;
+            if (!payload.cards.length)
+              return (
+                <PanelBlank
+                  body={
+                    query || picked
+                      ? "Nothing matches."
+                      : "A file or site an app makes in a conversation is listed here."
+                  }
+                />
+              );
+            const opened = payload.cards.find((card) => card.key === place.open);
+            const open = (card: Card) => () => onPlace({ open: card.key });
             return (
-              <PanelBlank
-                body={
-                  query || picked
-                    ? "Nothing matches."
-                    : "A file or site an app makes in a conversation is listed here."
-                }
-              />
-            );
-          const opened = payload.cards.find((card) => card.key === place.open);
-          return (
-            <>
-              <CardGrid
-                rows={payload.cards}
-                rowKey={(card) => card.key}
-                mark={{
-                  shape: "band",
-                  image: (card) => card.image,
-                  body: (card) => bandExcerpt(card.file),
-                }}
-                primary={(card) => card.name}
-                status={(card) => card.status}
-                body={(card) => card.body}
-                meta={(card) => card.meta}
-                action={(card) => <Act card={card} onPlace={onPlace} />}
-              />
-              {picked === SITE_FAMILY ? null : (
-                <Pager payload={payload.files} onPlace={onPlace} />
-              )}
-              {place.open && !at ? (
-                opened?.file ? (
-                  <Viewer entry={opened.file} onClose={() => onPlace({ open: undefined })} />
+              <>
+                {face === "table" ? (
+                  <Shapes cards={payload.cards} open={open} />
                 ) : (
-                  <PanelEmpty>That item is not on this page.</PanelEmpty>
-                )
-              ) : null}
-            </>
-          );
-        }}
-      </Panel>
+                  <CardGrid
+                    rows={payload.cards}
+                    rowKey={(card) => card.key}
+                    mark={{
+                      shape: "tile",
+                      image: (card) => card.image,
+                      body: (card) => tileExcerpt(card.file),
+                    }}
+                    primary={(card) => card.name}
+                    status={(card) => card.status}
+                    open={(card) => (card.file && !card.file.url ? null : open(card))}
+                    action={(card) => (card.link ? <OpenSite href={card.link} /> : null)}
+                  />
+                )}
+                {onSites ? null : <Pager payload={payload.files} onPlace={onPlace} />}
+                {place.open && !at ? (
+                  opened?.file ? (
+                    <Viewer entry={opened.file} onClose={() => onPlace({ open: undefined })} />
+                  ) : (
+                    <PanelEmpty>That item is not on this page.</PanelEmpty>
+                  )
+                ) : null}
+              </>
+            );
+          }}
+        </Panel>
       </Section>
       {detail}
     </>
   );
 }
 
-/** A site's own link leaves the portal and leads the foot; `View` opens the record in the pane.
- *  A file carries only `View`, and only once its link is minted. */
-function Act({ card, onPlace }: { card: Card; onPlace: (place: Placement) => void }) {
-  const view =
-    !card.file || card.file.url ? (
-      <Button variant="row" onClick={() => onPlace({ open: card.key })}>
-        View
-      </Button>
-    ) : null;
-  if (!card.link) return view;
+/** A site's own address, which is the one thing about it the portal cannot draw for the member.
+ *  It leads out of the portal, so it says so and opens where a link out always does. It is laid
+ *  over the tile's own picture, so it carries the page's surface under it rather than whatever the
+ *  picture happens to be showing there. */
+function OpenSite({ href }: { href: string }) {
   return (
-    <div className="flex flex-wrap gap-xs">
-      <a
-        href={card.link}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={cn(buttonVariants({ variant: "send" }), "no-underline")}
-      >
-        Open
-      </a>
-      {view}
-    </div>
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(buttonVariants({ variant: "row" }), "bg-surface no-underline")}
+    >
+      Open <span aria-hidden>↗</span>
+    </a>
   );
+}
+
+const COLUMNS = ["Name", "Details", { label: "Type", fact: true }];
+
+/** The shelf as facts in columns. A record leads with the same picture its tile is drawn from,
+ *  at the row's own pitch — a name alone makes the member read every line to find the file they
+ *  would have recognised at a glance, and a file with no picture states its type as a glyph so the
+ *  column of marks stays a column rather than a run of gaps. */
+function Shapes({ cards, open }: { cards: Card[]; open: (card: Card) => () => void }) {
+  return (
+    <DataTable
+      columns={COLUMNS}
+      rows={cards}
+      rowKey={(card) => card.key}
+      empty="A file or site an app makes in a conversation is listed here."
+      open={(card) => (card.file && !card.file.url ? null : open(card))}
+      act={(card) => (card.file && !card.file.url ? null : "Open")}
+    >
+      {(card) => (
+        <>
+          <Td>
+            <Lede mark={<Mark card={card} />}>{card.name}</Lede>
+          </Td>
+          <Td>{card.body ?? card.meta}</Td>
+          <TdFact>{card.type}</TdFact>
+        </>
+      )}
+    </DataTable>
+  );
+}
+
+function Mark({ card }: { card: Card }) {
+  if (card.image) return <img alt="" src={card.image} className="size-full object-cover" />;
+  if (!card.file) return <IconWorldWww className="size-icon" aria-hidden />;
+  return <MediaIcon mediaType={card.file.media_type} />;
 }
 
 function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {

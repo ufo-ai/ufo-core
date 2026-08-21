@@ -1,5 +1,12 @@
-import { IconX } from "@tabler/icons-react";
 import {
+  IconChevronDown,
+  IconFilter,
+  IconLayoutGrid,
+  IconList,
+  IconX,
+} from "@tabler/icons-react";
+import {
+  Fragment,
   createContext,
   useContext,
   useEffect,
@@ -9,7 +16,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { BesideHost } from "@/kernel/beside";
 import {
   Breadcrumb,
@@ -19,11 +26,25 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import type { FilterOption } from "@/components/ui/filter";
+import { ToggleGroupItem, ToggleGroupOne } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/cn";
 
-/** The measure a conversation is read at, centred in whatever width the shell leaves. A transcript
- *  is prose, so it is held to a line length the eye can return along; a screen of records is not,
- *  and takes `Page` instead. */
+/** The one measure the portal is read at, centred in whatever width the shell leaves — a
+ *  transcript, and a screen of records alike. A conversation needs it because prose has a line
+ *  length the eye can return along; a screen of records takes the same one so that moving between
+ *  a conversation and the records behind it does not move the column under the member. It bounds
+ *  the content, never the pane: the scroll and the gutter stay at the pane's own edges, so a
+ *  scrollbar sits where the member reaches for it rather than beside the text. */
 export const COLUMN = "mx-auto w-full max-w-page";
 
 /** The pane a destination draws in. It runs the full width the shell leaves, because the top bar's
@@ -68,9 +89,14 @@ export const BANDS = "flex flex-col gap-6xl";
 /** The band a page is headed by: what the page is on the left, and on the right the acts that reach
  *  the whole of it — the search over every record and the one that makes another. What narrows the
  *  records to a family stays with the records, so the head of the page and the head of the table
- *  each carry the controls that answer to them. The title takes the body face rather than the
- *  display one: it stands on a line with two controls, and a serif set beside a pill reads as a
- *  masthead over the page instead of as the first item in a row.
+ *  each carry the controls that answer to them.
+ *
+ *  The name is the page's own, at the size the words around it are set — not a masthead. A page
+ *  reached by pressing its name in the sidebar has been announced already, and a title set three
+ *  steps larger than everything under it states a beginning where the member is only continuing.
+ *  Where the page stands among siblings, the name is also the control that moves between them, so
+ *  the one word the member is reading is the one they press to leave — and the destinations do not
+ *  need a strip of their own under the band.
  *
  *  A phone has no room for all three on one line, and the title is the only part that can give —
  *  which is the page's own name, so it must not. The band stacks below the narrow breakpoint: the
@@ -79,15 +105,23 @@ export const BANDS = "flex flex-col gap-6xl";
  *  member cannot type into. */
 export function PageHeader({
   title,
+  siblings,
+  onPick,
   search,
   action,
 }: {
   /** Absent where the shell above already named the page — the band then carries the acts alone,
    *  rather than a second heading saying the word the member just pressed. */
   title?: string;
+  /** The destinations this one stands among, current included. Two or more make the name the
+   *  control that moves between them; one draws a plain name, because a chevron that opens a
+   *  list of one is a control with nothing to do. */
+  siblings?: FilterOption[];
+  onPick?: (value: string) => void;
   search?: ReactNode;
   action?: ReactNode;
 }) {
+  const switches = siblings && siblings.length > 1 && onPick;
   return (
     <div
       className={cn(
@@ -96,7 +130,40 @@ export function PageHeader({
       )}
     >
       {title ? (
-        <h1 className="m-0 flex-1 truncate text-title font-medium">{title}</h1>
+        <h1 className="m-0 min-w-0 flex-1 truncate text-body font-medium">
+          {switches ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className={cn(
+                    "flex min-w-0 items-center gap-2xs rounded-control border-0 bg-transparent",
+                    "-mx-xs px-xs py-2xs font-sans text-inherit",
+                    "transition-[background-color] duration-100 ease-control",
+                    "hover:bg-fill data-[state=open]:bg-fill",
+                  )}
+                >
+                  <span className="min-w-0 truncate">{title}</span>
+                  <IconChevronDown className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuRadioGroup
+                  value={siblings.find((entry) => entry.label === title)?.value ?? ""}
+                  onValueChange={onPick}
+                >
+                  {siblings.map((entry) => (
+                    <DropdownMenuRadioItem key={entry.value} value={entry.value}>
+                      {entry.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            title
+          )}
+        </h1>
       ) : (
         <span className="flex-1 max-narrow:hidden" />
       )}
@@ -145,6 +212,121 @@ export function PageToolbar({ children }: { children: ReactNode }) {
     >
       {children}
     </div>
+  );
+}
+
+/** The rule between the controls that narrow a listing and the controls that redraw it. They
+ *  answer different questions — which records, and in what shape — and a bar that ran them
+ *  together reads as one row of glyphs with no seam in it.
+ *
+ *  It stretches rather than centring: the bar centres what it holds, and a rule is a line with no
+ *  content to take a height from, so a centred one is drawn at no height at all. A phone wraps the
+ *  bar onto more than one line, where a vertical rule divides whichever two controls happen to
+ *  land beside each other — so there it is not drawn. */
+export function ToolbarRule() {
+  return <span aria-hidden className="my-xs w-px shrink-0 self-stretch bg-edge max-narrow:hidden" />;
+}
+
+/** The shape a member reads a listing in. `tiles` leads with each record's own picture and is
+ *  what a member scanning for something they would recognise by sight wants; `table` states the
+ *  same records as facts in columns, which is what comparing them down a page needs. */
+export type Face = "tiles" | "table";
+
+const FACES: { face: Face; label: string; glyph: typeof IconLayoutGrid }[] = [
+  { face: "tiles", label: "Tiles", glyph: IconLayoutGrid },
+  { face: "table", label: "Table", glyph: IconList },
+];
+
+/** Which shape the records are drawn in, held at the right of the bar where the acts on the whole
+ *  listing stand. It is a switch and not a filter: pressing it changes nothing about which records
+ *  are on the screen, so it sits past the rule rather than among the narrowings.
+ *
+ *  A press on the shape already picked is swallowed. The control states one of two shapes at all
+ *  times, and a group holding one answer clears that answer on a second press — which would leave
+ *  the listing with no shape at all and nothing on the screen saying so. The picked shape draws as
+ *  the checked radio it is, which is what a group of one answer reads out as. */
+export function ViewSwitch({ face, onPick }: { face: Face; onPick: (face: Face) => void }) {
+  return (
+    <ToggleGroupOne
+      value={face}
+      onValueChange={(next) => next && onPick(next as Face)}
+      aria-label="Shape"
+      className="flex shrink-0 items-center gap-hair"
+    >
+      {FACES.map(({ face: name, label, glyph: Glyph }) => (
+        <ToggleGroupItem
+          key={name}
+          value={name}
+          aria-label={label}
+          className={cn(
+            buttonVariants({ variant: "row", size: "icon" }),
+            "border-transparent text-ink-soft hover:bg-fill",
+            "aria-checked:bg-fill aria-checked:text-ink",
+          )}
+        >
+          <Glyph className="size-(--size-glyph)" aria-hidden />
+        </ToggleGroupItem>
+      ))}
+    </ToggleGroupOne>
+  );
+}
+
+/** One named run of narrowings inside the filter menu. The groups name the axes a member thinks
+ *  in — what kind of record, what kind of file — and the options inside a group are what that axis
+ *  offers. */
+export type FacetGroup = { label: string; options: FilterOption[] };
+
+/** Every narrowing a listing offers, behind one glyph. A listing narrowed on more than one axis
+ *  cannot draw them all as pill rows: two rows of pills fill the bar the search and the shape
+ *  switch also stand in, and the member reads six choices to make one. The menu states the axes by
+ *  name instead, so the same bar holds a listing with one narrowing and a listing with four.
+ *
+ *  The narrowings are one radio group across every named run, not one per run: a listing holds a
+ *  single narrowing at a time, and a menu drawing a tick beside a choice in each group would claim
+ *  the member had picked several. The empty value is every record and leads the menu, so the way
+ *  back to the whole listing is the first thing under the glyph rather than a second press on
+ *  whatever is picked. */
+export function FacetMenu({
+  groups,
+  value,
+  onPick,
+}: {
+  groups: FacetGroup[];
+  value: string;
+  onPick: (value: string) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="row"
+          size="icon"
+          aria-label="Filter"
+          className={cn(
+            "border-transparent text-ink-soft hover:bg-fill",
+            value && "bg-fill text-ink",
+          )}
+        >
+          <IconFilter className="size-glyph" aria-hidden />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuRadioGroup value={value} onValueChange={onPick}>
+          <DropdownMenuRadioItem value="">All</DropdownMenuRadioItem>
+          {groups.map((group) => (
+            <Fragment key={group.label}>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>{group.label}</DropdownMenuLabel>
+              {group.options.map((option) => (
+                <DropdownMenuRadioItem key={option.value} value={option.value}>
+                  {option.label}
+                </DropdownMenuRadioItem>
+              ))}
+            </Fragment>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

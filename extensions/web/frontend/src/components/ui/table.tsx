@@ -134,6 +134,28 @@ export function TdActs({ className, ...props }: ComponentProps<"td">) {
  *  carry. */
 export const ACTS = "flex flex-nowrap items-center justify-end gap-xs";
 
+/** What a record's first cell holds: the mark the record is recognised by, then its name. The mark
+ *  box keeps its size whether or not the record has a picture to draw in it — a record with none
+ *  shows the glyph for its kind in the same square — so every name down the column starts on one
+ *  line rather than sliding left in the rows that have nothing to show. The name is cut to the
+ *  track instead of wrapping, because a row is one pitch tall and a second line would be drawn
+ *  behind the row's own edge. */
+export function Lede({ mark, children }: { mark: ReactNode; children: ReactNode }) {
+  return (
+    <span className="flex min-w-0 items-center gap-md">
+      <span
+        className={cn(
+          "flex size-(--size-lede) shrink-0 items-center justify-center",
+          "overflow-hidden rounded-control bg-fill text-ink-soft",
+        )}
+      >
+        {mark}
+      </span>
+      <span className="min-w-0 truncate">{children}</span>
+    </span>
+  );
+}
+
 /** A filter that matches nothing leaves the table standing and says so in a row. Dropping the card
  *  and centring a note collapses the column the member is reading down, so every toggle of the
  *  filter would move the page under them. */

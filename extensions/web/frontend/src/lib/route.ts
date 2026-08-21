@@ -19,6 +19,8 @@ export type WorkspacePlace = {
   after?: string;
   q?: string;
   chip?: string;
+  face?: string;
+  scope?: string;
   open?: string;
   agent?: string;
   range?: string;
@@ -59,7 +61,17 @@ const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\?(.*))?$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
 
-const PLACE_KEYS = ["kind", "after", "q", "chip", "open", "agent", "range"] as const;
+const PLACE_KEYS = [
+  "kind",
+  "after",
+  "q",
+  "chip",
+  "face",
+  "scope",
+  "open",
+  "agent",
+  "range",
+] as const;
 
 function parsePlace(raw: string | undefined): WorkspacePlace {
   if (!raw) return {};

@@ -73,6 +73,18 @@ function streamOf(chunks: Uint8Array[], offered: { count: number }) {
   });
 }
 
+/** The shelf's narrowings live behind the filter glyph, so a test picking one opens the menu the
+ *  member opens rather than reaching past it. */
+async function narrowTo(family: string) {
+  await userEvent.click(await screen.findByRole("button", { name: "Filter" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: family }));
+}
+
+async function facets(): Promise<string[]> {
+  await userEvent.click(await screen.findByRole("button", { name: "Filter" }));
+  return screen.getAllByRole("menuitemradio").map((item) => item.textContent ?? "");
+}
+
 function only(artifacts: unknown[]) {
   vi.stubGlobal(
     "fetch",
@@ -97,11 +109,8 @@ test("the artifact listing sends search and media filters to its read", async ()
     </MainAgentProvider>,
   );
 
-  expect(await screen.findByRole("tab", { name: "Images" })).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Documents" })).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Other" })).toBeTruthy();
-  expect(screen.queryByRole("tab", { name: "Data" })).toBeNull();
-  await userEvent.click(screen.getByRole("tab", { name: "Images" }));
+  expect(await facets()).toEqual(["All", "Sites", "Images", "Documents", "Other"]);
+  await userEvent.click(screen.getByRole("menuitemradio", { name: "Images" }));
   await waitFor(() => expect(calls.some((url) => url.includes("media=image"))).toBe(true));
 
   await userEvent.type(screen.getByRole("searchbox"), "report{Enter}");
@@ -122,7 +131,7 @@ test("narrowing a paged listing reads from the start, not from the page it was o
   await userEvent.click(await screen.findByRole("button", { name: "Older" }));
   await waitFor(() => expect(calls.some((url) => url.includes("after=page-2"))).toBe(true));
 
-  await userEvent.click(screen.getByRole("tab", { name: "Images" }));
+  await narrowTo("Images");
   await waitFor(() => expect(calls.some((url) => url.includes("media=image"))).toBe(true));
   expect(calls.filter((url) => url.includes("media=image")).some((url) => url.includes("after="))).toBe(false);
 
@@ -455,7 +464,7 @@ test("closing the viewer discards a body still in flight", async () => {
   expect(await viewCard("notes.txt")).toBeTruthy();
 });
 
-test("the artifacts listing renders as cards, each led by its own band", async () => {
+test("the artifacts listing renders as tiles, each led by its own picture", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -474,12 +483,14 @@ test("the artifacts listing renders as cards, each led by its own band", async (
     entry.textContent?.includes("notes.txt"),
   );
   expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe("notes.txt");
-  expect(item?.querySelector('[data-part="body"]')?.textContent).toBe("notes");
-  expect(item?.querySelector('[data-part="meta"]')?.textContent).toBe("member@example.com");
   expect(item?.querySelector('[data-part="status"]')?.textContent).toBe("Jul 31 2026");
-  const band = item?.querySelector('[data-part="mark"]');
-  expect(band?.className).toContain("h-(--size-band)");
-  expect(band?.querySelector("img")).toBeNull();
+  /* A tile states its picture, its name and its moment. The sentence and the owner line a card
+     carried are read in the table shape and in the viewer, not under a picture. */
+  expect(item?.querySelector('[data-part="body"]')).toBeNull();
+  expect(item?.querySelector('[data-part="meta"]')).toBeNull();
+  const picture = item?.querySelector('[data-part="mark"]');
+  expect(picture?.className).toContain("aspect-square");
+  expect(picture?.querySelector("img")).toBeNull();
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
@@ -702,7 +713,7 @@ function open() {
   );
 }
 
-test("a file card binds its parts to the artifact payload", async () => {
+test("a file tile binds its parts to the artifact payload", async () => {
   shelf([], [artifact({ filename: "report.txt", subject: "member@example.com" })]);
   open();
 
@@ -710,26 +721,40 @@ test("a file card binds its parts to the artifact payload", async () => {
     entry.textContent?.includes("report.txt"),
   );
   expect(card?.querySelector('[data-part="primary"]')?.textContent).toBe("report.txt");
-  expect(card?.querySelector('[data-part="body"]')?.textContent).toBe("member@example.com");
   expect(card?.querySelector('[data-part="status"]')?.textContent).toBe("Jul 31 2026");
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
-test("a site is a card carrying its date, type, visibility, and summary", async () => {
+test("a tile is one control, and the grid around it stays a list", async () => {
+  shelf([], [artifact()]);
+  open();
+
+  const card = (await screen.findAllByRole("listitem"))[0];
+  const tile = within(card).getByRole("button");
+  expect(tile.tagName).toBe("BUTTON");
+  expect(tile.textContent).toContain("notes.txt");
+  /* `rowControl` would trade the row's own role for `button` and take the grid out of the list
+     it is announced as. A tile carries no acts inside it, so it is a button outright. */
+  expect(card.getAttribute("role")).toBeNull();
+});
+
+test("a site is a tile carrying its name and date, and states the rest in the table", async () => {
   shelf([DOCS], []);
   open();
 
   const card = (await screen.findAllByRole("listitem"))[0];
   expect(card.querySelector('[data-part="primary"]')?.textContent).toBe("docs-abc");
   expect(card.querySelector('[data-part="status"]')?.textContent).toBe("Jul 1 2026");
-  expect(card.querySelector('[data-part="meta"]')?.textContent).toBe(
-    "Site · Workspace · Workspace",
-  );
-  expect(card.querySelector('[data-part="body"]')?.textContent).toBe(DOCS.summary);
-  const band = card.querySelector('[data-part="mark"]');
-  expect(band?.className).toContain("h-(--size-band)");
-  expect(band?.getAttribute("aria-hidden")).toBe("true");
-  expect(band?.querySelector("img")).toBeNull();
+  const picture = card.querySelector('[data-part="mark"]');
+  expect(picture?.className).toContain("aspect-square");
+  expect(picture?.getAttribute("aria-hidden")).toBe("true");
+  expect(picture?.querySelector("img")).toBeNull();
+
+  await userEvent.click(screen.getByRole("radio", { name: "Table" }));
+  const row = (await screen.findAllByRole("row"))[1];
+  expect(within(row).getByText("docs-abc")).toBeTruthy();
+  expect(within(row).getByText(DOCS.summary)).toBeTruthy();
+  expect(within(row).getByText("Site")).toBeTruthy();
 });
 
 test("a site's captured page fills its band", async () => {
@@ -752,11 +777,11 @@ test("a site with a link opens it in a new tab, and one without draws no Open", 
   expect(link.getAttribute("href")).toBe(DOCS_URL);
   expect(link.getAttribute("target")).toBe("_blank");
   expect(link.getAttribute("rel")).toBe("noopener noreferrer");
-  expect(within(docs!).getByRole("button", { name: "View" })).toBeTruthy();
+  expect(within(docs!).getByRole("button")).toBeTruthy();
 
   const notes = screen.getByText("notes-def").closest("li");
-  expect(within(notes!).queryByRole("link", { name: "Open" })).toBeNull();
-  expect(within(notes!).getByRole("button", { name: "View" })).toBeTruthy();
+  expect(within(notes!).queryByRole("link", { name: /Open/ })).toBeNull();
+  expect(within(notes!).getByRole("button")).toBeTruthy();
 });
 
 test("the shelf merges sites and files newest first, and reads sites newest first", async () => {
@@ -781,84 +806,41 @@ test("the shelf merges sites and files newest first, and reads sites newest firs
 const cursorAt = (stamp: string, side = "older") =>
   side + "|" + stamp + "|11111111-1111-4111-8111-111111111111";
 
-test("a continued file page clamps sites to that page's date window", async () => {
-  const latest = { ...DOCS, name: "latest-site", created_at: "2026-07-31T08:00:00Z" };
+test("sites stand on the shelf's newest page and no other", async () => {
   const { calls } = wire({
-    "/objects/site": () => objectIndex(SITE_KIND, [latest, DOCS]),
-    "/workspace/artifacts": (url) =>
-      url.includes("after=")
-        ? json({ artifacts: [artifact({ filename: "older.txt", created_at: DOCS.created_at })] })
-        : json({ artifacts: [artifact()], older: cursorAt("2026-07-31T09:00:00") }),
-  });
-  open();
-
-  expect(await screen.findByText("latest-site")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Older" }));
-  await waitFor(() => expect(calls.some((url) => url.includes("after="))).toBe(true));
-  expect(await screen.findByText("docs-abc")).toBeTruthy();
-  expect(screen.queryByText("latest-site")).toBeNull();
-});
-
-test("a site between two file pages stands on the older one, never on neither", async () => {
-  const between = { ...DOCS, name: "between-site", created_at: "2026-07-31T08:30:00Z" };
-  const { calls } = wire({
-    "/objects/site": () => objectIndex(SITE_KIND, [between]),
-    "/workspace/artifacts": (url) =>
-      url.includes("after=")
-        ? json({ artifacts: [artifact({ filename: "older.txt", created_at: "2026-07-31T08:00:00Z" })] })
-        : json({
-            artifacts: [artifact({ created_at: "2026-07-31T09:00:00Z" })],
-            older: cursorAt("2026-07-31T09:00:00Z"),
-          }),
-  });
-  open();
-
-  await screen.findByText("notes.txt");
-  expect(screen.queryByText("between-site")).toBeNull();
-
-  await userEvent.click(screen.getByRole("button", { name: "Older" }));
-  await waitFor(() => expect(calls.some((url) => url.includes("after="))).toBe(true));
-  await screen.findByText("older.txt");
-  expect(screen.getByText("between-site")).toBeTruthy();
-});
-
-test("walking back to a page keeps its sites, which a foot cursor read as a top would drop", async () => {
-  const recent = { ...DOCS, name: "recent-site", created_at: "2026-07-31T10:00:00Z" };
-  const page1 = { artifacts: [artifact()], older: cursorAt("2026-07-31T09:00:00") };
-  const { calls } = wire({
-    "/objects/site": () => objectIndex(SITE_KIND, [recent]),
+    "/objects/site": () => objectIndex(SITE_KIND, [DOCS]),
     "/workspace/artifacts": (url) =>
       url.includes("after=older")
         ? json({
             artifacts: [artifact({ filename: "older.txt", created_at: DOCS.created_at })],
             newer: cursorAt("2026-07-31T09:00:00", "newer"),
           })
-        : json(page1),
+        : json({ artifacts: [artifact()], older: cursorAt("2026-07-31T09:00:00") }),
   });
   open();
 
-  expect(await screen.findByText("recent-site")).toBeTruthy();
+  expect(await screen.findByText("docs-abc")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Older" }));
   expect(await screen.findByText("older.txt")).toBeTruthy();
-  expect(screen.queryByText("recent-site")).toBeNull();
+  expect(screen.queryByText("docs-abc")).toBeNull();
 
+  /* Walking back up lands on the newest page again, and it carries a cursor saying so. The shelf
+     judges by the payload rather than by that cursor, so the sites come back with it. */
   await userEvent.click(screen.getByRole("button", { name: "Newer" }));
   await waitFor(() => expect(calls.some((url) => url.includes("after=newer"))).toBe(true));
   await screen.findByText("notes.txt");
-  expect(screen.getByText("recent-site")).toBeTruthy();
+  expect(screen.getByText("docs-abc")).toBeTruthy();
 });
 
-test("the family tabs narrow the shelf to sites or to one media kind", async () => {
+test("the filter menu narrows the shelf to sites or to one media kind", async () => {
   const { calls } = shelf([DOCS], [artifact()]);
   open();
 
   await screen.findByText("docs-abc");
-  await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
-
-  expect(screen.getByRole("tab", { name: "Sites" }).getAttribute("aria-selected")).toBe("true");
+  await narrowTo("Sites");
   expect(screen.queryByText("notes.txt")).toBeNull();
 
-  await userEvent.click(screen.getByRole("tab", { name: "Documents" }));
+  await narrowTo("Documents");
   await waitFor(() => expect(calls.some((url) => url.includes("media=document"))).toBe(true));
   expect(await screen.findByText("notes.txt")).toBeTruthy();
   expect(screen.queryByText("docs-abc")).toBeNull();
@@ -887,8 +869,42 @@ test("a deploy with no sites extension lists its files and states no fault", asy
 
   expect(await screen.findByText("notes.txt")).toBeTruthy();
   expect(screen.queryByText(/^Error /)).toBeNull();
-  expect(screen.queryByRole("tab", { name: "Sites" })).toBeNull();
-  expect(screen.getByRole("tab", { name: "Images" })).toBeTruthy();
+  /* A family that does not exist on this deploy is not offered, and the file types still are. */
+  expect(await facets()).toEqual(["All", "Images", "Documents", "Other"]);
+});
+
+test("the shape switch redraws the same records as a table, and holds the choice", async () => {
+  shelf([], [artifact()]);
+  open();
+
+  expect(await screen.findAllByRole("listitem")).toHaveLength(1);
+  expect(screen.queryAllByRole("columnheader")).toEqual([]);
+
+  await userEvent.click(screen.getByRole("radio", { name: "Table" }));
+  expect(screen.queryAllByRole("listitem")).toEqual([]);
+  expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
+    "Name",
+    "Details",
+    "Type",
+    "",
+  ]);
+  const row = screen.getAllByRole("row")[1];
+  expect(within(row).getByText("notes.txt")).toBeTruthy();
+  expect(within(row).getByText("plain")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("radio", { name: "Tiles" }));
+  expect(await screen.findAllByRole("listitem")).toHaveLength(1);
+});
+
+test("a file with no picture is marked by the glyph for its type", async () => {
+  shelf([], [artifact({ filename: "sheet.csv", media_type: "text/csv" })]);
+  open();
+
+  await userEvent.click(await screen.findByRole("radio", { name: "Table" }));
+  const row = screen.getAllByRole("row")[1];
+  expect(within(row).getByText("csv")).toBeTruthy();
+  expect(row.querySelector("svg")).not.toBeNull();
+  expect(row.querySelector("img")).toBeNull();
 });
 
 test("an empty shelf states what lands in it", async () => {
@@ -917,7 +933,7 @@ test("the scope toggle defaults to All, and a picked scope narrows the files rea
   expect(calls.some((url) => url.includes("/objects/site") && url.includes("scope="))).toBe(false);
 });
 
-test("a picked scope reads from the first page and is remembered across mounts", async () => {
+test("a picked scope reads from the first page, and a fresh screen opens on All", async () => {
   const { calls } = wire({
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/workspace/artifacts": () => json({ artifacts: [artifact()], older: "page-2" }),
@@ -933,22 +949,48 @@ test("a picked scope reads from the first page and is remembered across mounts",
     calls.filter((url) => url.includes("scope=created")).some((url) => url.includes("after=")),
   ).toBe(false);
 
+  /* The scope is a place, not a habit. A screen opened with nothing said about it stands on the
+     default — the leading choice, already drawn — rather than on whatever was picked last. */
   view.unmount();
   calls.length = 0;
   open();
 
-  const held = await screen.findByRole("tab", { name: "Created by me" });
-  expect(held.getAttribute("aria-selected")).toBe("true");
-  await waitFor(() => expect(calls.some((url) => url.includes("scope=created"))).toBe(true));
+  const scopes = await screen.findByRole("tablist", { name: "Scope" });
+  expect(within(scopes).getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
+  await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+  expect(calls.some((url) => url.includes("scope="))).toBe(false);
 });
 
-test("a held scope the toggle no longer offers reads as All", async () => {
-  localStorage.setItem("artifacts-scope", "shared");
+test("a link carrying a scope opens on it", async () => {
   const { calls } = wire({
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/workspace/artifacts": () => json({ artifacts: [artifact()] }),
   });
-  open();
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" place={{ scope: "created" }} />
+    </MainAgentProvider>,
+  );
+
+  const scopes = await screen.findByRole("tablist", { name: "Scope" });
+  expect(
+    within(scopes).getByRole("tab", { name: "Created by me" }).getAttribute("aria-selected"),
+  ).toBe("true");
+  await waitFor(() => expect(calls.some((url) => url.includes("scope=created"))).toBe(true));
+});
+
+test("a link naming a scope the toggle no longer offers reads as All", async () => {
+  const { calls } = wire({
+    "/objects/site": () => objectIndex(SITE_KIND, []),
+    "/workspace/artifacts": () => json({ artifacts: [artifact()] }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" place={{ scope: "shared" }} />
+    </MainAgentProvider>,
+  );
 
   await screen.findByText("notes.txt");
   const scopes = screen.getByRole("tablist", { name: "Scope" });

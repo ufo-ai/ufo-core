@@ -266,6 +266,10 @@
   --size-fact-column: 152px;
   --size-prose-column: 160px;
   --size-act: 88px;
+  /* The mark a record row leads with: a file's picture, or the glyph standing for its type.
+     Drawn short of the `--size-record` pitch the row is read at, so the mark sits inside the
+     row rather than setting its height. */
+  --size-lede: 24px;
   --size-composer: 15em;
   --size-control: 32px;
   /* What a thin scrollbar reserves, so anything laid over the pane can stop short of it. */
@@ -287,6 +291,11 @@
      same set reads as five columns on a page and two on a phone without either being written. */
   --size-brand-mark: 32px;
   --size-app-tile: 104px;
+  /* The floor a picture tile keeps in the grid of artifacts. A floor rather than a width, as the
+     app tile is: the grid fills the measure with whole columns of at least this, so one set of
+     artifacts reads as five columns on a page and two on a phone without either being written. The
+     picture is what a tile is found by, so it keeps the wider floor of the two. */
+  --size-tile: 160px;
   /* The command palette's list. Fixed rather than capped: the panel is centred, and a list that
      grew as reads landed would walk the rows out from under the member's cursor. */
   --size-palette: 360px;

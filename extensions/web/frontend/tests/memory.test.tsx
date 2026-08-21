@@ -38,7 +38,7 @@ test("the search heads the page and the filter stands with the table", async () 
   });
   open();
 
-  const header = screen.getByRole("heading", { level: 1, name: "Workspace" }).parentElement!;
+  const header = screen.getByRole("heading", { level: 1, name: "Memory" }).parentElement!;
   expect(header.contains(await screen.findByPlaceholderText("Search"))).toBe(true);
   expect(header.contains(await screen.findByRole("table"))).toBe(false);
 

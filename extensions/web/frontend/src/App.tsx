@@ -705,6 +705,13 @@ const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
  *  across apps rather than being one. They pin and unpin exactly as an app does. */
 const APPLICATION_SECTIONS: Section[] = ["artifacts", "radar"];
 
+/** The destinations a section's own name moves between: the group the sidebar files it under. An
+ *  application switches to the other applications; a section the sidebar stands on its own stands
+ *  on its own here too, and its name is a name rather than a control. */
+function siblingSections(section: Section): Section[] {
+  return APPLICATION_SECTIONS.includes(section) ? APPLICATION_SECTIONS : [section];
+}
+
 const FLYOUT_ID = "applications-flyout";
 
 function SidebarTooltip({
@@ -1257,7 +1264,6 @@ function RoutedPane({
   if (route.kind === "workspace") {
     return (
       <TabbedPane
-        title="Workspace"
         group="workspace"
         tabs={WORKSPACE_TABS}
         views={WORKSPACE_VIEWS}
@@ -1270,9 +1276,8 @@ function RoutedPane({
   if (route.kind === "section") {
     return (
       <TabbedPane
-        title={SECTION_VIEWS[route.section].label}
         group="section"
-        tabs={[route.section]}
+        tabs={siblingSections(route.section)}
         views={SECTION_VIEWS}
         view={route.section}
         place={route.place}

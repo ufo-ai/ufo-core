@@ -4,7 +4,17 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { pick, refusedNotice, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import {
+  destination,
+  goTo,
+  json,
+  pick,
+  refusedNotice,
+  useStreamFake,
+  wire,
+  AGENT,
+  MEMBER,
+} from "./harness";
 
 async function openAdd() {
   await userEvent.click(await screen.findByRole("button", { name: "Add member" }));
@@ -194,7 +204,7 @@ test("the tab names the roster, so the section under it repeats no heading", asy
   wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("tab", { name: "Team", selected: true })).toBeTruthy();
+  expect(destination()).toBe("Team");
   expect(screen.queryByRole("heading", { name: "Members" })).toBeNull();
   await openAdd();
   expect(screen.getByRole("complementary", { name: "Add members" })).toBeTruthy();
@@ -303,12 +313,12 @@ test("an outcome notice does not follow the member to another view", async () =>
   await userEvent.click(submit);
   expect(await screen.findByText("Added member@example.com.")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("tab", { name: "Credentials" }));
+  await goTo("Credentials");
 
   expect(await screen.findByText("OPENAI_API_KEY")).toBeTruthy();
   expect(screen.queryByText("Added member@example.com.")).toBeNull();
 
-  await userEvent.click(screen.getByRole("tab", { name: "Team" }));
+  await goTo("Team");
 
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
   expect(screen.queryByText("Added member@example.com.")).toBeNull();

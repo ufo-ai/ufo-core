@@ -60,6 +60,8 @@ export function usePlaceRecorder({
       after: "after" in patch ? patch.after : held.after,
       q: "q" in patch ? patch.q : held.q,
       chip: "chip" in patch ? patch.chip : held.chip,
+      face: "face" in patch ? patch.face : held.face,
+      scope: "scope" in patch ? patch.scope : held.scope,
       open: "open" in patch ? patch.open : held.open,
       agent: "agent" in patch ? patch.agent : held.agent,
     };

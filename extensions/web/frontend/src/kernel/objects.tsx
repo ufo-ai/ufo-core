@@ -153,12 +153,25 @@ function Chip({ children }: { children: ReactNode }) {
  *  than an empty cell, which reads as a table that failed to draw. A moment reads as its distance
  *  from now — the wait the member is holding for, or how lately the row moved — and holds the
  *  whole stamp for the pointer. */
+const ADDRESS = /^https?:\/\/\S+$/;
+
 function cell(field: string, value: ObjectValue, schema: SpecSchema | null): ReactNode {
   if (value === null || value === "") return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") return String(value);
   if (isMoment(value)) return <Moment at={value} />;
   if (enumerated(schema, field)) return <Chip>{value}</Chip>;
+  if (typeof value === "string" && ADDRESS.test(value))
+    return (
+      <a
+        href={value}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-inherit underline-offset-2 hover:underline focus-visible:underline"
+      >
+        {value}
+      </a>
+    );
   return value;
 }
 
