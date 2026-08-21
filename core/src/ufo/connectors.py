@@ -281,14 +281,22 @@ class CatalogEntry:
     label: str
 
 
+@dataclass(frozen=True)
+class CatalogPage:
+    """One page of connectable services and the broker cursor that continues it."""
+
+    entries: tuple[CatalogEntry, ...]
+    after: str | None
+
+
 class ConnectorResolver(Protocol):
     """The registry half of an open connector namespace: how a broker extension serves any provider
     slug it brokers without registering each as an explicit `ConnectorProvider`. `claims` answers
     whether the broker's live catalog serves a slug (I/O), so a caller choosing between the
     namespace and a workspace credential asks instead of assuming the namespace is a catch-all;
     `entry` builds the routing entry for a claimed slug (pure — the broker is shared and the label
-    is cosmetic, since the real label rides `catalog`); `catalog` searches the broker's live service
-    catalog so the discovery tool surfaces connectable services the closed registry never
+    is cosmetic, since the real label rides `catalog`); `catalog` pages through the broker's live
+    service catalog so the discovery tool surfaces connectable services the closed registry never
     enumerated; `transfer_hosts` are the broker's file-store hosts every grant in the namespace
     additionally admits at the egress proxy."""
 
@@ -299,7 +307,7 @@ class ConnectorResolver(Protocol):
 
     def entry(self, provider: str) -> ConnectorEntry: ...
 
-    async def catalog(self, query: str, limit: int) -> tuple[CatalogEntry, ...]: ...
+    async def catalog(self, query: str, limit: int, after: str | None) -> CatalogPage: ...
 
 
 @dataclass(frozen=True)
@@ -329,7 +337,29 @@ class ConnectorRegistry:
         live service search, empty when no open namespace is installed."""
         if self.resolver is None:
             return ()
-        return await self.resolver.catalog(query, limit)
+        return (await self.resolver.catalog(query, limit, None)).entries
+
+    async def catalog(self, query: str, limit: int, after: str | None) -> CatalogPage:
+        """Read one page of explicit providers and the open broker namespace."""
+        matched = (
+            [
+                CatalogEntry(provider=provider, label=entry.label)
+                for provider, entry in sorted(self.entries.items())
+                if query.lower() in f"{provider} {entry.label}".lower()
+            ]
+            if after is None
+            else []
+        )
+        page = (
+            await self.resolver.catalog(query, limit, after)
+            if self.resolver is not None
+            else CatalogPage(entries=(), after=None)
+        )
+        matched.extend(page.entries)
+        deduped: dict[str, CatalogEntry] = {}
+        for entry in matched:
+            deduped.setdefault(entry.provider, entry)
+        return CatalogPage(entries=tuple(deduped.values()), after=page.after)
 
 
 def _broker(registry: ConnectorRegistry, provider: str) -> ConnectorBroker | None:

@@ -20,7 +20,14 @@ from uuid import UUID
 
 import httpx
 
-from ufo.sdk.connectors import WORKSPACE_FILE_KEY, BrokerSearch, BrokerTool, OAuthAccount
+from ufo.sdk.connectors import (
+    WORKSPACE_FILE_KEY,
+    BrokerSearch,
+    BrokerTool,
+    CatalogEntry,
+    CatalogPage,
+    OAuthAccount,
+)
 from ufo_ext_composio import mcp_session
 
 COMPOSIO_API_BASE = "https://backend.composio.dev/api/v3.1"
@@ -286,16 +293,16 @@ class ComposioClient:
         name = payload.get("name")
         return name if isinstance(name, str) and name else slug
 
-    async def list_toolkits(self, query: str, limit: int) -> tuple[tuple[str, str], ...]:
-        """Search Composio's toolkit catalog, returning `(slug, label)` for each connectable match —
-        the open set the discovery tool surfaces, never bounded by the explicitly registered
-        connectors and never offering a service the member cannot then connect."""
+    async def list_toolkits(self, query: str, limit: int, after: str | None) -> CatalogPage:
+        """Read one page of Composio's connectable toolkit catalog and its continuation cursor."""
         params = {"limit": str(limit)}
         if query:
             params["search"] = query
+        if after:
+            params["cursor"] = after
         payload = await self._get(TOOLKITS_PATH, params=params)
         items = payload.get("items")
-        rows: list[tuple[str, str]] = []
+        rows: list[CatalogEntry] = []
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -303,8 +310,17 @@ class ComposioClient:
             if not isinstance(slug, str) or not slug or not connectable(slug, item):
                 continue
             name = item.get("name")
-            rows.append((slug, name if isinstance(name, str) and name else slug))
-        return tuple(rows)
+            rows.append(
+                CatalogEntry(
+                    provider=slug,
+                    label=name if isinstance(name, str) and name else slug,
+                )
+            )
+        next_cursor = payload.get("next_cursor")
+        return CatalogPage(
+            entries=tuple(rows),
+            after=next_cursor if isinstance(next_cursor, str) and next_cursor else None,
+        )
 
     async def execute_tool(
         self,

@@ -26,6 +26,7 @@ from ufo_testsupport.surfaces import (
 )
 
 from ufo.blob import FilesystemBlobStore
+from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.surface import SurfaceContext
@@ -140,6 +141,7 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         _credentials=None,
         _declared_slots=(),
         _artifact_token_secret="",
+        _connectors=ConnectorRegistry(entries={}),
         _skills=EMPTY_SKILL_REGISTRY,
         _member_skill_listing=no_member_skills,
         _public_base_url=None,

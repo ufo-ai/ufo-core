@@ -2968,6 +2968,9 @@ async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
 SLACK_SURFACE = "slack"
 GITHUB_PROVIDER = "github"
 CONNECT_STEP_NAMES = (SLACK_SURFACE, GITHUB_PROVIDER)
+CONNECTOR_CATALOG_LIMIT = 50
+CONNECTOR_CATALOG_QUERY_CHARS = 100
+CONNECTOR_CATALOG_CURSOR_CHARS = 500
 
 
 class ConnectStep(BaseModel):
@@ -2977,6 +2980,13 @@ class ConnectStep(BaseModel):
     name: str
     label: str
     installed: bool
+
+
+class ConnectorCatalogTile(BaseModel):
+    """One broker-catalog provider the connector page can offer."""
+
+    name: str
+    label: str
 
 
 async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response:
@@ -3007,6 +3017,37 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
                 for tile in FIRST_RUN_PROVIDERS
                 if tile.name in CONNECT_STEP_NAMES
             ],
+        }
+    )
+
+
+async def connector_catalog(ctx: SurfaceContext, request: Request) -> Response:
+    """The installed brokers' connectable providers for the connector page."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    query = request.query_params.get("q", "").strip()
+    if len(query) > CONNECTOR_CATALOG_QUERY_CHARS:
+        return Response(
+            "The connector search is too long.",
+            status_code=400,
+            headers={REFUSAL_HEADER: "1"},
+        )
+    after = request.query_params.get("after", "").strip() or None
+    if after is not None and len(after) > CONNECTOR_CATALOG_CURSOR_CHARS:
+        return Response(
+            "The connector page cursor is invalid.",
+            status_code=400,
+            headers={REFUSAL_HEADER: "1"},
+        )
+    page = await ctx.connector_catalog(query, CONNECTOR_CATALOG_LIMIT, after)
+    return JSONResponse(
+        {
+            "providers": [
+                ConnectorCatalogTile(name=row.provider, label=row.label).model_dump(mode="json")
+                for row in page.entries
+            ],
+            "after": page.after,
         }
     )
 
@@ -4152,6 +4193,7 @@ ROUTES = (
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="connections", handler=connection_pool),
+    SurfaceRoute(method="GET", path="connector-catalog", handler=connector_catalog),
     SurfaceRoute(method="GET", path="github/coverage", handler=github_coverage),
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills", handler=skills),
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills/community", handler=community_skills),

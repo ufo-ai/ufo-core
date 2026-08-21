@@ -70,6 +70,7 @@ from ufo_testsupport.surfaces import (
 from ufo.ambient_reply import AmbientReplyClassifier
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
@@ -230,6 +231,7 @@ def _context(workspace_id: UUID, tmp_path: Path, dbos: StubDbos) -> SurfaceConte
         _ingress_public_url=None,
         _deploy_sandbox_internet=False,
         _models=("auto", "claude-opus-4-8"),
+        _connectors=ConnectorRegistry(entries={}),
         _skills=EMPTY_SKILL_REGISTRY,
         _member_skill_listing=no_member_skills,
         _declared_slots=(),

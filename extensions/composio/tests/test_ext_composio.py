@@ -797,10 +797,34 @@ async def test_list_external_tools_surfaces_the_open_catalog(
 async def test_list_toolkits_filters_each_item_of_a_mixed_page() -> None:
     """One catalog page carries connectable and refused toolkits together, so the filter runs per
     item — an empty query returns the whole fixture and only the two refused slugs are dropped."""
-    rows = await _mock_client().list_toolkits("", 50)
-    slugs = {slug for slug, _ in rows}
+    page = await _mock_client().list_toolkits("", 50, None)
+    slugs = {entry.provider for entry in page.entries}
     assert slugs == {"github", "notion", "stripe"}
-    assert rows, "a mixed page must still yield its connectable toolkits"
+    assert page.entries, "a mixed page must still yield its connectable toolkits"
+    assert page.after is None
+
+
+async def test_list_toolkits_carries_the_remote_cursor() -> None:
+    requests: list[httpx.QueryParams] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.params)
+        if request.url.params.get("cursor") == "page-two":
+            return httpx.Response(200, json={"items": [_toolkit_record("stripe")]})
+        return httpx.Response(
+            200,
+            json={"items": [_toolkit_record("notion")], "next_cursor": "page-two"},
+        )
+
+    client = composio.ComposioClient("key", transport=httpx.MockTransport(handler))
+    first = await client.list_toolkits("", 50, None)
+    second = await client.list_toolkits("", 50, first.after)
+
+    assert [(entry.provider, entry.label) for entry in first.entries] == [("notion", "Notion")]
+    assert first.after == "page-two"
+    assert [(entry.provider, entry.label) for entry in second.entries] == [("stripe", "Stripe")]
+    assert second.after is None
+    assert requests[1]["cursor"] == "page-two"
 
 
 async def test_list_external_tools_never_offers_an_unbrokerable_service(

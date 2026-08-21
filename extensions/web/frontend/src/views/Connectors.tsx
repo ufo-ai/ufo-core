@@ -52,7 +52,7 @@ import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { Moment } from "@/lib/moments";
 import { agentName } from "@/lib/agentName";
-import { BASE, postIntent } from "@/lib/api";
+import { BASE, getJson, postIntent, type Fetched } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { ProviderGlyph } from "@/lib/providerGlyph";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
@@ -78,6 +78,10 @@ type Connection = {
 type ConnectionsPayload = { connections: Connection[] };
 export type PoolConnection = Connection & { agents: { id: string; name: string }[] };
 export type PoolPayload = { connections: PoolConnection[] };
+type ConnectorCatalogPayload = {
+  providers: { name: string; label: string }[];
+  after: string | null;
+};
 type GithubCoverage = { api: boolean; git_push: boolean; sources: boolean };
 
 const PROVIDER = { label: "Provider", fact: true };
@@ -230,15 +234,123 @@ const GITHUB = "github";
 /** The link left standing when the browser refused the consent window — the one case with nothing
  *  else to carry the member over. */
 type Handoff = { url: string; text: string };
+const CONNECTOR_BATCH_MIN = 25;
+const CONNECTOR_BATCH_CURSOR_LIMIT = 25;
+
+function connectorCatalogPath(query: string, after?: string): string {
+  const params = new URLSearchParams();
+  if (query) params.set("q", query);
+  if (after) params.set("after", after);
+  return "/connector-catalog?" + params.toString();
+}
+
+function useConnectorCatalog(query: string, reloads: number) {
+  const [state, setState] = useState<PanelState<ConnectorCatalogPayload>>({ phase: "loading" });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<NoticeState>(QUIET);
+  const generation = useRef(0);
+
+  useEffect(() => {
+    const current = ++generation.current;
+    const request = new AbortController();
+    setState({ phase: "loading" });
+    setLoadingMore(false);
+    setError(QUIET);
+    getJson<ConnectorCatalogPayload>(connectorCatalogPath(query), request.signal).then((result) => {
+      if (current !== generation.current) return;
+      setError(result.ok ? QUIET : { text: result.message, refused: true });
+      setState(
+        result.ok
+          ? { phase: "ready", payload: result.payload }
+          : { phase: "failed", message: result.message, status: result.status },
+      );
+    });
+    return () => {
+      if (generation.current === current) generation.current += 1;
+      request.abort();
+    };
+  }, [query, reloads]);
+
+  async function loadMore() {
+    if (state.phase !== "ready" || !state.payload.after || loadingMore) return;
+    setLoadingMore(true);
+    const current = generation.current;
+    const known = new Set(state.payload.providers.map((row) => row.name));
+    const additions: ConnectorCatalogPayload["providers"] = [];
+    let after: string | null = state.payload.after;
+    let failure: NoticeState = QUIET;
+    for (
+      let cursorCount = 0;
+      after && additions.length < CONNECTOR_BATCH_MIN && cursorCount < CONNECTOR_BATCH_CURSOR_LIMIT;
+      cursorCount += 1
+    ) {
+      const requested: string = after;
+      const result: Fetched<ConnectorCatalogPayload> = await getJson<ConnectorCatalogPayload>(
+        connectorCatalogPath(query, requested),
+      );
+      if (current !== generation.current) return;
+      if (!result.ok) {
+        failure = { text: result.message, refused: true };
+        break;
+      }
+      for (const row of result.payload.providers) {
+        if (known.has(row.name)) continue;
+        known.add(row.name);
+        additions.push(row);
+      }
+      after = result.payload.after;
+    }
+    setError(failure);
+    setState((held) => {
+      if (held.phase !== "ready") return held;
+      return {
+        phase: "ready",
+        payload: {
+          providers: [...held.payload.providers, ...additions],
+          after,
+        },
+      };
+    });
+    setLoadingMore(false);
+  }
+
+  return {
+    state,
+    loadingMore,
+    error,
+    loadMore,
+  };
+}
 
 function joined(
   catalog: PanelState<FirstRunPayload>,
   pool: PanelState<PoolPayload>,
+  expanded: PanelState<ConnectorCatalogPayload>,
 ): PanelState<{ catalog: FirstRunPayload; pool: PoolPayload }> {
   if (catalog.phase === "failed") return catalog;
   if (pool.phase === "failed") return pool;
   if (catalog.phase === "loading" || pool.phase === "loading") return { phase: "loading" };
-  return { phase: "ready", payload: { catalog: catalog.payload, pool: pool.payload } };
+  const known = new Set(catalog.payload.providers.map((row) => row.name));
+  const expandedProviders = expanded.phase === "ready" ? expanded.payload.providers : [];
+  return {
+    phase: "ready",
+    payload: {
+      catalog: {
+        ...catalog.payload,
+        providers: [
+          ...catalog.payload.providers,
+          ...expandedProviders
+            .filter((row) => !known.has(row.name))
+            .map((row) => ({
+              ...row,
+              summary: "Connect this account to use its tools.",
+              group: "More connectors",
+            })),
+        ],
+      },
+      pool: pool.payload,
+    },
+  };
 }
 
 /** The workspace's connector library: every account already reachable, then every tool the catalog
@@ -275,8 +387,9 @@ export function WorkspaceConnectors({
     waiting ? WATCH_MS : undefined,
   );
   const pool = usePanelRead<PoolPayload>("/connections", reloads, waiting ? WATCH_MS : undefined);
+  const expanded = useConnectorCatalog(query, reloads);
   const coverage = usePanelRead<GithubCoverage>("/github/coverage", reloads);
-  const state = joined(catalog, pool);
+  const state = joined(catalog, pool, expanded.state);
   const held =
     state.phase === "ready" ? standing(state.payload.catalog, state.payload.pool) : null;
   if (waiting && held?.some((row) => row.name === waiting)) setWaiting(null);
@@ -412,6 +525,7 @@ export function WorkspaceConnectors({
         </Notice>
       ) : null}
       <OutcomeNotice state={notice} />
+      <OutcomeNotice state={expanded.error} />
       <Panel state={state}>
         {(reads) => {
           const term = query.toLowerCase();
@@ -427,7 +541,8 @@ export function WorkspaceConnectors({
               inCategory(row.group) &&
               (row.label + " " + row.name + " " + row.summary).toLowerCase().includes(term),
           );
-          if (!mine.length && !open.length) {
+          const more = expanded.state.phase === "ready" && expanded.state.payload.after;
+          if (!mine.length && !open.length && !more) {
             return (
               <PanelBlank
                 body={
@@ -495,7 +610,7 @@ export function WorkspaceConnectors({
                   </ItemGroup>
                 </Section>
               )}
-              {!open.length ? null : (
+              {!open.length && !more ? null : (
                 <Section title="Available" note="Connect an account to let the app reach it.">
                   <div className="flex flex-col gap-4xl">
                     {grouped(open).map(([group, members]) => (
@@ -530,6 +645,17 @@ export function WorkspaceConnectors({
                         </ItemGroup>
                       </div>
                     ))}
+                    {more ? (
+                      <div>
+                        <Button
+                          variant="row"
+                          busy={expanded.loadingMore}
+                          onClick={expanded.loadMore}
+                        >
+                          Load more
+                        </Button>
+                      </div>
+                    ) : null}
                   </div>
                 </Section>
               )}

@@ -26,6 +26,9 @@ from ufo.connectors import (
     CatalogEntry as CatalogEntry,
 )
 from ufo.connectors import (
+    CatalogPage as CatalogPage,
+)
+from ufo.connectors import (
     CliCredential as CliCredential,
 )
 from ufo.connectors import (

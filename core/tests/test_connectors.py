@@ -26,6 +26,8 @@ from ufo.agent_scope import agent
 from ufo.audience import conversation_audience
 from ufo.config import Config
 from ufo.connectors import (
+    CatalogEntry,
+    CatalogPage,
     ConnectorEntry,
     ConnectorRegistry,
     Credential,
@@ -36,7 +38,12 @@ from ufo.db import workspace_tx
 from ufo.grants import GrantStore, install_connect_flow
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.serve import CONNECT_CALLBACK_PATH, _connect_flow, _connect_redirect_uri
+from ufo.serve import (
+    CONNECT_CALLBACK_PATH,
+    _connect_flow,
+    _connect_redirect_uri,
+    _connector_entries,
+)
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
 
@@ -66,6 +73,28 @@ class _BarrierBroker:
         return Credential(transport=self.transport)
 
 
+@dataclass(frozen=True)
+class _CatalogResolver:
+    rows: tuple[CatalogEntry, ...]
+    broker: _BarrierBroker
+
+    @property
+    def transfer_hosts(self) -> tuple[str, ...]:
+        return ()
+
+    async def claims(self, provider: str) -> bool:
+        return provider in {row.provider for row in self.rows}
+
+    def entry(self, provider: str) -> ConnectorEntry:
+        return ConnectorEntry(provider=provider, label=provider.title(), broker=self.broker)
+
+    async def catalog(self, query: str, limit: int, after: str | None) -> CatalogPage:
+        rows = tuple(row for row in self.rows if query.lower() in row.label.lower())
+        if after == "next":
+            return CatalogPage(entries=rows[1:limit], after=None)
+        return CatalogPage(entries=rows[:limit], after="next" if len(rows) > limit else None)
+
+
 @pytest.fixture(autouse=True)
 def _reset_connect_flow() -> Iterator[None]:
     yield
@@ -92,6 +121,32 @@ def test_serve_builds_the_provider_registry_from_manifest_connectors() -> None:
     assert set(flow.providers) == {sample.CONNECTOR_PROVIDER}
     assert flow.providers[sample.CONNECTOR_PROVIDER].host == sample.CONNECTOR_HOST
     assert flow.redirect_uri == EXPECTED_REDIRECT_URI
+
+
+async def test_connector_catalog_merges_explicit_and_open_providers() -> None:
+    broker = _BarrierBroker(_BarrierTransport())
+    registry = ConnectorRegistry(
+        entries=_connector_entries((sample.manifest(),)),
+        resolver=_CatalogResolver(
+            rows=(
+                CatalogEntry(provider=sample.CONNECTOR_PROVIDER, label="Sample Cloud"),
+                CatalogEntry(provider="notion", label="Notion"),
+            ),
+            broker=broker,
+        ),
+    )
+
+    assert await registry.catalog("", 10, None) == CatalogPage(
+        entries=(
+            CatalogEntry(provider=sample.CONNECTOR_PROVIDER, label=sample.CONNECTOR_LABEL),
+            CatalogEntry(provider="notion", label="Notion"),
+        ),
+        after=None,
+    )
+    assert await registry.catalog("not", 1, None) == CatalogPage(
+        entries=(CatalogEntry(provider="notion", label="Notion"),),
+        after=None,
+    )
 
 
 def test_two_connectors_claiming_the_same_provider_fail_loud() -> None:

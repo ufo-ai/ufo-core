@@ -366,6 +366,7 @@ def run() -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
+        connectors=connectors,
         key_slot_for=registry.key_slot_for,
         ambient_reply=AmbientReplyClassifier(
             model=ModelAccess(
@@ -948,6 +949,7 @@ def _mount_shared_surfaces(
     ingress_public_url: str | None,
     models: tuple[str, ...],
     *,
+    connectors: ConnectorRegistry | None = None,
     ambient_reply: AmbientReplyClassifier,
     skills: SkillRegistry,
     member_skill_listing: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
@@ -970,6 +972,11 @@ def _mount_shared_surfaces(
     then every claim, build, credential read, post, and attachment runs under that workspace's
     binding."""
     app.add_middleware(WorkspaceScopeBoundary)
+    if connectors is None:
+        connectors = ConnectorRegistry(
+            entries=_connector_entries(manifests),
+            resolver=open_connector_namespace(manifests),
+        )
     billing_url = billing_screen_url(public_base_url, home_surface(manifests))
     admission = Admission(
         dbos=dbos_client,
@@ -1042,6 +1049,7 @@ def _mount_shared_surfaces(
             _member_skill_listing=member_skill_listing,
             _declared_slots=slots,
             _ambient_reply=ambient_reply,
+            _connectors=connectors,
             _object_schemas=kind_schemas,
             _memory=memory,
             _model=None if surface_model is None else surface_model(surface),
@@ -1289,6 +1297,14 @@ def _connector_registry(
     feed-sync credentials through it — a brokered provider via its own broker, any other via the
     deploy-selected fallback backend. Two extensions claiming one provider fail loud, as the
     connect flow's OAuth registry would collide on the same name."""
+    return ConnectorRegistry(
+        entries=_connector_entries(manifests),
+        resolver=open_connector_namespace(manifests),
+        fallback=_select_auth_proxy(config, manifests, credentials),
+    )
+
+
+def _connector_entries(manifests: tuple[Manifest, ...]) -> dict[str, ConnectorEntry]:
     entries: dict[str, ConnectorEntry] = {}
     for manifest in manifests:
         for connector in manifest.connectors:
@@ -1298,11 +1314,7 @@ def _connector_registry(
             entries[provider] = ConnectorEntry(
                 provider=provider, label=connector.label, broker=connector.broker
             )
-    return ConnectorRegistry(
-        entries=entries,
-        resolver=open_connector_namespace(manifests),
-        fallback=_select_auth_proxy(config, manifests, credentials),
-    )
+    return entries
 
 
 def _connect_flow(

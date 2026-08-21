@@ -79,7 +79,7 @@ from ufo.audience import (
 )
 from ufo.blob import BlobNotFound, FleetBlobStore, WorkspaceBlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
-from ufo.connectors import DIRECT_ACCOUNT
+from ufo.connectors import DIRECT_ACCOUNT, CatalogPage, ConnectorRegistry
 from ufo.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequestInvalid,
@@ -1125,8 +1125,8 @@ class SurfaceContext:
     hub in its own SSE route, reading `turn_owner` to gate a tail, `spend_rollup` for a workspace
     spend view and `member_spend` for the reader's own, and the per-agent projections a portal
     renders —
-    `list_member_objects`/`member_object`/`object_kind`, `agent_skills`, `agent_spend`, and
-    `memory_available`/`search_memory` —
+    `list_member_objects`/`member_object`/`object_kind`, `agent_skills`, `agent_spend`,
+    `connector_catalog`, and `memory_available`/`search_memory` —
     and either mode renders a turn's
     shared files, the poller handing them to `attach` while a live surface reads
     `shared_artifacts` and links each through `artifact_link`. Each calls only what it needs.
@@ -1153,6 +1153,7 @@ class SurfaceContext:
     _member_skill_listing: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
     _declared_slots: tuple[DeclaredSlot, ...]
     _ambient_reply: AmbientReplyClassifier
+    _connectors: ConnectorRegistry
     _key_slot_for: Callable[[str], str | None] | None = None
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
@@ -1855,6 +1856,10 @@ class SurfaceContext:
     def connect_label(self, provider: str) -> str:
         """The member-facing name of a connect provider, as the connect flow declares it."""
         return installed_connect_flow().label_for(provider)
+
+    async def connector_catalog(self, query: str, limit: int, after: str | None) -> CatalogPage:
+        """Read one page of the deploy's connectable provider catalog."""
+        return await self._connectors.catalog(query, limit, after)
 
     async def admitted_body(self, idempotency_key: str) -> str | None:
         """The message body an idempotency key admitted — the founding inbound of the turn the key

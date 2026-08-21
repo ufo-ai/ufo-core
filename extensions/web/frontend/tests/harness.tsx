@@ -158,6 +158,7 @@ export function wire(routes: Record<string, Route>) {
   const table: Record<string, Route> = {
     "/api/chats": () => json({ chats: [] }),
     "/api/agents/status": () => json({ statuses: [] }),
+    "/connector-catalog": () => json({ providers: [], after: null }),
     "/homepage": () => json({ state: "none" }),
     "/conversations$": () => json({ conversations: [] }),
     ...routes,

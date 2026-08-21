@@ -661,6 +661,72 @@ test("the library offers every catalog tool and hoists the connected ones", asyn
   expect(within(row("Notion")).queryByRole("button", { name: "Connect" })).toBeNull();
 });
 
+test("the library adds providers from the broker catalog", async () => {
+  location.hash = sectionHash("connectors");
+  library({
+    "/connector-catalog": () =>
+      json({ providers: [{ name: "salesforce", label: "Salesforce" }], after: null }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("heading", { name: /More connectors/ })).toBeTruthy();
+  expect(connects("Salesforce")).toBeTruthy();
+  expect(within(row("Salesforce")).getByText("Connect this account to use its tools.")).toBeTruthy();
+});
+
+test("a broker catalog failure leaves held and fixed connectors available", async () => {
+  location.hash = sectionHash("connectors");
+  library({
+    "/connections": () => json(POOLED_NOTION),
+    "/connector-catalog": () => new Response(null, { status: 503 }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByLabelText("Notion connected")).toBeTruthy();
+  expect(screen.getByLabelText("GitHub connected")).toBeTruthy();
+  expect(connects("Slack")).toBeTruthy();
+  expect(screen.getByText("Error 503 — reload to retry.")).toBeTruthy();
+});
+
+test("the library follows broker cursors until one press adds 25 to 50 connectors", async () => {
+  const calls: string[] = [];
+  location.hash = sectionHash("connectors");
+  library({
+    "/connector-catalog": (url) => {
+      calls.push(url);
+      const after = new URL(url, "https://ufo.test").searchParams.get("after");
+      if (!after) {
+        return json({
+          providers: [{ name: "salesforce", label: "Salesforce" }],
+          after: "page-2",
+        });
+      }
+      const page = Number(after.replace("page-", ""));
+      if (!Number.isInteger(page) || page < 2 || page > 6) {
+        throw new Error("unexpected catalog cursor " + after);
+      }
+      return json({
+        providers: Array.from({ length: 6 }, (_, index) => ({
+          name: `connector-${page}-${index + 1}`,
+          label: `Connector ${page}-${index + 1}`,
+        })),
+        after: "page-" + (page + 1),
+      });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("Salesforce")).toBeTruthy();
+  expect(connects("Salesforce")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+  expect(await screen.findByText("Connector 6-6")).toBeTruthy();
+  expect(screen.getByText("Connector 2-1")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+  expect(calls.filter((url) => url.includes("after=")).length).toBe(5);
+  expect(calls.at(-1)).toContain("after=page-6");
+});
+
 test("a connected row names the account it stands on and who reaches it", async () => {
   location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
@@ -721,6 +787,29 @@ test("the search narrows the catalog and states when nothing matches", async () 
   await userEvent.clear(screen.getByLabelText("Search connectors"));
   await userEvent.type(screen.getByLabelText("Search connectors"), "salesforce{Enter}");
   expect(await screen.findByText("No connector matches this search.")).toBeTruthy();
+});
+
+test("the search reads providers outside the fixed catalog", async () => {
+  const calls: string[] = [];
+  location.hash = sectionHash("connectors");
+  library({
+    "/connector-catalog": (url) => {
+      calls.push(url);
+      return json({
+        providers: url.includes("q=salesforce")
+          ? [{ name: "salesforce", label: "Salesforce" }]
+          : [],
+        after: null,
+      });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await screen.findByRole("heading", { name: "Available" });
+
+  await userEvent.type(screen.getByLabelText("Search connectors"), "salesforce{Enter}");
+
+  expect(await screen.findByText("Salesforce")).toBeTruthy();
+  expect(calls.some((url) => url.includes("q=salesforce"))).toBe(true);
 });
 
 test("a library row connects the member's account through the main agent", async () => {

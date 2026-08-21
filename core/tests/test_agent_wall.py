@@ -20,6 +20,7 @@ from ufo_testsupport.surfaces import (
 
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
+from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SubagentProfile
@@ -90,6 +91,7 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
         _credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         _declared_slots=(),
         _artifact_token_secret="",
+        _connectors=ConnectorRegistry(entries={}),
         _skills=EMPTY_SKILL_REGISTRY,
         _member_skill_listing=no_member_skills,
         _public_base_url=None,

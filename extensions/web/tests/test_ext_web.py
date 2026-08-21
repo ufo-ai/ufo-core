@@ -100,7 +100,7 @@ from ufo.agent_scope import agent as bind_agent
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
 from ufo.config import Config
-from ufo.connectors import ConnectorRegistry
+from ufo.connectors import CatalogEntry, CatalogPage, ConnectorEntry, ConnectorRegistry
 from ufo.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
@@ -191,6 +191,32 @@ from ufo.workspace import ws
 from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges
 
 SECRET = "artifact-signing-secret"
+
+
+@dataclass(frozen=True)
+class CatalogResolver:
+    @property
+    def transfer_hosts(self) -> tuple[str, ...]:
+        return ()
+
+    async def claims(self, provider: str) -> bool:
+        return provider in {"notion", "salesforce"}
+
+    def entry(self, provider: str) -> ConnectorEntry:
+        raise AssertionError(provider)
+
+    async def catalog(self, query: str, limit: int, after: str | None) -> CatalogPage:
+        rows = (
+            CatalogEntry(provider="notion", label="Notion"),
+            CatalogEntry(provider="salesforce", label="Salesforce"),
+        )
+        matched = tuple(row for row in rows if query.lower() in row.label.lower())
+        if after == "catalog-page-two":
+            return CatalogPage(entries=matched[1:limit], after=None)
+        return CatalogPage(
+            entries=matched[:1],
+            after="catalog-page-two" if len(matched) > 1 else None,
+        )
 
 
 def _schedule_store() -> ScheduleStore:
@@ -1075,6 +1101,7 @@ async def web(
         "https://web",
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        connectors=ConnectorRegistry(entries={}, resolver=CatalogResolver()),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         surface_model=lambda _name: SURFACE_MODEL[0],
         skills=EMPTY_SKILL_REGISTRY,
@@ -3130,6 +3157,39 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
     assert set(payload) == {"providers", "connectors"}
+
+
+async def test_connector_catalog_searches_the_live_broker_namespace(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
+    path = "/surface/web/connector-catalog"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    listed = await client.get(path, headers=cookie)
+    assert listed.json() == {
+        "providers": [{"name": "notion", "label": "Notion"}],
+        "after": "catalog-page-two",
+    }
+    continued = await client.get(f"{path}?after=catalog-page-two", headers=cookie)
+    assert continued.json() == {
+        "providers": [{"name": "salesforce", "label": "Salesforce"}],
+        "after": None,
+    }
+    searched = await client.get(f"{path}?q=sales", headers=cookie)
+    assert searched.json() == {
+        "providers": [{"name": "salesforce", "label": "Salesforce"}],
+        "after": None,
+    }
+    too_long = await client.get(f"{path}?q={'x' * 101}", headers=cookie)
+    assert too_long.status_code == 400
+    assert too_long.text == "The connector search is too long."
+    assert too_long.headers[web_surface.REFUSAL_HEADER] == "1"
+    bad_cursor = await client.get(f"{path}?after={'x' * 501}", headers=cookie)
+    assert bad_cursor.status_code == 400
+    assert bad_cursor.text == "The connector page cursor is invalid."
+    assert (await client.get(path)).status_code == 401
 
 
 def test_added_tiles_carry_the_labels_the_memory_states() -> None:

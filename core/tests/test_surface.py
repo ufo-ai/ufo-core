@@ -35,7 +35,7 @@ from ufo.audience import (
 )
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.connectors import DIRECT_ACCOUNT
+from ufo.connectors import DIRECT_ACCOUNT, ConnectorRegistry
 from ufo.credentials import (
     CredentialRequestInvalid,
     CredentialRequestState,
@@ -277,6 +277,7 @@ def _context(
         _credentials=store,
         _declared_slots=(),
         _artifact_token_secret="artifact-token-secret",
+        _connectors=ConnectorRegistry(entries={}),
         _skills=EMPTY_SKILL_REGISTRY,
         _member_skill_listing=no_member_skills,
         _public_base_url="https://ufo.example.test",

@@ -14,7 +14,7 @@ no `ConnectorProvider` claimed."""
 
 from dataclasses import dataclass
 
-from ufo.sdk.connectors import CatalogEntry, ConnectorBroker, ConnectorEntry, OAuthProvider
+from ufo.sdk.connectors import CatalogPage, ConnectorBroker, ConnectorEntry, OAuthProvider
 from ufo_ext_composio import client as composio
 from ufo_ext_composio.client import COMPOSIO_TRANSFER_HOSTS, TOOLKIT_SEARCH_LIMIT
 from ufo_ext_composio.provider import ComposioOAuthProvider
@@ -46,7 +46,6 @@ class ComposioResolver:
         )
 
     async def catalog(
-        self, query: str, limit: int = TOOLKIT_SEARCH_LIMIT
-    ) -> tuple[CatalogEntry, ...]:
-        rows = await composio.composio_client().list_toolkits(query, limit)
-        return tuple(CatalogEntry(provider=slug, label=label) for slug, label in rows)
+        self, query: str, limit: int = TOOLKIT_SEARCH_LIMIT, after: str | None = None
+    ) -> CatalogPage:
+        return await composio.composio_client().list_toolkits(query, limit, after)
