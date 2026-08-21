@@ -95,12 +95,14 @@ from ufo.ext.manifest import (
     open_connector_namespace,
 )
 from ufo.ext.surface import (
+    SURFACE_MODEL_JOB_PREFIX,
     DeployExtensionView,
     MidTurnReplyPoller,
     SurfaceAuth,
     SurfaceContext,
     SurfaceIdentityContext,
     SurfaceListenerRunner,
+    SurfaceModel,
     SurfaceSpec,
     WritebackPoller,
     mid_turn_reply_workspaces,
@@ -371,6 +373,10 @@ def run() -> None:
                 AMBIENT_REPLY_JOB,
             )
         ),
+        surface_model=lambda name: ModelAccess(
+            replace(registry, auto_model=config.models.background_jobs_model),
+            f"{SURFACE_MODEL_JOB_PREFIX}{name}",
+        ),
         sandbox_sizes=carrier_spec.sizes,
         skills=skills,
         member_skill_listing=lambda: member_skill_listing(manifests, credentials, index, embed),
@@ -512,7 +518,6 @@ def _launch_jobs(
         registry=runtime.registry,
         probes=probes,
         background_model=runtime.config.models.background_jobs_model,
-        memory=runtime.memory,
     ).launch()
 
 
@@ -948,6 +953,7 @@ def _mount_shared_surfaces(
     member_skill_listing: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
     sandbox_sizes: tuple[str, ...] = (),
     memory: MemorySearch | None = None,
+    surface_model: "Callable[[str], SurfaceModel] | None" = None,
     objects: "Mapping[str, BoundKind] | None" = None,
     key_slot_for: Callable[[str], str | None] | None = None,
 ) -> None:
@@ -1038,6 +1044,7 @@ def _mount_shared_surfaces(
             _ambient_reply=ambient_reply,
             _object_schemas=kind_schemas,
             _memory=memory,
+            _model=None if surface_model is None else surface_model(surface),
             _objects=objects or {},
             _conversation_slots=conversation_slots,
             _preview_url=preview_service_url.rstrip("/") if preview_service_url else None,

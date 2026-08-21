@@ -101,7 +101,7 @@ from ufo.grants import (
 from ufo.hub import LiveFrame, SkillLoad, ToolCall
 from ufo.image_previews import raster_image_media_type
 from ufo.listings import page_of, page_query
-from ufo.models.interface import Message
+from ufo.models.interface import Message, ModelRequest
 from ufo.o11y import emit_metric, log, warn
 from ufo.sandbox.containment import contained_leaf
 from ufo.sandbox.conversation import (
@@ -391,6 +391,25 @@ def _media_predicate(column: sa.ColumnElement[str], media: str) -> sa.ColumnElem
     selected = claims[tuple(MEDIA_CLAIMS).index(media)]
     earlier = claims[: tuple(MEDIA_CLAIMS).index(media)]
     return sa.and_(selected, *(sa.not_(claim) for claim in earlier))
+
+
+SURFACE_MODEL_JOB_PREFIX = "surface:"
+
+
+class SurfaceModel(Protocol):
+    """The metered one-shot model a surface route reaches: `ModelAccess` pinned to the deploy's
+    background-jobs model and labelled `surface:<name>`, so a route's own call is keyed, billed, and
+    attributed exactly as a job's is — one label per installed surface, a bounded set decided at
+    boot. Held as a Protocol because `ModelAccess` lives in `ext.context`, which imports this
+    module.
+
+    A route reaches this only for work it can answer without it: a call here runs while a member
+    waits, so the handler owns the failure and answers from what it already holds."""
+
+    @property
+    def model(self) -> str: ...
+
+    async def turn(self, request: ModelRequest) -> Message: ...
 
 
 @dataclass(frozen=True)
@@ -1139,6 +1158,7 @@ class SurfaceContext:
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
     _sandbox_sizes: tuple[str, ...] = ()
     _memory: "MemorySearch | None" = None
+    _model: "SurfaceModel | None" = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
     _conversation_slots: tuple["BoundConversationSlot", ...] = ()
     _preview_url: str | None = None
@@ -2216,6 +2236,13 @@ class SurfaceContext:
                 for skill in member_skills
             ),
         )
+
+    @property
+    def model(self) -> "SurfaceModel | None":
+        """The metered model this route may call, or None where the deploy wired none. A route that
+        needs it gates on it and answers without it when absent, the way `memory_available` gates
+        the memory view — a deploy missing a model must still serve every page it can."""
+        return self._model
 
     @property
     def memory_available(self) -> bool:

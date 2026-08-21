@@ -90,6 +90,7 @@ from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_runn
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
+    UNREACHED_SURFACE_MODEL,
     no_member_skills,
 )
 
@@ -1030,6 +1031,12 @@ def test_chat_title_cuts_at_a_word_boundary_and_falls_back_to_filenames() -> Non
     assert web_surface._chat_title("the and then of to " + "y" * 60, ()) == "the"
 
 
+SURFACE_MODEL: list[object] = [UNREACHED_SURFACE_MODEL]
+"""What a mounted surface hands its routes as `ctx.model`. Every test holds the loud stub, so an
+unintended generation fails rather than passing quietly; the one test that wants a route to reach a
+model swaps it and puts it back."""
+
+
 @pytest.fixture
 async def web(
     db: None,
@@ -1069,6 +1076,7 @@ async def web(
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
+        surface_model=lambda _name: SURFACE_MODEL[0],
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=lambda: member_skill_listing(
             (skill_create_manifest(),),
@@ -10463,6 +10471,7 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
+        surface_model=lambda _name: SURFACE_MODEL[0],
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
         sandbox_sizes=("small", "medium", "large"),
@@ -10559,6 +10568,7 @@ async def test_settings_reports_the_deploy_internet_ceiling_when_granted(
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
+        surface_model=lambda _name: SURFACE_MODEL[0],
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
     )

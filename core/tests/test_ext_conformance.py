@@ -1485,6 +1485,74 @@ async def _surface_workspace() -> tuple[UUID, UUID, str]:
     return workspace_id, member_id, email
 
 
+@dataclass(frozen=True)
+class _NamedModel:
+    """A surface model that answers its own id and nothing else — the seam under test is which
+    model a route is handed, never what it returns."""
+
+    model: str
+
+    async def turn(self, request: ModelRequest) -> Message:
+        raise AssertionError("this probe calls no model")
+
+
+async def test_a_surface_route_is_handed_the_model_the_deploy_wired(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A surface route may generate what it answers, and what it generates on is wired per surface
+    at boot — one metered seam labelled by the surface's own name. The sample reads it back through
+    a real route, so the wiring is proved by a consumer rather than by core asserting against
+    itself, and a deploy that wires none still answers the page."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    workspace_id, _member_id, _email = await _surface_workspace()
+    manifest = _sample_manifest()
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (manifest,),
+        _credential_store(),
+        WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
+        _sandboxes(tmp_path / "workspaces"),
+        InProcessHub(),
+        _StubDbos(),
+        "",
+        None,
+        None,
+        ("auto",),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
+        skills=EMPTY_SKILL_REGISTRY,
+        member_skill_listing=no_member_skills,
+        surface_model=lambda name: _NamedModel(f"model-for-{name}"),
+    )
+    bare = FastAPI()
+    _mount_shared_surfaces(
+        bare,
+        (manifest,),
+        _credential_store(),
+        WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
+        _sandboxes(tmp_path / "workspaces-bare"),
+        InProcessHub(),
+        _StubDbos(),
+        "",
+        None,
+        None,
+        ("auto",),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
+        skills=EMPTY_SKILL_REGISTRY,
+        member_skill_listing=no_member_skills,
+    )
+    path = f"/surface/{sample.SURFACE_NAME}/{sample.SURFACE_MODEL_PATH}"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
+        wired = await client.get(path, headers=_bearer(workspace_id))
+    async with AsyncClient(transport=ASGITransport(app=bare), base_url="http://surface") as client:
+        unwired = await client.get(path, headers=_bearer(workspace_id))
+
+    assert wired.status_code == 200
+    assert wired.json() == {"model": f"model-for-{sample.SURFACE_NAME}"}
+    assert unwired.status_code == 200
+    assert unwired.json() == {"model": None}
+
+
 async def test_sample_surface_admits_links_streams_and_delivers(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

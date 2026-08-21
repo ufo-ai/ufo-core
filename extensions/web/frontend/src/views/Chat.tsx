@@ -797,6 +797,10 @@ type UnlockRow = { title: string; ask: string; providers: MissingTile[] };
 type StartersPayload = { starters: StarterRow[]; unlock: UnlockRow | null };
 
 const STARTERS_READ = "/workspace/starters";
+/** The slate behind this read turns over on the half hour, and the read that finds it stale is the
+ *  one that pays to remake it. Polling it at the panel default would ask six times an hour for an
+ *  answer that changes twice. */
+const STARTERS_EVERY_MS = 300_000;
 
 /** What a member can ask for before they have asked for anything: three applications named for the
  *  job each does and the decision each leaves with them. Creating one is the same act whichever app
@@ -946,7 +950,7 @@ function PressRow({
 }
 
 function Starters({ agentId }: { agentId: string }) {
-  const read = usePanelRead<StartersPayload>(STARTERS_READ);
+  const read = usePanelRead<StartersPayload>(STARTERS_READ, 0, STARTERS_EVERY_MS);
   const answered = read.phase === "ready" ? read.payload : null;
   const rows = answered?.starters?.length ? answered.starters : FALLBACK_ROWS;
   const unlock = answered?.unlock?.providers?.length ? answered.unlock : null;

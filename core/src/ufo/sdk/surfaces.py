@@ -112,6 +112,9 @@ from ufo.ext.surface import (
     SurfaceListenerContext as SurfaceListenerContext,
 )
 from ufo.ext.surface import (
+    SurfaceModel as SurfaceModel,
+)
+from ufo.ext.surface import (
     SurfaceRoute as SurfaceRoute,
 )
 from ufo.ext.surface import (

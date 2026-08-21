@@ -8,7 +8,7 @@ from uuid import UUID
 
 from ufo.ambient_reply import AmbientDecision, AmbientReplyClassifier
 from ufo.ext.surface import Stopped
-from ufo.models.interface import ModelRequest
+from ufo.models.interface import Message, ModelRequest
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 
 EMPTY_SKILL_REGISTRY = SkillRegistry({})
@@ -50,6 +50,22 @@ class UnreachedStopper:
 
     async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> Stopped:
         raise AssertionError("this surface stops no turn")
+
+
+@dataclass(frozen=True)
+class UnreachedSurfaceModel:
+    """A surface route may call a model; a test whose routes should call none gets one that fails
+    loud, so an unintended generation shows as a failure rather than a silent stub answer."""
+
+    @property
+    def model(self) -> str:
+        return "unreached"
+
+    async def turn(self, request: ModelRequest) -> Message:
+        raise AssertionError("this surface calls no model")
+
+
+UNREACHED_SURFACE_MODEL = UnreachedSurfaceModel()
 
 
 UNREACHED_STOPPER = UnreachedStopper()

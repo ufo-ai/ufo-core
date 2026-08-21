@@ -585,15 +585,19 @@ of it — with every turn fact on that row computed only from conversations the 
 workspace-visible agent tells each member their own picture of it and never a colleague's private
 turn.
 `workspace/starters` answers the start screen what this member can ask for before they have asked
-anything: two applications, one check-in drawn from their own memory, and one unlock. A batch job
-ranks the unlock catalog — each row an application and the connector classes it takes — against the
-memory that member's audience reads and the applications the workspace already has, and stores the
-ranking under their own subject; no other member's read touches it. Whether a ranked row is an
-application to build now or an unlock still short of an account is not stored, because access is
-not the ranking's to claim: the read decides it against the connectors the workspace holds at that
-moment, so connecting an account moves a row with no tick in between and a connected connector is
-never offered again. An unlock is offered as the accounts it would take and pressed like every
-other row — the member says the build, the agent asks for what it finds it does not hold, and the
+anything: two applications, one check-in drawn from their own memory, and one unlock. The ranking is
+made where it is read, by the read that finds none fresh, and cached under that member's own
+subject; no other member's read touches it. Nothing generates on a clock — a slate nobody opens is
+never made, and memory housekeeping rewriting rows behind the scenes costs nothing. The cache turns
+over on time and on the digest of the ranking instructions, because those are the only two things
+that can make a stored ranking wrong; one reader holds a claim so a tab re-read never pays twice, a
+refusing balance ranks nothing, and a generation that fails answers the ranking already held rather
+than an error, because a read that never answers stops the page asking. Whether a ranked row is an
+application to build now or an unlock still short of an account is not cached with it, because
+access is not the ranking's to claim: every read decides it against the connectors the workspace
+holds at that moment, so connecting an account moves a row with no new ranking and a connected
+connector is never offered again. An unlock is offered as the accounts it would take and pressed
+like every other row — the member says the build, the agent asks for what it finds it does not hold, and the
 connect control rides its reply. A slot the read cannot fill is drawn from the screen's own
 constants, so a workspace whose memory says nothing yet still reads as a screen.
 

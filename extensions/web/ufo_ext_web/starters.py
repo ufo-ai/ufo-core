@@ -1,30 +1,35 @@
 """The start screen's per-member slate: the rows a member reads before they have asked anything.
 
-A batch-at-interval job, fed only by its own clock, so it can never fire on the slate it wrote. It
-ranks the unlock catalog against what this member's memory says the team works on and what
-applications the workspace already has, and stores the ranking under the member's own subject. It
-reads no connection state at all: whether a ranked row is an application the member can build now
-or an unlock still short of an account is decided at read time by `workspace_starters`, against
-live truth, so connecting an account and reloading is enough to move a row.
+Generated where it is read, for the member who is there, and cached for `STARTERS_TTL`. Nothing
+generates on a clock: a slate nobody opens is never made, and memory housekeeping rewriting rows
+behind the scenes costs nothing. The cache turns over on time alone, because time and the ranking
+instructions are the only things that can make a stored slate wrong — whether a ranked row is an
+application the member can build now or an unlock still short of an account is decided at read time
+by `fill_starters` against live connections, so connecting an account moves a row with no new slate.
 """
 
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-import sqlalchemy as sa
 from pydantic import BaseModel, Field, ValidationError
 
-from ufo.sdk.audience import audience_subjects, conversation_audience
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import JsonValue, ScopedStore
 from ufo.sdk.models import Message, ModelRequest, ToolSchema, ToolUseBlock
+from ufo.sdk.o11y import warn
 from ufo.sdk.subjects import member_subject
+from ufo.sdk.surfaces import SurfaceModel
 from ufo_ext_web.panels import UNLOCKS, UNLOCKS_BY_NAME
 
-STARTERS_JOB_NAME = "starters"
-STARTERS_JOB_SCHEDULE = "0 */10 * * * *"
 STARTERS_KEY_PREFIX = "starters"
+CLAIM_KEY_PREFIX = "starters-claim"
+COOLDOWN_KEY_PREFIX = "starters-cooldown"
+
+STARTERS_TTL = timedelta(minutes=30)
+CLAIM_LEASE = timedelta(minutes=2)
+COOLDOWN_AFTER_FAILURE = timedelta(minutes=15)
 
 MEMORY_LIMIT = 60
 MEMORY_TEXT_CHARS = 400
@@ -35,13 +40,6 @@ ASK_CHARS = 320
 SLATE_MAX_TOKENS = 4096
 SLATE_TOOL = "record_slate"
 SLATE_TOOL_DESCRIPTION = "Record the ranked starters for this member."
-
-member = sa.table(
-    "member",
-    sa.column("id", sa.Uuid),
-    sa.column("workspace_id", sa.Uuid),
-    sa.column("seated_at", sa.DateTime(timezone=True)),
-)
 
 SLATE_SYSTEM = f"""\
 You rank the start screen of a work assistant for one member. The screen shows three rows they can \
@@ -88,16 +86,22 @@ class CheckIn(BaseModel):
 
 
 class Slate(BaseModel):
-    """What one member's start screen ranks, and the fingerprint of the state it was ranked from.
+    """What one member's start screen ranks, when it was ranked, and the instructions it was ranked
+    under.
 
-    The fingerprint is the whole regeneration rule: a tick that computes the same one skips the
-    model call. It covers the ranking instructions as well as the memory and the applications, so
-    a narrowed character budget re-ranks the slates the read would otherwise refuse whole. There
-    is no age floor — a member for whom none of that has moved has nothing new to say."""
+    Those two stamps are the whole cache rule. `generated_at` turns the slate over on time alone,
+    because nothing else can make a ranking wrong: access is answered live at read time. `prompt` is
+    the digest of the instructions that produced it, so an edit to those instructions — a narrowed
+    character budget, say, whose rows the read would otherwise refuse whole — re-ranks at once
+    rather than waiting out the clock."""
 
-    fingerprint: str
+    generated_at: datetime
+    prompt: str
     ranked: tuple[RankedUnlock, ...] = ()
     check_in: CheckIn | None = None
+
+    def fresh(self, now: datetime) -> bool:
+        return now - self.generated_at < STARTERS_TTL and self.prompt == SLATE_DIGEST
 
 
 class _SlateCall(BaseModel):
@@ -105,65 +109,122 @@ class _SlateCall(BaseModel):
     check_in: CheckIn | None = None
 
 
+SLATE_DIGEST = hashlib.sha256(SLATE_SYSTEM.encode()).hexdigest()
+
+
 def starters_key(member_id: UUID) -> str:
     return f"{STARTERS_KEY_PREFIX}:{member_subject(member_id)}"
 
 
-async def rank_starters(ctx: ExtensionContext) -> None:
-    """Rank every seated member's start screen — the job the manifest registers."""
-    if ctx.model is None:
-        raise RuntimeError("starters need model access; serve wires it")
-    agents = tuple(sorted(agent.name for agent in await ctx.workspace_agents()))
-    async with ctx.transaction() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(member.c.id).where(
-                    member.c.workspace_id == ctx.workspace_id,
-                    member.c.seated_at.is_not(None),
-                )
-            )
-        ).all()
-    for row in rows:
-        await _MemberSlate(ctx=ctx, member_id=row.id, agents=agents).run()
+def claim_key(member_id: UUID) -> str:
+    return f"{CLAIM_KEY_PREFIX}:{member_subject(member_id)}"
+
+
+def cooldown_key(member_id: UUID) -> str:
+    return f"{COOLDOWN_KEY_PREFIX}:{member_subject(member_id)}"
+
+
+def _stamped(held: object, key: str) -> datetime | None:
+    """The moment a stamp records, or None where it records nothing readable. A value written by an
+    older shape, or half-written, reads as absent rather than raising — the caller's answer to that
+    is to do the work again, which is always safe here."""
+    if not isinstance(held, dict) or not isinstance(held.get(key), str):
+        return None
+    try:
+        return datetime.fromisoformat(held[key])
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
-class _MemberSlate:
-    ctx: ExtensionContext
+class StarterCache:
+    """What the start screen reads, generated where it is read and cached for `STARTERS_TTL`.
+
+    `read` is the whole flow. A fresh slate is answered as it stands. A stale one is answered too —
+    the member is waiting, and last half-hour's ranking beats an empty screen — and only then is a
+    new one made, so the answer this member gets is never worse for the regeneration happening.
+
+    Nothing here may raise: a read that has never answered stops the pane polling for the rest of
+    the session, so a provider failure would freeze the start screen rather than degrade it. Every
+    failure answers what is stored and stamps a cooldown so the next read does not walk into the
+    same wall."""
+
+    store: ScopedStore
     member_id: UUID
     agents: tuple[str, ...]
+    recalled: tuple[str, ...]
+    model: SurfaceModel | None
+    solvent: bool
 
-    async def run(self) -> None:
-        recalled = await self._memory()
-        fingerprint = self._fingerprint(recalled)
-        key = starters_key(self.member_id)
-        held = await self.ctx.store.get(key)
-        if isinstance(held, dict) and held.get("fingerprint") == fingerprint:
-            return
-        slate = await self._rank(recalled, fingerprint)
-        await self.ctx.store.put(key, slate.model_dump(mode="json"))
+    async def read(self) -> Slate | None:
+        now = datetime.now(UTC)
+        held = await self._held()
+        if held is not None and held.fresh(now):
+            return held
+        if not await self._may_generate(now):
+            return held
+        try:
+            made = await self._rank(now)
+        except Exception:
+            cooled: JsonValue = {"failed_at": now.isoformat()}
+            await self.store.put(cooldown_key(self.member_id), cooled)
+            warn("web.starters_failed", member_id=str(self.member_id))
+            return held
+        finally:
+            await self.store.delete(claim_key(self.member_id))
+        await self.store.put(starters_key(self.member_id), made.model_dump(mode="json"))
+        return made
 
-    async def _memory(self) -> tuple[str, ...]:
-        subjects = audience_subjects(conversation_audience(self.member_id))
-        page = await self.ctx.recent_memory(subjects, MEMORY_LIMIT)
-        return tuple(match.text[:MEMORY_TEXT_CHARS] for match in page.rows)
+    async def _held(self) -> Slate | None:
+        stored = await self.store.get(starters_key(self.member_id))
+        if not isinstance(stored, dict):
+            return None
+        try:
+            return Slate.model_validate(stored)
+        except ValidationError:
+            return None
 
-    def _fingerprint(self, recalled: tuple[str, ...]) -> str:
-        state = json.dumps([list(recalled), list(self.agents), SLATE_SYSTEM], separators=(",", ":"))
-        return hashlib.sha256(state.encode()).hexdigest()
+    async def _may_generate(self, now: datetime) -> bool:
+        """Whether this read is the one that regenerates. It is not when there is no model or no
+        memory to rank, when the balance is refusing — a workspace that cannot run turns must not
+        be spending on suggestions it cannot act on — when a failure is still cooling off, or when
+        another read already holds the claim."""
+        if self.model is None or not self.recalled or not self.solvent:
+            return False
+        failed = _stamped(await self.store.get(cooldown_key(self.member_id)), "failed_at")
+        if failed is not None and now - failed < COOLDOWN_AFTER_FAILURE:
+            return False
+        return await self._claim(now)
 
-    async def _rank(self, recalled: tuple[str, ...], fingerprint: str) -> Slate:
-        if not recalled:
-            return Slate(fingerprint=fingerprint)
+    async def _claim(self, now: datetime) -> bool:
+        """One reader generates. The pane re-reads on its interval and again whenever the tab is
+        looked at, and two tabs are ordinary, so without this a member could pay for the same slate
+        several times over.
+
+        `put_if` with `expected=None` inserts only where no claim stands. A claim left behind by a
+        reader that died is taken over once it is older than `CLAIM_LEASE`, by comparing against the
+        exact value read — there is no primitive that displaces a live row, so the stale value is
+        the token."""
+        key = claim_key(self.member_id)
+        mine: JsonValue = {"claimed_at": now.isoformat()}
+        if await self.store.put_if(key, mine, expected=None):
+            return True
+        standing = await self.store.get(key)
+        claimed = _stamped(standing, "claimed_at")
+        if claimed is not None and now - claimed < CLAIM_LEASE:
+            return False
+        return await self.store.put_if(key, mine, expected=standing)
+
+    async def _rank(self, now: datetime) -> Slate:
+        assert self.model is not None
         payload = {
-            "memory": list(recalled),
+            "memory": list(self.recalled),
             "applications": list(self.agents),
             "catalog": [{"name": row.name, "does": row.does} for row in UNLOCKS],
         }
-        assert self.ctx.model is not None
-        reply = await self.ctx.model.turn(
+        reply = await self.model.turn(
             ModelRequest(
-                model=self.ctx.model.model,
+                model=self.model.model,
                 system=SLATE_SYSTEM,
                 messages=(
                     Message(role="user", content=json.dumps(payload, separators=(",", ":"))),
@@ -181,10 +242,10 @@ class _MemberSlate:
                 reasoning="off",
             )
         )
-        return settle_slate(reply, fingerprint)
+        return settle_slate(reply, now)
 
 
-def settle_slate(reply: Message, fingerprint: str) -> Slate:
+def settle_slate(reply: Message, generated_at: datetime) -> Slate:
     """The slate a `record_slate` reply carries, entry by entry: a row the contract does not
     satisfy, one naming no catalog row, and a repeat of a row already taken each drop without
     taking the rest of the slate with them, while a reply that recorded no call at all raises —
@@ -212,4 +273,9 @@ def settle_slate(reply: Message, fingerprint: str) -> Slate:
         check_in = CheckIn.model_validate(recorded.input.get("check_in"))
     except ValidationError:
         check_in = None
-    return Slate(fingerprint=fingerprint, ranked=tuple(ranked[:RANKED_MAX]), check_in=check_in)
+    return Slate(
+        generated_at=generated_at,
+        prompt=SLATE_DIGEST,
+        ranked=tuple(ranked[:RANKED_MAX]),
+        check_in=check_in,
+    )

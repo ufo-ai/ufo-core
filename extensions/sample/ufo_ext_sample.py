@@ -841,6 +841,18 @@ async def _one_chunk(data: bytes) -> AsyncIterator[bytes]:
     yield data
 
 
+SURFACE_MODEL_PATH = "model"
+
+
+async def _surface_model(ctx: SurfaceContext, request: Request) -> Response:
+    """Report the metered model this surface's routes were handed. A route may generate what it
+    answers rather than only project stored rows, and what it generates on is the deploy's, wired
+    per surface at boot — so the seam is proved here, by a real route reading it, rather than by
+    core asserting against itself. A deploy that wired none answers null, which is the case a route
+    must still serve a page for."""
+    return JSONResponse({"model": None if ctx.model is None else ctx.model.model})
+
+
 async def _surface_ingest(ctx: SurfaceContext, request: Request) -> Response:
     """Exercise the whole surface seam: resolve (and link) a member identity, get-or-create the
     conversation, optionally stream an inbound file into the workspace, then admit a turn — all
@@ -1264,7 +1276,10 @@ def manifest() -> Manifest:
         surfaces=(
             SurfaceSpec(
                 name=SURFACE_NAME,
-                routes=(SurfaceRoute(method="POST", path="", handler=_surface_ingest),),
+                routes=(
+                    SurfaceRoute(method="POST", path="", handler=_surface_ingest),
+                    SurfaceRoute(method="GET", path=SURFACE_MODEL_PATH, handler=_surface_model),
+                ),
                 post=_surface_post,
                 attach=_surface_attach,
                 identify=resolve_surface_workspace,

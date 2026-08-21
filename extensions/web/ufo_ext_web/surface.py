@@ -41,6 +41,7 @@ from pydantic import BaseModel, JsonValue, ValidationError
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import audience_subjects, conversation_audience
+from ufo.sdk.balance import read_headroom
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
 from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
@@ -128,7 +129,12 @@ from ufo_ext_web.panels import (
     agent_settings,
     submit_intent,
 )
-from ufo_ext_web.starters import Slate, starters_key
+from ufo_ext_web.starters import (
+    MEMORY_LIMIT,
+    MEMORY_TEXT_CHARS,
+    Slate,
+    StarterCache,
+)
 
 SURFACE_WEB = "web"
 SOURCE = "ufo web"
@@ -3104,28 +3110,57 @@ def fill_starters(
     return tuple(apps), unlock
 
 
+async def _solvent() -> bool:
+    """Whether this workspace's balance still admits spend. Read as its own line rather than through
+    `BalanceGate`, which a surface cannot reach and which answers about a turn — the question here
+    is only whether generating a slate is spending money a refusing workspace does not have."""
+    ext = web_extension()
+    async with ext.transaction() as connection:
+        headroom = await read_headroom(connection, ext.workspace_id)
+    if headroom is None:
+        return True
+    return headroom.balance_micro_usd > headroom.reserve_micro_usd - headroom.grace_micro_usd
+
+
+async def _recalled(ctx: SurfaceContext, member_id: UUID) -> tuple[str, ...]:
+    """The memory this member's own audience reads — their subject and the workspace-shared one,
+    never a colleague's — newest first and bounded next to the call that sends it."""
+    if not ctx.memory_available:
+        return ()
+    subjects = audience_subjects(conversation_audience(member_id))
+    page = await ctx.recent_memory(subjects, MEMORY_LIMIT)
+    return tuple(match.text[:MEMORY_TEXT_CHARS] for match in page.rows)
+
+
 async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
     """What this member reads before they have asked anything: two applications they can build now,
     one check-in drawn from their own memory, and one unlock naming what an account would buy them.
 
-    The ranking is the starters job's, stored under this member's own subject and read by nobody
-    else. Which ranked row is an application and which is an unlock is decided here instead, against
-    the connectors the workspace holds right now, so the job never stores a claim about access that
-    a connect made stale. A row whose name an application already carries is dropped for the same
+    The ranking is made here, for the member who is asking, and cached for `STARTERS_TTL` under
+    their own subject where nobody else reads it. Nothing generates on a clock: a slate nobody opens
+    is never made.
+
+    Which ranked row is an application and which is an unlock is not cached with it. That is decided
+    on every read against the connectors the workspace holds right now, so connecting an account
+    moves a row with no new ranking, and a stored slate never carries a claim about access that a
+    connect made stale. A row whose name an application already carries is dropped for the same
     reason: the screen offers work to do, never work already done.
 
-    An empty answer is ordinary — a workspace whose memory says nothing yet has nothing ranked — and
-    the page draws its own rows for every slot this read does not fill."""
+    An empty answer is ordinary — a workspace whose memory says nothing yet has nothing to rank —
+    and the page draws its own rows for every slot this read does not fill."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, audience = resolved
-    stored = await web_extension().store.get(starters_key(member_id))
-    if not isinstance(stored, dict):
-        return JSONResponse({"starters": [], "unlock": None})
-    try:
-        slate = Slate.model_validate(stored)
-    except ValidationError:
+    slate = await StarterCache(
+        store=web_extension().store,
+        member_id=member_id,
+        agents=tuple(sorted(agent.name for agent in audience.agents)),
+        recalled=await _recalled(ctx, member_id),
+        model=ctx.model,
+        solvent=await _solvent(),
+    ).read()
+    if slate is None:
         return JSONResponse({"starters": [], "unlock": None})
     held = await _held_providers(ctx, member_id, admin=audience.admin)
     taken = frozenset(agent.name.strip().lower() for agent in audience.agents)

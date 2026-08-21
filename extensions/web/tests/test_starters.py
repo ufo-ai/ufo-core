@@ -9,8 +9,8 @@ stored ranking never states a claim about access that a connect made stale.
 import json
 import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,23 +19,22 @@ from pydantic import ValidationError
 from ufo_ext_web.panels import FIRST_RUN_PROVIDER_NAMES, UNLOCKS, UNLOCKS_BY_NAME, Unlock
 from ufo_ext_web.starters import (
     BODY_CHARS,
+    SLATE_DIGEST,
     SLATE_SYSTEM,
     SLATE_TOOL,
     TITLE_CHARS,
     CheckIn,
     RankedUnlock,
     Slate,
-    rank_starters,
+    StarterCache,
+    claim_key,
     settle_slate,
     starters_key,
 )
 from ufo_ext_web.surface import STARTER_APP_SLOTS, fill_starters
 
-from ufo.audience import audience_subjects, conversation_audience
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.listings import ListingPage
-from ufo.memory import MemoryMatch, MemorySearch
+from ufo.ext.context import ModelAccess, ScopedStore
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
     Message,
@@ -50,13 +49,17 @@ from ufo.models.interface import (
 from ufo.models.pricing import Pricing
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.subjects import member_subject
 from ufo.workspace import ws
 
 AUTO_MODEL = "claude-opus-5"
 PROVIDER_ANTHROPIC = "anthropic"
 
-FINGERPRINT = "f" * 64
+STAMP = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+
+
+def _slate(**kw: object) -> Slate:
+    return Slate(generated_at=STAMP, prompt=SLATE_DIGEST, **kw)  # type: ignore[arg-type]
 
 
 def _ranked(unlock: str, title: str) -> RankedUnlock:
@@ -122,7 +125,7 @@ def test_the_prompt_states_the_character_budget_the_schema_enforces() -> None:
 
 def test_a_reply_recording_no_call_raises_rather_than_settling_an_empty_slate() -> None:
     with pytest.raises(ValueError, match="record_slate"):
-        settle_slate(_reply(TextBlock(text="here are some ideas")), FINGERPRINT)
+        settle_slate(_reply(TextBlock(text="here are some ideas")), STAMP)
 
 
 def test_one_unusable_entry_drops_without_taking_the_slate_with_it() -> None:
@@ -136,7 +139,7 @@ def test_one_unusable_entry_drops_without_taking_the_slate_with_it() -> None:
                 ]
             )
         ),
-        FINGERPRINT,
+        STAMP,
     )
     assert [entry.unlock for entry in slate.ranked] == ["pr-babysitter", "runway-report"]
 
@@ -151,7 +154,7 @@ def test_an_entry_naming_no_catalog_row_drops() -> None:
                 ]
             )
         ),
-        FINGERPRINT,
+        STAMP,
     )
     assert [entry.unlock for entry in slate.ranked] == ["inbox-triage"]
 
@@ -166,19 +169,18 @@ def test_a_row_ranked_twice_is_taken_once() -> None:
                 ]
             )
         ),
-        FINGERPRINT,
+        STAMP,
     )
     assert [entry.unlock for entry in slate.ranked] == ["inbox-triage"]
 
 
 def test_an_unusable_check_in_leaves_the_slate_without_one() -> None:
-    slate = settle_slate(_reply(_call(ranked=[], check_in={"title": "x"})), FINGERPRINT)
+    slate = settle_slate(_reply(_call(ranked=[], check_in={"title": "x"})), STAMP)
     assert slate.check_in is None
 
 
 def test_a_held_row_is_an_application_and_a_short_row_is_the_unlock() -> None:
-    slate = Slate(
-        fingerprint=FINGERPRINT,
+    slate = _slate(
         ranked=(_ranked("pr-babysitter", "PR watch"), _ranked("runway-report", "Runway")),
     )
     rows, unlock = fill_starters(slate, frozenset({"github"}), frozenset())
@@ -189,7 +191,7 @@ def test_a_held_row_is_an_application_and_a_short_row_is_the_unlock() -> None:
 
 
 def test_a_connected_provider_is_never_offered_as_an_unlock() -> None:
-    slate = Slate(fingerprint=FINGERPRINT, ranked=(_ranked("runway-report", "Runway"),))
+    slate = _slate(ranked=(_ranked("runway-report", "Runway"),))
     _rows, still_short = fill_starters(slate, frozenset({"stripe"}), frozenset())
     assert still_short is not None
     assert [tile.name for tile in still_short.providers] == ["quickbooks"]
@@ -208,7 +210,7 @@ def test_a_row_more_than_two_accounts_short_is_passed_over() -> None:
     )
     UNLOCKS_BY_NAME[row.name] = row
     try:
-        slate = Slate(fingerprint=FINGERPRINT, ranked=(_ranked("three-way", "Three"),))
+        slate = _slate(ranked=(_ranked("three-way", "Three"),))
         rows, unlock = fill_starters(slate, frozenset(), frozenset())
         assert rows == ()
         assert unlock is None
@@ -217,8 +219,7 @@ def test_a_row_more_than_two_accounts_short_is_passed_over() -> None:
 
 
 def test_an_application_the_workspace_already_has_is_never_offered_again() -> None:
-    slate = Slate(
-        fingerprint=FINGERPRINT,
+    slate = _slate(
         ranked=(_ranked("pr-babysitter", "PR watch"), _ranked("inbox-triage", "Inbox")),
     )
     rows, _unlock = fill_starters(
@@ -228,14 +229,13 @@ def test_an_application_the_workspace_already_has_is_never_offered_again() -> No
 
 
 def test_a_title_an_application_already_carries_is_never_offered_again() -> None:
-    slate = Slate(fingerprint=FINGERPRINT, ranked=(_ranked("pr-babysitter", "PR watch"),))
+    slate = _slate(ranked=(_ranked("pr-babysitter", "PR watch"),))
     rows, _unlock = fill_starters(slate, frozenset({"github"}), frozenset({"pr watch"}))
     assert rows == ()
 
 
 def test_the_screen_takes_no_more_applications_than_it_draws() -> None:
-    slate = Slate(
-        fingerprint=FINGERPRINT,
+    slate = _slate(
         ranked=tuple(
             _ranked(name, name)
             for name in ("competitor-watch", "market-researcher", "writing-desk")
@@ -246,8 +246,7 @@ def test_the_screen_takes_no_more_applications_than_it_draws() -> None:
 
 
 def test_the_check_in_closes_the_list_and_founds_no_application() -> None:
-    slate = Slate(
-        fingerprint=FINGERPRINT,
+    slate = _slate(
         ranked=(_ranked("competitor-watch", "Rivals"),),
         check_in=CheckIn(title="Acme renewal", body="Waiting on legal.", ask="Where did it land?"),
     )
@@ -258,13 +257,17 @@ def test_the_check_in_closes_the_list_and_founds_no_application() -> None:
 @dataclass
 class _SlateClient:
     """Streams one canned `record_slate` call, counting completions so a test can witness that a
-    workspace whose state has not moved costs no model call at all."""
+    cached slate costs nothing. `fails` makes the provider raise, which is the case the read must
+    survive without ever answering an error."""
 
     arguments: str
+    fails: bool = False
     calls: int = 0
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.calls += 1
+        if self.fails:
+            raise RuntimeError("provider is down")
         yield ToolCallStart(id=f"call-{self.calls}", name=SLATE_TOOL)
         yield ToolCallDelta(id=f"call-{self.calls}", partial_json=self.arguments)
         yield Usage(input_tokens=10, output_tokens=5)
@@ -286,35 +289,21 @@ class _Resolver:
         return PROVIDER_ANTHROPIC
 
 
-@dataclass
-class _Recall:
-    """A memory-search provider standing in for the extension's: `list_recent` is the only half the
-    starters job reads, and the subjects it is asked for are recorded so a test can hold that a
-    member's slate is ranked from their own audience and nobody else's."""
+RANKED_ARGUMENTS = json.dumps(
+    {
+        "ranked": [
+            {
+                "unlock": "pr-babysitter",
+                "title": "PR watch",
+                "body": "Reports what each pull request waits on.",
+                "ask": "Build me a pull request watcher.",
+            }
+        ],
+        "check_in": None,
+    }
+)
 
-    texts: tuple[str, ...]
-    asked: list[frozenset[str]] = field(default_factory=list)
-
-    async def search(self, queries, reader, start=None, end=None):
-        raise AssertionError("the starters job browses memory; it never searches it")
-
-    def listable_kinds(self) -> tuple[str, ...]:
-        return ("fact",)
-
-    async def list_recent(self, subjects, limit, kinds=None, cursor=None):
-        self.asked.append(frozenset(subjects))
-        return ListingPage(
-            rows=tuple(
-                MemoryMatch(
-                    kind="fact",
-                    text=text,
-                    ref=None,
-                    created_at=datetime.now(UTC),
-                    subject=SHARED_SUBJECT,
-                )
-                for text in self.texts
-            )
-        )
+RECALLED = ("We ship a payments product.",)
 
 
 async def _seed_member() -> tuple[UUID, UUID]:
@@ -337,106 +326,128 @@ async def _seed_member() -> tuple[UUID, UUID]:
     return workspace_id, member_id
 
 
-RANKED_ARGUMENTS = json.dumps(
-    {
-        "ranked": [
-            {
-                "unlock": "pr-babysitter",
-                "title": "PR watch",
-                "body": "Reports what each pull request waits on.",
-                "ask": "Build me a pull request watcher.",
-            }
-        ],
-        "check_in": None,
-    }
-)
+def _cache(
+    member_id: UUID,
+    client: _SlateClient | None = None,
+    recalled: tuple[str, ...] = RECALLED,
+    solvent: bool = True,
+) -> StarterCache:
+    model = None if client is None else ModelAccess(_Resolver(client), "surface:web")
+    return StarterCache(
+        store=ScopedStore(extension="web"),
+        member_id=member_id,
+        agents=(),
+        recalled=recalled,
+        model=model,
+        solvent=solvent,
+    )
 
 
-async def test_a_ranked_slate_lands_under_the_members_subject_from_their_own_audience(
-    db: None,
-) -> None:
+async def _backdate(store: ScopedStore, key: str, field_name: str, minutes: float) -> None:
+    """Age a stamp the way the house tests a TTL — no test in this repo freezes the clock."""
+    held = await store.get(key)
+    assert isinstance(held, dict)
+    stamped = datetime.fromisoformat(str(held[field_name])) - timedelta(minutes=minutes)
+    await store.put(key, {**held, field_name: stamped.isoformat()})
+
+
+async def test_the_first_read_generates_and_stores_the_slate(db: None) -> None:
     workspace_id, member_id = await _seed_member()
     client = _SlateClient(RANKED_ARGUMENTS)
-    recall = _Recall(("We ship a payments product.",))
     with ws(workspace_id):
-        ctx = context_for(
-            "web",
-            frozenset(),
-            model_resolver=_Resolver(client),
-            model_job="web:starters",
-            member_context_read=True,
-            memory=MemorySearch(provider=recall),
-        )
-        await rank_starters(ctx)
-        stored = await ctx.store.get(starters_key(member_id))
+        slate = await _cache(member_id, client).read()
+        stored = await ScopedStore(extension="web").get(starters_key(member_id))
 
     assert client.calls == 1
-    assert recall.asked == [audience_subjects(conversation_audience(member_id))]
-    assert [entry.unlock for entry in Slate.model_validate(stored).ranked] == ["pr-babysitter"]
+    assert slate is not None
+    assert [entry.unlock for entry in slate.ranked] == ["pr-babysitter"]
+    assert Slate.model_validate(stored).prompt == SLATE_DIGEST
 
 
-async def test_a_workspace_that_has_not_moved_costs_no_model_call(db: None) -> None:
-    workspace_id, _member_id = await _seed_member()
-    client = _SlateClient(RANKED_ARGUMENTS)
-    recall = _Recall(("We ship a payments product.",))
-    with ws(workspace_id):
-        ctx = context_for(
-            "web",
-            frozenset(),
-            model_resolver=_Resolver(client),
-            model_job="web:starters",
-            member_context_read=True,
-            memory=MemorySearch(provider=recall),
-        )
-        await rank_starters(ctx)
-        await rank_starters(ctx)
-        assert client.calls == 1
-
-        recall.texts = ("We ship a payments product.", "We moved to annual billing.")
-        await rank_starters(ctx)
-        assert client.calls == 2
-
-
-async def test_a_narrowed_character_budget_re_ranks_the_slate_the_read_would_refuse(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace_id, _member_id = await _seed_member()
-    client = _SlateClient(RANKED_ARGUMENTS)
-    recall = _Recall(("We ship a payments product.",))
-    with ws(workspace_id):
-        ctx = context_for(
-            "web",
-            frozenset(),
-            model_resolver=_Resolver(client),
-            model_job="web:starters",
-            member_context_read=True,
-            memory=MemorySearch(provider=recall),
-        )
-        await rank_starters(ctx)
-        assert client.calls == 1
-
-        monkeypatch.setattr(
-            "ufo_ext_web.starters.SLATE_SYSTEM",
-            SLATE_SYSTEM.replace("68 characters", "40 characters"),
-        )
-        await rank_starters(ctx)
-        assert client.calls == 2
-
-
-async def test_a_member_with_no_memory_is_ranked_without_asking_the_model(db: None) -> None:
+async def test_a_slate_inside_its_ttl_costs_no_model_call(db: None) -> None:
     workspace_id, member_id = await _seed_member()
     client = _SlateClient(RANKED_ARGUMENTS)
     with ws(workspace_id):
-        ctx = context_for(
-            "web",
-            frozenset(),
-            model_resolver=_Resolver(client),
-            model_job="web:starters",
-            member_context_read=True,
-            memory=MemorySearch(provider=_Recall(())),
-        )
-        await rank_starters(ctx)
-        stored = await ctx.store.get(starters_key(member_id))
+        await _cache(member_id, client).read()
+        await _cache(member_id, client).read()
+        assert client.calls == 1
 
+        await _backdate(ScopedStore(extension="web"), starters_key(member_id), "generated_at", 31)
+        await _cache(member_id, client).read()
+        assert client.calls == 2
+
+
+async def test_changed_ranking_instructions_re_rank_inside_the_ttl(db: None) -> None:
+    workspace_id, member_id = await _seed_member()
+    client = _SlateClient(RANKED_ARGUMENTS)
+    store = ScopedStore(extension="web")
+    with ws(workspace_id):
+        await _cache(member_id, client).read()
+        held = await store.get(starters_key(member_id))
+        assert isinstance(held, dict)
+        await store.put(starters_key(member_id), {**held, "prompt": "a different digest"})
+        await _cache(member_id, client).read()
+
+    assert client.calls == 2
+
+
+async def test_a_failed_generation_answers_what_is_held_and_then_stands_down(db: None) -> None:
+    workspace_id, member_id = await _seed_member()
+    good = _SlateClient(RANKED_ARGUMENTS)
+    bad = _SlateClient(RANKED_ARGUMENTS, fails=True)
+    store = ScopedStore(extension="web")
+    with ws(workspace_id):
+        first = await _cache(member_id, good).read()
+        assert first is not None
+        await _backdate(store, starters_key(member_id), "generated_at", 31)
+        aged = await store.get(starters_key(member_id))
+
+        answered = await _cache(member_id, bad).read()
+        assert bad.calls == 1
+        # The member reads the ranking they already had rather than an error or an empty screen,
+        # and nothing overwrote it.
+        assert answered is not None
+        assert answered.ranked == first.ranked
+        assert await store.get(starters_key(member_id)) == aged
+
+        # The cooldown holds the next read back rather than walking into the same wall.
+        await _cache(member_id, bad).read()
+        assert bad.calls == 1
+        # And the claim was released, so a later read is free to try again.
+        assert await store.get(claim_key(member_id)) is None
+
+
+async def test_a_held_claim_leaves_the_second_reader_with_what_is_stored(db: None) -> None:
+    workspace_id, member_id = await _seed_member()
+    client = _SlateClient(RANKED_ARGUMENTS)
+    store = ScopedStore(extension="web")
+    with ws(workspace_id):
+        await store.put(claim_key(member_id), {"claimed_at": datetime.now(UTC).isoformat()})
+        assert await _cache(member_id, client).read() is None
+        assert client.calls == 0
+
+        await _backdate(store, claim_key(member_id), "claimed_at", 3)
+        assert await _cache(member_id, client).read() is not None
+        assert client.calls == 1
+
+
+async def test_a_refusing_balance_generates_nothing(db: None) -> None:
+    workspace_id, member_id = await _seed_member()
+    client = _SlateClient(RANKED_ARGUMENTS)
+    with ws(workspace_id):
+        assert await _cache(member_id, client, solvent=False).read() is None
     assert client.calls == 0
-    assert Slate.model_validate(stored).ranked == ()
+
+
+async def test_a_member_with_no_memory_is_never_ranked(db: None) -> None:
+    workspace_id, member_id = await _seed_member()
+    client = _SlateClient(RANKED_ARGUMENTS)
+    with ws(workspace_id):
+        assert await _cache(member_id, client, recalled=()).read() is None
+    assert client.calls == 0
+
+
+async def test_a_deploy_with_no_model_answers_without_one(db: None) -> None:
+    workspace_id, member_id = await _seed_member()
+    with ws(workspace_id):
+        assert await _cache(member_id, None).read() is None
