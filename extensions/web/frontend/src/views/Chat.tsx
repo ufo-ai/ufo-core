@@ -965,7 +965,7 @@ function Starters({ agentId }: { agentId: string }) {
         <PressRow
           glyph={
             <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
-              <BrandMark provider={unlock.providers[0].name} />
+              <BrandMark provider={unlock.providers[0].name} className="size-(--size-glyph)" />
             </span>
           }
           title={unlock.title}

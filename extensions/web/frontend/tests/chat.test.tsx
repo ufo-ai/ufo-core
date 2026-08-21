@@ -3250,6 +3250,12 @@ test("an unlock is an ask, not a departure: it names its accounts and says the b
     screen.queryByRole("link", { name: /Connect more accounts/ }),
   ).toBeNull();
 
+  // The account's mark draws in the glyph the rows above it draw, not at the square a connector
+  // tile takes: jsdom lays nothing out, so the size it is asked for is what a test can hold.
+  const mark = row.firstElementChild!.firstElementChild!.getAttribute("class") ?? "";
+  expect(mark).toContain("size-(--size-glyph)");
+  expect(mark).not.toContain("--size-brand-mark");
+
   // The press says the build, never a connect: the agent asks for what it turns out not to hold,
   // and the connect control rides its reply.
   await userEvent.click(row);
