@@ -2,6 +2,7 @@ import {
   IconAddressBook,
   IconBrandAirtable,
   IconBrandAsana,
+  IconBrandBitbucket,
   IconBrandDiscord,
   IconBrandFigma,
   IconBrandGithub,
@@ -27,6 +28,7 @@ import { cn } from "@/lib/cn";
 export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
   airtable: IconBrandAirtable,
   asana: IconBrandAsana,
+  bitbucket: IconBrandBitbucket,
   attio: IconAddressBook,
   discord: IconBrandDiscord,
   figma: IconBrandFigma,

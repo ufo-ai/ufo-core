@@ -7,6 +7,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { Table, Td } from "@/components/ui/table";
+import { BRAND_MARKS } from "@/lib/brandMark";
 import { Notice } from "@/kernel/panel";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 
@@ -240,6 +241,33 @@ test("a transcript bubble wraps an unbreakable string instead of widening the pa
 test("the working pulse yields to reduced motion in the built sheet", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
+});
+
+const BRANDS = join(import.meta.dirname, "..", "src", "assets", "brands");
+
+/** Tailwind scans this directory, so a mark's own words reach the compiler as class candidates and
+ *  a colour-bearing utility name emits a literal the palette does not own. A colour function
+ *  survives the data URI Vite builds, where `#` does not. Both land in the sheet as the mark's
+ *  fault and the palette's failure, so they are named here, at the file. */
+const MARK_TOKENS = /\b(?:ring|shadow|border|blur)\b|rgba?\(|hsla?\(/;
+const SERVED = [".svg", ".png"];
+
+test("a vendored mark carries nothing the theme or the surface refuses", () => {
+  const offenders = readdirSync(BRANDS)
+    .filter((name) => name.endsWith(".svg"))
+    .filter((name) => MARK_TOKENS.test(readFileSync(join(BRANDS, name), "utf8")));
+  expect(offenders).toEqual([]);
+  const unserved = readdirSync(BRANDS).filter(
+    (name) => !SERVED.some((suffix) => name.endsWith(suffix)),
+  );
+  expect(unserved).toEqual([]);
+});
+
+test("every mark the portal claims is one the built sheet can draw", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  const declared = new Set([...css.matchAll(/--brand-([a-z_]+):url\(/g)].map((hit) => hit[1]));
+  expect([...BRAND_MARKS].filter((mark) => !declared.has(mark))).toEqual([]);
+  expect([...declared].filter((name) => !BRAND_MARKS.has(name))).toEqual([]);
 });
 
 test("the reading plane's tokens survive into the built sheet", () => {

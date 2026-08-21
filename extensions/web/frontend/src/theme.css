@@ -317,39 +317,121 @@
   --marker-width: 2px;
 }
 
-/* The vendored provider marks a first-run tile is picked by, each drawn in its own product's
-   colours so a member finds the one they use by its shape rather than by reading every label. A
+/* The vendored provider marks a first-run tile and a connector row are drawn by, each in its own
+   product's colours so a member finds the one they use by its shape rather than by reading every
+   label. A
    `url()` is not a colour, so `light-dark()` cannot carry a pair — the one mark that needs both
    schemes restates the mechanism the palette uses instead: the pinning class first, the preference
    only where nothing is pinned. A provider named here is one the portal draws in full colour, and
    every other takes its glyph. */
 :root {
+  --brand-airtable: url("./assets/brands/airtable.png");
   --brand-asana: url("./assets/brands/asana.svg");
   --brand-attio: url("./assets/brands/attio.png");
+  --brand-basecamp: url("./assets/brands/basecamp.png");
+  --brand-box: url("./assets/brands/box.png");
+  --brand-cal: url("./assets/brands/cal.png");
+  --brand-calendly: url("./assets/brands/calendly.svg");
+  --brand-canva: url("./assets/brands/canva.svg");
+  --brand-capsule_crm: url("./assets/brands/capsule_crm.png");
+  --brand-clickup: url("./assets/brands/clickup.svg");
+  --brand-contentful: url("./assets/brands/contentful.png");
+  --brand-crowdin: url("./assets/brands/crowdin.png");
+  --brand-dart: url("./assets/brands/dart.png");
+  --brand-daytona: url("./assets/brands/daytona.png");
+  --brand-dialpad: url("./assets/brands/dialpad.png");
   --brand-discord: url("./assets/brands/discord.svg");
+  --brand-discordbot: url("./assets/brands/discordbot.png");
+  --brand-dropbox: url("./assets/brands/dropbox.svg");
+  --brand-dub: url("./assets/brands/dub.svg");
+  --brand-eventbrite: url("./assets/brands/eventbrite.png");
+  --brand-excel: url("./assets/brands/excel.svg");
+  --brand-exist: url("./assets/brands/exist.png");
+  --brand-facebook: url("./assets/brands/facebook.svg");
+  --brand-fathom: url("./assets/brands/fathom.png");
   --brand-figma: url("./assets/brands/figma.svg");
+  --brand-freeagent: url("./assets/brands/freeagent.png");
   --brand-github: url("./assets/brands/github.svg");
+  --brand-gitlab: url("./assets/brands/gitlab.svg");
   --brand-gmail: url("./assets/brands/gmail.svg");
+  --brand-gong: url("./assets/brands/gong.png");
+  --brand-google_analytics: url("./assets/brands/google_analytics.svg");
+  --brand-google_maps: url("./assets/brands/google_maps.svg");
   --brand-googlecalendar: url("./assets/brands/googlecalendar.svg");
   --brand-googledrive: url("./assets/brands/googledrive.svg");
+  --brand-googlemeet: url("./assets/brands/googlemeet.svg");
   --brand-googlesheets: url("./assets/brands/googlesheets.svg");
+  --brand-googleslides: url("./assets/brands/googleslides.svg");
+  --brand-gumroad: url("./assets/brands/gumroad.png");
+  --brand-harvest: url("./assets/brands/harvest.png");
+  --brand-hubspot: url("./assets/brands/hubspot.png");
+  --brand-hugging_face: url("./assets/brands/hugging_face.svg");
+  --brand-instagram: url("./assets/brands/instagram.svg");
+  --brand-kit: url("./assets/brands/kit.png");
   --brand-linear: url("./assets/brands/linear.svg");
+  --brand-linkedin: url("./assets/brands/linkedin.svg");
+  --brand-linkhut: url("./assets/brands/linkhut.png");
+  --brand-mailchimp: url("./assets/brands/mailchimp.png");
+  --brand-microsoft_teams: url("./assets/brands/microsoft_teams.svg");
+  --brand-miro: url("./assets/brands/miro.png");
+  --brand-monday: url("./assets/brands/monday.png");
+  --brand-moneybird: url("./assets/brands/moneybird.png");
   --brand-notion: url("./assets/brands/notion.svg");
+  --brand-one_drive: url("./assets/brands/one_drive.svg");
+  --brand-outlook: url("./assets/brands/outlook.svg");
+  --brand-pagerduty: url("./assets/brands/pagerduty.png");
+  --brand-prisma: url("./assets/brands/prisma.svg");
+  --brand-productboard: url("./assets/brands/productboard.png");
+  --brand-pushbullet: url("./assets/brands/pushbullet.png");
+  --brand-reddit: url("./assets/brands/reddit.svg");
+  --brand-reddit_ads: url("./assets/brands/reddit_ads.png");
+  --brand-roam: url("./assets/brands/roam.png");
+  --brand-salesforce: url("./assets/brands/salesforce.svg");
+  --brand-sentry: url("./assets/brands/sentry.svg");
+  --brand-share_point: url("./assets/brands/share_point.svg");
+  --brand-shippo: url("./assets/brands/shippo.png");
   --brand-slack: url("./assets/brands/slack.svg");
+  --brand-slackbot: url("./assets/brands/slackbot.png");
+  --brand-splitwise: url("./assets/brands/splitwise.png");
+  --brand-stack_exchange: url("./assets/brands/stack_exchange.png");
+  --brand-strava: url("./assets/brands/strava.png");
   --brand-stripe: url("./assets/brands/stripe.svg");
+  --brand-supabase: url("./assets/brands/supabase.svg");
+  --brand-ticketmaster: url("./assets/brands/ticketmaster.png");
+  --brand-ticktick: url("./assets/brands/ticktick.png");
+  --brand-timely: url("./assets/brands/timely.png");
+  --brand-todoist: url("./assets/brands/todoist.svg");
+  --brand-toneden: url("./assets/brands/toneden.png");
+  --brand-trello: url("./assets/brands/trello.svg");
+  --brand-typeform: url("./assets/brands/typeform.png");
+  --brand-wakatime: url("./assets/brands/wakatime.svg");
+  --brand-webex: url("./assets/brands/webex.png");
+  --brand-whatsapp: url("./assets/brands/whatsapp.svg");
+  --brand-wrike: url("./assets/brands/wrike.png");
+  --brand-youtube: url("./assets/brands/youtube.svg");
+  --brand-zendesk: url("./assets/brands/zendesk.png");
+  --brand-zeplin: url("./assets/brands/zeplin.png");
+  --brand-zoho: url("./assets/brands/zoho.png");
+  --brand-zoho_bigin: url("./assets/brands/zoho_bigin.png");
   --brand-zoom: url("./assets/brands/zoom.svg");
 }
 
-/* GitHub draws its mark in one ink and leaves the page to supply the contrast, which the dark pane
-   does not. Every other mark carries its own colours and reads on both panes unchanged. */
+/* These four draw in one ink and leave the page to supply the contrast, which the dark pane does
+   not. Every other mark carries its own colours and reads on both panes unchanged. */
 @media (prefers-color-scheme: dark) {
   :root:where(:not(.light)) {
+    --brand-dub: url("./assets/brands/dub-dark.svg");
     --brand-github: url("./assets/brands/github-dark.svg");
+    --brand-prisma: url("./assets/brands/prisma-dark.svg");
+    --brand-wakatime: url("./assets/brands/wakatime-dark.svg");
   }
 }
 
 :root:where(.dark) {
+  --brand-dub: url("./assets/brands/dub-dark.svg");
   --brand-github: url("./assets/brands/github-dark.svg");
+  --brand-prisma: url("./assets/brands/prisma-dark.svg");
+  --brand-wakatime: url("./assets/brands/wakatime-dark.svg");
 }
 
 /* The same marks drawn inside a filled act. That act is ink on the pane, so its ground is the
