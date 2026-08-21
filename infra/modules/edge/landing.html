@@ -269,6 +269,19 @@ body {
   .hero { padding-left: 16px; padding-right: 16px; }
 }
 
+/* --- phone ---------------------------------------------------------------
+   A phone sits on both clamp floors above — 40px of headline under 88px of
+   padding — which reads small and hangs the line under the bar rather than
+   centring it in the sky. 20.5vw is 80px at 390 and 74px at 360, the widest
+   "Go further." that still holds one line inside the gutters there; 84px caps
+   a 480px phone. The art is square and cover-fit, so the heads land at 0.406
+   of the viewport height, and 88px + 8vh centres the line above them at 360,
+   390 and 430. Stops at 480 so nothing between 481 and 640 moves. */
+@media (max-width: 480px) {
+  .hero { padding-top: calc(88px + 8vh); }
+  .display { font-size: clamp(40px, 20.5vw, 84px); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .btn { transition: none; }
 }
