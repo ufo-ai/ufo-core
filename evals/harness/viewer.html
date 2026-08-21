@@ -85,7 +85,7 @@ select {
 .button:hover { border-color: var(--line-strong); background: #252c25; }
 .summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  grid-template-columns: repeat(6, minmax(150px, 1fr));
   border-bottom: 1px solid var(--line);
 }
 .metric { min-height: 108px; padding: 19px 22px; border-right: 1px solid var(--line); }
@@ -269,8 +269,8 @@ pre {
   .topbar { position: static; grid-template-columns: 1fr; }
   .summary { grid-template-columns: repeat(2, 1fr); }
   .score-grid { grid-template-columns: 1fr; }
-  .metric:nth-child(2) { border-right: 0; }
-  .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .metric:nth-child(2n) { border-right: 0; }
+  .metric:nth-child(-n+4) { border-bottom: 1px solid var(--line); }
   .workspace { display: block; }
   .column { border-right: 0; border-bottom: 1px solid var(--line); }
   .column-head { position: static; }
@@ -394,9 +394,26 @@ function comparableTotals(base, current) {
   }
   return totals;
 }
+function usd(microUsd) {
+  const dollars = microUsd / 1e6;
+  const decimals = dollars === 0 || dollars >= 1 ? 2 : dollars >= 0.01 ? 4 : 6;
+  return `$${dollars.toFixed(decimals)}`;
+}
+function resourceTotals(cases) {
+  const attempts = cases.map(item => (item.evidence && item.evidence.attempts) || []);
+  const costRecorded = attempts.length > 0 && attempts.every(items =>
+    items.length > 0 && items.every(item => typeof item.costMicroUsd === 'number'));
+  const latencyRecorded = attempts.length > 0 && attempts.every(items =>
+    items.length > 0 && items.every(item => item.timing && typeof item.timing.wall_ms === 'number'));
+  return {
+    cost: costRecorded ? attempts.flat().reduce((total, item) => total + item.costMicroUsd, 0) : null,
+    latency: latencyRecorded ? attempts.flat().reduce((total, item) => total + item.timing.wall_ms, 0) : null
+  };
+}
 function summaryMarkup(base, current) {
   const cases = current ? current.reports.flatMap(report => report.cases) : [];
   const comparable = comparableTotals(base, current);
+  const resources = resourceTotals(cases);
   const delta = comparable.scored
     ? comparable.currentPassed / comparable.scored - comparable.basePassed / comparable.scored : 0;
   const excluded = cases.filter(item => item.excluded).length;
@@ -404,6 +421,12 @@ function summaryMarkup(base, current) {
     <div class="metric"><div class="metric-label">Current pass rate</div>
       <div class="metric-value">${pct(rate(cases))}</div>
       <div class="metric-note">${passed(cases)} / ${scored(cases).length} scored cases</div></div>
+    <div class="metric"><div class="metric-label">Total cost</div>
+      <div class="metric-value">${resources.cost == null ? '—' : usd(resources.cost)}</div>
+      <div class="metric-note">${resources.cost == null ? 'Not recorded' : `${usd(resources.cost / cases.length)} per case`}</div></div>
+    <div class="metric"><div class="metric-label">Total latency</div>
+      <div class="metric-value">${resources.latency == null ? '—' : duration(resources.latency)}</div>
+      <div class="metric-note">${resources.latency == null ? 'Not recorded' : `${duration(Math.round(resources.latency / cases.length))} per case`}</div></div>
     <div class="metric"><div class="metric-label">Comparable delta</div>
       <div class="metric-value ${delta > 0 ? 'positive' : delta < 0 ? 'negative' : 'neutral'}">${comparable.scored ? points(delta) : '—'}</div>
       <div class="metric-note">${comparable.scored} digest-matched cases</div></div>

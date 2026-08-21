@@ -7,6 +7,7 @@ turn row and the transcript the agent would have produced, then returns the turn
 real work — invoke, reconstruct, grade — is what the tests assert, read back through the corpus."""
 
 import asyncio
+import subprocess
 from base64 import b64encode, urlsafe_b64decode
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
@@ -5639,6 +5640,7 @@ def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, obj
                 "artifactError": None,
                 "tokens": 140,
                 "costMicroUsd": 9,
+                "timing": {"wall_ms": 4_000, "turns": [], "slowest": [], "error": ""},
                 "compactions": 1,
                 "compactionRecords": [
                     {
@@ -5729,6 +5731,8 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     html = (tmp_path / "index.html").read_text()
     assert "Comparable delta" in html
     assert "Regressions" in html
+    assert "Total cost" in html
+    assert "Total latency" in html
     assert "Suite scores" in html
     assert "data-score" in html
     assert 'class="leaf-label"' in html
@@ -5782,6 +5786,56 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert payload["judgeRevision"] == JUDGE_REVISION
     assert payload["metrics"] == [{"name": "f1", "value": 0.75}]
     assert "f1 75.0%" in report.console_summary
+
+
+def test_eval_viewer_sums_attempt_cost_and_latency_per_archived_case() -> None:
+    cases: list[EvalCaseResult] = []
+    for index in range(3):
+        evidence = _debug_evidence("done")
+        attempts = cast(list[dict[str, object]], evidence["attempts"])
+        if index == 0:
+            attempts.append(dict(attempts[0]))
+        cases.append(
+            EvalCaseResult(name=f"case-{index}", passed=True, reason="ok", evidence=evidence)
+        )
+    report = EvalReport(
+        name="resource-summary",
+        suite="capability",
+        digest="sha256:abc",
+        cases=tuple(cases),
+    )
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 8, 20, tzinfo=UTC),
+        label="resources",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123",
+        reports=(report,),
+    )
+    html = render_viewer((run,), run.id).decode()
+    payload = html.split('<script id="eval-data" type="application/json">', 1)[1].split(
+        "</script>", 1
+    )[0]
+    script = html.split("<script>\n", 1)[1].rsplit("\nrender();\n</script>", 1)[0]
+    program = (
+        f"const payload = {dumps(payload)};"
+        "global.document = {getElementById: id => id === 'eval-data' "
+        "? {textContent: payload} : {}};"
+        "global.location = {hash: ''};"
+        "global.history = {replaceState() {}};"
+        "global.window = {addEventListener() {}};"
+        f"{script}\nprocess.stdout.write(summaryMarkup(null, runs[0]));"
+    )
+
+    rendered = subprocess.run(
+        ("node", "-e", program), check=True, capture_output=True, text=True
+    ).stdout
+
+    assert "$0.000036" in rendered
+    assert "$0.000012 per case" in rendered
+    assert "16.0s" in rendered
+    assert "5.3s per case" in rendered
 
 
 @pytest.mark.docker
