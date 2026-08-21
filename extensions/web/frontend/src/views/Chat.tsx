@@ -56,7 +56,7 @@ import {
 } from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
-import { workspaceHash } from "@/lib/route";
+import { sectionHash } from "@/lib/route";
 import {
   answerQuestions,
   refreshTranscript,
@@ -977,7 +977,7 @@ function Starters({ agentId }: { agentId: string }) {
           onPress={() => setPendingAsk(agentId, unlock.ask, true)}
         />
       ) : (
-        <a href={workspaceHash("connectors")} className={STARTER_ROW}>
+        <a href={sectionHash("connectors")} className={STARTER_ROW}>
           <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
             <IconPlug className="size-(--size-glyph) text-ink-soft" aria-hidden />
           </span>

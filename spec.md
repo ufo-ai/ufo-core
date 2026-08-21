@@ -550,19 +550,19 @@ Admitting it costs nothing, because a prepared intent runs no model round — th
 verb and terminates — so an overdrawn workspace cannot spend against it, and no other tool is
 exempt.
 
-The agents screen is master-detail: a thin index of the agents themselves beside one selected
-agent's pane — the bare route shows the main agent — with the topology graph as the index's other
-reading of the same pane. The pane is two equal halves, read at once rather than switched between,
-because they are one fact: talking to the app on the left, what it built on the right. The left
-half opens on the conversation that moved last and carries the composer where the portal founded
-that conversation, a read-only transcript where another surface holds it, and the acknowledgement
-gate where the member has not opened it; every one of the app's conversations is reached from the
-switcher its title carries. The right half is the agent's homepage — the hosted site its binding
-names, framed bare (no site header) through the sites frame's per-visit gate, which for a homepage
-answers the agent's visibility. The homepage read has three states, so the page a member is waiting
-for is not the page that is not there: `building` while the seed run that builds an agent's first
-homepage is still working, drawn as the shape a page takes; `set` once one is bound; and `none`,
-where the half is not drawn at all and the pane is one column. Beside
+The agents screen shows one agent's pane whole — the bare route shows the main agent — and
+switching agents is the sidebar's Applications flyout, which lists every app with its live status
+and whose pins place rows in the sidebar. The pane is the agent's homepage — the hosted site its
+binding names, framed bare (no site header) through the sites frame's per-visit gate, which for a
+homepage answers the agent's visibility — headed by the agent's name, the way out to the page, its
+settings, and a chat toggle that opens the conversation beside the page at the threads width.
+That conversation column opens on the conversation that moved last and carries the composer where
+the portal founded that conversation, a read-only transcript where another surface holds it, and
+the acknowledgement gate where the member has not opened it; every one of the app's conversations
+is reached from the switcher its title carries. The homepage read has three states, so the page a
+member is waiting for is not the page that is not there: `building` while the seed run that builds
+an agent's first homepage is still working, drawn as the shape a page takes; `set` once one is
+bound; and `none`, where the pane draws the conversation column alone. Beside
 chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its homepage (the frame link
 of the hosted site `set_homepage` bound — a background job seeds one homepage-build turn per

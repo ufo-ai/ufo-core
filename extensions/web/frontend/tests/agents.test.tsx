@@ -93,9 +93,16 @@ const ASKED = {
   cost_micro_usd: 2_000_000,
 };
 
+async function raisedIndex(): Promise<HTMLElement> {
+  if (!screen.queryByRole("navigation", { name: "Apps" })) {
+    fireEvent.click(await screen.findByRole("button", { name: "Applications" }));
+  }
+  return agentIndex();
+}
+
 async function openWizard() {
-  await userEvent.click(await screen.findByRole("button", { name: "Apps" }));
-  await userEvent.click(await screen.findByRole("button", { name: "New application" }));
+  const index = await raisedIndex();
+  await userEvent.click(within(index).getByRole("button", { name: "New application" }));
   return screen.findByRole("region", { name: "App Builder" });
 }
 
@@ -108,7 +115,7 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("New application opens the wizard speaking in the pane, beside the rail the screen keeps", async () => {
+test("New application opens the wizard speaking in the pane, and the flyout keeps its apps", async () => {
   const sent: { url: string; body: string }[] = [];
   wire({
     "/api/agents": () => boot([AGENT], ADMIN),
@@ -128,7 +135,7 @@ test("New application opens the wizard speaking in the pane, beside the rail the
   expect(sent[0].body).toBe(OPENING);
   expect(within(wizard).getByText(OPENING)).toBeTruthy();
   expect(within(wizard).getByLabelText("Message the app")).toBeTruthy();
-  expect(within(await agentIndex()).getByText("Assistant")).toBeTruthy();
+  expect(within(await raisedIndex()).getByText("Assistant")).toBeTruthy();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
@@ -189,7 +196,7 @@ test("a conversation the composer founds after a failed opening send is still th
   // The bar reads the founded conversation's own board, and the rail row takes its title — neither
   // is reachable from a wizard that lost the conversation.
   expect(await waitFor(progress)).toBeTruthy();
-  expect(within(await agentIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(within(await raisedIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 test("the rail names the run in flight and takes the conversation's own title", async () => {
@@ -208,20 +215,20 @@ test("the rail names the run in flight and takes the conversation's own title", 
   });
   render(<Portal />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Apps" }));
-  const index = await agentIndex();
+  const index = await raisedIndex();
   expect(within(index).queryByText("App Builder")).toBeNull();
 
   await userEvent.click(within(index).getByRole("button", { name: "New application" }));
 
   // Until admission answers there is no conversation and nothing to call it, so the row states the
   // run alone; the title the chat route hands back names it from then on.
-  expect(await within(index).findByText("App Builder")).toBeTruthy();
-  expect(within(index).queryByRole("button", { name: /App Builder/ })).toBeNull();
+  const raised = await raisedIndex();
+  expect(await within(raised).findByText("App Builder")).toBeTruthy();
+  expect(within(raised).queryByRole("button", { name: /App Builder/ })).toBeNull();
 
   answer();
 
-  expect(await within(index).findByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(await within(raised).findByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 test("the progress bar reads the run's own phase board and advances with it", async () => {
@@ -294,7 +301,7 @@ test("an answer to the wizard's question rides the turn that asked it", async ()
   // The question rides the turn's terminal, and a member can only answer in a pane that has drawn
   // the conversation — so the emit waits for the bind the rail's title states, the way a real
   // terminal can only follow a stream the page already tails.
-  expect(await within(await agentIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(await within(await raisedIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
   StreamFake.last().emit("terminal", {
     ...ASKED,
     question: {
@@ -334,6 +341,7 @@ test("the app the last phase creates reaches the rail when the turn settles", as
 
   await waitFor(() => expect(progress().getAttribute("aria-valuenow")).toBe("5"));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await raisedIndex();
   await openAgentRow("Research");
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
@@ -346,7 +354,7 @@ test("the New application act stands under the app rows, at the foot of the inde
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
 
-  const index = await agentIndex();
+  const index = await raisedIndex();
   const act = within(index).getByRole("button", { name: "New application" });
   const last = within(index).getByRole("button", { name: /^Research/ });
 
@@ -366,7 +374,8 @@ test("the drawer holds the apps index at a phone width, and a pick shuts it", as
 
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
-  const index = within(drawer).getByRole("navigation", { name: "Apps" });
+  const index = await raisedIndex();
+  expect(drawer.contains(index)).toBe(true);
   await userEvent.click(within(index).getByRole("button", { name: /^Research/ }));
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
@@ -388,7 +397,7 @@ test("closing the wizard gives the pane back to the app and clears the run's row
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
-  expect(within(await agentIndex()).queryByText("App Builder")).toBeNull();
+  expect(within(await raisedIndex()).queryByText("App Builder")).toBeNull();
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
 });
 
@@ -427,7 +436,7 @@ test("a close before the founding send answers keeps the pane closed and founds 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(sent).toEqual([OPENING]);
   expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull();
-  expect(within(await agentIndex()).queryByText(/App Builder/)).toBeNull();
+  expect(within(await raisedIndex()).queryByText(/App Builder/)).toBeNull();
 });
 
 /** The run is the key's, not the mount's: a wizard reopened while its founding send is still in
@@ -464,7 +473,7 @@ test("a wizard reopened during its founding send binds to the run the first moun
   );
   expect(sent).toEqual([OPENING]);
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  expect(within(await agentIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(within(await raisedIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 /** The run is the key's, not the screen's: leaving for another screen unmounts every pane here,
@@ -485,13 +494,14 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
-  await userEvent.click(screen.getByRole("button", { name: "Chat" }));
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
-  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
+  const index = await raisedIndex();
+  await userEvent.click(within(index).getByRole("button", { name: /App Builder/ }));
 
   const wizard = await screen.findByRole("region", { name: "App Builder" });
   expect(await within(wizard).findByText(saying(OPENING))).toBeTruthy();
-  expect(within(await agentIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(await within(await raisedIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
   expect(sent).toEqual([OPENING]);
 });
 
@@ -514,9 +524,10 @@ test("an app row leaves the run standing, and the rail's own row returns to it",
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
+  await raisedIndex();
   await openAgentRow("Research");
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
-  const index = await agentIndex();
+  const index = await raisedIndex();
   const row = await within(index).findByRole("button", { name: /App Builder/ });
 
   await userEvent.click(row);
@@ -559,7 +570,7 @@ test("a founding send from the chat screen never blocks the wizard's own", async
 
   answerChat();
   await waitFor(() => expect(within(wizard).queryByText("About our numbers.")).toBeNull());
-  expect(within(await agentIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(within(await raisedIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 /** A founding send the key turns away is refused to its caller and worn by the key as a fault —
@@ -594,8 +605,7 @@ test("each row in the index draws its own app's mark, and states nothing by it",
   wire({ "/transcript": () => json({ messages: [] }) });
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
-  const index = within(await agentIndex());
+  const index = within(await raisedIndex());
 
   const assistant = index.getByRole("button", { name: /^Assistant/ });
   expect(assistant.querySelector(".element-icon-propylon")).toBeTruthy();
@@ -736,7 +746,7 @@ test("the index sorts a working app as now, a resting one by its last activity, 
   location.hash = "#/agents";
   render(<App agents={[AGENT, RESEARCH, SCRIBE]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = await agentIndex();
+  const index = await raisedIndex();
   await waitFor(() => {
     const rows = within(index).getAllByRole("button", { name: /^(Assistant|Research|Scribe)/ });
     expect(rows.map((row) => row.querySelector(".text-label")!.textContent)).toEqual([
@@ -764,7 +774,7 @@ test("a working row prints its work under the name, in plain text and with no to
     <App agents={[AGENT, RESEARCH, SCRIBE, WATCHER]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  const index = await agentIndex();
+  const index = await raisedIndex();
   const row = (name: RegExp) => within(index).getByRole("button", { name });
   // The line is drawn a character at a time, so what a reader is given is the whole line beside
   // those cells and the cells themselves are hidden — which is what the row is named by.
@@ -789,9 +799,8 @@ test("a resting row holds its status at the pointer, and one without a status tr
   location.hash = "#/agents";
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = await agentIndex();
+  const index = await raisedIndex();
   const row = () => within(index).getByRole("button", { name: /^Research/ });
-  await waitFor(() => expect(row().getAttribute("data-state")).toBe("closed"));
   fireEvent.focus(row());
   expect((await screen.findByRole("tooltip")).textContent).toBe("Active 5h ago");
   fireEvent.blur(row());
@@ -819,7 +828,7 @@ test("the avatar dot reads live on work in flight, blocked on parked or failed, 
     <App agents={[AGENT, RESEARCH, SCRIBE, WATCHER]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  const index = await agentIndex();
+  const index = await raisedIndex();
   const dot = (name: RegExp, tone: string) =>
     within(index).getByRole("button", { name }).querySelector("." + tone);
   await waitFor(() => expect(dot(/^Assistant/, "bg-live")).toBeTruthy());
@@ -845,7 +854,7 @@ test("a row keeps the member's focus as its status gains and loses a tooltip", a
   location.hash = "#/agents";
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = await agentIndex();
+  const index = await raisedIndex();
   const row = () => within(index).getByRole("button", { name: /^Research/ });
   await waitFor(() => expect(row().querySelector(".bg-live")).toBeTruthy());
   row().focus();
@@ -854,9 +863,12 @@ test("a row keeps the member's focus as its status gains and loses a tooltip", a
   // The work ends, the row loses its line and gains a tooltip: the same element wears both, so
   // whoever was standing on it still is.
   working = false;
-  await waitFor(() => expect(row().getAttribute("data-state")).toBe("closed"));
+  await waitFor(() => expect(row().querySelector(".bg-live")).toBeNull(), {
+    timeout: 2 * WORKING_STATUS_MS,
+  });
   expect(document.activeElement).toBe(row());
-});
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Active 5h ago");
+}, 15_000);
 
 /** A presence read is nobody's errand: no member action re-runs it, so a poll that gave up on one
  *  refusal would leave the rail stating the workspace had gone quiet until the screen was left. */
@@ -881,6 +893,8 @@ test("a status read that fails after answering keeps polling and recovers", asyn
         await Promise.resolve();
       });
     };
+    await settle(0);
+    fireEvent.click(screen.getByRole("button", { name: "Applications" }));
     await settle(0);
     const row = () => screen.getByRole("button", { name: /^Research/ });
     expect(row().querySelector(".bg-live")).toBeTruthy();
@@ -921,7 +935,7 @@ test("the index row and the pane header draw the app's name in Title Case", asyn
   location.hash = "#/agents/" + SECOND_ID;
   render(<App agents={[AGENT, REVIEWER]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = within(await agentIndex());
+  const index = within(await raisedIndex());
   expect(index.getByRole("button", { name: /^Code Reviewer/ })).toBeTruthy();
   expect(index.queryByText("code reviewer")).toBeNull();
 
@@ -988,4 +1002,24 @@ test("the app pane's header starts a chat with the app it shows, standing with t
 
   await waitFor(() => expect(sent.length).toBe(1));
   expect(sent[0]).toBe("/surface/web/agents/" + SECOND_ID + "/chat?conversation=new");
+});
+
+test("the wizard's bare address founds nothing and forwards to the apps screen", async () => {
+  const sent: string[] = [];
+  wire({
+    "/api/agents": () => boot([AGENT], MEMBER),
+    "/chat": (url) => {
+      sent.push(url);
+      return json(OPENED);
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/builder";
+  render(<Portal />);
+
+  await screen.findByRole("region", { name: agentName(AGENT.name) });
+  await waitFor(() => expect(location.hash).toBe("#/agents"));
+  expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull();
+  expect(StreamFake.opened.length).toBe(0);
+  expect(sent).toEqual([]);
 });

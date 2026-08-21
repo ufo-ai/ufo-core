@@ -341,7 +341,9 @@ export async function openRow(name: string): Promise<void> {
   await pressRow(name);
 }
 
-/** The agents screen's index column. */
+/** The apps index, which the sidebar's Applications flyout holds while it is open. The caller
+ *  raises the flyout first — with `fireEvent.click` on the "Applications" header button, because
+ *  `userEvent`'s hover opens the flyout and its click then toggles it shut again. */
 export function agentIndex(): Promise<HTMLElement> {
   return screen.findByRole("navigation", { name: "Apps" });
 }
@@ -351,27 +353,23 @@ export function agentIndex(): Promise<HTMLElement> {
  *  also the switcher's own control while nothing is open. */
 export const FRESH = "New conversation";
 
-/** Open one of an app's conversations: the title of the one the half holds is the control, and the
- *  conversations it lists are what a press picks between. */
-export async function pickConversation(held: string, wanted: string): Promise<void> {
-  await userEvent.click(await screen.findByRole("button", { name: held }));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: wanted }));
-}
-
 export async function openAgentRow(name: string): Promise<void> {
   const index = await agentIndex();
-  await userEvent.click(within(index).getByRole("button", { name: new RegExp("^" + name) }));
+  await userEvent.click(
+    await within(index).findByRole("button", { name: new RegExp("^" + name) }),
+  );
 }
 
-/** An agent's settings, which stand in a dialog the gear in the agent's own pane header opens
- *  rather than on a tab of the agent's page. The dialog opens on Settings; `tab` reaches the
- *  other three. */
+/** An agent's settings, which stand in a dialog the gear in the agent's own pane opens rather
+ *  than on a tab of the agent's page. The gear is found by its own label rather than inside a
+ *  region, because which half wears it depends on the app: the homepage titlebar where one is set
+ *  or building, the conversation header where the app has none. The dialog opens on Settings;
+ *  `tab` reaches the other three. */
 export async function openAgentSettings(
   name = "Assistant",
   tab: "Settings" | "Connectors" | "Skills" | "Scheduled" = "Settings",
 ): Promise<HTMLElement> {
-  const pane = await screen.findByRole("region", { name });
-  await userEvent.click(within(pane).getByRole("button", { name: "Settings for " + name }));
+  await userEvent.click(await screen.findByRole("button", { name: "Settings for " + name }));
   const dialog = await screen.findByRole("dialog");
   if (tab !== "Settings") {
     await userEvent.click(within(dialog).getByRole("tab", { name: tab }));

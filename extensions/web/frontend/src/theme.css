@@ -208,6 +208,10 @@
   --breakpoint-narrow: 720px;
 
   --container-sidebar: 240px;
+  /* The sidebar collapsed to its glyph column: wide enough for one control and its focus ring. */
+  --container-rail: 48px;
+  /* The applications grid's tile floor: wide enough for a mark over a one-line name. */
+  --container-tile: 180px;
   /* The column an app's conversations are read in: wider than the app index beside it, because a
      thread row carries a subject, its meta line, and the moment it last moved. */
   --container-threads: 360px;

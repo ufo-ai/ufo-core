@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   IconApps,
-  IconFile,
+  IconBooks,
   IconMessage,
   IconPlug,
   IconPlus,
@@ -48,8 +48,9 @@ const WORKING = "Searching…";
 const CHORD = "k";
 
 const SECTION_ICONS: Record<Section, TablerIcon> = {
-  artifacts: IconFile,
+  artifacts: IconBooks,
   radar: IconRadar,
+  connectors: IconPlug,
 };
 
 /** Where the bar reaches, in the order it lists them. These rows are the same destinations as the
@@ -63,7 +64,6 @@ const PLACES: { label: string; hash: string; icon: TablerIcon }[] = [
     hash: sectionHash(section),
     icon: SECTION_ICONS[section],
   })),
-  { label: "Connectors", hash: workspaceHash("connectors"), icon: IconPlug },
   { label: "Workspace", hash: workspaceHash("team"), icon: IconUsers },
 ];
 
@@ -77,10 +77,12 @@ const PLACES: { label: string; hash: string; icon: TablerIcon }[] = [
 export function Spotlight({
   agents,
   className,
+  label,
   onOpen,
 }: {
   agents: Agent[];
   className?: string;
+  label?: React.ReactNode;
   onOpen: (hash: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -175,7 +177,8 @@ export function Spotlight({
           aria-keyshortcuts="Meta+K"
           className={cn(className, open && "bg-fill")}
         >
-          <IconSearch className="size-(--size-glyph)" aria-hidden />
+          <IconSearch className="size-(--size-glyph) shrink-0" aria-hidden />
+          {label}
         </button>
       </DialogTrigger>
       <DialogContent

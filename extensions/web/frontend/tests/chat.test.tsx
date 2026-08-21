@@ -2251,9 +2251,9 @@ test("a streamed chunk never steals focus from where the member put it", async (
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
-  const elsewhere = within(screen.getByRole("navigation", { name: "Primary" })).getByRole(
+  const elsewhere = within(screen.getByRole("navigation", { name: "Workspace" })).getByRole(
     "button",
-    { name: "Apps" },
+    { name: "Connectors" },
   );
   elsewhere.focus();
   StreamFake.last().emit("message", { text: "chunk" });
@@ -3320,14 +3320,14 @@ test("the starters close on a link to the connectors screen, which the press rea
 
   await screen.findByLabelText("Message the app");
   const cta = screen.getByRole("link", { name: /Connect more accounts/ });
-  expect(cta.getAttribute("href")).toBe("#/workspace/connectors");
+  expect(cta.getAttribute("href")).toBe("#/connectors");
 
   // The start screen prevents the default of every mousedown outside the box, so that a press in
   // its empty space lands the cursor in the words. A link is reached on the click that follows,
   // and this holds that the one does not swallow the other.
   await userEvent.click(cta);
 
-  expect(location.hash).toBe("#/workspace/connectors");
+  expect(location.hash).toBe("#/connectors");
   await screen.findByText("No connector is offered yet.");
   expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
 });

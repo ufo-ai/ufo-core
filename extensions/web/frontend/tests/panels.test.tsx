@@ -41,6 +41,10 @@ beforeEach(() => {
   useStreamFake();
 });
 
+function toggleApplications(): void {
+  fireEvent.click(screen.getByRole("button", { name: "Applications" }));
+}
+
 const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
 
 /** What the half is called before a conversation is picked, which is the switcher's own control. */
@@ -281,6 +285,7 @@ test("the agents index states a row's name alone, and leaves the address list to
     />,
   );
 
+  toggleApplications();
   const index = within(await screen.findByRole("navigation", { name: "Apps" }));
   expect(index.getByText("Main")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
@@ -291,11 +296,13 @@ test("the agents index states a row's name alone, and leaves the address list to
 });
 
 test("a non-admin reads the same index rows", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
   location.hash = "#/agents";
   render(
     <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
 
+  toggleApplications();
   const index = within(await screen.findByRole("navigation", { name: "Apps" }));
   expect(index.getByText("Main")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
@@ -553,7 +560,8 @@ test("the switcher names a conversation by what it is about, and the keyboard op
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const switcher = await screen.findByRole("button", { name: FRESH });
+  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
+  const switcher = await pane.findByRole("button", { name: FRESH });
   switcher.focus();
   await userEvent.keyboard("{Enter}");
   const item = await screen.findByRole("menuitemradio", { name: said });
@@ -790,7 +798,8 @@ test("a conversation nobody shared offers no opener, and the half stands on the 
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: FRESH }));
+  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
+  await userEvent.click(await pane.findByRole("button", { name: FRESH }));
 
   expect(screen.queryAllByRole("menuitemradio")).toEqual([]);
   expect(screen.queryByText("#ops")).toBeNull();
@@ -934,7 +943,7 @@ test("a member with no rollup sees only their own figure and no workspace sectio
   expect(screen.queryByText("Members")).toBeNull();
 });
 
-test("the top bar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
+test("the sidebar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
   wire({
     "/transcript": () => json({ messages: [] }),
     "/settings": () => json(SETTINGS),
@@ -950,16 +959,18 @@ test("the top bar routes agents, sections, and the workspace by hash and marks t
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
-  expect(location.hash).toBe("#/agents");
-  expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-current")).toBe("true");
-
+  toggleApplications();
   await openAgentRow("Second");
   expect(location.hash).toBe("#/agents/" + SECOND.id);
-  expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-current")).toBe("true");
+
+  toggleApplications();
+  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
+  expect(index.getByRole("button", { name: /^Second/ }).getAttribute("aria-current")).toBe("true");
+  toggleApplications();
 
   await userEvent.click(screen.getByRole("button", { name: "Radar" }));
   expect(location.hash).toBe("#/radar");
+  expect(screen.getByRole("button", { name: "Radar" }).getAttribute("aria-current")).toBe("true");
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
   expect(screen.getAllByRole("tablist")).toHaveLength(1);
   expect(screen.getByRole("tab", { name: "Reports" }).getAttribute("aria-selected")).toBe("true");
@@ -985,9 +996,8 @@ test("the top bar routes agents, sections, and the workspace by hash and marks t
 test("a member who is not an admin is offered no administration control", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
-  expect(await screen.findByRole("menuitem", { name: /Theme/ })).toBeTruthy();
-  expect(screen.queryByRole("menuitem", { name: "Administration" })).toBeNull();
+  expect(await screen.findByRole("button", { name: "Theme" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
 });
 
 test("an app opens on the conversation that moved last, and the switcher names the rest", async () => {
@@ -1025,7 +1035,8 @@ test("an app opens on the conversation that moved last, and the switcher names t
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   // Landing writes nothing to the address: the app's own hash already means "the latest".
-  const switcher = await screen.findByRole("button", { name: /Newest thread/ });
+  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
+  const switcher = await pane.findByRole("button", { name: /Newest thread/ });
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
   expect(screen.queryByRole("tab", { name: "Home" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Conversations" })).toBeNull();

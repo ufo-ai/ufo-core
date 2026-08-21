@@ -1,12 +1,11 @@
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
+import { IconPin, IconPinFilled } from "@tabler/icons-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ObjectPane } from "@/kernel/objects";
 import { BesideHost } from "@/kernel/beside";
-import { useDrawerList, useShutDrawer } from "@/kernel/drawer";
 import { usePanelRead } from "@/kernel/panel";
 import { BANDS } from "@/kernel/pane";
 import { TabPanel, TabRow } from "@/kernel/tabs";
@@ -26,17 +25,23 @@ import type { ChatRow } from "@/lib/rail";
 import type { Agent, Member } from "@/lib/types";
 
 export type AgentsProps = {
-  agents: Agent[];
   member: Member;
   /** The agent the hash names, or null on the bare route — which shows the main agent without
    *  navigating. */
   selected: Agent | null;
+  /** Whether the hash names the wizard: the builder holds the pane whatever run state it finds. */
+  build: boolean;
   chats: ChatRow[] | null;
   place: WorkspacePlace;
-  onOpen: (agentId: string) => void;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onAgents: () => void;
+  /** Leaves the wizard's address for the apps screen, which closing the builder is. */
+  onExitBuilder: () => void;
+  /** Where an unbacked wizard address forwards, replacing itself rather than stacking. */
+  onForwardAgents: () => void;
+  /** Whether a member's press raised the wizard: the address alone must not found a run. */
+  buildWanted: boolean;
 };
 
 const MAIN = "Main";
@@ -136,11 +141,15 @@ function AgentRow({
   agent,
   status,
   open,
+  pinned,
+  onPin,
   onOpen,
 }: {
   agent: Agent;
   status: AgentStatus | undefined;
   open: boolean;
+  pinned: boolean;
+  onPin: () => void;
   onOpen: () => void;
 }) {
   const active = activeLine(status);
@@ -163,19 +172,16 @@ function AgentRow({
         "px-sm py-2xs text-left text-inherit",
       )}
     >
+      {/* The mark is the glyph a sidebar row draws, bare in the row's own ink, so the list reads
+          as the sidebar the pin act puts a row into. */}
       <span className="relative shrink-0">
-        <Avatar>
-          <AvatarFallback>
-            <AgentIcon name={agent.icon} />
-          </AvatarFallback>
-        </Avatar>
-        {/* The mark is always drawn and scales away when the app has nothing to say, so a change of
+        <AgentIcon name={agent.icon} className="size-(--size-glyph)" />
+        {/* The dot is always drawn and scales away when the app has nothing to say, so a change of
             state is a mark growing or turning rather than one appearing out of nothing. */}
         <span
           aria-hidden
           className={cn(
-            "absolute right-0 bottom-0 size-sm rounded-full outline-2 transition duration-200 ease-control",
-            open ? "outline-fill" : "outline-sidebar group-hover/row:outline-fill",
+            "absolute -right-2xs -bottom-2xs size-sm rounded-full transition duration-200 ease-control",
             dot ?? "scale-0",
           )}
         />
@@ -202,15 +208,43 @@ function AgentRow({
     </button>
   );
   return (
-    <li className={cn("group/row flex items-center rounded-row hover:bg-fill", open && "bg-fill")}>
-      {/* The row is worn by the same tooltip whether or not it has a fact to hold, because an app
-          gains and loses one as it works and a row swapped for another element takes the member's
-          focus down with it. A row with nothing to say draws no content and so opens nothing. */}
-      <Tooltip>
-        <TooltipTrigger asChild>{row}</TooltipTrigger>
-        {line ? <TooltipContent>{line}</TooltipContent> : null}
-      </Tooltip>
-    </li>
+    /* The whole row wears the tooltip — anchored on the row, the fact opens past the list's edge
+       instead of over the pin act at the row's end, where it would stand between the pointer and
+       the control. The row is worn by the same tooltip whether or not it has a fact to hold,
+       because an app gains and loses one as it works and a row swapped for another element takes
+       the member's focus down with it. A row with nothing to say draws no content and so opens
+       nothing. */
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <li
+          className={cn("group/row flex items-center rounded-row hover:bg-fill", open && "bg-fill")}
+        >
+          {row}
+          {/* Pinning puts the app's row in the sidebar; the act rests until the pointer is on the
+              row, except where it is already done — an unmarked pinned row could only be unpinned
+              by a member who already remembered it was pinned. */}
+          <button
+            type="button"
+            aria-label={(pinned ? "Unpin " : "Pin ") + agentName(agent.name)}
+            aria-pressed={pinned}
+            onClick={onPin}
+            className={cn(
+              "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
+              pinned
+                ? undefined
+                : "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
+            )}
+          >
+            {pinned ? (
+              <IconPinFilled className="size-icon" aria-hidden />
+            ) : (
+              <IconPin className="size-icon" aria-hidden />
+            )}
+          </button>
+        </li>
+      </TooltipTrigger>
+      {line ? <TooltipContent>{line}</TooltipContent> : null}
+    </Tooltip>
   );
 }
 
@@ -231,23 +265,34 @@ const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
   skills: "Skills",
 };
 
-/** The apps screen: a thin index — one row per app under the New application act, the open app's
- *  settings behind the gear beside it — next to a wide pane holding the selected app, or the
- *  app-building wizard while a run is open. On a narrow screen the pane is the page and the nav
- *  drawer holds the index. */
-export function Agents({
+/** The apps index: one row per app under the New application act, the wizard's run in flight at
+ *  the head while one is live. The apps screen carried it as a column once; it is the sidebar's
+ *  Applications flyout now, mounted only while that flyout is open, which is what scopes the
+ *  status polling to the moments the rows are read. */
+export function AppsIndex({
   agents,
-  member,
-  selected,
-  chats,
-  place,
+  openId,
+  building,
+  pinned,
+  onPin,
   onOpen,
-  onPlace,
-  onCreated,
-  onAgents,
-}: AgentsProps) {
+  onBuild,
+  children,
+}: {
+  agents: Agent[];
+  /** The agent whose pane the page is showing, or null when no app holds it. */
+  openId: string | null;
+  /** Whether the wizard holds the pane, which draws its row as the place the member already is. */
+  building: boolean;
+  pinned: string[];
+  onPin: (agentId: string) => void;
+  onOpen: (agentId: string) => void;
+  onBuild: () => void;
+  /** Rows the caller lists after the apps — the fixed destinations the sidebar files under
+   *  Applications, so the flyout carries the whole section. */
+  children?: React.ReactNode;
+}) {
   const mainAgent = useMainAgent();
-  const shown = selected ?? mainAgent;
   const [statusRate, setStatusRate] = useState(RESTING_STATUS_MS);
   const statusRead = usePanelRead<{ statuses: AgentStatus[] }>(
     "/api/agents/status",
@@ -277,104 +322,118 @@ export function Agents({
   };
   const ordered = [...agents].sort((a, b) => recency(b) - recency(a));
   // The run lives on the wizard's own store key — busy or spoken before it founds, a forwarding
-  // record after — so it survives every unmount of this screen; a reload clears the store, so no
-  // phantom row survives one. `wanting` is only the member's last press: it raises the pane ahead
-  // of the run's first send and brings it back over a selected app.
+  // record after — so it survives every unmount of this list; a reload clears the store, so no
+  // phantom row survives one.
   const key = mainAgent ? wizardKey(mainAgent.id) : null;
   const held = useChat(key ?? "");
   const running =
     key !== null &&
     !held.closed &&
     (held.busy || (held.messages ?? []).length > 0 || held.founded !== null);
-  const [wanting, setWanting] = useState(false);
-  const building = mainAgent !== null && (wanting || (running && selected === null));
   const runTitle = held.founded?.title ?? null;
+  return (
+    <nav aria-label="Apps" className="flex min-h-0 flex-1 flex-col gap-sm">
+      <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-px overflow-y-auto px-sm py-0">
+        {/* The run in flight, named the way the wizard's own pane is until the conversation has
+            a title of its own. While the pane shows it states where the member already is;
+            while an app holds the pane instead, the row is the way back to the run. It is not
+            an app: nothing here opens one, and the app's real row arrives from the apps read
+            when it lands. */}
+        {building || running ? (
+          <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
+            {building ? (
+              <div
+                aria-current
+                className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
+              >
+                <span className="min-w-0 truncate text-label">
+                  {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                </span>
+                <span className="w-full truncate font-mono text-small text-ink-soft">
+                  Building
+                </span>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={onBuild}
+                className={cn(
+                  "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
+                  "rounded-row text-left text-inherit hover:bg-fill",
+                )}
+              >
+                <span className="min-w-0 max-w-full truncate text-label">
+                  {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                </span>
+                <span className="w-full truncate font-mono text-small text-ink-soft">
+                  Building
+                </span>
+              </button>
+            )}
+          </li>
+        ) : null}
+        {ordered.map((agent) => (
+          <AgentRow
+            key={agent.id}
+            agent={agent}
+            status={statuses[agent.id]}
+            open={!building && agent.id === openId}
+            pinned={pinned.includes(agent.id)}
+            onPin={() => onPin(agent.id)}
+            onOpen={() => onOpen(agent.id)}
+          />
+        ))}
+        {children}
+      </ul>
+      {/* Every member is offered the act: the `agent` kind admits a create from any speaking
+          member and stamps them the owner, and the wizard rides the main agent's own chat. */}
+      {mainAgent ? (
+        <Button variant="send" size="bar" className="mx-sm shrink-0" onClick={onBuild}>
+          New application
+        </Button>
+      ) : null}
+    </nav>
+  );
+}
+
+/** The apps screen: the selected app's pane whole — the main app on the bare route — or the
+ *  app-building wizard at its own address; switching apps is the sidebar's Applications flyout. */
+export function Agents({
+  member,
+  selected,
+  build,
+  chats,
+  place,
+  onPlace,
+  onCreated,
+  onAgents,
+  onExitBuilder,
+  onForwardAgents,
+  buildWanted,
+}: AgentsProps) {
+  const mainAgent = useMainAgent();
+  const shown = selected ?? mainAgent;
+  const key = mainAgent ? wizardKey(mainAgent.id) : null;
+  const held = useChat(key ?? "");
+  const running =
+    key !== null &&
+    !held.closed &&
+    (held.busy || (held.messages ?? []).length > 0 || held.founded !== null);
+  // The wizard's address is honoured only behind a member's press or a run already in flight: the
+  // builder's mount founds a conversation, and Back or a reload landing on the bare address must
+  // not send a turn nobody asked for.
+  const building = mainAgent !== null && build && (buildWanted || running);
+  const forwarding = build && !building;
+  useEffect(() => {
+    if (forwarding) onForwardAgents();
+  }, [forwarding, onForwardAgents]);
   const [settling, setSettling] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(SETTINGS_TABS[0]);
-  const shutDrawer = useShutDrawer();
-  /** Raising the wizard draws it on the page, so a drawer holding the index that raised it is shut
-   *  the way navigating out of the drawer shuts it. */
-  const build = () => {
-    setWanting(true);
-    shutDrawer();
-  };
 
-  const index = useDrawerList(
-    <div
-      className={cn(
-        "flex min-h-0 flex-col",
-        "border-r border-edge bg-sidebar py-2xl max-narrow:border-r-0 max-narrow:py-0",
-      )}
-    >
-      {/* The list carries the column's scroll so the act below it stands at the bottom edge
-          however many apps the workspace holds. */}
-      <nav aria-label="Apps" className="flex min-h-0 flex-1 flex-col gap-sm">
-        <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-px overflow-y-auto px-sm py-0">
-          {/* The run in flight, named the way the wizard's own pane is until the conversation has
-              a title of its own. While the pane shows it states where the member already is;
-              while an app holds the pane instead, the row is the way back to the run. It is not
-              an app: nothing here opens one, and the app's real row arrives from the apps read
-              when it lands. */}
-          {building || running ? (
-            <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
-              {building ? (
-                <div
-                  aria-current
-                  className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
-                >
-                  <span className="min-w-0 truncate text-label">
-                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
-                  </span>
-                  <span className="w-full truncate font-mono text-small text-ink-soft">
-                    Building
-                  </span>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={build}
-                  className={cn(
-                    "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
-                    "rounded-row text-left text-inherit hover:bg-fill",
-                  )}
-                >
-                  <span className="min-w-0 max-w-full truncate text-label">
-                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
-                  </span>
-                  <span className="w-full truncate font-mono text-small text-ink-soft">
-                    Building
-                  </span>
-                </button>
-              )}
-            </li>
-          ) : null}
-          {ordered.map((agent) => (
-            <AgentRow
-              key={agent.id}
-              agent={agent}
-              status={statuses[agent.id]}
-              open={!building && agent.id === shown?.id}
-              onOpen={() => {
-                setWanting(false);
-                onOpen(agent.id);
-              }}
-            />
-          ))}
-        </ul>
-        {/* Every member is offered the act: the `agent` kind admits a create from any speaking
-            member and stamps them the owner, and the wizard rides the main agent's own chat. */}
-        {mainAgent ? (
-          <Button variant="send" size="bar" className="mx-sm shrink-0" onClick={build}>
-            New application
-          </Button>
-        ) : null}
-      </nav>
-    </div>,
-  );
+  if (forwarding) return null;
 
   return (
-    <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1">
-      {index}
+    <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-1">
       {building && mainAgent ? (
         <AppBuilder
           agent={mainAgent}
@@ -383,11 +442,13 @@ export function Agents({
           onClose={() => {
             // Closing ends the run's presence here. A run whose founding send is still in flight
             // cannot be cleared out from under that send, so the key wears the close instead and
-            // the landing leaves no forwarding record behind.
-            setWanting(false);
-            if (key === null) return;
-            if (chatState(key).busy) updateChat(key, (state) => ({ ...state, closed: true }));
-            else clearChat(key);
+            // the landing leaves no forwarding record behind. The wizard's own address closes by
+            // navigation, back to the screen it was raised over.
+            if (key !== null) {
+              if (chatState(key).busy) updateChat(key, (state) => ({ ...state, closed: true }));
+              else clearChat(key);
+            }
+            onExitBuilder();
           }}
         />
       ) : shown ? (

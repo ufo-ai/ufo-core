@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -11,10 +11,19 @@ import {
   FRESH,
   MEMBER,
   json,
-  pickConversation,
   useStreamFake,
   wire,
 } from "./harness";
+
+async function paneButton(name: string): Promise<HTMLElement> {
+  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
+  return pane.findByRole("button", { name });
+}
+
+async function pickConversation(held: string, wanted: string): Promise<void> {
+  await userEvent.click(await paneButton(held));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: wanted }));
+}
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -61,7 +70,7 @@ test("a disclosable conversation is offered, one shared with nobody is not", asy
   wire(conversations([PRIVATE, WALLED]));
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: FRESH }));
+  await userEvent.click(await paneButton(FRESH));
 
   expect(await screen.findByRole("menuitemradio", { name: OWNER })).toBeTruthy();
   expect(screen.queryByRole("menuitemradio", { name: ROOM })).toBeNull();
@@ -230,7 +239,7 @@ test("the switcher stands over the acknowledgement, which reads nothing until it
   await pickConversation(FRESH, OWNER);
 
   expect(await screen.findByRole("button", { name: "Open transcript" })).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: OWNER }));
+  await userEvent.click(await paneButton(OWNER));
   expect(await screen.findByRole("menuitemradio", { name: OWNER })).toBeTruthy();
   expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
 });

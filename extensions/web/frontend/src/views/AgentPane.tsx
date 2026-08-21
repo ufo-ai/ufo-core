@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { IconArrowUpRight, IconChevronDown, IconSettings } from "@tabler/icons-react";
+import { IconArrowUpRight, IconChevronDown, IconMessage, IconSettings } from "@tabler/icons-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -41,9 +41,6 @@ const HEADER =
 const NEW_CONVERSATION = "New conversation";
 const NEW = "New";
 
-/** What the second half is called. The site's own address is not a title — a member reading an app
- *  already knows which one they opened, and the address is what the act beside it opens. */
-const HOME = "Home";
 
 export type AgentPaneProps = {
   agent: Agent;
@@ -64,23 +61,13 @@ export type AgentPaneProps = {
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
 };
 
-/** The wide pane of the apps screen, in two halves: talking to the app on the left, what it built
- *  on the right. They are read at once rather than switched between, because they are one fact — a
- *  member asking for a page change is looking at that page — and the halves are equal because
- *  neither is the other's aside. Each half heads itself, so the rule between them is the whole of
- *  the division and no band spans both to say it again.
+/** The apps screen's pane: the app's homepage whole, headed by the app's name with the way out to
+ *  the page and the settings act beside it. Opening an app is opening what it built — the page IS
+ *  the app to the member reading it — so nothing shares the width with it.
  *
- *  Arriving opens the conversation that moved last, so the screen lands on the work rather than on
- *  a list of it; an app nobody has spoken to opens the composer instead, because the first thing a
- *  member does with a new app is talk to it.
- *
- *  An app that has built no site draws one half. A column whose only content is the sentence that
- *  it is empty takes half the screen to say what a member learns from the app having no site at
- *  all.
- *
- *  A screen too narrow for two columns reads them as two rows, the site under the conversation at
- *  the height a page fingerprint is read at. Hiding it there would leave the member no way to the
- *  thing the app built, since the way out to it stands in the half that would be gone. */
+ *  An app that has built no page draws its conversation instead: arriving opens the one that moved
+ *  last, so the screen lands on the work rather than on a list of it, and an app nobody has spoken
+ *  to opens the composer, because the first thing a member does with a new app is talk to it. */
 export function AgentPane({
   agent,
   member,
@@ -164,23 +151,20 @@ export function AgentPane({
   // draws one column, because a column whose only content is the sentence that it is empty takes
   // half the screen to say what the app having no homepage already says.
   const beside = url !== null || building;
+  /** Whether the conversation stands open beside the page. It opens by the titlebar's own act and
+   *  arrives shut, because opening an app is opening what it built. */
+  const [chatting, setChatting] = useState(false);
 
-  return (
-    <div
+  const conversation = (
+    <section
+      aria-label={agentName(agent.name)}
       className={cn(
-        "grid min-h-0 min-w-0 grid-cols-1",
-        beside && "grid-cols-2 max-narrow:grid-cols-1 max-narrow:grid-rows-[minmax(0,1fr)_auto]",
+        "flex min-h-0 min-w-0 flex-col",
+        beside && "border-l border-edge max-narrow:border-t max-narrow:border-l-0",
       )}
     >
-      <section
-        aria-label={agentName(agent.name)}
-        className={cn(
-          "flex min-h-0 min-w-0 flex-col",
-          beside && "border-r border-edge max-narrow:border-r-0",
-        )}
-      >
-        <header className={HEADER}>
-          <Switcher
+      <header className={HEADER}>
+        <Switcher
             title={opened ? subject(opened, viewer) : NEW_CONVERSATION}
             held={opened?.id ?? null}
             rows={rows}
@@ -198,14 +182,16 @@ export function AgentPane({
           >
             {NEW}
           </Button>
-          <Button
-            size="icon"
-            aria-label={"Settings for " + agentName(agent.name)}
-            className="shrink-0 rounded-full"
-            onClick={onSettings}
-          >
-            <IconSettings className="size-icon" aria-hidden />
-          </Button>
+          {beside ? null : (
+            <Button
+              size="icon"
+              aria-label={"Settings for " + agentName(agent.name)}
+              className="shrink-0 rounded-full"
+              onClick={onSettings}
+            >
+              <IconSettings className="size-icon" aria-hidden />
+            </Button>
+          )}
         </header>
         {listed.phase === "failed" ? (
           // A read that refused must never be read as an app nobody has spoken to: one draws the
@@ -258,21 +244,38 @@ export function AgentPane({
           />
         )}
       </section>
-      {beside ? (
+  );
+
+  if (beside) {
+    return (
+      <div
+        className={cn(
+          "grid min-h-0 min-w-0",
+          chatting
+            ? "grid-cols-[minmax(0,1fr)_var(--container-threads)] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_minmax(0,1fr)]"
+            : "grid-cols-1",
+        )}
+      >
+        {/* A screen too narrow for two columns reads them as two rows, the page above the
+            conversation at the height a page fingerprint is read at. Hiding it there would leave
+            the member no way back out of the chat, since the toggle, the settings act, and the way
+            to the page all stand in this titlebar. */}
         <section
           aria-label={agentName(agent.name) + " homepage"}
           aria-busy={url === null}
           className={cn(
             "flex min-h-0 min-w-0 flex-col",
-            "max-narrow:h-(--media-tall) max-narrow:border-t max-narrow:border-edge",
+            chatting && "max-narrow:h-(--media-tall)",
           )}
         >
           <header className={HEADER}>
-            <h2 className="m-0 min-w-0 flex-1 truncate text-subtitle font-medium">{HOME}</h2>
+            <h2 className="m-0 min-w-0 flex-1 truncate text-subtitle font-medium">
+              {agentName(agent.name)}
+            </h2>
             {/* A link, not a button: this is the one act on the screen that leaves the portal, so
                 it keeps the shape a member already knows how to open in a tab of their own. It
-                wears the icon control's box so it stands level with the settings act across the
-                pane's one header line. A homepage still being built has no address to open. */}
+                wears the icon control's box so it stands level with the acts beside it across the
+                titlebar's one line. A homepage still being built has no address to open. */}
             {url !== null ? (
               <a
                 href={url}
@@ -284,6 +287,23 @@ export function AgentPane({
                 <IconArrowUpRight className="size-icon" aria-hidden />
               </a>
             ) : null}
+            <Button
+              size="icon"
+              aria-label={"Settings for " + agentName(agent.name)}
+              className="shrink-0 rounded-full"
+              onClick={onSettings}
+            >
+              <IconSettings className="size-icon" aria-hidden />
+            </Button>
+            <Button
+              size="icon"
+              aria-label={"Chat with " + agentName(agent.name)}
+              aria-pressed={chatting}
+              className={cn("shrink-0 rounded-full", chatting && "bg-fill")}
+              onClick={() => setChatting(!chatting)}
+            >
+              <IconMessage className="size-icon" aria-hidden />
+            </Button>
           </header>
           {url === null ? (
             <Building />
@@ -298,9 +318,12 @@ export function AgentPane({
             />
           )}
         </section>
-      ) : null}
-    </div>
-  );
+        {chatting ? conversation : null}
+      </div>
+    );
+  }
+
+  return <div className="grid min-h-0 min-w-0 grid-cols-1">{conversation}</div>;
 }
 
 /** The page while it is being written: the shape a page takes — a heading, a rule under it, a few

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { workspaceHash } from "@/lib/route";
+import { sectionHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -134,8 +134,8 @@ function connectors() {
   });
 }
 
-test("the workspace tab lists the connection pool", async () => {
-  location.hash = "#/workspace/connectors";
+test("the connectors section lists the connection pool", async () => {
+  location.hash = sectionHash("connectors");
   connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
@@ -146,7 +146,7 @@ test("the workspace tab lists the connection pool", async () => {
 /** The three legs are GitHub's own, so they are read in GitHub's record and stand nowhere on the
  *  page's own ground. */
 test("the GitHub row opens the coverage its install stands on", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({ "/github/coverage": () => json({ api: true, git_push: true, sources: false }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -162,7 +162,7 @@ test("the GitHub row opens the coverage its install stands on", async () => {
 });
 
 test("the pool narrows on the header's search, which names what it searches", async () => {
-  location.hash = "#/workspace/connectors";
+  location.hash = sectionHash("connectors");
   wire({
     "/connections": () =>
       json({ connections: [grant("github", false, "g1"), grant("notion", true, "g2")] }),
@@ -174,9 +174,9 @@ test("the pool narrows on the header's search, which names what it searches", as
 
   expect(await screen.findByText("notion")).toBeTruthy();
   const box = screen.getByLabelText("Search connectors");
-  expect(screen.getByRole("heading", { level: 1, name: "Workspace" }).parentElement!.contains(box)).toBe(
-    true,
-  );
+  expect(
+    screen.getByRole("heading", { level: 1, name: "Connectors" }).parentElement!.contains(box),
+  ).toBe(true);
 
   await userEvent.type(box, "github{enter}");
 
@@ -210,7 +210,7 @@ test("the agent's settings read its attached connections", async () => {
 
 test("the pool's record states what the row gave up, and attaches to the agent named on it", async () => {
   const posted: string[] = [];
-  location.hash = "#/workspace/connectors";
+  location.hash = sectionHash("connectors");
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
     "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
@@ -237,7 +237,7 @@ test("the pool's record states what the row gave up, and attaches to the agent n
 
 test("the pool's record shares and revokes into the lane of the agent already holding the grant", async () => {
   const posted: string[] = [];
-  location.hash = "#/workspace/connectors";
+  location.hash = sectionHash("connectors");
   wire({
     "/connections": () =>
       json({
@@ -371,7 +371,7 @@ test("the attach picker names the provider and the account, not the broker id", 
 });
 
 test("the account column names the account the member holds, not the broker id", async () => {
-  location.hash = "#/workspace/connectors";
+  location.hash = sectionHash("connectors");
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
     "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
@@ -386,7 +386,7 @@ test("the account column names the account the member holds, not the broker id",
 });
 
 test("an empty pool stands the catalog alone, with no connected zone", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   wire({
     "/connections": () => json({ connections: [] }),
     "/github/coverage": () => json({ api: false, git_push: false, sources: false }),
@@ -551,7 +551,7 @@ function removes(label: string): HTMLElement {
 test("a connected row removes that one account behind a confirmation naming it", async () => {
   const posted: { url: string; body: unknown }[] = [];
   let pool: unknown = POOLED_PAIR;
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/connections": () => json(pool),
     "/intents": (url, init) => {
@@ -582,7 +582,7 @@ test("a connected row removes that one account behind a confirmation naming it",
 
 test("the confirmation cancels and nothing is disconnected", async () => {
   const posted: unknown[] = [];
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/connections": () => json(POOLED_PAIR),
     "/intents": (_url, init) => {
@@ -606,7 +606,7 @@ test("the confirmation cancels and nothing is disconnected", async () => {
  *  where they pressed, and the account is still there behind it. */
 test("a refused removal states itself in the confirmation and the account stays", async () => {
   const refusal = "only the connection owner or a workspace admin may disconnect an account";
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/connections": () => json(POOLED_PAIR),
     "/intents": () => json({ applied: false, message: refusal }),
@@ -626,7 +626,7 @@ test("a refused removal states itself in the confirmation and the account stays"
 /** Where the act would be refused it is not drawn: another member's shared account, and a workspace
  *  install, which carries no connection to disconnect. */
 test("a row the member holds no claim on draws no remove", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/connections": () =>
       json({
@@ -648,7 +648,7 @@ test("a row the member holds no claim on draws no remove", async () => {
 });
 
 test("the library offers every catalog tool and hoists the connected ones", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -662,7 +662,7 @@ test("the library offers every catalog tool and hoists the connected ones", asyn
 });
 
 test("a connected row names the account it stands on and who reaches it", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -675,7 +675,7 @@ test("a connected row names the account it stands on and who reaches it", async 
 /** The brokers reach further than the catalog names, so the pool is listed whole: a connection on a
  *  provider no tile offers still stands, headed by the slug it carries. */
 test("a connection outside the catalog still stands in the library", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/connections": () => json({ connections: [grant("sentry", false, "g9")] }),
   });
@@ -685,7 +685,7 @@ test("a connection outside the catalog still stands in the library", async () =>
 });
 
 test("an available row stands under the group the catalog gives it", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -696,7 +696,7 @@ test("an available row stands under the group the catalog gives it", async () =>
 
 /** Everything the catalog offers is connected, so the page is the connected zone alone. */
 test("a fully connected catalog stands as one zone", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/workspace/first-run": () =>
       json({ providers: [CATALOG.providers[2]], connectors: [] }),
@@ -709,7 +709,7 @@ test("a fully connected catalog stands as one zone", async () => {
 });
 
 test("the search narrows the catalog and states when nothing matches", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("heading", { name: "Available" });
@@ -725,7 +725,7 @@ test("the search narrows the catalog and states when nothing matches", async () 
 
 test("a library row connects the member's account through the main agent", async () => {
   const posted: { url: string; body: unknown }[] = [];
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/intents": (url, init) => {
       posted.push({ url, body: JSON.parse(String(init?.body)) });
@@ -758,7 +758,7 @@ test("a library row connects the member's account through the main agent", async
 });
 
 test("a library consent the browser refuses still renders the link", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({ "/intents": () => json({ applied: true, message: "", turn_id: TURN_ID }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -772,7 +772,7 @@ test("a library consent the browser refuses still renders the link", async () =>
 
 test("a workspace install dispatches its own verb and hands back its install page", async () => {
   const posted: unknown[] = [];
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
@@ -790,7 +790,7 @@ test("a workspace install dispatches its own verb and hands back its install pag
 });
 
 test("a refused intent states itself and the row stays open", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({
     "/intents": () => json({ applied: false, message: "Only a workspace admin connects Slack." }),
   });
@@ -805,7 +805,7 @@ test("a refused intent states itself and the row stays open", async () => {
 
 test("the row moves up when the account lands", async () => {
   let pool: unknown = { connections: [] };
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({ "/connections": () => json(pool) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("heading", { name: "Available" });
@@ -819,7 +819,7 @@ test("the row moves up when the account lands", async () => {
 });
 
 test("the category picker narrows both zones and lands in the place", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByLabelText("Notion connected");
@@ -837,7 +837,7 @@ test("the category picker narrows both zones and lands in the place", async () =
 /** A connection on a provider the catalog does not name has no category, so a picked one hides it
  *  rather than sweeping it into a group it never stood under. */
 test("a connection outside the catalog stands only under every category", async () => {
-  location.hash = workspaceHash("connectors");
+  location.hash = sectionHash("connectors");
   library({ "/connections": () => json({ connections: [grant("sentry", false, "g9")] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByLabelText("sentry connected");

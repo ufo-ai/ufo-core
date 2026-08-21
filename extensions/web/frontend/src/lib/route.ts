@@ -2,13 +2,12 @@ export const WORKSPACE_TABS = [
   "team",
   "memory",
   "sources",
-  "connectors",
   "credentials",
   "usage",
   "billing",
 ] as const;
 
-export const SECTIONS = ["artifacts", "radar"] as const;
+export const SECTIONS = ["artifacts", "radar", "connectors"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
@@ -36,7 +35,7 @@ export type Route =
       rootConversationId?: string;
     }
   | { kind: "new-chat"; agentId: string }
-  | { kind: "agents" }
+  | { kind: "agents"; build?: boolean }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
@@ -95,10 +94,14 @@ export const HOME_HASH = "#/";
 
 export const AGENTS_HASH = "#/agents";
 
+/** The app-building wizard's own address, so any screen can raise it by navigation. */
+export const BUILDER_HASH = "#/agents/builder";
+
 export function parseHash(hash: string): Route {
   if (hash === FIRST_RUN_HASH) return { kind: "first-run" };
   if (hash === "#/admin") return { kind: "admin" };
   if (hash === AGENTS_HASH) return { kind: "agents" };
+  if (hash === BUILDER_HASH) return { kind: "agents", build: true };
   const chat = hash.match(CHAT_HASH);
   if (chat) {
     const slot = new URLSearchParams(chat[2]).get("slot");
@@ -121,6 +124,11 @@ export function parseHash(hash: string): Route {
   const fresh = hash.match(NEW_CHAT_HASH);
   if (fresh) return { kind: "new-chat", agentId: fresh[1] };
   const workspace = hash.match(WORKSPACE_HASH);
+  /* Connectors stood on a workspace tab once, so links to that address exist outside this code;
+     the address keeps answering with the section that holds the same screen. */
+  if (workspace && workspace[1] === "connectors") {
+    return { kind: "section", section: "connectors", place: parsePlace(workspace[2]) };
+  }
   if (workspace && isWorkspaceTab(workspace[1])) {
     return { kind: "workspace", view: workspace[1], place: parsePlace(workspace[2]) };
   }

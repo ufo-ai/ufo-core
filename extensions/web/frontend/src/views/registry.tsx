@@ -52,12 +52,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
   sources: declared("Sources", SOURCES),
-  connectors: {
-    label: "Connectors",
-    remountOnPlace: false,
-    search: "Search connectors",
-    render: (place, onPlace) => <WorkspaceConnectors place={place} onPlace={onPlace} />,
-  },
   credentials: declared("Credentials", CREDENTIALS),
   usage: {
     label: "Usage",
@@ -83,6 +77,12 @@ export const SECTION_VIEWS: Record<Section, PaneView> = {
     remountOnPlace: false,
     search: "Search artifacts",
     render: (place, onPlace) => <Artifacts place={place} onPlace={onPlace} />,
+  },
+  connectors: {
+    label: "Connectors",
+    remountOnPlace: false,
+    search: "Search connectors",
+    render: (place, onPlace) => <WorkspaceConnectors place={place} onPlace={onPlace} />,
   },
 };
 

@@ -18,6 +18,7 @@ import {
   MEMBER,
   type Route,
   SECOND_ID,
+  atPhoneWidth,
   json,
   pageFits,
   pressRow,
@@ -41,8 +42,7 @@ beforeEach(() => {
 });
 
 async function openAdministration() {
-  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Administration" }));
+  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
 }
 
 test("the built page names a hashed module and stylesheet under this surface", () => {
@@ -180,57 +180,72 @@ test("an admin is offered administration, which reads the admin projection", asy
   expect(document.querySelectorAll("h1").length).toBe(1);
 });
 
-test("the top bar names the categories on the left and workspace and the member on the right", () => {
+test("the sidebar names the shell's destinations and states the member at its foot", () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const bar = screen.getByRole("navigation", { name: "Primary" });
-  const names = within(bar)
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const names = within(sidebar)
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
-  expect(names).toEqual(["Chat", "Apps", "Artifacts", "Radar", "Connectors", "Search", "Workspace"]);
-  const account = screen.getByRole("button", { name: MEMBER.email });
-  expect(bar.contains(account)).toBe(false);
-  expect(bar.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(names).toEqual([
+    "Collapse sidebar",
+    "Search",
+    "New conversation",
+    "Applications",
+    "Artifacts",
+    "Radar",
+    "Conversations",
+    "Connectors",
+    "Workspace",
+    "Theme",
+  ]);
+  expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
 });
 
-/** The bar draws one mark, wherever it stands: leading the row at a desk width, centred between the
- *  hamburger and the account at a phone width. It is centred out of the row — absolutely placed — so
+/** A desk width draws the mark at the sidebar's head; a phone width keeps it on the bar, centred
+ *  between the hamburger and the account. It is centred out of the row — absolutely placed — so
  *  the row it stands over keeps one line whatever the mark's own width. */
 test("the bar's mark stands at a phone width too, centred out of the row", () => {
+  atPhoneWidth();
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const mark = screen.getByRole("img", { name: "ufo" });
-  expect(mark.className).not.toContain("max-narrow:hidden");
-  expect(mark.className).toContain("max-narrow:absolute");
-  expect(mark.className).toContain("max-narrow:start-1/2");
-  expect(mark.closest("header")!.className).toContain("max-narrow:relative");
+  const stand = mark.closest("button")!;
+  expect(stand.className).toContain("absolute");
+  expect(stand.className).toContain("start-1/2");
+  expect(mark.closest("header")!.className).toContain("relative");
 });
 
-test("the menu drawer carries the bar's destinations and the act that starts a conversation", async () => {
+test("the menu drawer holds the whole sidebar and the act that starts a conversation", async () => {
+  atPhoneWidth();
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
+  expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
 
   const drawer = await screen.findByRole("dialog");
-  const names = within(drawer)
+  const sidebar = within(drawer).getByRole("navigation", { name: "Workspace" });
+  const names = within(sidebar)
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
-    "Close",
+    "Collapse sidebar",
     "New conversation",
-    "Chat",
-    "Apps",
+    "Applications",
     "Artifacts",
     "Radar",
+    "Conversations",
     "Connectors",
     "Workspace",
+    "Theme",
   ]);
 });
 
 test("picking a destination in the drawer moves the page and shuts the drawer", async () => {
+  atPhoneWidth();
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -242,18 +257,21 @@ test("picking a destination in the drawer moves the page and shuts the drawer", 
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
-test("the member's menu states who is signed in and offers the theme choice", async () => {
+test("the sidebar's foot states who is signed in and offers the theme choice", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const trigger = screen.getByRole("button", { name: MEMBER.email });
-  expect(trigger.querySelector("[data-slot=avatar-fallback]")!.textContent).toBe("M");
-  await userEvent.click(trigger);
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const foot = sidebar.querySelector("footer")!;
+  expect(foot.querySelector("[data-slot=avatar-fallback]")!.textContent).toBe("M");
+  expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
+  expect(within(foot).getByText("Member")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
 
-  expect(await screen.findByText(MEMBER.email)).toBeTruthy();
-  expect(screen.getByText("Member")).toBeTruthy();
-  expect(screen.getByRole("menuitem", { name: /Theme/ })).toBeTruthy();
-  expect(screen.queryByRole("menuitem", { name: "Administration" })).toBeNull();
+  await userEvent.click(within(foot).getByRole("button", { name: "Theme" }));
+  expect(await screen.findByRole("menuitemradio", { name: "System" })).toBeTruthy();
+  expect(screen.getByRole("menuitemradio", { name: "Light" })).toBeTruthy();
+  expect(screen.getByRole("menuitemradio", { name: "Dark" })).toBeTruthy();
 });
 
 const SECOND_AGENT = {
