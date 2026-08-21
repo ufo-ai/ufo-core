@@ -1,4 +1,5 @@
-"""The operator session debugger: a read-only operator surface over one workspace's sessions.
+"""The operator session debugger: a read-only operator surface over the fleet's sessions — an index
+of the deploy's workspaces and its most recent threads, and one workspace's sessions in depth.
 
 Authorization is entirely in `resolve_operator_workspace`, the surface's shared-fleet `identify`:
 the request's gateway bearer must verify against this deploy's `UFO_TOKEN_SECRET` AND carry an
@@ -39,7 +40,7 @@ from ufo.sdk.hub import (
     TextDelta,
     ToolCall,
 )
-from ufo.sdk.operator import bind_operator_session
+from ufo.sdk.operator import FleetDirectory, bind_operator_session
 from ufo.sdk.surfaces import SurfaceContext, SurfaceRoute
 
 SURFACE_DEBUG = "debug"
@@ -55,6 +56,13 @@ async def app_page(ctx: SurfaceContext, request: Request) -> Response:
             "debugger app is not built — run `npm run build` in extensions/debugger/frontend"
         )
     return HTMLResponse(APP_HTML)
+
+
+async def fleet(ctx: SurfaceContext, request: Request) -> Response:
+    """The landing index: the deploy's workspaces and its most recent threads. The request's `?ws=`
+    scope is beside the point here — the page reads across the fleet, under the same operator-domain
+    gate that already lets `?ws=` reach any workspace in it."""
+    return JSONResponse((await FleetDirectory().read()).model_dump(mode="json"))
 
 
 async def workspace_meta(ctx: SurfaceContext, request: Request) -> Response:
@@ -201,6 +209,7 @@ def _uuid_param(request: Request, name: str) -> UUID | None:
 ROUTES = (
     SurfaceRoute(method="GET", path="", handler=app_page),
     SurfaceRoute(method="POST", path="", handler=bind_operator_session),
+    SurfaceRoute(method="GET", path="api/fleet", handler=fleet),
     SurfaceRoute(method="GET", path="api/workspace", handler=workspace_meta),
     SurfaceRoute(method="GET", path="api/conversations", handler=conversations),
     SurfaceRoute(

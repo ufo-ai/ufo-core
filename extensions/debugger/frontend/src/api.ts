@@ -90,6 +90,27 @@ export type CompactionRecord = {
   summary: CompactionSummary;
 };
 
+export type FleetWorkspace = {
+  workspace_id: string;
+  domain: string | null;
+  members: number;
+  conversations: number;
+  last_turn_at: string | null;
+};
+
+export type FleetThread = {
+  workspace_id: string;
+  domain: string | null;
+  conversation_id: string;
+  surface: string;
+  queue_key: string;
+  title: string | null;
+  turn_count: number;
+  last_turn_at: string;
+};
+
+export type FleetListing = { workspaces: FleetWorkspace[]; threads: FleetThread[] };
+
 export type WorkspaceFile = { path: string; size_bytes: number; modified_at: string };
 export type WorkspaceMeta = { workspace_id: string; slack_team: string | null };
 

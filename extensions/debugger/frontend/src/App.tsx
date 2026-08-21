@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { get, WorkspaceMeta } from "./api";
 import { Conversations } from "./Conversations";
+import { Fleet } from "./Fleet";
 import { useParams } from "./nav";
 import { Session } from "./Session";
 
@@ -10,22 +11,27 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [picker, setPicker] = useState(params.ws ?? "");
 
+  const fleet = !params.ws && !params.c;
+
+  useEffect(() => setPicker(params.ws ?? ""), [params.ws]);
+
   useEffect(() => {
-    document.title = (params.c ?? "Conversations") + " · ufo debugger";
-  }, [params.c]);
+    document.title = (params.c ?? (fleet ? "Fleet" : "Conversations")) + " · ufo debugger";
+  }, [params.c, fleet]);
 
   useEffect(() => {
     setMeta(null);
     setError(null);
+    if (fleet) return;
     get<WorkspaceMeta>("workspace")
       .then(setMeta)
       .catch((err: Error) => setError(err.message));
-  }, [params.ws]);
+  }, [params.ws, fleet]);
 
   return (
     <>
       <header>
-        <h1 onClick={() => navigate({ c: null, t: null })}>ufo · session debugger</h1>
+        <h1 onClick={() => navigate({ ws: null, c: null, t: null })}>ufo · session debugger</h1>
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -40,7 +46,7 @@ export function App() {
           <button type="submit">open</button>
         </form>
         {meta && (
-          <span className="meta">
+          <span className="meta crumb" onClick={() => navigate({ c: null, t: null })}>
             workspace <code>{meta.workspace_id}</code>
             {meta.slack_team && (
               <>
@@ -62,6 +68,8 @@ export function App() {
           <div className="empty">
             {error} — check the workspace target and that your session is signed in.
           </div>
+        ) : fleet ? (
+          <Fleet navigate={navigate} />
         ) : params.c ? (
           <Session conversationId={params.c} selectedTurn={params.t} navigate={navigate} />
         ) : (

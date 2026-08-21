@@ -1,9 +1,9 @@
 """The debug surface end to end through the shared-fleet mount: the `identify` gate (operator
-domain, `?ws=` re-scoping, forged/missing bearers), the cookie bind, and every read route against
-real rows, blobs, and a real conversation sandbox — the same seam the operator hits, no runtime
-engine needed because the surface admits nothing and a completed turn tails from its durable
-terminal row. The files tab reads the live sandbox workspace through the carrier, so its proof
-seeds files by writing through the same `ConversationSandbox`."""
+domain, `?ws=` re-scoping, forged/missing bearers), the cookie bind, the fleet index that spans
+every workspace, and every read route against real rows, blobs, and a real conversation sandbox —
+the same seam the operator hits, no runtime engine needed because the surface admits nothing and a
+completed turn tails from its durable terminal row. The files tab reads the live sandbox workspace
+through the carrier, so its proof seeds files by writing through the same `ConversationSandbox`."""
 
 import base64
 import hashlib
@@ -42,7 +42,7 @@ from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
+from ufo.schema.records import SUBAGENT_SURFACE, TerminalFrame
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
 from ufo.transcript import (
@@ -111,14 +111,32 @@ async def debug(
         yield client, blob, sandboxes
 
 
-async def _seed_workspace() -> tuple[UUID, UUID]:
-    workspace_id, agent_id = uuid4(), uuid4()
+async def _seed_workspace(domain: str | None = None, members: int = 1) -> tuple[UUID, UUID]:
+    """A workspace as the fleet addresses one: named by a domain it derives its id from and seated
+    by members at that domain, or an anonymous uuid4 row with nobody in it."""
+    workspace_id = uuid5(NAMESPACE_DNS, domain) if domain is not None else uuid4()
+    agent_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
             )
         )
+        if domain is not None:
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    [
+                        {
+                            "id": uuid4(),
+                            "workspace_id": workspace_id,
+                            "email": f"person{index}@{domain}",
+                            "created_at": sa.func.now(),
+                            "updated_at": sa.func.now(),
+                        }
+                        for index in range(members)
+                    ]
+                )
+            )
         await connection.execute(
             sa.insert(tables.agent).values(
                 id=agent_id,
@@ -134,7 +152,11 @@ async def _seed_workspace() -> tuple[UUID, UUID]:
 
 
 async def _seed_conversation(
-    workspace_id: UUID, *, queue_key: str = "C042:1721.5", surface: str = "slack"
+    workspace_id: UUID,
+    *,
+    queue_key: str = "C042:1721.5",
+    surface: str = "slack",
+    title: str | None = None,
 ) -> UUID:
     conversation_id = uuid4()
     async with workspace_tx() as connection:
@@ -149,6 +171,7 @@ async def _seed_conversation(
                 .scalar_subquery(),
                 surface=surface,
                 queue_key=queue_key,
+                title=title,
                 member_id=None,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -165,6 +188,7 @@ async def _seed_turn(
     *,
     status: str = "done",
     parent_turn_id: UUID | None = None,
+    at: datetime | None = None,
 ) -> UUID:
     turn_id = uuid4()
     terminal = (
@@ -187,8 +211,8 @@ async def _seed_turn(
                 parent_turn_id=parent_turn_id,
                 subagent_profile="research" if parent_turn_id is not None else None,
                 terminal=terminal,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+                created_at=at or sa.func.now(),
+                updated_at=at or sa.func.now(),
             )
         )
     return turn_id
@@ -213,6 +237,112 @@ async def test_identify_gates_on_the_operator_domain(debug) -> None:
     assert denied_member.status_code == 401
     assert denied_forged.status_code == 401
     assert (await client.get("/surface/debug/api/workspace")).status_code == 401
+
+
+async def test_fleet_indexes_every_workspace_and_the_newest_threads_across_them(debug) -> None:
+    """The landing index: every workspace the deploy serves, newest activity first and an idle one
+    last, each named by the domain that addresses it — and the recent threads across all of them,
+    each carrying the workspace a click must re-scope to."""
+    client, _, _ = debug
+    acme, acme_agent = await _seed_workspace("acme.com")
+    beta, beta_agent = await _seed_workspace("beta.io", members=2)
+    idle, _ = await _seed_workspace()
+    older, older_json = datetime(2026, 8, 20, 9, 30, tzinfo=UTC), "2026-08-20T09:30:00Z"
+    newer, newer_json = datetime(2026, 8, 21, 17, 5, tzinfo=UTC), "2026-08-21T17:05:00Z"
+    acme_conversation = await _seed_conversation(acme, queue_key="C001:1.0", title="quarter close")
+    await _seed_turn(acme, acme_conversation, acme_agent, 1, at=older)
+    await _seed_turn(acme, acme_conversation, acme_agent, 2, at=older)
+    beta_conversation = await _seed_conversation(beta, queue_key="C002:2.0", surface="web")
+    await _seed_turn(beta, beta_conversation, beta_agent, 1, at=newer)
+    token = _mint(SECRET, acme, f"alex@{OPERATOR_EMAIL_DOMAIN}")
+
+    listing = await client.get("/surface/debug/api/fleet", headers=_auth(token))
+    assert listing.status_code == 200
+    body = listing.json()
+
+    assert [entry["workspace_id"] for entry in body["workspaces"]] == [
+        str(beta),
+        str(acme),
+        str(idle),
+    ]
+    assert body["workspaces"][0] == {
+        "workspace_id": str(beta),
+        "domain": "beta.io",
+        "members": 2,
+        "conversations": 1,
+        "last_turn_at": newer_json,
+    }
+    assert body["workspaces"][2] == {
+        "workspace_id": str(idle),
+        "domain": None,
+        "members": 0,
+        "conversations": 0,
+        "last_turn_at": None,
+    }
+    assert body["threads"] == [
+        {
+            "workspace_id": str(beta),
+            "domain": "beta.io",
+            "conversation_id": str(beta_conversation),
+            "surface": "web",
+            "queue_key": "C002:2.0",
+            "title": None,
+            "turn_count": 1,
+            "last_turn_at": newer_json,
+        },
+        {
+            "workspace_id": str(acme),
+            "domain": "acme.com",
+            "conversation_id": str(acme_conversation),
+            "surface": "slack",
+            "queue_key": "C001:1.0",
+            "title": "quarter close",
+            "turn_count": 2,
+            "last_turn_at": older_json,
+        },
+    ]
+
+
+async def test_fleet_indexes_rooted_turns_only(debug) -> None:
+    """A subagent runs in a conversation of its own, so a busy workspace's fan-out would otherwise
+    fill the index and hide every other workspace's threads behind it. The directory orders, counts
+    and lists on rooted turns alone — the fan-out is reachable through the parent turn, never as a
+    thread of its own."""
+    client, _, _ = debug
+    acme, agent = await _seed_workspace("acme.com")
+    rooted_at = datetime(2026, 8, 20, 9, 30, tzinfo=UTC)
+    fanned_at = datetime(2026, 8, 21, 17, 5, tzinfo=UTC)
+    conversation = await _seed_conversation(acme, queue_key="C001:1.0")
+    parent = await _seed_turn(acme, conversation, agent, 1, at=rooted_at)
+    fanned = await _seed_conversation(acme, queue_key=str(parent), surface=SUBAGENT_SURFACE)
+    await _seed_turn(acme, fanned, agent, 1, at=fanned_at, parent_turn_id=parent)
+    token = _mint(SECRET, acme, f"alex@{OPERATOR_EMAIL_DOMAIN}")
+
+    body = (await client.get("/surface/debug/api/fleet", headers=_auth(token))).json()
+
+    assert [thread["conversation_id"] for thread in body["threads"]] == [str(conversation)]
+    assert body["workspaces"] == [
+        {
+            "workspace_id": str(acme),
+            "domain": "acme.com",
+            "members": 1,
+            "conversations": 1,
+            "last_turn_at": "2026-08-20T09:30:00Z",
+        }
+    ]
+
+
+async def test_fleet_is_closed_to_everyone_but_an_operator(debug) -> None:
+    """The index reads across every workspace, so it answers only what `?ws=` already would: a
+    verified bearer whose email domain is the operator's, and nothing else."""
+    client, _, _ = debug
+    workspace_id, _ = await _seed_workspace("acme.com")
+    member = _mint(SECRET, workspace_id, "member@acme.com")
+    forged = _mint("wrong-secret", workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
+
+    assert (await client.get("/surface/debug/api/fleet", headers=_auth(member))).status_code == 401
+    assert (await client.get("/surface/debug/api/fleet", headers=_auth(forged))).status_code == 401
+    assert (await client.get("/surface/debug/api/fleet")).status_code == 401
 
 
 async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> None:

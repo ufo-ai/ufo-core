@@ -47,6 +47,10 @@ th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--lin
 th { font-size: 12px; color: var(--dim); font-weight: 600; }
 tr.row { cursor: pointer; }
 tr.row:hover { background: var(--soft); }
+main h2 { font-size: 12px; color: var(--dim); font-weight: 600; margin: 0 0 6px; }
+main h2 + table { margin-bottom: 20px; }
+.crumb { cursor: pointer; }
+.crumb:hover { color: CanvasText; }
 button, .button {
   padding: 5px 12px;
   border: 1px solid var(--line);

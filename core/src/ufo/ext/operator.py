@@ -5,6 +5,9 @@ stays out of URLs, access logs, and browser history — and resolve it to the wo
 scoped to under the operator-domain gate. One cookie serves every operator surface, so an operator
 authenticates once and browses all of them.
 
+Beside the session sits `FleetDirectory`, the index of what an operator may then pick: the
+workspaces this deploy serves and the threads that moved most recently across all of them.
+
 It lives in core, re-exported through `ufo.sdk.operator`, because two sibling extensions (the
 debugger and the memory explorer) share it and an extension imports only `ufo.sdk` — never another
 extension — so this session can live in neither. Verification stays the caller's: `verified_claims`
@@ -12,12 +15,23 @@ takes the token and resolves `UFO_TOKEN_SECRET` itself, so this module never hol
 key."""
 
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid5
 
+import sqlalchemy as sa
+from pydantic import BaseModel, field_validator
+
 from ufo.bearer import LOGIN_PATH, verified_claims
+from ufo.db import owner_tx, workspace_tx
 from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN, SurfaceAuth, SurfaceContext
+from ufo.schema import tables
+from ufo.schema.records import SUBAGENT_SURFACE
 from ufo.sdk.http import JSONResponse, RedirectResponse, Request, Response, set_session_cookie
-from ufo.seats import email_domain
+from ufo.seats import email_domain, workspace_domain
+from ufo.workspace import ws
 
 OPERATOR_COOKIE = "ufo_debug"
 TOKEN_FIELD = "token"
@@ -103,3 +117,194 @@ async def bind_operator_session(ctx: SurfaceContext, request: Request) -> Respon
     response = RedirectResponse(str(request.url), status_code=303)
     set_session_cookie(response, OPERATOR_COOKIE, posted.strip(), samesite="lax")
     return response
+
+
+FLEET_THREAD_LIMIT = 50
+
+
+class FleetWorkspace(BaseModel):
+    """One workspace as the operator's index lists it: the domain that addresses it, how much is
+    in it, and when it last did anything."""
+
+    workspace_id: UUID
+    domain: str | None
+    members: int
+    conversations: int
+    last_turn_at: datetime | None
+
+    @field_validator("last_turn_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime | None) -> datetime | None:
+        return value if value is None or value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class FleetThread(BaseModel):
+    """One recently active conversation, carrying the workspace it belongs to so a click can
+    re-scope and open it in the same step."""
+
+    workspace_id: UUID
+    domain: str | None
+    conversation_id: UUID
+    surface: str
+    queue_key: str
+    title: str | None
+    turn_count: int
+    last_turn_at: datetime
+
+    @field_validator("last_turn_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class FleetListing(BaseModel):
+    workspaces: tuple[FleetWorkspace, ...]
+    threads: tuple[FleetThread, ...]
+
+
+@dataclass(frozen=True)
+class FleetDirectory:
+    """The operator's index of the deploy: every workspace it serves, newest activity first, and
+    the most recently active threads across all of them. It grants no reach `?ws=` does not already
+    have — an operator bearer already re-scopes this surface to any workspace in the fleet — it
+    only removes having to know a domain before typing it.
+
+    Crossing workspaces means `owner_tx`, whose contract admits identifiers and nothing else, so
+    the two passes below split on exactly that line: the owner pass reads workspace and
+    conversation ids plus the activity timestamps that order them, and every word an operator
+    reads — the domain, the surface, the queue key, the title — comes from the scoped pass, re-bound
+    under `with ws(...)` and read through RLS like any other workspace read. The scoped pass costs
+    one transaction per workspace, which is right for a deploy holding tens of them and wrong for
+    one holding thousands.
+
+    Only rooted turns count. A subagent runs in a conversation of its own, so a busy workspace's
+    fan-out otherwise fills the index and hides every other workspace's threads behind it —
+    measured on the live fleet, 35 of 50 slots. `parent_turn_id is null` separates the two exactly
+    (every subagent turn carries a parent, no member-facing turn does), and it is the filter the
+    owner pass can apply, holding only identifiers; the conversation count beside it drops the same
+    runs by the surface the portal's own listing excludes them by."""
+
+    threads: int = FLEET_THREAD_LIMIT
+
+    async def read(self) -> FleetListing:
+        activity, recent = await self._enumerate()
+        wanted: dict[UUID, list[UUID]] = {}
+        for row in recent:
+            wanted.setdefault(row.workspace_id, []).append(row.conversation_id)
+        listed: list[FleetWorkspace] = []
+        opened: dict[UUID, sa.Row[Any]] = {}
+        for row in activity:
+            with ws(row.id):
+                workspace, conversations = await self._scoped(
+                    row.id, row.last_turn_at, wanted.get(row.id, [])
+                )
+            listed.append(workspace)
+            opened.update(conversations)
+        named = {workspace.workspace_id: workspace.domain for workspace in listed}
+        return FleetListing(
+            workspaces=tuple(listed),
+            threads=tuple(
+                FleetThread(
+                    workspace_id=row.workspace_id,
+                    domain=named.get(row.workspace_id),
+                    conversation_id=row.conversation_id,
+                    surface=opened[row.conversation_id].surface,
+                    queue_key=opened[row.conversation_id].queue_key,
+                    title=opened[row.conversation_id].title,
+                    turn_count=row.turn_count,
+                    last_turn_at=row.last_turn_at,
+                )
+                for row in recent
+                if row.conversation_id in opened
+            ),
+        )
+
+    async def _enumerate(self) -> tuple[Sequence[sa.Row[Any]], Sequence[sa.Row[Any]]]:
+        """The owner pass: which workspaces exist and which conversations moved last. Identifiers
+        and their ordering keys only — a workspace with no turn yet still lists, so a deploy's
+        newest tenant is visible the moment it is created."""
+        per_workspace = (
+            sa.select(
+                tables.turn.c.workspace_id,
+                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
+            )
+            .where(tables.turn.c.parent_turn_id.is_(None))
+            .group_by(tables.turn.c.workspace_id)
+            .subquery()
+        )
+        workspaces = (
+            sa.select(tables.workspace.c.id, per_workspace.c.last_turn_at)
+            .select_from(
+                tables.workspace.outerjoin(
+                    per_workspace, per_workspace.c.workspace_id == tables.workspace.c.id
+                )
+            )
+            .order_by(per_workspace.c.last_turn_at.desc().nulls_last(), tables.workspace.c.id)
+        )
+        recent = (
+            sa.select(
+                tables.turn.c.workspace_id,
+                tables.turn.c.conversation_id,
+                sa.func.count().label("turn_count"),
+                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
+            )
+            .where(tables.turn.c.parent_turn_id.is_(None))
+            .group_by(tables.turn.c.workspace_id, tables.turn.c.conversation_id)
+            .order_by(sa.func.max(tables.turn.c.updated_at).desc())
+            .limit(self.threads)
+        )
+        async with owner_tx() as connection:
+            return (
+                (await connection.execute(workspaces)).all(),
+                (await connection.execute(recent)).all(),
+            )
+
+    async def _scoped(
+        self, workspace_id: UUID, last_turn_at: datetime | None, conversation_ids: Sequence[UUID]
+    ) -> tuple[FleetWorkspace, dict[UUID, sa.Row[Any]]]:
+        """The scoped pass for one re-bound workspace: everything the index renders in words. RLS
+        is pinned to this workspace for the whole transaction, so these reads are no broader than
+        the ones the surface already serves under `?ws=`."""
+        async with workspace_tx() as connection:
+            domain = await workspace_domain(connection, workspace_id)
+            members = (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.member)
+                    .where(tables.member.c.workspace_id == workspace_id)
+                )
+            ).scalar_one()
+            conversations = (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.conversation)
+                    .where(
+                        tables.conversation.c.workspace_id == workspace_id,
+                        tables.conversation.c.surface != SUBAGENT_SURFACE,
+                    )
+                )
+            ).scalar_one()
+            opened = (
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.conversation.c.id,
+                            tables.conversation.c.surface,
+                            tables.conversation.c.queue_key,
+                            tables.conversation.c.title,
+                        ).where(tables.conversation.c.id.in_(conversation_ids))
+                    )
+                ).all()
+                if conversation_ids
+                else ()
+            )
+        return (
+            FleetWorkspace(
+                workspace_id=workspace_id,
+                domain=domain,
+                members=members,
+                conversations=conversations,
+                last_turn_at=last_turn_at,
+            ),
+            {row.id: row for row in opened},
+        )
