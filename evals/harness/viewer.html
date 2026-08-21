@@ -6,24 +6,30 @@
 <title>ufo eval viewer</title>
 <style>
 :root {
-  color-scheme: dark;
-  --bg: #101310;
-  --panel: #171b17;
-  --panel-2: #1d221d;
-  --line: #303830;
-  --line-strong: #465146;
-  --text: #eef2e9;
-  --muted: #9ca89a;
-  --green: #a7f06d;
-  --green-deep: #26451f;
-  --red: #ff8c7a;
-  --red-deep: #4c2722;
-  --amber: #f3c96b;
-  --amber-deep: #44371d;
-  --blue: #96c7ff;
-  --blue-deep: #21374c;
-  --purple: #cbb0ff;
-  --purple-deep: #322549;
+  color-scheme: light dark;
+  --bg: light-dark(#faf9f7, #101310);
+  --chrome: light-dark(#f4f3f2, #131713);
+  --panel: light-dark(#f4f3f2, #171b17);
+  --panel-2: light-dark(#ebeae9, #1d221d);
+  --hover: light-dark(#e2e4e1, #252c25);
+  --line: light-dark(#d7dad6, #303830);
+  --line-strong: light-dark(#9ca39b, #465146);
+  --text: light-dark(#191a1a, #eef2e9);
+  --muted: light-dark(#626a62, #9ca89a);
+  --code-bg: light-dark(#f4f3f2, #111411);
+  --code-text: light-dark(#293029, #dbe3d6);
+  --green: light-dark(#2f6b1f, #a7f06d);
+  --green-deep: light-dark(#e2f4d6, #26451f);
+  --red: light-dark(#a82a1e, #ff8c7a);
+  --red-deep: light-dark(#f8e4df, #4c2722);
+  --amber: light-dark(#805600, #f3c96b);
+  --amber-deep: light-dark(#f6ecd2, #44371d);
+  --blue: light-dark(#245f94, #96c7ff);
+  --blue-deep: light-dark(#e0edf8, #21374c);
+  --purple: light-dark(#6841a1, #cbb0ff);
+  --purple-deep: light-dark(#eee7f8, #322549);
+  --missing: light-dark(#e3e5e2, #292f29);
+  --backdrop: light-dark(rgb(25 26 26 / 35%), rgb(0 0 0 / 78%));
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
@@ -44,7 +50,7 @@ button { color: inherit; }
   align-items: end;
   padding: 18px 22px;
   border-bottom: 1px solid var(--line);
-  background: #131713;
+  background: var(--chrome);
   position: sticky;
   top: 0;
   z-index: 10;
@@ -82,7 +88,7 @@ select {
   background: var(--panel-2);
   cursor: pointer;
 }
-.button:hover { border-color: var(--line-strong); background: #252c25; }
+.button:hover { border-color: var(--line-strong); background: var(--hover); }
 .summary {
   display: grid;
   grid-template-columns: repeat(6, minmax(150px, 1fr));
@@ -96,7 +102,7 @@ select {
 .positive { color: var(--green); }
 .negative { color: var(--red); }
 .neutral { color: var(--muted); }
-.scoreboard { border-bottom: 1px solid var(--line); background: #131713; }
+.scoreboard { border-bottom: 1px solid var(--line); background: var(--chrome); }
 .scoreboard > summary {
   min-height: 47px;
   display: flex;
@@ -142,7 +148,7 @@ select {
   gap: 12px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
-  background: #131713;
+  background: var(--chrome);
   position: sticky;
   top: 75px;
   z-index: 5;
@@ -193,7 +199,7 @@ select {
 .fail, .regressed { color: var(--red); background: var(--red-deep); }
 .excluded, .changed { color: var(--amber); background: var(--amber-deep); }
 .fixed, .new, .running { color: var(--blue); background: var(--blue-deep); }
-.missing, .same { color: var(--muted); background: #292f29; }
+.missing, .same { color: var(--muted); background: var(--missing); }
 .compaction { color: var(--purple); background: var(--purple-deep); }
 .filters { display: flex; gap: 5px; flex-wrap: wrap; padding: 8px 8px 2px; }
 .filter {
@@ -227,8 +233,8 @@ pre {
   padding: 11px;
   border: 1px solid var(--line);
   border-radius: 5px;
-  background: #111411;
-  color: #dbe3d6;
+  background: var(--code-bg);
+  color: var(--code-text);
   font: 11px/1.55 var(--mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -250,7 +256,7 @@ pre {
   background: var(--panel);
   color: var(--text);
 }
-.artifact-preview::backdrop { background: rgb(0 0 0 / 78%); }
+.artifact-preview::backdrop { background: var(--backdrop); }
 .artifact-preview-shell { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); }
 .artifact-preview-head {
   display: flex;
@@ -627,6 +633,15 @@ function responseMarkup(attempt) {
   if (attempt.response == null) return EVIDENCE_UNRECORDED;
   return attempt.response === '' ? 'The turn recorded no final response text.' : attempt.response;
 }
+function resourcesMarkup(attempt) {
+  const lines = [];
+  if (attempt.tokens != null) lines.push(`${attempt.tokens} tokens`);
+  if (attempt.costMicroUsd != null) lines.push(`${attempt.costMicroUsd} micro-USD`);
+  if (attempt.compactions) {
+    lines.push(`${attempt.compactions} compaction${attempt.compactions === 1 ? '' : 's'}`);
+  }
+  return `<div class="section"><div class="section-title">Resources</div><pre>${h(lines.length ? lines.join('\n') : 'not recorded')}</pre></div>`;
+}
 const STATUS_CLASS = {done: 'pass', failed: 'fail', cancelled: 'fail', running: 'running',
   queued: 'running', parked: 'excluded'};
 function statusBadge(status) {
@@ -736,7 +751,7 @@ function attemptMarkup(attempt, index, selected, kind) {
     <div class="attempt-body">
       <div class="reason">${h(attempt.reason)}</div>
       ${trajectory}
-      <div class="section"><div class="section-title">Resources</div><pre>${attempt.tokens == null && attempt.costMicroUsd == null ? 'not recorded' : `${h(attempt.tokens || 0)} tokens\n${h(attempt.costMicroUsd || 0)} micro-USD${attempt.compactions ? `\n${h(attempt.compactions)} compactions` : ''}`}</pre></div>
+      ${resourcesMarkup(attempt)}
       ${timingMarkup(attempt.timing)}
       ${scenarioMarkup(attempt)}
       <div class="section"><div class="section-title">Agent response</div><pre>${h(responseMarkup(attempt))}</pre></div>
@@ -863,6 +878,8 @@ function trajectoryMarkup(kind, run, report, item, attempt, index) {
     <div class="trajectory-body">
       ${trajectory.error ? `<div class="reason negative">${h(trajectory.error)}</div>` : ''}
       ${agentPrompt}
+      ${resourcesMarkup(attempt)}
+      ${timingMarkup(attempt.timing)}
       ${compactionsMarkup(attempt)}
       <div class="section"><div class="section-title">Stored transcript snapshot · ${(trajectory.messages || []).length} messages</div>${messagesMarkup(trajectory.messages || [])}</div>
     </div>

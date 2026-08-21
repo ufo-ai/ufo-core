@@ -5861,9 +5861,10 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert "Tool trajectory" in html
     assert "View trajectory" in html
     assert '"tokens":140,"costMicroUsd":9' in html
-    assert "${h(attempt.tokens || 0)} tokens" in html
-    assert "${h(attempt.costMicroUsd || 0)} micro-USD" in html
+    assert "resourcesMarkup(attempt)" in html
     assert "Stored transcript snapshot" in html
+    assert "color-scheme: light dark" in html
+    assert "light-dark(#faf9f7, #101310)" in html
     assert "11111111-1111-1111-1111-111111111111" in html
     assert '"judge":[{"criterion":"finish the work","passed":true,"reason":"work shown"}]' in html
     assert '"grader":{"recallRank":2}' in html
@@ -5965,6 +5966,59 @@ def test_eval_viewer_sums_attempt_cost_and_latency_per_archived_case() -> None:
     assert "$0.000012 per case" in rendered
     assert "16.0s" in rendered
     assert "5.3s per case" in rendered
+
+
+def test_eval_viewer_trajectory_shows_attempt_resources_and_latency() -> None:
+    report = EvalReport(
+        name="resource-detail",
+        suite="capability",
+        digest="sha256:abc",
+        cases=(
+            EvalCaseResult(
+                name="case",
+                passed=True,
+                reason="ok",
+                evidence=_debug_evidence("done"),
+            ),
+        ),
+    )
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime(2026, 8, 21, tzinfo=UTC),
+        label="resources",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123",
+        reports=(report,),
+    )
+    html = render_viewer((run,), run.id).decode()
+    payload = html.split('<script id="eval-data" type="application/json">', 1)[1].split(
+        "</script>", 1
+    )[0]
+    script = html.split("<script>\n", 1)[1].rsplit("\nrender();\n</script>", 1)[0]
+    program = (
+        f"const payload = {dumps(payload)};"
+        "global.document = {getElementById: id => id === 'eval-data' "
+        "? {textContent: payload} : {}};"
+        "global.location = {hash: ''};"
+        "global.history = {replaceState() {}};"
+        "global.window = {addEventListener() {}};"
+        f"{script}\n"
+        "const report = runs[0].reports[0];"
+        "const item = report.cases[0];"
+        "const attempt = item.evidence.attempts[0];"
+        "process.stdout.write(trajectoryMarkup('current', runs[0], report, item, attempt, 0));"
+    )
+
+    rendered = subprocess.run(
+        ("node", "-e", program), check=True, capture_output=True, text=True
+    ).stdout
+
+    assert "140 tokens" in rendered
+    assert "9 micro-USD" in rendered
+    assert "1 compaction" in rendered
+    assert "4.0s wall" in rendered
+    assert "Stored transcript snapshot · 2 messages" in rendered
 
 
 @pytest.mark.docker
