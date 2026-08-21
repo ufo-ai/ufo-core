@@ -87,6 +87,37 @@ own `ufoctl serve` — recording every run into the shared archive. Each `[[run]
 label, a template config carrying the suite knobs, and the `python -m evals` arguments; run
 directories and per-run databases are retained for reconstruction.
 
+`python -m evals.ablate experiment.toml` measures a change to text a model reads — a skill, a
+prompt section, a corpus file — the way the Prompts rule demands: one arm per variant, each arm
+its own git worktree, venv, and stack, always beside a control arm on the unmodified base. The
+experiment file names the base revision, the suites and cases, repeats, a budget the preflight
+refuses to exceed, the stack's template config, and `[[arm]]` blocks mapping repo paths to variant
+files. Verdicts compare sample-level pass counts per case and call a move only past a two-sample
+gap at equal sample counts (or a total collapse or fix); a failing case is data — a stack's
+nonzero exit is fatal only when it wrote no record. Reports and every arm's records land under
+`eval-reports/experiments/<name>/`. Judge and simulator variance is real: compare arms from the
+same experiment, never across runs.
+
+```toml
+name = "customers-section-clauses"
+base = "origin/main"
+suites = ["onboarding_help"]
+cases = ["slack-install-pending", "promised-credits"]
+repeats = 2
+budget_usd = 60.0
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_hosted" }
+
+[[arm]]
+name = "no-topic-list"
+[arm.files]
+"packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "arms/no-topic-list.py"
+```
+
 Each invocation records an immutable JSON run under `eval-reports/runs/` and rebuilds the offline
 `eval-reports/index.html` viewer. Every case shows its full setup (message or scenario, rubric,
 member binding) and every attempt its tool trajectory, tool errors, per-criterion judge verdicts,

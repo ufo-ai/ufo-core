@@ -79,7 +79,9 @@ its words answer to the same rules.
 A change to text a model reads — a prompt section, a tool description, injected context — ships
 only ablated: run the relevant evals with and without the changed wording, and with any other
 section covering the same ground, and keep only what the arms prove load-bearing. A prompt change
-no eval can measure gets that eval first.
+no eval can measure gets that eval first. `python -m evals.ablate experiment.toml` runs the arms —
+one isolated stack per text variant beside an always-run control, verdicts at sample level (the
+README's Evals section shows the experiment file).
 
 ## Skills
 
