@@ -1476,3 +1476,61 @@ async def test_list_recent_carries_each_row_subject(db: None, tmp_path: Path) ->
         ("a private note", member_subject(member)),
         ("a team note", "shared"),
     }
+
+
+@pytest.mark.asyncio
+async def test_the_memory_listing_orders_newest_first_on_written(db: None, tmp_path: Path) -> None:
+    """A memory item is named by a uuid, so the index's default order by name is arbitrary — the
+    portal's wiki asks for `written` instead, and the kind has to declare it and sort on it. Three
+    items are committed out of chronological order with uuid names that sort against the dates, so
+    a listing ordered by name lands in a different order than one ordered by `written`."""
+    workspace_id = await _workspace()
+    member = uuid4()
+    dm = conversation_audience(member)
+    index = DefaultIndex(transaction=workspace_tx)
+    embed = StubEmbed(vec((0, 1.0)))
+    ctx = _tool_ctx(
+        _ext(index, embed, dm), member, tmp_path, workspace_id=workspace_id, audience=dm
+    )
+    written = {
+        "the oldest note": datetime(2026, 1, 1, tzinfo=UTC),
+        "the newest note": datetime(2026, 8, 1, tzinfo=UTC),
+        "the middle note": datetime(2026, 4, 1, tzinfo=UTC),
+    }
+
+    with ws(workspace_id):
+        for body in written:
+            await _run("memory_update", ctx, body=body)
+        async with workspace_tx() as connection:
+            for body, moment in written.items():
+                await connection.execute(
+                    sa.update(memory_item)
+                    .where(memory_item.c.body == body)
+                    .values(created_at=moment, updated_at=moment)
+                )
+
+        with agent(uuid4()):
+            page = await MemoryObjects().member_page(
+                ctx.ext,
+                member_id=member,
+                admin=False,
+                query=ObjectListQuery(
+                    supported_fields=MEMORY_OBJECT.list_fields,
+                    order_by="written",
+                    order="desc",
+                ),
+            )
+
+    assert [row.summary for row in page.rows] == [
+        "the newest note",
+        "the middle note",
+        "the oldest note",
+    ]
+    assert [row.fields["written"] for row in page.rows] == [
+        moment.isoformat()
+        for moment in (
+            written["the newest note"],
+            written["the middle note"],
+            written["the oldest note"],
+        )
+    ]

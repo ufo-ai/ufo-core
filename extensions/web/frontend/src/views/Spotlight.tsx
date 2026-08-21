@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   IconApps,
+  IconBook,
   IconBooks,
   IconMessage,
   IconPlug,
@@ -48,6 +49,7 @@ const WORKING = "Searching…";
 const CHORD = "k";
 
 const SECTION_ICONS: Record<Section, TablerIcon> = {
+  wiki: IconBook,
   artifacts: IconBooks,
   radar: IconRadar,
   connectors: IconPlug,

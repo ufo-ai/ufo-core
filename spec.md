@@ -637,7 +637,10 @@ reads here, admin included, because participation there is the peer surface's li
 portal read can check it. What the data never scoped to an
 agent reads — and, where a verb exists, mutates:
 the team roster, source bindings, the deploy's member-fillable credential slots, memory, shared
-files, hosted sites, and usage. The team view is the workspace roster — every member reads who
+files, hosted sites, and usage. The wiki is a second reading of two of them, as a document rather
+than a listing: the workspace's shared memory set out under the kind that filed each item, and the
+roster as the way into one member's page, where that member's own memory answers to them alone.
+The team view is the workspace roster — every member reads who
 their colleagues are, which of them administer the workspace, and who holds a seat, exactly what
 the `member` kind answers a member asking the main agent in an internal conversation. The roster
 is internal: a child agent and an externally shared channel answer the speaker's own row alone,

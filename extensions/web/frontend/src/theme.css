@@ -198,6 +198,10 @@
   --text-subtitle: 16px;
   --text-title: 24px;
 
+  /* The one tracking the type carries: half a percent, so a heading and a chip open by the same
+     ratio at any size rather than each carrying its own hand-set figure. */
+  --tracking-ui: 0.005em;
+
   --leading-chrome: 1.5;
   --leading-reading: 1.65;
 
@@ -300,6 +304,10 @@
      grew as reads landed would walk the rows out from under the member's cursor. */
   --size-palette: 360px;
   --size-reveal: 280px;
+  /* What a folded part of a document shows before its heading has to be pressed: about four lines
+     of the register the body is set in. `--size-reveal` folds a block to one screen, which is the
+     wrong question for a part of a page that has five more parts under it. */
+  --size-fold: 96px;
   --size-row: 32px;
   --size-textarea: 12em;
   --size-usage-chart: 10em;

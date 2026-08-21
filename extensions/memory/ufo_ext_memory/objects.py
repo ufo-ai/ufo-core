@@ -10,6 +10,7 @@ the subjects their own conversation carries. `memory_update` stays the write pat
 delete: index chunks are derived by jobs and no cleanup path exists for one item's chunks."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -63,11 +64,30 @@ def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
     return ext
 
 
-def _row(name: str, body: str, subject: str, item_class: str, memory_kind: str) -> ObjectRow:
+def _stamp(written: datetime) -> str:
+    """The moment an item was recorded, as one wire spelling whatever the dialect stored. SQLite
+    holds no offset on a `timezone=True` column and Postgres does, and a field a consumer orders
+    and reads has to mean the same thing under both."""
+    return (written if written.tzinfo else written.replace(tzinfo=UTC)).isoformat()
+
+
+def _row(
+    name: str,
+    body: str,
+    subject: str,
+    item_class: str,
+    memory_kind: str,
+    written: datetime | None,
+) -> ObjectRow:
     return ObjectRow(
         name=name,
-        summary=body[:SUMMARY_MAX],
-        fields={"subject": subject, "item_class": item_class, "memory_kind": memory_kind},
+        summary=body if len(body) <= SUMMARY_MAX else body[: SUMMARY_MAX - 1].rstrip() + "…",
+        fields={
+            "subject": subject,
+            "item_class": item_class,
+            "memory_kind": memory_kind,
+            "written": None if written is None else _stamp(written),
+        },
     )
 
 
@@ -122,7 +142,14 @@ class MemoryObjects:
             return None
         spec = detail.spec
         return MemberObject(
-            row=_row(name, spec.body, spec.subject, spec.item_class, spec.memory_kind),
+            row=_row(
+                name,
+                spec.body,
+                spec.subject,
+                spec.item_class,
+                spec.memory_kind,
+                detail.created_at,
+            ),
             detail=detail,
         )
 
@@ -143,6 +170,7 @@ class MemoryObjects:
                             memory_item.c.subject,
                             memory_item.c.item_class,
                             memory_item.c.memory_kind,
+                            memory_item.c.created_at,
                             memory_item.c.created_from_page_id,
                             memory_item.c.created_from_page_revision,
                         )
@@ -170,6 +198,7 @@ class MemoryObjects:
                     row["subject"],
                     row["item_class"],
                     row["memory_kind"],
+                    row["created_at"],
                 )
                 for row in rows
                 if row["created_from_page_id"] is None
@@ -293,12 +322,13 @@ MEMORY_OBJECT = ObjectKind(
         "it for the source document), and `superseded_by` names the item that replaced it. "
         "Search excludes superseded items, so reaching one through an old reference means "
         "follow `superseded_by` to the current statement before relying on it. Listing shows "
-        "live items newest first (filter subject, item_class, or memory_kind); search, not "
+        "live items newest first (filter subject, item_class, or memory_kind, and order on "
+        "`written`, the moment the item was recorded); search, not "
         "listing, is how memory is recalled. Reads follow the conversation audience. Apply and "
         "delete are refused — memory_update is the write path, and "
         "consolidation is how an item ends."
     ),
     spec_model=MemorySpec,
     store=MemoryObjects(),
-    list_fields=frozenset({"subject", "item_class", "memory_kind"}),
+    list_fields=frozenset({"subject", "item_class", "memory_kind", "written"}),
 )

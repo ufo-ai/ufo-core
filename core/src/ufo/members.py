@@ -272,6 +272,11 @@ def _row(row: sa.Row) -> ObjectRow:
             f"{'workspace admin' if row.is_admin else 'workspace member'}, "
             f"{'seated' if row.seated_at is not None else 'unseated'}"
         ),
+        fields={
+            "email": row.email,
+            "admin": row.is_admin,
+            "seated": row.seated_at is not None,
+        },
     )
 
 
@@ -398,4 +403,5 @@ MEMBER_OBJECT = ObjectKind(
     ),
     spec_model=MemberSpec,
     store=MemberObjects(),
+    list_fields=frozenset({"email", "admin", "seated"}),
 )

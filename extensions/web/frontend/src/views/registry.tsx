@@ -5,6 +5,7 @@ import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
 import { Artifacts } from "@/views/Artifacts";
 import { Radar } from "@/views/Radar";
+import { Wiki } from "@/views/Wiki";
 import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
 import { SOURCES } from "@/views/Sources";
@@ -66,6 +67,12 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
 };
 
 export const SECTION_VIEWS: Record<Section, PaneView> = {
+  wiki: {
+    label: "Wiki",
+    remountOnPlace: false,
+    ownsHeader: true,
+    render: (place, onPlace) => <Wiki place={place} onPlace={onPlace} />,
+  },
   radar: {
     label: "Radar",
     remountOnPlace: false,

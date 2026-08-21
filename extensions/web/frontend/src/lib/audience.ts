@@ -49,6 +49,10 @@ export function slackLink(
   return source || null;
 }
 
+/** The subject a record is filed under when it belongs to the whole workspace rather than to one
+ *  member, one room, or another org. */
+export const SHARED_SUBJECT = "shared";
+
 /** Whether a wire audience names one member rather than a room, the workspace, or another org. */
 export function isMemberAudience(audience: string): boolean {
   return audience.startsWith("member:");
@@ -60,7 +64,7 @@ export function audienceLabel(
   entry: { audience: string; member_email: string | null; surface_label?: string | null },
   viewer: string | null,
 ): string {
-  if (entry.audience === "shared") return "Workspace";
+  if (entry.audience === SHARED_SUBJECT) return "Workspace";
   if (isMemberAudience(entry.audience)) {
     if (entry.member_email && entry.member_email !== viewer) {
       return "Private to " + entry.member_email;
@@ -75,7 +79,7 @@ export function audienceLabel(
 /** Who may read a memory or source, from the subject the store filed it under. The portal query
  *  already scopes member subjects to the viewer's own, so a member subject reads `Only you`. */
 export function subjectLabel(subject: string | null): string {
-  if (subject === "shared") return "Workspace";
+  if (subject === SHARED_SUBJECT) return "Workspace";
   if (subject != null && isMemberAudience(subject)) return "Only you";
   return "Unknown";
 }
