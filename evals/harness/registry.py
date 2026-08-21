@@ -56,6 +56,11 @@ class EvalTask:
     pin_runtime: bool = False
     exclusive: bool = False
     packs: tuple[str, ...] = ()
+    wait_seconds: float | None = None
+    """How long this suite's turns may run before the harness stops waiting; `None` takes the run's
+    default. The wait belongs to the task because a shard mixes suites: a deck build needs minutes a
+    chat case does not, and a wait chosen for the shard as a whole cancelled the deck cases of every
+    shard that also carried something else (measured on `document_visual`, 2026-08-21 sweep)."""
     narrow: Callable[[tuple[str, ...]], EvalTask] | None = None
 
 
@@ -67,6 +72,7 @@ def capability_task(
     judge_reasoning: ReasoningEffort = "low",
     serial: bool = False,
     packs: tuple[str, ...] = (),
+    wait_seconds: float | None = None,
 ) -> EvalTask:
     needs_judge = any(case.rubric or case.artifact_rubric or case.visual_rubric for case in cases)
     if needs_judge and judge_model is None:
@@ -116,6 +122,7 @@ def capability_task(
             judge_reasoning=judge_reasoning,
             serial=serial,
             packs=packs,
+            wait_seconds=wait_seconds,
         )
 
     return EvalTask(
@@ -130,6 +137,7 @@ def capability_task(
         judge_reasoning=judge_reasoning,
         exclusive=serial,
         packs=packs,
+        wait_seconds=wait_seconds,
         narrow=narrow,
     )
 

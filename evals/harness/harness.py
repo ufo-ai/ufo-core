@@ -10,7 +10,7 @@ from json import dumps
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.schema.records import NON_TERMINAL_STATUSES, TurnStatus
+from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TurnStatus
 
 type Json = str | int | float | bool | None | list[Json] | dict[str, Json]
 type JsonObject = dict[str, Json]
@@ -261,15 +261,24 @@ def is_transient_fault(error_class: str | None) -> bool:
 
 
 WAIT_EXPIRED = "turn produced no terminal transcript"
+WAIT_EXPIRY_STATUSES = frozenset({*NON_TERMINAL_STATUSES, CANCELLED})
+"""The statuses a turn can hold when the harness's own wait expires on it. `cancelled` belongs
+here because the harness writes it: `WorkspaceDriver._cancel_overdue` terminalizes the turn the
+moment the wait deadline fires, so reading `cancelled` back as a capability verdict scores the
+harness's own stopwatch against the model (measured on three cases of the 2026-08-21 sweep —
+`skill_routing/board-visual-narrative`, `document_visual/kickoff`, `document_visual/quarterly`,
+each at 300.0s wall with no transcript). Any other failure reason on a cancelled turn is
+untouched."""
 
 
 def infra_owned_fault(
     error_class: str | None, failure_reason: str, status: TurnStatus | None
 ) -> bool:
     """Whether an unclean run's fault lies outside the model's capability: a provider-owned
-    transient, or a wait that expired while the turn was still live — the harness stopped
-    listening, the turn did not stop working, so no capability question was put. A turn that
-    reached a terminal status without a transcript is a wedge of ours and stays a failure."""
+    transient, or a wait that expired while the turn was still live or was cancelled by the expiry
+    itself — the harness stopped listening, the turn did not stop working of its own accord, so no
+    capability question was put. A turn that reached `done` or `failed` without a transcript is a
+    wedge of ours and stays a failure."""
     if is_transient_fault(error_class):
         return True
-    return failure_reason == WAIT_EXPIRED and status in NON_TERMINAL_STATUSES
+    return failure_reason == WAIT_EXPIRED and status in WAIT_EXPIRY_STATUSES

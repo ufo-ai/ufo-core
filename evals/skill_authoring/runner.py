@@ -27,7 +27,14 @@ from uuid import UUID
 from ufo_ext_skill_create.store import UserSkillStore
 
 from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject, digest_payload
-from evals.harness.mounts import TERMINAL_STATUSES, MountObservation, TurnControl, watch_mounts
+from evals.harness.mounts import (
+    START_DEADLINE_SECONDS,
+    TERMINAL_STATUSES,
+    MountObservation,
+    TurnControl,
+    never_started,
+    watch_mounts,
+)
 from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import (
     CapabilityTarget,
@@ -36,12 +43,19 @@ from evals.harness.target import (
     capability_output,
     trajectory_snapshot,
 )
+from evals.harness.timing import TurnSteps
 from ufo.sdk.context import ExtensionContext
 from ufo.skills.runtime import SKILL_MD, RuntimeSkill, parse_skill_content
 
 SUITE = "skill_authoring"
-GRADER_REVISION = "authored-then-loaded-instructions-only"
+GRADER_REVISION = "authored-then-loaded-instructions-only-2"
 PROBE_DEADLINE_SECONDS = 180.0
+"""How long the probe's own work may run before the load is called missing. It is charged from the
+turn's first durable engine step, so queue wait and sandbox boot no longer eat into it (see
+`evals.harness.mounts`), and a probe that never began that work is excluded rather than read as a
+clean no-load. The number is unchanged and its meaning is not, so the grader revision moves with it:
+this suite's digest changes at this commit, and the sweep's trend line for every `skill_authoring`
+trio starts again here."""
 DESCRIPTION_OPENING = "Load when"
 DESCRIPTION_MAX_WORDS = 50
 EXCERPT_MARGIN = 60
@@ -178,7 +192,14 @@ def probe_verdict(
     sibling reaching the workspace first is a turn still free to correct itself, and only a sibling
     standing alone at the terminal is the confusion two neighbouring descriptions produce. A probe
     that does not load is the mirror — any authored mount fails it, and a clean terminal or the
-    deadline passes it."""
+    deadline passes it. A turn that never began its own work is excluded ahead of both: its empty
+    workspace says nothing about routing, and it would otherwise read as a clean no-load pass."""
+    if never_started(observation):
+        return ProbeVerdict(
+            False,
+            f"the turn never began its own work (status {observation.status})",
+            excluded=True,
+        )
     others = tuple(name for name in observation.mounted if name != case.name)
     unclean = observation.status in TERMINAL_STATUSES and observation.status != "done"
     if not probe.loads:
@@ -220,6 +241,9 @@ class SkillAuthoringRunTarget(Protocol):
     @property
     def outcome(self) -> TurnControl: ...
 
+    @property
+    def turn_steps(self) -> TurnSteps: ...
+
     async def step(
         self, conversation_id: UUID, message: str, idempotency_key: str
     ) -> TargetResult: ...
@@ -244,6 +268,7 @@ def skill_authoring_task(name: str, cases: tuple[SkillAuthorCase, ...]) -> EvalT
             "task": name,
             "grader": GRADER_REVISION,
             "probeDeadlineSeconds": PROBE_DEADLINE_SECONDS,
+            "startDeadlineSeconds": START_DEADLINE_SECONDS,
             "descriptionOpening": DESCRIPTION_OPENING,
             "descriptionMaxWords": DESCRIPTION_MAX_WORDS,
             "cases": [case.payload() for case in cases],

@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import webbrowser
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -76,6 +77,7 @@ from evals.harness.target import InProcessTarget
 from evals.harness.viewer import (
     MAX_SHARE_EXPIRY_SECONDS,
     EvalRun,
+    RunRecorder,
     S3ViewerShare,
     load_runs,
     record_run,
@@ -105,7 +107,9 @@ from evals.memory_ingestion.runner import MemoryIngestionRun, load_memory_ingest
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
+from evals.skill_loading.catalog import SKILL_LOADING_PACKS
 from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
+from evals.skill_loading.runner import SUITE as SKILL_LOADING_SUITE
 from evals.skill_loading.runner import skill_loading_task
 from evals.turn_logs import TurnLogCollector
 from evals.ufo_app_bench import (
@@ -553,7 +557,11 @@ def main(argv: list[str] | None = None) -> None:
         if workspace_id is not None and workspace_id != recall_workspace_id:
             parser.error("--workspace does not match the recall readiness workspace")
         workspace_id = recall_workspace_id
-        forgetful = sorted({task.name for task in tasks} & {"skill_loading", "new_application"})
+        forgetful = sorted(
+            task.name
+            for task in tasks
+            if task.suite == SKILL_LOADING_SUITE or task.name == "new_application"
+        )
         if forgetful:
             parser.error(
                 f"{', '.join(forgetful)} forget the workspace's memories before each case; "
@@ -583,11 +591,26 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = MEMORY_100_WORKFLOW_WAIT_SECONDS
     if memory_ingestion_run is not None:
         workflow_wait_seconds = MEMORY_INGESTION_WORKFLOW_WAIT_SECONDS
+    run_agent = (
+        args.agent
+        if args.candidate_from_proposal is None
+        else CANDIDATE_AGENT_NAME.format(proposal_id=args.candidate_from_proposal)
+    )
+    recorder = RunRecorder(
+        root=args.out,
+        id=uuid4(),
+        created_at=datetime.now(UTC),
+        label=args.label,
+        agent=run_agent,
+        ufo_version=version("ufo"),
+        revision=_revision(),
+    )
     reports, agent_prompt = asyncio.run(
         _run(
             config,
             tasks,
             args.agent,
+            recorder,
             workspace_id,
             collector,
             workflow_wait_seconds,
@@ -597,15 +620,32 @@ def main(argv: list[str] | None = None) -> None:
             args.concurrency,
         )
     )
-    run_agent = (
-        args.agent
-        if args.candidate_from_proposal is None
-        else CANDIDATE_AGENT_NAME.format(proposal_id=args.candidate_from_proposal)
-    )
+    recorder.agent_prompt = agent_prompt
     failed = False
     for report in reports:
         print(report.console_summary)
         failed = failed or not report.passed
+    record = record_run(args.out, recorder.run()).resolve()
+    print(f"run {recorder.id} · {record}")
+    print(f"viewer {(args.out / 'index.html').resolve()}")
+    if failed:
+        raise SystemExit(1)
+
+
+def _with_task_wait(
+    target: InProcessTarget, driver: WorkspaceDriver, wait_seconds: float | None
+) -> InProcessTarget:
+    """The target one suite runs against, carrying that suite's own harness wait. The wait lives on
+    the driver behind the target's seams, so a suite that needs longer than the run's default gets a
+    driver of its own instead of the shard voting on one number — a deck case was cancelled at the
+    default 300s in every shard that carried anything besides `document_visual`."""
+    if wait_seconds is None:
+        return target
+    waited = replace(driver, workflow_wait_seconds=wait_seconds)
+    return replace(target, conversations=waited, outcome=waited, turn_steps=waited)
+
+
+def _revision() -> str:
     try:
         revision_process = subprocess.run(
             ["git", "rev-parse", "--short=12", "HEAD"],
@@ -622,27 +662,14 @@ def main(argv: list[str] | None = None) -> None:
                 revision += "+dirty"
     except FileNotFoundError:
         revision = version("ufo")
-    run = EvalRun(
-        id=uuid4(),
-        created_at=datetime.now(UTC),
-        label=args.label,
-        agent=run_agent,
-        agent_prompt=agent_prompt,
-        ufo_version=version("ufo"),
-        revision=revision,
-        reports=reports,
-    )
-    record = record_run(args.out, run).resolve()
-    print(f"run {run.id} · {record}")
-    print(f"viewer {(args.out / 'index.html').resolve()}")
-    if failed:
-        raise SystemExit(1)
+    return revision
 
 
 async def _run(
     config: Config,
     tasks: tuple[EvalTask, ...],
     agent_name: str,
+    recorder: RunRecorder,
     workspace_id: UUID | None = None,
     collector: TurnLogCollector | None = None,
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS,
@@ -687,6 +714,7 @@ async def _run(
                 agent_model,
                 agent_reasoning,
             ) = await resolve_workspace_and_agent(agent_name, workspace_id)
+            recorder.agent_prompt = agent_prompt
             blob = WorkspaceBlobStore(backend=blob_store_for(config.blob))
             dbos = replay_safe_client(config.database.system_url)
             driver = WorkspaceDriver(
@@ -716,7 +744,7 @@ async def _run(
             slots = asyncio.Semaphore(concurrency)
             with ws(workspace_id), agent(agent_id):
                 loadable_skills: frozenset[str] | None = None
-                if any(task.suite == "skill_loading" for task in tasks):
+                if any(task.suite == SKILL_LOADING_SUITE for task in tasks):
                     loadable_skills = frozenset(
                         skill_registry(manifests, (model_catalog_skill(registry),)).by_name
                     )
@@ -775,63 +803,70 @@ async def _run(
                     ),
                 )
                 targets = tuple(
-                    replace(
-                        target,
-                        judge=_model_leg(
-                            registry,
-                            task.judge_model,
-                            task.judge_max_tokens,
-                            task.judge_reasoning,
+                    _with_task_wait(
+                        replace(
+                            target,
+                            judge=_model_leg(
+                                registry,
+                                task.judge_model,
+                                task.judge_max_tokens,
+                                task.judge_reasoning,
+                            ),
+                            simulator=_model_leg(
+                                registry,
+                                task.simulator_model,
+                                task.simulator_max_tokens,
+                                task.simulator_reasoning,
+                            ),
                         ),
-                        simulator=_model_leg(
-                            registry,
-                            task.simulator_model,
-                            task.simulator_max_tokens,
-                            task.simulator_reasoning,
-                        ),
+                        driver,
+                        task.wait_seconds,
                     )
                     for task in tasks
                 )
-                reports = await _task_reports(tasks, targets, slots)
-            completed: list[EvalReport] = []
-            for report, task in zip(reports, tasks, strict=True):
-                digest = report.digest
-                if task.pin_runtime:
-                    digest = digest_payload(
-                        {
-                            "taskDigest": task.digest,
-                            "pack": config.pack.name,
-                            "manifests": [
-                                {"name": manifest.name, "version": manifest.version}
-                                for manifest in manifests
-                            ],
-                            "agentPromptDigest": prompt_digest(agent_prompt),
-                            "agentModel": agent_model,
-                            **(
-                                {
-                                    "judgeModel": task.judge_model,
-                                    "judgeMaxTokens": task.judge_max_tokens,
-                                    "judgeReasoning": task.judge_reasoning,
-                                }
-                                if task.judge_model is not None
-                                else {}
-                            ),
-                            **(
-                                {
-                                    "simulatorModel": task.simulator_model,
-                                    "simulatorMaxTokens": task.simulator_max_tokens,
-                                    "simulatorReasoning": task.simulator_reasoning,
-                                }
-                                if task.simulator_model is not None
-                                else {}
-                            ),
-                            "reasoning": agent_reasoning,
-                            "searchProvider": config.research.search_provider,
-                            "cdpProvider": config.browser.cdp_provider,
-                        }
-                    )
-                completed.append(
-                    report.model_copy(
+                completed: dict[int, EvalReport] = {}
+
+                def finished(index: int, report: EvalReport) -> None:
+                    """Stamp one suite's report with the runtime it ran against and record it. The
+                    stamp happens here rather than after the whole run, so the report on disk is the
+                    final one from the moment its suite ends."""
+                    task = tasks[index]
+                    digest = report.digest
+                    if task.pin_runtime:
+                        digest = digest_payload(
+                            {
+                                "taskDigest": task.digest,
+                                "pack": config.pack.name,
+                                "manifests": [
+                                    {"name": manifest.name, "version": manifest.version}
+                                    for manifest in manifests
+                                ],
+                                "agentPromptDigest": prompt_digest(agent_prompt),
+                                "agentModel": agent_model,
+                                **(
+                                    {
+                                        "judgeModel": task.judge_model,
+                                        "judgeMaxTokens": task.judge_max_tokens,
+                                        "judgeReasoning": task.judge_reasoning,
+                                    }
+                                    if task.judge_model is not None
+                                    else {}
+                                ),
+                                **(
+                                    {
+                                        "simulatorModel": task.simulator_model,
+                                        "simulatorMaxTokens": task.simulator_max_tokens,
+                                        "simulatorReasoning": task.simulator_reasoning,
+                                    }
+                                    if task.simulator_model is not None
+                                    else {}
+                                ),
+                                "reasoning": agent_reasoning,
+                                "searchProvider": config.research.search_provider,
+                                "cdpProvider": config.browser.cdp_provider,
+                            }
+                        )
+                    completed[index] = report.model_copy(
                         update={
                             "digest": digest,
                             "target_model": agent_model,
@@ -840,8 +875,10 @@ async def _run(
                             "judge_revision": task.judge_revision,
                         }
                     )
-                )
-            return tuple(completed), agent_prompt
+                    recorder.record(index, completed[index])
+
+                await _task_reports(tasks, targets, slots, finished)
+            return tuple(completed[index] for index in sorted(completed)), agent_prompt
     finally:
         install_credential_requests(None)
         init_workspace_credentials(None)
@@ -852,23 +889,30 @@ async def _task_reports(
     tasks: tuple[EvalTask, ...],
     targets: tuple[InProcessTarget, ...],
     slots: asyncio.Semaphore,
-) -> tuple[EvalReport, ...]:
-    reports: dict[int, EvalReport] = {}
+    on_report: Callable[[int, EvalReport], None],
+) -> None:
+    """Run every suite of the shard, handing each finished report to `on_report` in completion
+    order. The exclusive suites are guarded the way the concurrent wave already is: they run last,
+    one at a time, and one of them raising leaves the rest to run and still surfaces in the group
+    raised at the end — an exclusive suite raising unguarded used to end the shard on the spot."""
 
     async def run_task(index: int) -> None:
-        reports[index] = await tasks[index].run(targets[index], slots)
+        on_report(index, await tasks[index].run(targets[index], slots))
 
     overlapping = tuple(index for index, task in enumerate(tasks) if not task.exclusive)
     outcomes = await asyncio.gather(
         *(run_task(index) for index in overlapping), return_exceptions=True
     )
-    errors = tuple(outcome for outcome in outcomes if isinstance(outcome, BaseException))
+    errors = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+    if not errors:
+        for index, task in enumerate(tasks):
+            if task.exclusive:
+                try:
+                    await run_task(index)
+                except Exception as error:
+                    errors.append(error)
     if errors:
-        raise BaseExceptionGroup("eval tasks raised", errors)
-    for index, task in enumerate(tasks):
-        if task.exclusive:
-            await run_task(index)
-    return tuple(reports[index] for index in range(len(tasks)))
+        raise BaseExceptionGroup("eval tasks raised", tuple(errors))
 
 
 async def _reconstruct(config: Config, run: EvalRun, workspace_id: UUID) -> EvalRun:
@@ -997,7 +1041,7 @@ def _skill_loading_subset(names: tuple[str, ...]) -> EvalTask:
     missing = tuple(name for name in names if name not in by_name)
     if missing:
         raise ValueError(f"unknown skill_loading case: {', '.join(missing)}")
-    return skill_loading_task(tuple(by_name[name] for name in names))
+    return skill_loading_task(tuple(by_name[name] for name in names), packs=SKILL_LOADING_PACKS)
 
 
 def _tasks(

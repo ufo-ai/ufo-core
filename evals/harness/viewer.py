@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_urlsafe
@@ -78,6 +78,47 @@ def record_run(root: Path, run: EvalRun) -> Path:
     write_atomic(path, run.model_dump_json(indent=2, by_alias=True, exclude_none=True).encode())
     write_viewer(root, load_runs(root))
     return path
+
+
+@dataclass
+class RunRecorder:
+    """One run's record, rewritten every time a suite finishes. A record written once at the end is
+    a record the next raise deletes: a shard runs its suites in one process, so one suite raising —
+    or the workflow step's own deadline killing the process — used to discard every finished
+    suite's report with it. Recording per suite keeps the reports already in hand on disk under the
+    run's own id, and the run rewrites in place as the rest arrive, so a salvaged shard reads as one
+    partial run rather than a pile of fragments.
+
+    A report is recorded finished, digest and all, so a partial record compares against a trend line
+    exactly as the complete one would."""
+
+    root: Path
+    id: UUID
+    created_at: datetime
+    label: str
+    agent: str
+    ufo_version: str
+    revision: str
+    agent_prompt: str = ""
+    reports: dict[int, EvalReport] = field(default_factory=dict)
+
+    def record(self, index: int, report: EvalReport) -> Path:
+        """Add one finished suite's report, keyed by its position in the run's task list, and
+        rewrite the run around every report recorded so far."""
+        self.reports[index] = report
+        return record_run(self.root, self.run())
+
+    def run(self) -> EvalRun:
+        return EvalRun(
+            id=self.id,
+            created_at=self.created_at,
+            label=self.label,
+            agent=self.agent,
+            agent_prompt=self.agent_prompt,
+            ufo_version=self.ufo_version,
+            revision=self.revision,
+            reports=tuple(self.reports[index] for index in sorted(self.reports)),
+        )
 
 
 def write_viewer(root: Path, runs: tuple[EvalRun, ...]) -> Path:

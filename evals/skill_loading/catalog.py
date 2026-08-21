@@ -15,6 +15,16 @@ from textwrap import dedent
 from evals.harness.capability import WorkspaceFile
 from evals.skill_loading.runner import SkillLoadCase
 
+SKILL_LOADING_PACKS = ("assistant_hosted",)
+"""The pack these cases route against. `first-run` is a pack-level skill: `assistant` and
+`assistant_hosted` carry it, no extension does, and `assistant_eval` passes no `skills=` at all — so
+on that pack the five `first-run` cases can only self-exclude, and the two cases that forbid
+`first-run` name a distractor no agent could pick. Binding the suite to the hosted arm is the
+narrower of the two available fixes: it moves these cases to a pack the sweep already runs, and
+leaves every other suite alone. Giving `assistant_eval` the assistant pack's skills instead would
+add those skills to the index in the system prompt of every suite on that arm — a routing change for
+the whole arm, and an ablation of its own."""
+
 OPC_CONTENT_TYPES = (
     '<?xml version="1.0" encoding="UTF-8"?>\n'
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>\n'

@@ -44,9 +44,11 @@ from evals.harness.capability import WorkspaceFile
 from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject, digest_payload
 from evals.harness.memory_fence import forget_workspace_memory
 from evals.harness.mounts import (
+    START_DEADLINE_SECONDS,
     TERMINAL_STATUSES,
     MountObservation,
     TurnControl,
+    never_started,
     watch_mounts,
 )
 from evals.harness.registry import EvalTask, gather_cases
@@ -56,14 +58,25 @@ from evals.harness.target import (
     capability_output,
     trajectory_snapshot,
 )
+from evals.harness.timing import TurnSteps
 from ufo.agent_scope import agent_current
 from ufo.config import load_config
 from ufo.db import workspace_tx
 from ufo.sdk.context import ExtensionContext
 from ufo.skills.runtime import SKILL_MD
 
-GRADER_REVISION = "skill-verdict-5"
+SUITE = "skill_loading"
+"""The suite label both skill-loading tasks register under. It is the label the runner keys on, not
+the task name: the member task registers as `skill_loading_member`, and while that name was also its
+suite the shard built no loadable-skill set for it and the suite raised on its first line, taking
+every finished suite of the shard with it (nightly 2026-08-21, shard 4)."""
+GRADER_REVISION = "skill-verdict-6"
 LOAD_DEADLINE_SECONDS = 120.0
+"""How long the turn's own work may run before the load is called missing. It is charged from the
+turn's first durable engine step, so queue wait and sandbox boot no longer eat into it (see
+`evals.harness.mounts`). The number is unchanged and its meaning is not, so the grader revision
+moves with it: this suite's digest changes at this commit, and the sweep's trend line for
+`skill_loading` and `skill_loading_member` starts again here."""
 ABLATION_TAGS = frozenset({"", "block-on", "block-off"})
 REGIMES = frozenset({"", "fold", "names", "retrieval", "tail"})
 
@@ -238,14 +251,23 @@ def skill_load_verdict(case: SkillLoadCase, observation: MountObservation) -> tu
 
     An `expects_no_load` case inverts the question: any watched mount fails it immediately, and it
     passes only when the turn reaches its own terminal with none — a turn still running at the
-    deadline is a fail, never a pass, because it may yet load."""
+    deadline is a fail, never a pass, because it may yet load.
+
+    A turn that never began its own work is neither: the rig held it in the queue or in setup for
+    the whole start budget, so it is reported as the rig's fault and the caller excludes it."""
+    if never_started(observation):
+        return False, (
+            f"the turn had not begun its own work {observation.elapsed_seconds:.0f}s after "
+            f"admission (status {observation.status}); the {LOAD_DEADLINE_SECONDS:g}s load "
+            "deadline never started"
+        )
     if case.expects_no_load:
         loaded = [name for name in case.forbidden if name in observation.mounted]
         if loaded:
             return False, f"mounted {', '.join(loaded)} where no skill load was warranted"
         if observation.status in TERMINAL_STATUSES:
             return True, (
-                f"ended {observation.status} after {observation.elapsed_seconds:.1f}s without "
+                f"ended {observation.status} after {observation.charged_seconds:.1f}s without "
                 "mounting any watched skill"
             )
         return False, (
@@ -262,7 +284,7 @@ def skill_load_verdict(case: SkillLoadCase, observation: MountObservation) -> tu
         alongside = f" (alongside {', '.join(loaded_forbidden)})" if loaded_forbidden else ""
         return (
             True,
-            f"mounted {case.expected!r} after {observation.elapsed_seconds:.1f}s{alongside}",
+            f"mounted {case.expected!r} after {observation.charged_seconds:.1f}s{alongside}",
         )
     if loaded_forbidden:
         return False, (
@@ -287,32 +309,55 @@ class SkillLoadRunTarget(Protocol):
     def outcome(self) -> TurnControl: ...
 
     @property
+    def turn_steps(self) -> TurnSteps: ...
+
+    @property
     def loadable_skills(self) -> frozenset[str] | None: ...
 
 
-def skill_loading_task(cases: tuple[SkillLoadCase, ...], name: str = "skill_loading") -> EvalTask:
+def skill_loading_task(
+    cases: tuple[SkillLoadCase, ...],
+    name: str = "skill_loading",
+    packs: tuple[str, ...] = (),
+) -> EvalTask:
     """One skill-loading suite under its own task name and digest. The pack cases and the
     member-seeding cases register as separate tasks at the seeding boundary: a seeded corpus is
     agent-global, so a task carrying any seeding case is exclusive and its cases cost a full shard
     slot each — splitting there keeps the pack cases concurrent and each task inside a nightly
-    shard's weight ceiling."""
+    shard's weight ceiling.
+
+    Both tasks register under the shared `SUITE` label. The name is the task's own; the label is
+    what the runner and the run's setup key on, so neither task can be the one the setup skips.
+
+    The task narrows to named cases, so `--case` and an ablation's `cases` can measure a handful of
+    them instead of the whole catalog. A narrowing rebuilds the suite from the kept cases, so its
+    digest covers that subset and its exclusivity follows the seeds the subset keeps."""
     digest = digest_payload(
         {
             "runner": "skill-load-case",
             "task": name,
             "grader": GRADER_REVISION,
             "deadlineSeconds": LOAD_DEADLINE_SECONDS,
+            "startDeadlineSeconds": START_DEADLINE_SECONDS,
             "cases": [case.payload() for case in cases],
         }
     )
-    suite = SkillLoadingSuite(cases=cases, digest=digest)
+    suite = SkillLoadingSuite(cases=cases, digest=digest, name=name)
+
+    def narrow(names: tuple[str, ...]) -> EvalTask:
+        return skill_loading_task(
+            tuple(case for case in cases if case.name in names), name=name, packs=packs
+        )
+
     return EvalTask(
         name,
-        name,
+        SUITE,
         digest,
         tuple(case.name for case in cases),
         suite.run,
         exclusive=any(case.seeds for case in cases),
+        packs=packs,
+        narrow=narrow,
     )
 
 
@@ -320,12 +365,13 @@ def skill_loading_task(cases: tuple[SkillLoadCase, ...], name: str = "skill_load
 class SkillLoadingSuite:
     cases: tuple[SkillLoadCase, ...]
     digest: str
+    name: str = SUITE
 
     async def run(self, target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
         run_target = cast(SkillLoadRunTarget, target)
         loadable = run_target.loadable_skills
         if loadable is None:
-            raise RuntimeError("the skill_loading suite requires the pack's loadable-skill set")
+            raise RuntimeError(f"the {self.name} suite requires the pack's loadable-skill set")
         arm = "block-on" if load_config().skills.member_block else "block-off"
         direct = tuple(case for case in self.cases if not case.seeds)
         seeding = tuple(case for case in self.cases if case.seeds)
@@ -338,8 +384,8 @@ class SkillLoadingSuite:
             async with slots:
                 by_name[case.name] = await self._gated_case(case, run_target, loadable, arm)
         return EvalReport(
-            name="skill_loading",
-            suite="skill_loading",
+            name=self.name,
+            suite=SUITE,
             digest=self.digest,
             cases=tuple(by_name[case.name] for case in self.cases),
         )
@@ -426,7 +472,13 @@ class SkillLoadingSuite:
                 await self._attempt(passed, reason, observation, target, conversation_id, turn_id)
             ]
             evidence["selectedAttempt"] = 0
-            return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
+            return EvalCaseResult(
+                name=case.name,
+                passed=passed,
+                reason=reason,
+                evidence=evidence,
+                excluded=never_started(observation),
+            )
         finally:
             if case.seeds:
                 await forget_agent_skills()
@@ -474,6 +526,12 @@ class SkillLoadingSuite:
             evidence["status"] = observation.status
             evidence["cancelled"] = observation.cancelled
             evidence["elapsedSeconds"] = round(observation.elapsed_seconds, 1)
+            evidence["chargedSeconds"] = round(observation.charged_seconds, 1)
+            evidence["startupSeconds"] = (
+                None
+                if observation.startup_seconds is None
+                else round(observation.startup_seconds, 1)
+            )
         return evidence
 
     async def _attempt(

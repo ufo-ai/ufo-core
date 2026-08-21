@@ -51,6 +51,7 @@ from evals.skill_authoring.catalog import CASES as SKILL_AUTHORING_CASES
 from evals.skill_authoring.runner import skill_authoring_task
 from evals.skill_gtm import CASES as SKILL_GTM_CASES
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
+from evals.skill_loading.catalog import SKILL_LOADING_PACKS
 from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
 from evals.skill_loading.runner import skill_loading_task
 from evals.skill_selection.runner import skill_selection_task
@@ -119,7 +120,7 @@ TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("connector_connections", connector_connections.CASES, serial=True),
     capability_task("report_digest", report_digest.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
-    skill_loading_task(SKILL_LOADING_CASES),
+    skill_loading_task(SKILL_LOADING_CASES, packs=SKILL_LOADING_PACKS),
     skill_loading_task(SKILL_MEMBER_CASES, name="skill_loading_member"),
     skill_selection_task(),
     scenario_task(
@@ -156,6 +157,7 @@ TASKS: tuple[EvalTask, ...] = (
         judge_model=VISUAL_JUDGE_MODEL,
         judge_max_tokens=16_000,
         judge_reasoning="high",
+        wait_seconds=document_visual.WORKFLOW_WAIT_SECONDS,
     ),
     capability_task(
         "onboarding_help",

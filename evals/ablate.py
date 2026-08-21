@@ -29,6 +29,12 @@ The experiment file:
     [arm.files]
     "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "arms/no-topic-list.py"
 
+A `memory_ingestion` snapshot path makes the ingestion suites measurable: it rides every matrix row
+the orchestrator writes, so each arm's stack materializes the corpus itself and hands its eval child
+that snapshot together with the readiness state its own materialization produced. Those suites are
+named `memory_ingestion.<corpus>.<category>` and are built from the snapshot at run time, so the
+budget preflight counts their cases from the snapshot instead of the registry.
+
 Credentials come from the invoking environment — the orchestrator adds nothing and strips
 nothing, so run it under the same minimal environment an `evals.stack` run takes."""
 
@@ -46,12 +52,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tomli_w
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from evals.harness.registry import narrowed_tasks
+from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
 
 CONTROL_ARM = "control"
+INGESTION_PREFIX = "memory_ingestion"
 ARM_LABEL_PREFIX = "ablate"
 EGRESS_BINARY = Path("egress/target/debug/ufo-egress")
 RUNS_DIR = Path("eval-reports/runs")
@@ -86,6 +94,7 @@ class ExperimentSpec(BaseModel):
     base: str
     suites: tuple[str, ...]
     cases: tuple[str, ...] = ()
+    memory_ingestion: Path | None = None
     repeats: int = 1
     concurrency: int = 4
     max_stacks: int = 3
@@ -102,9 +111,35 @@ class ExperimentSpec(BaseModel):
             raise ValueError(f"duplicate arm names: {sorted(names)}")
         return arms
 
+    @model_validator(mode="after")
+    def _ingestion_suites_name_their_snapshot(self) -> ExperimentSpec:
+        named = [name for name in self.suites if name.startswith(f"{INGESTION_PREFIX}.")]
+        if named and self.memory_ingestion is None:
+            raise ValueError(
+                f"suites {', '.join(named)} need memory_ingestion naming the snapshot they "
+                "are built from"
+            )
+        return self
+
+
+def ingestion_suites(snapshot_root: Path) -> dict[str, tuple[str, ...]]:
+    """The ingestion suites the snapshot carries, each with its case ids. The runner groups the
+    corpus into suites at run time, so they reach `TASKS` only inside a stack that materialized
+    them and the orchestrator reads them from the snapshot instead."""
+    grouped: dict[str, list[str]] = {}
+    for case in load_snapshot(snapshot_root).cases:
+        suite = f"{INGESTION_PREFIX}.{case.corpus}.{case.category}"
+        grouped.setdefault(suite, []).append(case.id)
+    return {suite: tuple(ids) for suite, ids in sorted(grouped.items())}
+
 
 def load_experiment(path: Path) -> ExperimentSpec:
     spec = ExperimentSpec.model_validate(tomllib.loads(path.read_text()))
+    snapshot = None
+    if spec.memory_ingestion is not None:
+        snapshot = (path.parent / spec.memory_ingestion).resolve()
+        if not (snapshot / MANIFEST_FILE).is_file():
+            raise SystemExit(f"memory_ingestion snapshot missing {MANIFEST_FILE}: {snapshot}")
     resolved = tuple(
         ArmSpec(
             name=arm.name,
@@ -119,7 +154,7 @@ def load_experiment(path: Path) -> ExperimentSpec:
         for repo_path, variant in arm.files.items():
             if not variant.is_file():
                 raise SystemExit(f"arm {arm.name!r}: variant for {repo_path} missing: {variant}")
-    return spec.model_copy(update={"arm": resolved})
+    return spec.model_copy(update={"arm": resolved, "memory_ingestion": snapshot})
 
 
 @dataclass(frozen=True)
@@ -288,6 +323,8 @@ class Ablation:
         )
 
     def _planned_cases(self) -> int:
+        if self.spec.memory_ingestion is not None:
+            return self._planned_ingestion_cases(self.spec.memory_ingestion)
         by_suite = {task.name: task for task in TASKS}
         unknown = [name for name in self.spec.suites if name not in by_suite]
         if unknown:
@@ -296,6 +333,19 @@ class Ablation:
         if self.spec.cases:
             tasks = narrowed_tasks(tasks, self.spec.cases)
         return max(sum(len(task.cases) for task in tasks), 1)
+
+    def _planned_ingestion_cases(self, snapshot: Path) -> int:
+        suites = ingestion_suites(snapshot)
+        unknown = [name for name in self.spec.suites if name not in suites]
+        if unknown:
+            raise SystemExit(f"unknown suites: {', '.join(unknown)}")
+        selected = tuple(case for name in self.spec.suites for case in suites[name])
+        if not self.spec.cases:
+            return max(len(selected), 1)
+        unknown_cases = [name for name in self.spec.cases if name not in selected]
+        if unknown_cases:
+            raise SystemExit(f"unknown eval case: {', '.join(unknown_cases)}")
+        return len(self.spec.cases)
 
     def _resolve_base(self) -> str:
         return self._git("rev-parse", self.spec.base).strip()
@@ -351,20 +401,33 @@ class Ablation:
         binary.chmod(0o755)
         config = root / "ablate-template.toml"
         config.write_text(tomli_w.dumps(self.spec.template))
+        (root / "ablate-matrix.toml").write_text(tomli_w.dumps(self.matrix(arm, config)))
+
+    def matrix(self, arm: ArmSpec, config: Path) -> dict[str, list[dict[str, object]]]:
+        """One arm's `evals.stack` matrix: a run block per repeat, each an isolated stack.
+
+        A memory-ingestion snapshot travels as a row key, never as an argument. The stack owns
+        `--memory-ingestion` and `--memory-ingestion-state`, because it materializes the corpus
+        itself and only then knows where the readiness state landed."""
         args = ["--concurrency", str(self.spec.concurrency), "--only", *self.spec.suites]
         if self.spec.cases:
             args += ["--case", *self.spec.cases]
-        matrix = {
+        corpus: dict[str, object] = (
+            {"memory_ingestion": str(self.spec.memory_ingestion)}
+            if self.spec.memory_ingestion is not None
+            else {}
+        )
+        return {
             "run": [
                 {
                     "label": f"{ARM_LABEL_PREFIX}-{arm.name}-{index}",
                     "config": str(config),
                     "args": args,
+                    **corpus,
                 }
                 for index in range(self.spec.repeats)
             ]
         }
-        (root / "ablate-matrix.toml").write_text(tomli_w.dumps(matrix))
 
     async def _stack(self, arm: ArmSpec, root: Path) -> tuple[int, str]:
         process = await asyncio.create_subprocess_exec(

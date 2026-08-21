@@ -1,8 +1,10 @@
 import asyncio
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
+import tomli_w
 
 from evals.ablate import (
     WORKTREES_DIR,
@@ -11,12 +13,21 @@ from evals.ablate import (
     CaseCount,
     ExperimentSpec,
     collect_counts,
+    ingestion_suites,
     load_experiment,
     render_report,
     verdict,
 )
+from evals.memory_ingestion.models import (
+    IngestionCase,
+    IngestionPage,
+    content_digest,
+    write_snapshot,
+)
+from evals.stack import Matrix
 
 TEMPLATE = 'template = { pack = { name = "assistant_eval" } }'
+INGESTION_SUITE = "memory_ingestion.longmem.information_extraction"
 
 
 def _experiment(tmp_path: Path, body: str) -> Path:
@@ -64,6 +75,195 @@ def test_duplicate_arm_names_are_rejected() -> None:
             template={"pack": {"name": "assistant_eval"}},
             arm=(ArmSpec(name="twin", files={}), ArmSpec(name="twin", files={})),
         )
+
+
+def _snapshot(root: Path) -> Path:
+    body = "The project codename is Polaris and it remains active for the launch."
+    write_snapshot(
+        root,
+        upstreams=(),
+        builder_digest="sha256:" + "0" * 64,
+        cases=(
+            IngestionCase(
+                id="longmem/polaris",
+                corpus="longmem",
+                category="information_extraction",
+                question="What is the project codename?",
+                expected_answer="Polaris",
+                evidence_refs=("longmem/polaris/session/answer",),
+            ),
+            IngestionCase(
+                id="longmem/atlas",
+                corpus="longmem",
+                category="information_extraction",
+                question="Which team owns the launch?",
+                expected_answer="Atlas",
+            ),
+            IngestionCase(
+                id="locomo/conv-26/120",
+                corpus="locomo",
+                category="multi_session",
+                question="When did the move happen?",
+                expected_answer="In May",
+            ),
+        ),
+        pages=(
+            IngestionPage(
+                source_ref="longmem/polaris/answer/00/00.txt",
+                evidence_ref="longmem/polaris/session/answer",
+                body=body,
+                digest=content_digest(body),
+                origin="longmem:polaris",
+            ),
+        ),
+    )
+    return root
+
+
+def _ingestion_spec(tmp_path: Path, cases: tuple[str, ...] = ()) -> ExperimentSpec:
+    return ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=(INGESTION_SUITE,),
+        cases=cases,
+        memory_ingestion=_snapshot(tmp_path / "snapshot"),
+        budget_usd=500.0,
+        template={"pack": {"name": "assistant"}},
+        arm=(ArmSpec(name="knockout", files={}),),
+    )
+
+
+def test_ingestion_suites_group_the_snapshot_by_corpus_and_category(tmp_path: Path) -> None:
+    assert ingestion_suites(_snapshot(tmp_path / "snapshot")) == {
+        INGESTION_SUITE: ("longmem/polaris", "longmem/atlas"),
+        "memory_ingestion.locomo.multi_session": ("locomo/conv-26/120",),
+    }
+
+
+def test_load_experiment_resolves_the_snapshot_against_the_file(tmp_path: Path) -> None:
+    _snapshot(tmp_path / "snapshot")
+    path = _experiment(
+        tmp_path,
+        'name = "exp"\nbase = "origin/main"\n'
+        f'suites = ["{INGESTION_SUITE}"]\n'
+        'memory_ingestion = "snapshot"\nbudget_usd = 500.0\n'
+        f"{TEMPLATE}\n"
+        '[[arm]]\nname = "knockout"\n[arm.files]\n"packs/thing.py" = "variant.py"\n',
+    )
+    spec = load_experiment(path)
+    assert spec.memory_ingestion == (tmp_path / "snapshot").resolve()
+
+
+def test_load_experiment_rejects_a_missing_snapshot(tmp_path: Path) -> None:
+    path = _experiment(
+        tmp_path,
+        'name = "exp"\nbase = "origin/main"\n'
+        f'suites = ["{INGESTION_SUITE}"]\n'
+        'memory_ingestion = "gone"\nbudget_usd = 500.0\n'
+        f"{TEMPLATE}\n"
+        '[[arm]]\nname = "knockout"\n[arm.files]\n"packs/thing.py" = "variant.py"\n',
+    )
+    with pytest.raises(SystemExit, match=r"snapshot\.json"):
+        load_experiment(path)
+
+
+def test_an_ingestion_suite_without_a_snapshot_is_rejected() -> None:
+    with pytest.raises(ValueError, match="need memory_ingestion"):
+        ExperimentSpec(
+            name="exp",
+            base="origin/main",
+            suites=(INGESTION_SUITE,),
+            budget_usd=5.0,
+            template={"pack": {"name": "assistant"}},
+            arm=(),
+        )
+
+
+def test_the_budget_preflight_counts_ingestion_cases_from_the_snapshot(tmp_path: Path) -> None:
+    """The ingestion suites are built from the corpus inside a materialized stack, so they are
+    absent from `TASKS` and the estimate has to come from the snapshot."""
+    ablation = Ablation(repo=tmp_path, spec=_ingestion_spec(tmp_path), out=tmp_path / "out")
+    narrowed = Ablation(
+        repo=tmp_path,
+        spec=_ingestion_spec(tmp_path, cases=("longmem/polaris",)),
+        out=tmp_path / "out",
+    )
+
+    assert ablation._planned_cases() == 2
+    assert narrowed._planned_cases() == 1
+
+
+def test_the_preflight_names_an_unknown_ingestion_suite_or_case(tmp_path: Path) -> None:
+    spec = _ingestion_spec(tmp_path)
+    unknown_suite = Ablation(
+        repo=tmp_path,
+        spec=spec.model_copy(update={"suites": ("memory_ingestion.longmem.typo",)}),
+        out=tmp_path / "out",
+    )
+    unknown_case = Ablation(
+        repo=tmp_path,
+        spec=spec.model_copy(update={"cases": ("locomo/conv-26/120",)}),
+        out=tmp_path / "out",
+    )
+
+    with pytest.raises(SystemExit, match="unknown suites"):
+        unknown_suite._planned_cases()
+    with pytest.raises(SystemExit, match="unknown eval case"):
+        unknown_case._planned_cases()
+
+
+def test_the_preflight_narrows_the_skill_loading_suite(tmp_path: Path) -> None:
+    """An experiment on two skill_loading cases estimates two cases per run, not the whole
+    catalog: the suite narrows, so the budget and the arm's `--case` arguments agree."""
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("skill_loading",),
+        cases=("daily-brief-review", "daily-brief-approval"),
+        budget_usd=50.0,
+        template={"pack": {"name": "assistant_hosted"}},
+        arm=(ArmSpec(name="knockout", files={}),),
+    )
+
+    assert Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")._planned_cases() == 2
+
+
+def test_every_matrix_row_carries_the_ingestion_snapshot(tmp_path: Path) -> None:
+    """The stack materializes the corpus per row and passes the snapshot with the readiness state it
+    produced, so the snapshot must ride the row: `--memory-ingestion` in `args` is rejected."""
+    spec = _ingestion_spec(tmp_path, cases=("longmem/polaris",)).model_copy(update={"repeats": 2})
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    written = ablation.matrix(spec.arm[0], tmp_path / "ablate-template.toml")
+    matrix = Matrix.model_validate(tomllib.loads(tomli_w.dumps(written)))
+
+    assert len(matrix.run) == 2
+    for row in matrix.run:
+        assert row.memory_ingestion == spec.memory_ingestion
+        assert row.args == (
+            "--concurrency",
+            "4",
+            "--only",
+            INGESTION_SUITE,
+            "--case",
+            "longmem/polaris",
+        )
+
+
+def test_a_matrix_row_without_a_corpus_names_no_snapshot(tmp_path: Path) -> None:
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("basics",),
+        budget_usd=5.0,
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(ArmSpec(name="knockout", files={}),),
+    )
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    written = ablation.matrix(spec.arm[0], tmp_path / "ablate-template.toml")
+
+    assert "memory_ingestion" not in written["run"][0]
 
 
 def _record(cases: list[dict]) -> dict:

@@ -8,6 +8,7 @@ real work — invoke, reconstruct, grade — is what the tests assert, read back
 
 import asyncio
 import subprocess
+import time
 from base64 import b64encode, urlsafe_b64decode
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
@@ -31,9 +32,15 @@ from dbos import error as dbos_error
 from httpx import AsyncClient
 
 import evals.harness.capability as harness_capability
+import evals.harness.mounts as mounts
 import evals.harness.target as harness_target
 from evals import coding_subagent, github_connections, low_stakes_default
-from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports, _task_workflow_wait_seconds
+from evals.__main__ import (
+    EVAL_SHARE_BUCKET_ENV,
+    _task_reports,
+    _task_workflow_wait_seconds,
+    _with_task_wait,
+)
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
@@ -44,6 +51,7 @@ from evals.closing_message import (
     no_backreference_scorer,
 )
 from evals.compaction.target import CompactionTarget
+from evals.document_visual import WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WAIT_SECONDS
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
     WorkspaceDriver,
@@ -127,13 +135,14 @@ from evals.harness.target import (
     _terminal_result,
     capability_output,
 )
-from evals.harness.timing import CaseTiming, StepTiming, TurnTiming
+from evals.harness.timing import CaseTiming, StepTiming, TurnStep, TurnTiming
 from evals.harness.viewer import (
     AWS_S3_CONFIG,
     MAX_SHARE_EXPIRY_SECONDS,
     MAX_SHARE_PAGE_BYTES,
     SHARE_TOKEN_BYTES,
     EvalRun,
+    RunRecorder,
     S3ViewerShare,
     load_runs,
     record_run,
@@ -445,10 +454,11 @@ async def test_task_reports_overlaps_tasks_and_isolates_exclusive_ones() -> None
 
     tasks = (overlapping("left", "right"), exclusive(), overlapping("right", "left"))
     targets = cast(tuple[InProcessTarget, ...], (object(), object(), object()))
+    recorded: dict[int, EvalReport] = {}
 
-    reports = await _task_reports(tasks, targets, asyncio.Semaphore(4))
+    await _task_reports(tasks, targets, asyncio.Semaphore(4), recorded.__setitem__)
 
-    assert tuple(report.name for report in reports) == ("left", "gate", "right")
+    assert tuple(recorded[index].name for index in sorted(recorded)) == ("left", "gate", "right")
     assert flight_during_exclusive == [0]
 
 
@@ -475,11 +485,45 @@ async def test_task_reports_settles_the_wave_before_raising() -> None:
     )
     targets = cast(tuple[InProcessTarget, ...], (object(), object(), object()))
 
+    recorded: dict[int, EvalReport] = {}
+
     with pytest.raises(BaseExceptionGroup):
-        await _task_reports(tasks, targets, asyncio.Semaphore(4))
+        await _task_reports(tasks, targets, asyncio.Semaphore(4), recorded.__setitem__)
 
     assert sibling_done.is_set()
     assert not exclusive_ran.is_set()
+    assert [report.name for report in recorded.values()] == ["sibling"]
+
+
+async def test_task_reports_hands_over_every_suite_a_raising_exclusive_one_left() -> None:
+    """An exclusive suite raising must not end the shard: the finished suites are already handed
+    over, the exclusive suites behind it still run, and the fault surfaces in the group."""
+
+    def report(name: str, suite: str) -> EvalReport:
+        return EvalReport(name=name, suite=suite, digest="sha256:abc", cases=())
+
+    async def concurrent(target, slots) -> EvalReport:
+        return report("concurrent", "capability")
+
+    async def failing(target, slots) -> EvalReport:
+        raise RuntimeError("seeding suite raised")
+
+    async def last(target, slots) -> EvalReport:
+        return report("last", "scenario")
+
+    tasks = (
+        EvalTask("concurrent", "capability", "sha256:abc", (), concurrent),
+        EvalTask("failing", "scenario", "sha256:abc", (), failing, exclusive=True),
+        EvalTask("last", "scenario", "sha256:abc", (), last, exclusive=True),
+    )
+    targets = cast(tuple[InProcessTarget, ...], (object(), object(), object()))
+    recorded: dict[int, EvalReport] = {}
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        await _task_reports(tasks, targets, asyncio.Semaphore(4), recorded.__setitem__)
+
+    assert [type(error) for error in raised.value.exceptions] == [RuntimeError]
+    assert sorted(report.name for report in recorded.values()) == ["concurrent", "last"]
 
 
 async def test_gather_cases_preserves_corpus_order_under_out_of_order_completion() -> None:
@@ -3035,11 +3079,13 @@ async def test_a_wait_expired_on_a_live_turn_is_excluded_a_terminal_wedge_is_not
 
     still_running = harness_capability._unclean_verdict(unclean("running"))
     assert still_running.excluded
-    assert "still-running" in still_running.reason
+    assert "wait expired" in still_running.reason
     assert harness_capability._unclean_verdict(unclean("queued")).excluded
     assert not harness_capability._unclean_verdict(unclean("failed")).excluded
     assert not harness_capability._unclean_verdict(unclean(None)).excluded
     assert not harness_capability._unclean_verdict(unclean("running", "turn row vanished")).excluded
+    assert harness_capability._unclean_verdict(unclean("cancelled")).excluded
+    assert not harness_capability._unclean_verdict(unclean("cancelled", "no artifact")).excluded
     provider = TargetResult(
         CapabilityOutput("", ()),
         clean=False,
@@ -3049,6 +3095,78 @@ async def test_a_wait_expired_on_a_live_turn_is_excluded_a_terminal_wedge_is_not
     assert harness_capability._unclean_verdict(provider).excluded
     assert infra_owned_fault(None, WAIT_EXPIRED, "parked")
     assert not infra_owned_fault(None, WAIT_EXPIRED, "done")
+
+
+async def test_the_load_clock_starts_at_the_turns_first_durable_step() -> None:
+    """Measured on three `skill_loading` cases: the 120s deadline covered queue wait and sandbox
+    boot, so a case could expire before its turn ran a round. The clock starts at the first
+    recorded step — the arrivals drain, which the engine reaches after the claim and the boot."""
+
+    @dataclass(frozen=True)
+    class Steps:
+        recorded: tuple[TurnStep, ...]
+
+        async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]:
+            return self.recorded
+
+    started_ms = int((time.time() - 5.0) * 1000)
+    target = SimpleNamespace(
+        turn_steps=Steps(
+            (
+                TurnStep(function_name="_claim_arrivals", started_at_epoch_ms=started_ms),
+                TurnStep(function_name="_stream_once", started_at_epoch_ms=started_ms + 900),
+            )
+        )
+    )
+
+    working_from = await mounts._work_started(target, uuid4())
+    unstarted = await mounts._work_started(SimpleNamespace(turn_steps=Steps(())), uuid4())
+
+    assert unstarted is None
+    assert working_from is not None
+    assert 4.5 <= asyncio.get_running_loop().time() - working_from <= 5.5
+
+
+def test_the_harness_cancelling_an_overdue_turn_is_not_a_capability_failure() -> None:
+    """Measured on three cases of the 2026-08-21 sweep: the harness wait expired, `_cancel_overdue`
+    committed `cancelled`, and the status the harness had just written itself turned its own
+    stopwatch into a capability verdict. Any other reason on a cancelled turn still fails."""
+    assert infra_owned_fault(None, WAIT_EXPIRED, "cancelled")
+    assert not infra_owned_fault(None, "turn produced no artifact", "cancelled")
+    assert not infra_owned_fault(None, WAIT_EXPIRED, "failed")
+
+
+def test_a_suites_own_wait_reaches_its_cases_in_a_mixed_shard(tmp_path) -> None:
+    """Measured on `document_visual/kickoff` and `/quarterly`: the suite asks for 900s, shard 2 also
+    carried six other suites, and the shard-wide rule left the deck cases on the 300s default."""
+    deck = next(task for task in TASKS if task.name == "document_visual")
+    chat = next(task for task in TASKS if task.name == "basics")
+    driver = WorkspaceDriver(
+        uuid4(),
+        uuid4(),
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path / "blob"),
+        UNCALLED_DBOS,
+        tmp_path / "workspaces",
+    )
+    target = InProcessTarget(
+        ctx=cast(ExtensionContext, object()),
+        agent_id=uuid4(),
+        conversations=driver,
+        outcome=driver,
+        turn_steps=driver,
+    )
+
+    assert deck.wait_seconds == DOCUMENT_VISUAL_WAIT_SECONDS
+    assert chat.wait_seconds is None
+    assert _with_task_wait(target, driver, chat.wait_seconds) is target
+    waited = _with_task_wait(target, driver, deck.wait_seconds)
+    assert waited.conversations is waited.outcome
+    assert waited.conversations is waited.turn_steps
+    assert cast(WorkspaceDriver, waited.conversations).workflow_wait_seconds == (
+        DOCUMENT_VISUAL_WAIT_SECONDS
+    )
+    assert driver.workflow_wait_seconds == DEFAULT_WORKFLOW_WAIT_SECONDS
 
 
 async def test_the_delegated_case_guard_reads_the_change_not_the_inspection(tmp_path: Path) -> None:
@@ -6297,6 +6415,50 @@ def test_sentinels_survive_the_local_archive_and_the_share_render_alike(tmp_path
     assert '"confidence":66' in shared
 
 
+def _recorder(root: Path) -> RunRecorder:
+    return RunRecorder(
+        root=root,
+        id=uuid4(),
+        created_at=datetime(2026, 8, 21, tzinfo=UTC),
+        label="test",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123def456",
+    )
+
+
+def test_run_recorder_keeps_finished_suites_when_a_later_suite_dies(tmp_path) -> None:
+    """The observed failure mode (nightly 2026-08-21, shard 4): one record written at the very end,
+    so a suite raising or the step deadline killing the runner discarded seven finished suites'
+    reports. The recorder writes after each suite, so the archive holds what is already in hand."""
+    recorder = RunRecorder(
+        root=tmp_path,
+        id=uuid4(),
+        created_at=datetime(2026, 8, 21, tzinfo=UTC),
+        label="nightly-assistant-eval-4",
+        agent="assistant",
+        ufo_version="0.1.0",
+        revision="abc123def456",
+    )
+    recorder.agent_prompt = "be helpful and honest"
+
+    recorder.record(
+        1, EvalReport(name="response_register", suite="capability", digest="sha256:b", cases=())
+    )
+    recorder.record(
+        0, EvalReport(name="semantic_quality", suite="capability", digest="sha256:a", cases=())
+    )
+
+    recorded = load_runs(tmp_path)
+    assert len(recorded) == 1
+    assert recorded[0].id == recorder.id
+    assert recorded[0].agent_prompt == "be helpful and honest"
+    assert [report.name for report in recorded[0].reports] == [
+        "semantic_quality",
+        "response_register",
+    ]
+
+
 def test_record_run_refuses_a_case_recorded_without_evidence(tmp_path) -> None:
     """The observed failure mode: a recorder that scrubbed while recording produced cases with
     null prompts, responses, and trajectories. The archive refuses them loudly instead of storing
@@ -6594,9 +6756,13 @@ async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, m
         judge_revision=JUDGE_REVISION,
     )
 
-    reports, agent_prompt = await run_evals(config, (task,), "assistant")
+    recorder = _recorder(tmp_path)
+
+    reports, agent_prompt = await run_evals(config, (task,), "assistant", recorder)
 
     assert agent_prompt == "prompt"
+    assert recorder.agent_prompt == "prompt"
+    assert [report.name for report in recorder.run().reports] == ["suite"]
     assert installed[-1] is None
     requests = cast(CredentialRequests, installed[0])
     assert requests.fernet.decrypt(Fernet(key).encrypt(b"proof")) == b"proof"
@@ -6656,7 +6822,7 @@ async def test_run_builds_the_compaction_client_inside_the_workspace_scope(
     )
     task = EvalTask("compaction.overload", "compaction", "sha256:abc", (), run)
 
-    await run_evals(config, (task,), "assistant")
+    await run_evals(config, (task,), "assistant", _recorder(tmp_path))
 
     assert isinstance(seen["compaction"], CompactionTarget)
 

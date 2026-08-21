@@ -49,10 +49,17 @@ def _skill(
 
 
 def _observed(
-    mounted: tuple[str, ...] = (), status: TurnStatus | None = "running"
+    mounted: tuple[str, ...] = (),
+    status: TurnStatus | None = "running",
+    startup_seconds: float | None = 2.0,
 ) -> MountObservation:
     return MountObservation(
-        mounted=mounted, status=status, cancelled=status == "running", elapsed_seconds=4.0
+        mounted=mounted,
+        status=status,
+        cancelled=status == "running",
+        elapsed_seconds=4.0,
+        charged_seconds=2.0,
+        startup_seconds=startup_seconds,
     )
 
 
@@ -162,6 +169,21 @@ def test_a_declining_probe_that_outlives_the_deadline_passes() -> None:
     verdict = probe_verdict(CASE, DECLINES, _observed())
     assert verdict.passed
     assert "no authored skill mounted" in verdict.reason
+
+
+def test_a_probe_whose_turn_never_began_its_work_is_excluded_not_passed() -> None:
+    """A turn still queued or in setup mounted nothing because it did nothing. Scoring that as a
+    clean no-load would read an outage as correct restraint."""
+    stalled = _observed(status="queued", startup_seconds=None)
+
+    declining = probe_verdict(CASE, DECLINES, stalled)
+    loading = probe_verdict(CASE, LOADS, stalled)
+
+    assert not declining.passed
+    assert declining.excluded
+    assert not loading.passed
+    assert loading.excluded
+    assert "never began its own work" in declining.reason
 
 
 @pytest.mark.parametrize("probe", [LOADS, DECLINES])
