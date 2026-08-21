@@ -11,9 +11,9 @@ themselves are committed at `control/src/assets/og-home.jpg` and
 `control/src/assets/og-site.jpg`, because the gateway image builds from the
 `control` tree alone and reaches nothing above it.
 
-Neither file is hand-drawn: `render_cards.py` composes `card.html` over an
-illustration from `art/` and screenshots it at exactly 1200x630. Regenerate and
-verify with
+Neither file is hand-drawn: `render_cards.py` composes `card.html` over the flat
+ground, draws the logo lockup from `art/` on it, and screenshots it at exactly
+1200x630. Regenerate and verify with
 
 ```
 python3 assets/brand/share/render_cards.py          # writes control/src/assets
@@ -21,45 +21,58 @@ python3 assets/brand/share/render_cards.py --check  # reproduces byte-identicall
 ```
 
 Chromium and Pillow are the only requirements. The brand faces are not copied
-here: the script extracts the subset Canela and Inter woff2 already inlined in
-`infra/modules/edge/landing.html`, so the cards can never drift from the faces
-the marketing page renders.
+here: the script extracts the three subset woff2 faces already inlined in
+`infra/modules/edge/landing.html` — Canela 300, its true italic, and Inter 500 —
+so the cards can never drift from the faces the marketing page renders. A card
+sets Canela, the brand's display face. It is deliberately not the face of the
+wordmark inside the lockup art, which is Albertus Nova: a card's words are
+display copy, so they take the display face, and the wordmark arrives as artwork.
 
-## The type scale, and where it comes from
+## The geometry, and where it comes from
 
-A link preview is rendered small — Slack, iMessage and X draw a 1200px card at
-roughly 360-500px, a third of its size — so card type is set far larger than
-page type. The sizes below were measured off reference cards at this exact frame
-(the Granola card, and the Chutes, Opus and Notion cards in the same collection):
-on the Granola card the wordmark band is 93px, the three claim lines are 85, 70
-and 87px with a ~100px line pitch, and nothing on the card is smaller than a 70px
-band.
+Both cards are the logo lockup on the flat ground and nothing else; the
+hosted-site card adds one line of type above it. The spacing is the source art's
+own: the lockup SVG is a 1184x555 canvas that already carries the reference
+padding, so `card.html` places that canvas at a set width and measures no margin
+of its own. Measured on the committed renders:
 
-| Object | Size | Share of the 630px frame |
-| --- | --- | --- |
-| Wordmark, Canela 300 | 52px, mark 40px | 8% |
-| Headline, Canela 300 | 120-136px | 19-22% |
-| Claim, Inter 500 | 46px | 7% |
-| Margin, left / top | 64px / 48px | 5% of the width / 8% |
+| Object | Measured on the render |
+| --- | --- |
+| Lockup ink, `og-home` | 813 x 203 at x190..1002, y213..415, 68% of the frame width |
+| Field left / right / above / below, `og-home` | 190px / 197px / 213px / 214px |
+| Line, Canela 300 at 108px, `og-site` | a 412 x 86 ink band at x394..805, y167..252 |
+| Lockup ink, `og-site` | 601 x 150 at x299..899, from y312 |
+| Line, gap and lockup as one group, `og-site` | 296px tall, a 59px gap, 167px of field above and 168px below |
 
 Rules that hold whatever the copy is:
 
-- **40px floor.** Nothing smaller than 40px earns a place on the card. A 21px
-  line arrives as 7px in a feed, which is a smudge.
-- **Two type sizes plus the wordmark.** More hierarchy than that does not survive
-  the downscale.
-- **Text objects are stacked, never placed.** Every text object lives in one flex
-  column with fixed gaps, so a longer headline pushes the claim down instead of
-  landing on top of it.
-- **The crop is measured.** `render_cards.py` finds the first row where the
-  illustration's black silhouettes begin and picks the window so they start below
-  the type, which is why the headline is never over a face.
+- **40px floor.** Nothing smaller than 40px earns a place on the card. A link
+  preview is rendered small — Slack, iMessage and X draw a 1200px card at roughly
+  360-500px, a third of its size — so a 21px line arrives as 7px, which is a
+  smudge.
+- **One line at most, and it sits above the lockup.** More hierarchy than that
+  does not survive the downscale, and the lockup is what the card is for.
+- **The line is one size on every card.** 108px is the size the first
+  hosted-site card set it at. A card that carries a line shrinks the lockup to
+  suit rather than resizing the line, so the words read the same on any card.
+- **The group is centred, not placed.** The line and the lockup hold equal field
+  above and below, and the gap between them stays far smaller than that field, so
+  the pair reads as one object. Their ink centres sit within a pixel of each
+  other, at x599.5 and x599.0, which is what the line's 3px optical offset buys:
+  the italic M opens with a wide left sidebearing and pulls a centred line left.
+- **Nothing reflows.** Every object is placed at coordinates measured off the
+  render, so a longer line does not push the lockup down — it grows into it.
+  Change the copy, re-render, and measure the new render.
 
 ## Artwork
 
-`art/` holds the brand illustrations the cards are cut from, at 1200x1200 webp —
-the size the card actually needs, since the frame is 1200 wide. `science-lab-three`
-carries the ufo.ai card, `factory-kids-two` the hosted-site card. They belong to
-the same set as the landing page's `bridge-command` hero: black silhouettes, ember
-dots, signal-blue ground. To swap one, drop the new webp in `art/`, name it in
-`CARDS` in the script, and re-render.
+`art/logo-ember-with-padding.svg` is the lockup both cards draw: three ember dots
+(`#FFD18B`) left of the white wordmark, drawn as outlined paths on a transparent
+1184x555 canvas. It is committed unedited, because the padding inside its canvas
+is the card's spacing. To change the words above the lockup, edit `CARDS` in the
+script — it maps each card's stem to the one line set above the lockup, and
+`<em>` takes the true italic. To swap the art, drop the new SVG in `art/`, name
+it in `LOCKUP`, and re-render.
+
+`art/` also still holds `science-lab-three.webp` and `factory-kids-two.webp`, the
+brand illustrations the earlier cards were cut from. No card draws them now.

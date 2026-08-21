@@ -3,18 +3,19 @@
 <head>
 <meta charset="utf-8">
 <style>
-  /* The share card, 1200x630. Faces are the marketing page's own subset woff2,
-     extracted at render time so this template keeps no second copy of them. */
+  /* The share card, 1200x630. The faces are the marketing page's own subset woff2,
+     Canela and its true italic, extracted at render time so this template keeps no
+     second copy of them. Canela is the brand's display face; it is deliberately not
+     the face of the wordmark in the art, which is Albertus Nova, because a card's
+     words are display copy and the wordmark arrives as artwork. */
   @font-face { font-family: 'Canela'; font-style: normal; font-weight: 300;
     src: url('fonts/Canela-normal-300.woff2') format('woff2'); }
   @font-face { font-family: 'Canela'; font-style: italic; font-weight: 300;
     src: url('fonts/Canela-italic-300.woff2') format('woff2'); }
-  @font-face { font-family: 'Inter'; font-style: normal; font-weight: 500;
-    src: url('fonts/Inter-normal-500.woff2') format('woff2'); }
 
   :root {
     --void-900: #0D1418;   /* the marketing page's ground */
-    --sand-25: #FFFAEF;
+    --ink: #FFFFFF;        /* the wordmark's own white, read off the lockup art */
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 1200px; height: 630px; overflow: hidden; }
@@ -22,40 +23,40 @@
   .card { position: relative; width: 1200px; height: 630px; overflow: hidden;
           background: var(--void-900); }
 
-  /* The illustration, cover-cropped by render_cards.py so its silhouettes begin
-     below the type. Nothing here re-frames it. */
-  .art { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* The lockup art carries the reference side padding inside its own 1184x555
+     canvas, so the card places that canvas at the full frame width and adds no
+     margin of its own: at 1200 wide the ink measures 811x204 and holds 194px of
+     field at each side. Centring the 562.5px canvas leaves 212px of field above
+     the ink and 215px below. */
+  .lockup { position: absolute; left: 0; top: 34px; width: 1200px; display: block; }
 
-  /* One stack holds every text object, laid out in flow with fixed gaps, so a
-     longer headline pushes the claim down instead of landing on top of it.
-     Type sizes are measured against reference cards at this exact frame — see
-     README.md. The floor is 40px: a feed renders the card near a third of its
-     size, so 21px type arrives as 7px and disappears. */
-  .stack { position: absolute; top: 48px; left: 64px; display: flex;
-           flex-direction: column; align-items: flex-start; color: var(--void-900); }
+  /* A card that carries a line gives the line the size the first hosted-site card
+     set it at, and shrinks the lockup to suit: an 887px canvas puts the lockup ink
+     at 601x150, starting at y312. The words and the lockup then read as one group
+     of 296px centred in the 630px height — 167px of field above and below, and a
+     59px gap between the two. */
+  .card:has(.line) .lockup { width: 887px; left: 158px; top: 179px; }
 
-  .lockup { display: flex; align-items: center; gap: 16px; }
-  .lockup svg { width: 40px; height: 40px; display: block; flex: 0 0 auto; }
-  .lockup .word { font-family: 'Canela', Georgia, serif; font-weight: 300;
-                  font-size: 52px; line-height: 1; letter-spacing: 0.02em; }
+  /* 108px is the size the first card set this line at, which puts its ink band at
+     412x86. The floor is 40px: a feed renders the card near a third of its size,
+     so a 21px line arrives as 7px and disappears.
+     The 3px offset is optical. A line centred in the frame lands 3px left of the
+     lockup's ink centre, because the italic M opens with a wide left sidebearing;
+     the offset puts the two ink centres together at x599.5 and x599.0. */
+  .line { position: absolute; left: 3px; top: 157px; width: 1200px;
+          text-align: center; font-family: 'Canela', Georgia, serif;
+          font-weight: 300; font-size: 108px; line-height: 1; color: var(--ink); }
 
-  .display { font-family: 'Canela', Georgia, serif; font-weight: 300;
-             line-height: 1.04; white-space: nowrap; margin-top: 56px; }
-  .display em { font-style: italic; }
-
-  .claim { font-family: 'Inter', system-ui, sans-serif; font-weight: 500;
-           font-size: 46px; line-height: 1.22; letter-spacing: -0.005em;
-           margin-top: 30px; color: rgba(13, 20, 24, 0.80); }
+  /* An italic word crowds the roman word after it, which is why the smaller line
+     needed the space opened by hand. At this size the face's own metric space
+     already opens 86px of field between the two words, so it is left alone. */
+  .line em { font-style: italic; }
 </style>
 </head>
 <body>
   <div class="card">
-    <img class="art" src="ART" alt="">
-    <div class="stack">
-      <div class="lockup">MARK<span class="word">UFO</span></div>
-      <div class="display" style="font-size: DISPLAY_SIZEpx">HEADLINE</div>
-      <div class="claim">CLAIM</div>
-    </div>
+    LINE
+    <img class="lockup" src="LOCKUP_SRC" alt="">
   </div>
 </body>
 </html>
