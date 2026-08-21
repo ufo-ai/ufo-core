@@ -4,10 +4,12 @@ of the deploy's workspaces and its most recent threads, and one workspace's sess
 Authorization is entirely in `resolve_operator_workspace`, the surface's shared-fleet `identify`:
 the request's gateway bearer must verify against this deploy's `UFO_TOKEN_SECRET` AND carry an
 email in `OPERATOR_EMAIL_DOMAIN`, and only then does `?ws=` pick the workspace the request is
-scoped to — a raw workspace UUID, or a customer domain (the shared fleet derives a workspace id as
-`uuid5(NAMESPACE_DNS, domain)`, so the domain IS the address). Whatever the resolver returns becomes
-the request's RLS binding and `SurfaceContext.workspace_id`, so every read below is
-workspace-scoped by construction; without `?ws=` the bearer's own workspace claim is the scope.
+scoped to — a raw workspace UUID, or a customer domain, which resolves to the workspace whose first
+member is seated at that domain, so the address the fleet index prints reaches the workspace it is
+printed beside, and to `uuid5(NAMESPACE_DNS, domain)` only when no workspace is seated at that
+domain. Whatever the resolver returns becomes the request's RLS binding and
+`SurfaceContext.workspace_id`, so every read below is workspace-scoped by construction; without
+`?ws=` the bearer's own workspace claim is the scope.
 
 The page is a built React app served whole from `static/index.html`; everything it renders comes
 from the JSON routes under `api/`, all thin dumps of the `SurfaceContext` read views plus an SSE

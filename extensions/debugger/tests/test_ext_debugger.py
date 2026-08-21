@@ -112,9 +112,9 @@ async def debug(
 
 
 async def _seed_workspace(domain: str | None = None, members: int = 1) -> tuple[UUID, UUID]:
-    """A workspace as the fleet addresses one: named by a domain it derives its id from and seated
-    by members at that domain, or an anonymous uuid4 row with nobody in it."""
-    workspace_id = uuid5(NAMESPACE_DNS, domain) if domain is not None else uuid4()
+    """A workspace as sign-up mints one: an id of its own, addressed by the domain its members are
+    seated at rather than by any derivation of it, or an anonymous row with nobody in it."""
+    workspace_id = uuid4()
     agent_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -346,9 +346,13 @@ async def test_fleet_is_closed_to_everyone_but_an_operator(debug) -> None:
 
 
 async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> None:
+    """A domain addresses the workspace its members are seated at — the one the fleet index prints
+    it beside — and not a second workspace id derived from the same text. A workspace holds an id
+    of its own, so the two are the same only by accident, and an operator who clicks a row or types
+    a domain must reach the rows they were looking at."""
     client, _, _ = debug
     operator_workspace, _ = await _seed_workspace()
-    target_workspace, target_agent = await _seed_workspace()
+    target_workspace, target_agent = await _seed_workspace("acme.com")
     conversation_id = await _seed_conversation(target_workspace)
     await _seed_turn(target_workspace, conversation_id, target_agent, 1)
     token = _mint(SECRET, operator_workspace, f"alex@{OPERATOR_EMAIL_DOMAIN}")
@@ -362,10 +366,31 @@ async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> No
     assert [entry["id"] for entry in by_uuid.json()] == [str(conversation_id)]
 
     by_domain = await client.get(
-        "/surface/debug/api/workspace", params={"ws": "acme.com"}, headers=_auth(token)
+        "/surface/debug/api/conversations", params={"ws": "acme.com"}, headers=_auth(token)
     )
     assert by_domain.status_code == 200
-    assert by_domain.json()["workspace_id"] == str(uuid5(NAMESPACE_DNS, "acme.com"))
+    assert [entry["id"] for entry in by_domain.json()] == [str(conversation_id)]
+
+    scope = await client.get(
+        "/surface/debug/api/workspace", params={"ws": "acme.com"}, headers=_auth(token)
+    )
+    assert scope.json()["workspace_id"] == str(target_workspace)
+    assert scope.json()["workspace_id"] != str(uuid5(NAMESPACE_DNS, "acme.com"))
+
+
+async def test_a_domain_nobody_is_seated_at_scopes_to_the_id_it_provisions(debug) -> None:
+    """A workspace provisioned for a domain is created under `uuid5(NAMESPACE_DNS, domain)` and
+    carries no member until someone onboards. The domain must still reach it in that window, so a
+    domain no seating claims falls back to the id its provisioning uses."""
+    client, _, _ = debug
+    operator_workspace, _ = await _seed_workspace()
+    token = _mint(SECRET, operator_workspace, f"alex@{OPERATOR_EMAIL_DOMAIN}")
+
+    scope = await client.get(
+        "/surface/debug/api/workspace", params={"ws": "nobody.example"}, headers=_auth(token)
+    )
+    assert scope.status_code == 200
+    assert scope.json()["workspace_id"] == str(uuid5(NAMESPACE_DNS, "nobody.example"))
 
 
 async def test_posted_token_binds_the_cookie_and_redirects(debug) -> None:

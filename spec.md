@@ -743,13 +743,14 @@ prompt's private fulfillment, so a secret reaches no turn, transcript, or intent
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one
 `ufo_debug` cookie): the operator-domain bearer's `identify` is the entire authorization — it picks
-the target workspace (a UUID or a customer domain via `uuid5(NAMESPACE_DNS, domain)`), core binds it,
-and every read is RLS-scoped by construction. The debugger reads a workspace's sessions
-(conversations, turns with terminal outcomes and subagent children, transcripts, compaction records,
-workspace files, a live SSE tail); the memory explorer reads its durable memory store — every
-`memory_item`, shared and per-member, live and superseded, indexed and due, carrying the
-recall-decay signals recall itself applies. Each surface reads only its owning extension's data, so
-neither reaches a core internal nor the other extension's tables.
+the target workspace (a UUID, or a customer domain, which resolves to the workspace whose first
+member is seated at that domain, and to `uuid5(NAMESPACE_DNS, domain)` only when no workspace is
+seated there), core binds it, and every read is RLS-scoped by construction. The debugger reads a
+workspace's sessions (conversations, turns with terminal outcomes and subagent children,
+transcripts, compaction records, workspace files, a live SSE tail); the memory explorer reads its
+durable memory store — every `memory_item`, shared and per-member, live and superseded, indexed
+and due, carrying the recall-decay signals recall itself applies. Each surface reads only its
+owning extension's data, so neither reaches a core internal nor the other extension's tables.
 
 Two-way attachments cross under explicit bounds at every hop: an inbound Slack file streams from
 `url_private` in bounded chunks into the conversation's workspace before the turn runs; a shared

@@ -15,7 +15,7 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from dbos import EnqueueOptions
 
-from ufo.db import MIGRATIONS_DIR, workspace_tx
+from ufo.db import MIGRATIONS_DIR, owner_tx, workspace_tx
 from ufo.ext.loader import migration_locations
 from ufo.hub import Parked
 from ufo.jobs import TurnDispatcher
@@ -30,6 +30,8 @@ from ufo.seats import (
     gate_member,
     member_by_email,
     member_is_admin,
+    workspace_by_domain,
+    workspace_domain,
 )
 from ufo.surfaces.hub_tail import PARK_NOTICE, turn_status_frame
 from ufo.workspace import ws
@@ -448,3 +450,53 @@ async def test_member_by_email_never_creates_a_member(db: None) -> None:
                 await connection.execute(sa.select(sa.func.count()).select_from(tables.member))
             ).scalar_one()
     assert seated == 0
+
+
+async def test_a_domain_resolves_to_the_workspace_its_first_member_holds(db: None) -> None:
+    """The inverse of `workspace_domain`: what the derivation prints for a workspace is what
+    resolves back to it. A workspace holds an id of its own, unrelated to its domain, so nothing
+    but this lookup can turn an address an operator types into the workspace they meant."""
+    mine, other = await _workspace(), await _workspace()
+    await _member(mine, "owner@acme.com")
+    await _member(other, "owner@beta.io")
+    async with owner_tx() as connection:
+        assert await workspace_by_domain(connection, "acme.com") == mine
+        assert await workspace_by_domain(connection, "beta.io") == other
+        assert await workspace_by_domain(connection, "nobody.example") is None
+    async with workspace_tx() as connection:
+        with ws(mine):
+            assert await workspace_domain(connection, mine) == "acme.com"
+
+
+async def test_only_the_first_member_names_the_workspace(db: None) -> None:
+    """A later hire at another domain does not give the workspace a second address, and the
+    workspace they joined is not reachable by theirs — the derivation reads one member, so the
+    lookup must match on that same one."""
+    workspace_id = await _workspace()
+    await _member(workspace_id, "owner@acme.com")
+    await _member(workspace_id, "contractor@other.com", offset_seconds=60)
+    async with owner_tx() as connection:
+        assert await workspace_by_domain(connection, "acme.com") == workspace_id
+        assert await workspace_by_domain(connection, "other.com") is None
+
+
+async def test_the_oldest_seating_wins_a_domain_two_workspaces_share(db: None) -> None:
+    """Two workspaces seated at one domain is a fleet a sign-in refuses to choose between. An
+    operator reading a directory must still reach a workspace, so the older seating answers and
+    the answer does not move between requests."""
+    older, newer = await _workspace(), await _workspace()
+    await _member(older, "owner@acme.com")
+    await _member(newer, "founder@acme.com", offset_seconds=60)
+    async with owner_tx() as connection:
+        assert await workspace_by_domain(connection, "acme.com") == older
+        assert await workspace_by_domain(connection, "acme.com") == older
+
+
+async def test_a_malformed_domain_matches_nothing(db: None) -> None:
+    """`?ws=` carries whatever was typed. A wildcard, an address, or blank text must answer nothing
+    rather than pattern-match its way into a workspace."""
+    workspace_id = await _workspace()
+    await _member(workspace_id, "owner@acme.com")
+    async with owner_tx() as connection:
+        for typed in ("%", "%.com", "acme_com", "owner@acme.com", " ", ""):
+            assert await workspace_by_domain(connection, typed) is None

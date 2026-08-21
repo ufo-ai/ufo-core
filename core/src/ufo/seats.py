@@ -248,6 +248,43 @@ async def workspace_domain(connection: AsyncConnection, workspace_id: UUID) -> s
     return email_domain(email) or None
 
 
+async def workspace_by_domain(connection: AsyncConnection, domain: str) -> UUID | None:
+    """The workspace a domain addresses: the one whose first member holds it — the exact inverse of
+    `workspace_domain`, so a domain an operator types or a directory prints resolves back to the
+    workspace it names, never to a second workspace derived from the same text.
+
+    A cross-workspace read, so it runs on an `owner_tx` connection: the address is the predicate and
+    a workspace id is the whole result, so no row's contents cross a tenant boundary. Two workspaces
+    seated at one domain is the fleet a sign-in refuses to choose between; here the oldest seating
+    wins, so an operator reading the directory reaches a workspace rather than nothing."""
+    wanted = email_domain(f"anyone@{domain.strip()}")
+    if not wanted:
+        return None
+    escaped = wanted.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    ranked = sa.select(
+        tables.member.c.workspace_id,
+        tables.member.c.email,
+        tables.member.c.created_at,
+        sa.func.row_number()
+        .over(
+            partition_by=tables.member.c.workspace_id,
+            order_by=(tables.member.c.created_at.asc(), tables.member.c.id.asc()),
+        )
+        .label("seniority"),
+    ).subquery()
+    return (
+        await connection.execute(
+            sa.select(ranked.c.workspace_id)
+            .where(
+                ranked.c.seniority == 1,
+                sa.func.lower(ranked.c.email).like(f"%@{escaped}", escape="\\"),
+            )
+            .order_by(ranked.c.created_at.asc(), ranked.c.workspace_id.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def member_by_email(
     connection: AsyncConnection, workspace_id: UUID, email: str
 ) -> UUID | None:

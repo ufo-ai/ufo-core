@@ -30,7 +30,7 @@ from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN, SurfaceAuth, SurfaceContext
 from ufo.schema import tables
 from ufo.schema.records import SUBAGENT_SURFACE
 from ufo.sdk.http import JSONResponse, RedirectResponse, Request, Response, set_session_cookie
-from ufo.seats import email_domain, workspace_domain
+from ufo.seats import email_domain, workspace_by_domain, workspace_domain
 from ufo.workspace import ws
 
 OPERATOR_COOKIE = "ufo_debug"
@@ -73,9 +73,12 @@ async def resolve_operator_workspace(
 ) -> UUID | Response | None:
     """The workspace this operator request is scoped to, or None to reject. The domain gate is the
     whole authorization: the verified bearer's email domain must equal the operator's domain before
-    `?ws=` may re-scope the request to any workspace in the fleet — a raw workspace UUID, or a
-    customer domain the shared fleet addresses as `uuid5(NAMESPACE_DNS, domain)`. Without `?ws=` the
-    bearer's own workspace claim is the scope.
+    `?ws=` may re-scope the request to any workspace in the fleet — a raw workspace UUID, or the
+    domain its members are seated at, which `workspace_by_domain` resolves to that workspace's own
+    id so an address the fleet directory prints reaches the workspace the directory lists it as.
+    A domain no workspace is seated at falls to `uuid5(NAMESPACE_DNS, domain)`, the id a workspace
+    provisioned for that domain is created under, so a tenant reached before anyone has onboarded
+    still resolves. Without `?ws=` the bearer's own workspace claim is the scope.
 
     A GET of the surface page carrying no credential that resolves redirects to the deploy's one
     sign-in page under the ask that sends the minted bearer back here, so a link into an operator
@@ -101,7 +104,10 @@ async def resolve_operator_workspace(
     try:
         return UUID(target)
     except ValueError:
-        return uuid5(NAMESPACE_DNS, target.lower())
+        pass
+    async with owner_tx() as connection:
+        seated = await workspace_by_domain(connection, target)
+    return seated or uuid5(NAMESPACE_DNS, target.lower())
 
 
 async def bind_operator_session(ctx: SurfaceContext, request: Request) -> Response:
