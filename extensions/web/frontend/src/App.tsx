@@ -6,6 +6,7 @@ import {
   IconBook,
   IconBooks,
   IconBrandSlack,
+  IconClockPlay,
   IconCheck,
   IconChevronRight,
   IconDeviceDesktop,
@@ -699,13 +700,14 @@ const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
   wiki: <IconBook className={GLYPH} aria-hidden />,
   radar: <IconRadar className={GLYPH} aria-hidden />,
+  tasks: <IconClockPlay className={GLYPH} aria-hidden />,
   artifacts: <IconBooks className={GLYPH} aria-hidden />,
   connectors: <IconPlug className={GLYPH} aria-hidden />,
 };
 
 /** The fixed reads the Applications section carries beside the apps: destinations that read
  *  across apps rather than being one. They pin and unpin exactly as an app does. */
-const APPLICATION_SECTIONS: Section[] = ["wiki", "artifacts", "radar"];
+const APPLICATION_SECTIONS: Section[] = ["wiki", "artifacts", "radar", "tasks"];
 
 /** The destinations a section's own name moves between: the group the sidebar files it under. An
  *  application switches to the other applications; a section the sidebar stands on its own stands

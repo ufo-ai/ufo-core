@@ -15,27 +15,28 @@ import {
   AGENT,
   AGENT_ID,
   CONVO_ID,
+  declaredFloor,
+  fact,
+  json,
   MEMBER,
   NO_ARTIFACTS,
   NO_RUNS,
   NO_TASKS,
   NO_TRIGGERS,
+  objectIndex,
+  openAgentSettings,
+  openRow,
+  owned,
+  pageFits,
+  pick,
+  PlacedSection,
+  refusedNotice,
   SECOND,
   SECOND_ID,
   SETTINGS,
   SITE_KIND,
   TASK_KIND,
   TRIGGER_KIND,
-  declaredFloor,
-  fact,
-  json,
-  objectIndex,
-  pageFits,
-  owned,
-  pick,
-  openAgentSettings,
-  openRow,
-  refusedNotice,
   useStreamFake,
   viewCard,
   wire,
@@ -113,13 +114,6 @@ const RUN = {
   ],
 };
 
-const OLDER_RUN = {
-  ...RUN,
-  turn_id: "1c8f3e54-6b97-4a20-8d4e-9f75b13c8d26",
-  task: "weekly-roll",
-  fired_at: "2026-08-13T09:00:00+00:00",
-  artifacts: [],
-};
 
 const TASK_DETAIL = {
   ...TASK_KIND,
@@ -211,6 +205,14 @@ function mountRadar() {
   render(
     <MainAgentProvider agents={[AGENT]}>
       <PlacedRadar />
+    </MainAgentProvider>,
+  );
+}
+
+function mountTasks() {
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="tasks" />
     </MainAgentProvider>,
   );
 }
@@ -804,11 +806,33 @@ test("the radar section is reached by its own hash and leads with the feed", asy
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
   expect(await screen.findByText("Pipeline slipped a week")).toBeTruthy();
   expect(reads[0]).not.toContain("agent=");
-  expect(screen.getByRole("tab", { name: "Reports" }).getAttribute("aria-selected")).toBe("true");
+  /* The feed is the whole of this screen: what is armed to run is the tasks screen's answer. */
+  expect(screen.queryByRole("tab", { name: "Scheduled" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Triggers" })).toBeNull();
+  expect(screen.queryByRole("tablist")).toBeNull();
+  expect(listed).toEqual([]);
+});
 
-  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
+test("the tasks section is reached by its own hash and leads with the schedules", async () => {
+  const listed: string[] = [];
+  wire({
+    "/objects/scheduled_task": (url) => {
+      listed.push(url);
+      return objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]);
+    },
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+  });
+  location.hash = "#/tasks";
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("heading", { level: 1, name: "Tasks" })).toBeTruthy();
   expect(await screen.findByText("weekly-roll")).toBeTruthy();
   expect(listed[0]).not.toContain("agent=");
+  /* Both kinds stand on the page under headings of their own, so neither needs reaching for. */
+  expect(screen.getByRole("heading", { level: 2, name: "Scheduled" })).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 2, name: "Triggers" })).toBeTruthy();
+  /* One narrowing row, the one the scheduled listing declares — not a second saying which kind. */
+  expect(screen.getAllByRole("tablist")).toHaveLength(1);
 });
 
 test("an app's Scheduled tab lists that app's tasks, and a row opens inside the dialog", async () => {
@@ -848,7 +872,7 @@ test("a row opens under the agent that owns it, and closing returns to the whole
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/radar?chip=scheduled_task";
+  location.hash = "#/tasks?chip=scheduled_task";
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await openRow("weekly-roll");
@@ -860,41 +884,47 @@ test("a row opens under the agent that owns it, and closing returns to the whole
   expect(await screen.findByText("daily-brief")).toBeTruthy();
 });
 
-/** The pane holds one column, so a panel opened on the index takes it from the record the feed put
- *  there. The record is the route's and has to be cleared out of it — but nobody pressed a way out,
- *  and the entry that opened the record is the one the member is standing on, so a step back off it
- *  leaves the screen and takes the panel they just opened with it. */
-test("a panel taking the column clears the displaced record without leaving the page", async () => {
+/** The pane holds one column, so the create form raised from the list takes it from the record the
+ *  route named. A route still naming a record nothing shows would lie about the screen, so the
+ *  record is cleared out of it — without leaving the page, which is where the form now stands. */
+test("a form taking the column clears the record the route named", async () => {
   wire({
-    "/workspace/radar": (url) =>
-      url.includes("after=")
-        ? json({ runs: [OLDER_RUN], older: null, newer: "newer|x" })
-        : json({ runs: [RUN], older: "older|x", newer: null }),
-    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
     "/objects/scheduled_task/weekly-roll": () =>
       json({ ...TASK_DETAIL, name: "weekly-roll", summary: "0 9 * * 1 — weekly roll-up" }),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-    "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/radar";
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  location.hash =
+    "#/tasks?chip=scheduled_task&open=object%2Fscheduled_task%2Fweekly-roll&agent=" + SECOND_ID;
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
-  expect(await screen.findByRole("heading", { level: 2, name: "daily-brief" })).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("button", { name: "Older" }));
-  await userEvent.click(await screen.findByRole("button", { name: "weekly-roll" }));
   expect(await screen.findByRole("heading", { level: 2, name: "weekly-roll" })).toBeTruthy();
-  expect(location.hash).toContain("open=object%2Fscheduled_task%2Fweekly-roll");
 
-  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
   await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
 
   expect(await screen.findByRole("complementary", { name: "New scheduled task" })).toBeTruthy();
   await waitFor(() => expect(location.hash).not.toContain("open="));
   expect(location.hash).toContain("chip=scheduled_task");
   expect(screen.queryByRole("heading", { level: 2, name: "weekly-roll" })).toBeNull();
+});
+
+/** What search hands over: the record named in the route, under the agent that owns it. */
+test("a record the route names opens beside the list it belongs to", async () => {
+  const reads: string[] = [];
+  wire({
+    "/objects/scheduled_task/weekly-roll": (url) => {
+      reads.push(url);
+      return json({ ...TASK_DETAIL, name: "weekly-roll", summary: "0 9 * * 1 — weekly roll-up" });
+    },
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+  });
+  location.hash =
+    "#/tasks?chip=scheduled_task&open=object%2Fscheduled_task%2Fweekly-roll&agent=" + SECOND_ID;
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("heading", { level: 2, name: "weekly-roll" })).toBeTruthy();
+  expect(reads[0]).toContain("agent=" + SECOND_ID);
 });
 
 test("the artifacts section reads the site index on the main agent", async () => {
@@ -1104,13 +1134,9 @@ const TRIGGER_ROW = owned({
   mine: true,
 });
 
-test("Radar shows one family at a time and the switcher names which", async () => {
+test("Tasks stands both kinds on one page, each under its own heading", async () => {
   const reads: string[] = [];
   wire({
-    "/workspace/radar": (url) => {
-      reads.push(url);
-      return json({ runs: [RUN], older: null, newer: null });
-    },
     "/objects/scheduled_task": (url) => {
       reads.push(url);
       return objectIndex(TASK_KIND, [TASK_ROW]);
@@ -1120,21 +1146,11 @@ test("Radar shows one family at a time and the switcher names which", async () =
       return objectIndex(TRIGGER_KIND, [TRIGGER_ROW]);
     },
   });
-  mountRadar();
-
-  expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
-  expect(await screen.findByText("Pipeline slipped a week")).toBeTruthy();
-  expect(reads.every((read) => read.includes("/workspace/radar"))).toBe(true);
-
-  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
+  mountTasks();
 
   expect(await screen.findByText("daily-brief")).toBeTruthy();
-  expect(screen.queryByText("Pipeline slipped a week")).toBeNull();
-
-  await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
-
   expect(await screen.findByText(TRIGGER_NAME)).toBeTruthy();
-  expect(screen.queryByText("daily-brief")).toBeNull();
+  expect(reads.some((read) => read.includes("/objects/scheduled_task"))).toBe(true);
   expect(reads.some((read) => read.includes("/objects/source_trigger"))).toBe(true);
 });
 
@@ -1160,9 +1176,9 @@ test("a trigger is ended from its own page and never created from one", async ()
       return json({ applied: true, message: "Deleted the trigger." });
     },
   });
-  mountRadar();
+  mountTasks();
 
-  await userEvent.click(await screen.findByRole("tab", { name: "Triggers" }));
+  expect(await screen.findByRole("heading", { level: 2, name: "Triggers" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "New source trigger" })).toBeNull();
   await openRow(TRIGGER_NAME);
 
@@ -1181,15 +1197,20 @@ test("a trigger is ended from its own page and never created from one", async ()
 
 test("a section with no trigger says so without saying none was ever made", async () => {
   wire({
-    "/workspace/radar": () => json({ runs: [] }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
   });
+  mountTasks();
+
+  /* Each listing says its own absence, and both say it at once. */
+  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
+  expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
+});
+
+test("a radar with nothing on it says so and offers no family to look behind", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [] }) });
   mountRadar();
 
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
-  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
-  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
-  await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
-  expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
+  expect(screen.queryByRole("tablist")).toBeNull();
 });

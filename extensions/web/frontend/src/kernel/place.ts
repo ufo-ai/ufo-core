@@ -72,7 +72,7 @@ export function usePlaceRecorder({
     const opened = next.open !== undefined && held.open === undefined;
     const closed = !moved && next.open === undefined && held.open !== undefined;
     const step: PlaceStep =
-      closed && pushedOpen.current && !patch.displaced
+      closed && pushedOpen.current
         ? "back"
         : opened || moved
           ? "push"

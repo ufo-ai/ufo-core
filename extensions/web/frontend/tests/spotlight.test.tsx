@@ -149,7 +149,7 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
   expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Radar"]);
+  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]);
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
   expect(asked.some((url) => url.includes("/workspace/artifacts"))).toBe(true);
@@ -261,7 +261,7 @@ test("a hosted site stands once, under artifacts, and opens there", async () => 
   expect(opened).toContain("#/artifacts?");
   expect(opened).toContain("chip=Sites");
   expect(opened).toContain("object/site/deploy-notes");
-  expect(opened).not.toContain("radar");
+  expect(opened).not.toContain("tasks");
 });
 
 /** An object's name is unique under its own agent, not across the workspace, so two agents may
@@ -289,7 +289,7 @@ test("two agents' same-named records both stand, each opening its own", async ()
   expect(decodeURIComponent(location.hash)).toContain("agent=" + SECOND_ID);
 });
 
-test("a radar hit opens that record in the radar feed", async () => {
+test("a task hit opens that record on the tasks screen", async () => {
   everything();
   await open();
   await type("deploy");
@@ -298,7 +298,7 @@ test("a radar hit opens that record in the radar feed", async () => {
   await userEvent.click(await found.findByRole("option", { name: /nightly-deploy/ }));
 
   const opened = decodeURIComponent(location.hash);
-  expect(opened).toContain("#/radar?");
+  expect(opened).toContain("#/tasks?");
   expect(opened).toContain("chip=" + TASK_KIND.kind);
   expect(opened).toContain("object/" + TASK_KIND.kind + "/nightly-deploy");
   expect(opened).toContain("agent=" + AGENT_ID);
@@ -395,7 +395,17 @@ test("an unopened term lists what to do and where to go, and reads nothing", asy
   expect(headings()).toEqual(["Actions", "Places"]);
   expect(
     found.getAllByRole("option").map((row) => row.textContent),
-  ).toEqual(["New chat", "Chat", "Apps", "Wiki", "Artifacts", "Radar", "Connectors", "Workspace"]);
+  ).toEqual([
+    "New chat",
+    "Chat",
+    "Apps",
+    "Wiki",
+    "Artifacts",
+    "Radar",
+    "Tasks",
+    "Connectors",
+    "Workspace",
+  ]);
   expect(calls.some((url) => url.includes("q="))).toBe(false);
 });
 

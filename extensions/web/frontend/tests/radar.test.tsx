@@ -159,7 +159,55 @@ test("a picture the report made is drawn beside the entry, cropped from its top"
   const picture = await screen.findByRole("presentation");
   expect(picture.getAttribute("src")).toBe("/dl/queue.png?preview");
   expect(picture.className).toContain("object-cover");
-  expect(picture.className).toContain("object-top");
+  expect(picture.className).toContain("object-top-left");
+});
+
+/** A run whose document was shared before the chart it drew. Both carry a picture — a rendered
+ *  first page is minted for the document the same way a raster is for the chart — so share order
+ *  alone would put the page on the rail. */
+const PAGE_FIRST_RUN = {
+  ...RUN,
+  turn_id: "6b3f8da9-1ce2-4f75-b293-e4c8a6812f37",
+  artifacts: [
+    {
+      filename: "brief.pdf",
+      subject: null,
+      media_type: "application/pdf",
+      size_bytes: 2048,
+      url: "/dl/brief.pdf",
+      preview_url: "/dl/brief.png?preview",
+    },
+    {
+      filename: "queue.png",
+      subject: "the queue",
+      media_type: "image/png",
+      size_bytes: 3,
+      url: "/dl/queue.png",
+      preview_url: "/dl/queue.png?preview",
+    },
+  ],
+};
+
+test("the picture on the rail is one the report drew, not the first page of its paperwork", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [PAGE_FIRST_RUN], older: null }) });
+  mountRadarSection();
+
+  const picture = await screen.findByRole("presentation");
+  expect(picture.getAttribute("src")).toBe("/dl/queue.png?preview");
+});
+
+/** A run that drew nothing is still represented: the page it published is the only picture it has. */
+test("a report that drew no picture stands on the page it published", async () => {
+  const paperwork = {
+    ...PAGE_FIRST_RUN,
+    turn_id: "7c4a9eb0-2df3-4086-a3a4-f5d9b7923048",
+    artifacts: [PAGE_FIRST_RUN.artifacts[0]],
+  };
+  wire({ "/workspace/radar": () => json({ runs: [paperwork], older: null }) });
+  mountRadarSection();
+
+  const picture = await screen.findByRole("presentation");
+  expect(picture.getAttribute("src")).toBe("/dl/brief.png?preview");
 });
 
 test("a report with no entry yet stands on its task and states nothing it cannot", async () => {
@@ -234,7 +282,7 @@ test("a story is what a run made, never what it said", async () => {
   });
   mountPinnedRun(RUN);
 
-  const headline = await screen.findByRole("heading", { level: 3, name: "morning-digest" });
+  const headline = await screen.findByRole("heading", { level: 1, name: "morning-digest" });
   expect(headline.querySelector("button")).toBeNull();
 
   const byline = screen.getByText("by");
@@ -246,7 +294,7 @@ test("a story is what a run made, never what it said", async () => {
   const preview = screen.getByRole("img", { name: "the queue" });
   expect(preview.getAttribute("src")).toBe("/dl/queue.png?preview");
   expect(preview.className).toContain("object-cover");
-  expect(preview.className).toContain("object-top");
+  expect(preview.className).toContain("object-top-left");
   expect(preview.closest("a")).toBeNull();
   expect(preview.closest("button")).toBeTruthy();
   expect(screen.getByText("brief.pdf").closest("a")).toBeNull();
@@ -270,12 +318,14 @@ test("a story that ended badly is marked and says why", async () => {
   wire({ "/workspace/radar": () => json({ runs: [FAILED_RUN], older: null }) });
   mountPinnedRun(FAILED_RUN);
 
-  expect(await screen.findByRole("heading", { level: 3, name: "weekly-numbers" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "weekly-numbers" })).toBeTruthy();
   expect(screen.getByText("Failed")).toBeTruthy();
   expect(screen.getByText("The roll-up source timed out.")).toBeTruthy();
 });
 
-/** jsdom lays nothing out, so the fold — the one measurement `Reveal` reads — is stated here. */
+/** jsdom lays nothing out, so a document longer than the screen is stated rather than laid out —
+ *  the measurement a fold would have read, kept so a report can be proven to stand whole without
+ *  one. */
 function laid(content: number, fold: number) {
   const held = [
     vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(content),
@@ -291,9 +341,10 @@ test("a story is titled the way its report titles itself, and says that title on
   });
   mountPinnedRun(RUN);
 
-  expect(await screen.findByRole("heading", { level: 3, name: "Standup" })).toBeTruthy();
-  expect(screen.queryByRole("heading", { level: 3, name: "morning-digest" })).toBeNull();
-  expect(screen.queryByRole("heading", { level: 1, name: "Standup" })).toBeNull();
+  expect(await screen.findByRole("heading", { level: 1, name: "Standup" })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "morning-digest" })).toBeNull();
+  /* The page is headed by the report, so the document beneath must not repeat its own title. */
+  expect(screen.getAllByText("Standup")).toHaveLength(1);
   expect(screen.getByText("Two blockers cleared.")).toBeTruthy();
   expect(screen.getByText("by").textContent).toBe("by assistant morning-digest");
 });
@@ -382,13 +433,17 @@ test("a permalink pins the feed to its one report, and the way back is offered",
   });
   mountPinnedRun(RUN);
 
-  expect(await screen.findByRole("heading", { level: 3, name: "Standup" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Standup" })).toBeTruthy();
   expect(reads[0]).toContain("turn=" + RUN.turn_id);
   expect(screen.queryByText("The roll-up source timed out.")).toBeNull();
+  /* The way out stands over the report as the path it was opened from, so the foot of a document
+     the member came to read carries nothing to press. */
+  expect(screen.queryByRole("button", { name: "All reports" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "All reports" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Radar" }));
   expect(await screen.findByText("The roll-up source timed out.")).toBeTruthy();
   expect(reads.some((read) => !read.includes("turn="))).toBe(true);
+  expect(screen.getByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
 });
 
 test("a permalink that resolves no readable run states it", async () => {
@@ -398,7 +453,7 @@ test("a permalink that resolves no readable run states it", async () => {
   expect(
     await screen.findByText("This report does not exist or is not shared with you."),
   ).toBeTruthy();
-  expect(screen.getByRole("button", { name: "All reports" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Back to Radar" })).toBeTruthy();
 });
 
 test("a shared picture opens full with its download", async () => {

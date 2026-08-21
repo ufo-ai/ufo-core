@@ -226,7 +226,6 @@ export function Wiki({
         onBack={() => onPlace({ open: undefined, agent: undefined })}
       />
     ) : null,
-    () => onPlace({ open: undefined, agent: undefined, displaced: true }),
   );
 
   return (

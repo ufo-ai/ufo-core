@@ -360,7 +360,7 @@ test("the scheduled index leads with both runs, and its detail pauses through th
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/radar?chip=scheduled_task";
+  location.hash = "#/tasks?chip=scheduled_task";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const listed = (await screen.findByText("digest")).closest("tr");
@@ -974,8 +974,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/radar");
   expect(screen.getByRole("button", { name: "Radar" }).getAttribute("aria-current")).toBe("true");
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
-  expect(screen.getAllByRole("tablist")).toHaveLength(1);
-  expect(screen.getByRole("tab", { name: "Reports" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.queryByRole("tablist")).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
   expect(location.hash).toBe("#/artifacts");

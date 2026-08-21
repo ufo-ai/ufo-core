@@ -392,7 +392,7 @@ test("a refused store states the reason the server gave and keeps the field", as
 test("the scheduled and settings refusals tone their notices", async () => {
   const refuse = () => json({ applied: false, message: "The workspace refuses it." });
 
-  location.hash = "#/radar?chip=scheduled_task";
+  location.hash = "#/tasks?chip=scheduled_task";
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),

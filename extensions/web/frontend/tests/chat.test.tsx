@@ -1239,7 +1239,9 @@ test("tasks slot preserves an empty truncated board's context", async () => {
   });
   open();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Tasks" }));
+  /* The sidebar carries a Tasks app of its own, so the slot is pressed where the slots are. */
+  const slots = within(await screen.findByLabelText("Conversation slots"));
+  await userEvent.click(await slots.findByRole("button", { name: "Tasks" }));
   expect(await screen.findByRole("heading", { name: "Bounded board" })).toBeTruthy();
   expect(screen.getByText("0 of 0 completed.")).toBeTruthy();
   expect(await screen.findByText("No tasks.")).toBeTruthy();

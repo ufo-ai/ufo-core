@@ -5,7 +5,7 @@ import type { WorkspacePlace } from "@/lib/route";
  *  record the place named was taken by another panel instead of shut by the member. A place clearing
  *  a taken record states it, because the way out the member pressed is the only close that steps the
  *  route back off the entry the record was opened on. */
-export type Placement = WorkspacePlace & { notice?: string; displaced?: boolean };
+export type Placement = WorkspacePlace & { notice?: string };
 
 export function Pager({
   payload,

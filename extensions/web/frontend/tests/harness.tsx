@@ -3,10 +3,11 @@ import { join } from "node:path";
 
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { expect, vi } from "vitest";
 
 import { NARROW } from "@/App";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 import {
@@ -16,6 +17,12 @@ import {
   type WorkspaceTab,
 } from "@/lib/route";
 
+/** The shell's own providers, so a view mounted alone draws what it draws inside the app. A tooltip
+ *  reads its delay from a provider above it and raises without one. */
+function Shell({ children }: { children: ReactNode }) {
+  return <TooltipProvider>{children}</TooltipProvider>;
+}
+
 export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
   const [placed, setPlaced] = useState<{ view: WorkspaceTab; place: WorkspacePlace }>({
     view,
@@ -23,6 +30,7 @@ export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
   });
   if (placed.view !== view) setPlaced({ view, place: {} });
   return (
+    <Shell>
     <TabbedPane
       group="workspace"
       tabs={WORKSPACE_TABS}
@@ -31,6 +39,7 @@ export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
       place={placed.place}
       onPlace={(next, place) => setPlaced({ view: next, place })}
     />
+    </Shell>
   );
 }
 
@@ -47,6 +56,7 @@ export function PlacedSection({
   });
   if (placed.section !== section) setPlaced({ section, place: {} });
   return (
+    <Shell>
     <TabbedPane
       group="section"
       tabs={[section]}
@@ -55,6 +65,7 @@ export function PlacedSection({
       place={placed.place}
       onPlace={(next, place) => setPlaced({ section: next, place })}
     />
+    </Shell>
   );
 }
 

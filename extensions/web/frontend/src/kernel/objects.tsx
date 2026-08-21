@@ -4,7 +4,7 @@ import { IconRefresh } from "@tabler/icons-react";
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts, type Fact } from "@/components/ui/facts";
 import { Field, Input, Search } from "@/components/ui/field";
-import { Filter } from "@/components/ui/filter";
+import { Filter, type FilterOption } from "@/components/ui/filter";
 import {
   Select,
   SelectContent,
@@ -28,6 +28,7 @@ import {
 import { DataTable, OPEN, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import { agentName } from "@/lib/agentName";
+import { cn } from "@/lib/cn";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Moment, isMoment } from "@/lib/moments";
@@ -208,10 +209,21 @@ export function ObjectPane({
   agentId,
   kind,
   title,
+  section,
+  siblings,
+  onPickSibling,
   lead,
 }: {
   agentId: string | null;
   kind: string;
+  /** What heads this listing where it is one of several on a page the caller has already headed.
+   *  A pane given one draws a heading under the page's name rather than a page title of its own. */
+  section?: string;
+  /** The kinds this page stands among, current included. Two or more make the page's own name the
+   *  control that moves between them, so a page holding several kinds needs no strip of pills under
+   *  its band saying what the name could say. */
+  siblings?: FilterOption[];
+  onPickSibling?: (value: string) => void;
   /** What a page holding more than one kind says about which one is showing. It leads the toolbar,
    *  where what family to show already stands. */
   lead?: ReactNode;
@@ -245,6 +257,9 @@ export function ObjectPane({
         agentId={agentId}
         kind={kind}
         title={title}
+        section={section}
+        siblings={siblings}
+        onPickSibling={onPickSibling}
         lead={lead}
         onOpen={setAt}
       />
@@ -253,16 +268,45 @@ export function ObjectPane({
   );
 }
 
+/** The band a listing standing among others is headed by: what these records are, and the act that
+ *  makes another of them. The name is a heading under the page's, not a second page title — the
+ *  page was named once, above, and two names set alike would read as two pages rather than as a
+ *  page and the listings on it.
+ *
+ *  It carries no search. A page of several listings would carry one box per listing, and a member
+ *  looking for a name they half remember does not know which of them holds it — so a box that
+ *  searches one of the listings on the screen is a box that fails on half the screen. The listings
+ *  are short and stand whole; what a search would narrow is already in front of the member. */
+function SectionBand({ name, action }: { name: string; action: ReactNode }) {
+  return (
+    <div
+      className={cn(
+        "flex h-(--size-control) shrink-0 items-center gap-sm",
+        "max-narrow:h-auto max-narrow:flex-col max-narrow:items-stretch",
+      )}
+    >
+      <h2 className="m-0 min-w-0 flex-1 truncate text-body font-medium text-ink-soft">{name}</h2>
+      {action ? <div className="flex shrink-0 items-center gap-sm">{action}</div> : null}
+    </div>
+  );
+}
+
 function ObjectIndex({
   agentId,
   kind,
   title,
+  section,
+  siblings,
+  onPickSibling,
   lead,
   onOpen,
 }: {
   agentId: string | null;
   kind: string;
   title?: string;
+  section?: string;
+  siblings?: FilterOption[];
+  onPickSibling?: (value: string) => void;
   lead?: ReactNode;
   onOpen: (at: At) => void;
 }) {
@@ -341,42 +385,48 @@ function ObjectIndex({
             field !== STATE_FIELD &&
             (narrowed === field || payload.objects.some((row) => typeof row[field] === "boolean")),
         );
+        const searching = (
+          <Search
+            label={"Search " + noun(payload.kind)}
+            placeholder="Search"
+            value={typed}
+            onChange={(event) => setTyped(event.target.value)}
+            onSubmit={() => {
+              setCursor("");
+              setQuery(typed);
+            }}
+          />
+        );
+        const making = acts ? (
+          <Button
+            variant="send"
+            size="bar"
+            onClick={() =>
+              setCreating({
+                kind: payload.kind,
+                fields: payload.fields,
+                spec_schema: payload.spec_schema,
+                applies: payload.applies,
+                deletes: payload.deletes,
+              })
+            }
+          >
+            {"New " + noun(payload.kind)}
+          </Button>
+        ) : null;
         return (
           <>
-            <PageHeader
-              title={title}
-              search={
-                <Search
-                  label={"Search " + noun(payload.kind)}
-                  placeholder="Search"
-                  value={typed}
-                  onChange={(event) => setTyped(event.target.value)}
-                  onSubmit={() => {
-                    setCursor("");
-                    setQuery(typed);
-                  }}
-                />
-              }
-              action={
-                acts ? (
-                  <Button
-                    variant="send"
-                    size="bar"
-                    onClick={() =>
-                      setCreating({
-                        kind: payload.kind,
-                        fields: payload.fields,
-                        spec_schema: payload.spec_schema,
-                        applies: payload.applies,
-                        deletes: payload.deletes,
-                      })
-                    }
-                  >
-                    {"New " + noun(payload.kind)}
-                  </Button>
-                ) : null
-              }
-            />
+            {section ? (
+              <SectionBand name={section} action={making} />
+            ) : (
+              <PageHeader
+                title={title}
+                siblings={siblings}
+                onPick={onPickSibling}
+                search={searching}
+                action={making}
+              />
+            )}
             <PageToolbar>
               {lead}
               {flags.length ? (

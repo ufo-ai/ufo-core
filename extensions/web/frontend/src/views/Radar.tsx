@@ -1,14 +1,14 @@
 import { useLayoutEffect, useState } from "react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button, buttonVariants } from "@/components/ui/button";
-import { Filter } from "@/components/ui/filter";
+import { buttonVariants } from "@/components/ui/button";
+import { PressRow } from "@/components/ui/pressrow";
 import { Sheet } from "@/components/ui/sheet";
 import { ARTIFACT_TEXT_BYTES, useTextArtifact } from "@/kernel/artifact";
 import { useBeside } from "@/kernel/beside";
-import { ObjectDetail, ObjectPane, type ObjectAddress } from "@/kernel/objects";
+import { ObjectDetail, type ObjectAddress } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
-import { PageHeader, PageToolbar } from "@/kernel/pane";
+import { PageHeader } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { slackLink } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -19,16 +19,6 @@ import { Markdown } from "@/lib/markdown";
 import { Moment } from "@/lib/moments";
 import { agentHash, chatHash, sectionHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
-
-/** What stands on the radar: the feed of what ran on its own leads, and the two kinds of standing
- *  order — a schedule, and a trigger against a source — stay reachable as the families behind it.
- *  One destination because a member asking what happens here without anyone typing asks one
- *  question; the feed answers what it did, the kinds answer what is armed. */
-const FAMILIES = [
-  { label: "Reports", value: "" },
-  { label: "Scheduled", value: "scheduled_task" },
-  { label: "Triggers", value: "source_trigger" },
-];
 
 const TASK_KIND = "scheduled_task";
 const OBJECT_PREFIX = "object/";
@@ -81,11 +71,11 @@ function objectAt(open: string | undefined): ObjectAddress | null {
   return cut < 0 ? null : { kind: rest.slice(0, cut), name: rest.slice(cut + 1) };
 }
 
-/** The workspace's radar: the feed answers across the viewer's whole audience. A story's task name
- *  opens that task's record beside the feed — `place.agent` remembers whose namespace the record
- *  lives in, since the feed crosses agents. Another panel taking the pane's one column clears the
- *  record out of the place as displaced, so the route stays on the screen the member is standing
- *  on rather than stepping back off the panel they just opened. */
+/** The workspace's radar: the feed of what ran on its own, answered across the viewer's whole
+ *  audience. What is armed to run is the tasks screen's answer, not this one — a member here is
+ *  reading what happened. A story's task name opens that task's record in the place the report
+ *  stood, since the place holds one thing at a time; `place.agent` remembers whose namespace the
+ *  record lives in, because the feed crosses agents. */
 export function Radar({
   title,
   place,
@@ -108,29 +98,15 @@ export function Radar({
         onBack={() => onPlace({ open: undefined, agent: undefined })}
       />
     ) : null,
-    () => onPlace({ open: undefined, agent: undefined, displaced: true }),
   );
-  const family = place.chip ?? "";
-  if (family) {
-    return (
-      <>
-        <ObjectPane
-          key={family}
-          agentId={null}
-          kind={family}
-          title={title}
-          lead={<Lead value={family} onPlace={onPlace} />}
-        />
-        {detail}
-      </>
-    );
-  }
+  const pinned = place.open?.startsWith(RUN_PREFIX) ? place.open.slice(RUN_PREFIX.length) : null;
   return (
     <>
-      {title ? <PageHeader title={title} /> : null}
-      <PageToolbar>
-        <Lead value="" onPlace={onPlace} />
-      </PageToolbar>
+      {pinned ? (
+        <Back label={title ?? "Radar"} onGo={() => onPlace({ open: undefined })} />
+      ) : title ? (
+        <PageHeader title={title} />
+      ) : null}
       <Section>
         <Feed place={place} onPlace={onPlace} />
       </Section>
@@ -139,20 +115,30 @@ export function Radar({
   );
 }
 
-function Lead({ value, onPlace }: { value: string; onPlace: (place: Placement) => void }) {
+/** The way back to the list a report was opened from, standing over the report rather than under
+ *  it: a member who wants the feed again should not have to read to the end of a document to find
+ *  it. The report names itself below — the page is headed by what it is, and this is the path it
+ *  was reached by. */
+function Back({ label, onGo }: { label: string; onGo: () => void }) {
   return (
-    <Filter
-      options={FAMILIES}
-      value={value}
-      onChange={(picked) => onPlace({ chip: picked || undefined, after: undefined })}
-      all={false}
-    />
+    <button
+      type="button"
+      aria-label={"Back to " + label}
+      onClick={onGo}
+      className={cn(
+        "m-0 shrink-0 self-start border-0 bg-transparent p-0 text-left text-body text-ink-soft",
+        "transition-colors duration-100 ease-control hover:text-ink",
+      )}
+    >
+      {label}
+    </button>
   );
 }
 
 /** The feed, or — when the place carries a run's own address, which is what a story's dateline
- *  links — the one story that address names, with the whole feed one press away. A pinned page
- *  that answers no run says so: the run is gone or was never this reader's to read. */
+ *  links — the one story that address names. The way back to the whole feed stands over the story
+ *  rather than in here. A pinned page that answers no run says so: the run is gone or was never
+ *  this reader's to read. */
 function Feed({
   place,
   onPlace,
@@ -172,23 +158,15 @@ function Feed({
   return (
     <Panel state={state} shape="cards">
       {(payload) => {
-        const back = pinned ? (
-          <Button variant="row" onClick={() => onPlace({ open: undefined })}>
-            All reports
-          </Button>
-        ) : null;
         if (!payload.runs.length)
           return (
-            <>
-              <PanelBlank
-                body={
-                  pinned
-                    ? "This report does not exist or is not shared with you."
-                    : "Each scheduled run reports here: the reply it closed with and the files it shared."
-                }
-              />
-              {back ? <div className="mt-4xl">{back}</div> : null}
-            </>
+            <PanelBlank
+              body={
+                pinned
+                  ? "This report does not exist or is not shared with you."
+                  : "Each scheduled run reports here: the reply it closed with and the files it shared."
+              }
+            />
           );
         if (pinned)
           return (
@@ -198,7 +176,7 @@ function Feed({
                   <Story key={run.turn_id} run={run} onPlace={onPlace} />
                 ))}
               </ol>
-              <div className="mt-4xl">{back}</div>
+              <ReadNext pinned={pinned} />
             </>
           );
         return (
@@ -218,11 +196,62 @@ function Feed({
   );
 }
 
-/** A picture the report made — a chart, a capture — is what draws a reader down the page to it.
- *  Only a file with a rendered preview qualifies: the feed shows the picture or nothing, never a
- *  frame around a name. */
-function isPicture(artifact: RadarArtifact): boolean {
-  return artifact.preview_url !== null;
+/** How many reports stand under one, offered as what to read next. Enough that the feed is worth
+ *  reaching from here, few enough that they read as a postscript to the report rather than as the
+ *  feed printed twice. */
+const READ_NEXT = 3;
+
+/** What to read after this report: the reports either side of it in the feed, each named the way the
+ *  feed names it. A report is the end of a page, and a member who read to the end of one is deciding
+ *  what to read next, not whether to go back — the way back stands at the top, where they came in.
+ *
+ *  The whole feed is read for this, not the one run the page is pinned to, so the page holds a
+ *  second read of the same projection. A reader who reaches the foot of a document has waited out
+ *  the document; the list under it costs them nothing they were waiting on. */
+function ReadNext({ pinned }: { pinned: string }) {
+  const state = usePanelRead<RadarPayload>("/workspace/radar");
+  const agents = useAgents();
+  if (state.phase !== "ready") return null;
+  const rest = state.payload.runs.filter((run) => run.turn_id !== pinned).slice(0, READ_NEXT);
+  if (!rest.length) return null;
+  return (
+    <section className="mt-6xl flex flex-col gap-md">
+      <h2 className="m-0 text-subtitle font-medium">More reports</h2>
+      <div className="flex flex-col">
+        {rest.map((run) => {
+          const agent = agents.find((entry) => entry.id === run.agent_id);
+          return (
+            <PressRow
+              key={run.turn_id}
+              href={sectionHash("radar", { open: RUN_PREFIX + run.turn_id })}
+              glyph={
+                <Avatar>
+                  <AvatarFallback>
+                    <AgentIcon name={agent?.icon ?? "propylon"} />
+                  </AvatarFallback>
+                </Avatar>
+              }
+              title={run.entry?.title ?? run.task ?? "Scheduled run"}
+              body={run.entry?.summary ?? ""}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/** Which picture stands for a run. Only a file with a rendered preview can stand for one at all —
+ *  the feed shows a picture or nothing, never a frame around a name. Among those, a picture the run
+ *  drew — a chart, a capture — says at a glance what the report is about, while the first page of a
+ *  document says only that a document exists, because every page of prose crops to the same grey
+ *  band. So a raster the run shared outranks a rendered page whatever order the two were shared in,
+ *  and only a run that drew nothing is represented by its paperwork. */
+function cover(artifacts: RadarArtifact[]): RadarArtifact | null {
+  const pictures = artifacts.filter((artifact) => artifact.preview_url !== null);
+  return (
+    pictures.find((artifact) => artifact.media_type.startsWith("image/")) ?? pictures[0] ?? null
+  );
 }
 
 /** A markdown file the run shared is the run's own document: it reads inline as the story rather
@@ -246,7 +275,7 @@ function Entry({
   onPlace: (place: Placement) => void;
 }) {
   const agent = useAgents().find((entry) => entry.id === run.agent_id);
-  const picture = run.artifacts.find(isPicture) ?? null;
+  const picture = cover(run.artifacts);
   const note = STATUS_NOTES[run.status];
   const heading = run.entry?.title ?? run.task ?? "Scheduled run";
   /** A run that did not end well says why, whatever else was written about it: the reason it
@@ -319,7 +348,7 @@ function Entry({
               loading="lazy"
               alt=""
               src={picture.preview_url ?? ""}
-              className="h-(--size-digest-picture) w-(--container-attachment) shrink-0 rounded-panel border border-edge object-cover object-top"
+              className="size-(--size-digest-picture) shrink-0 rounded-panel border border-edge object-cover object-top-left"
             />
           ) : null}
         </a>
@@ -339,7 +368,8 @@ function Entry({
  *  away.
  *
  *  A run that published no document, or one whose document opens on no title, is headed by the task
- *  that fired it — every story states what it is before it states what it did. */
+ *  that fired it — every story states what it is before it states what it did. The heading is the
+ *  page's own, because a pinned story is the whole of the page it stands on. */
 function Story({
   run,
   onPlace,
@@ -347,18 +377,18 @@ function Story({
   run: RadarRun;
   onPlace: (place: Placement) => void;
 }) {
-  const [title, setTitle] = useState<string | null>(null);
+  const [reportTitle, setReportTitle] = useState<string | null>(null);
   const agent = useAgents().find((entry) => entry.id === run.agent_id);
   const note = STATUS_NOTES[run.status];
   const thread = slackLink(run.surface, run.source);
   const documents = run.artifacts.filter(isDocument);
   const files = run.artifacts.filter((artifact) => !isDocument(artifact));
-  const heading = title ?? run.task ?? "Scheduled run";
+  const heading = reportTitle ?? run.task ?? "Scheduled run";
   const out =
     "text-inherit no-underline hover:underline focus-visible:underline";
   return (
-    <li className="flex flex-col gap-sm border-b border-edge py-4xl last:border-b-0">
-      <h3 className="m-0 text-title font-medium">{heading}</h3>
+    <li className="flex flex-col gap-sm border-b border-edge pb-4xl last:border-b-0">
+      <h1 className="m-0 text-title font-medium">{heading}</h1>
       {agent || run.task ? (
         <p className="m-0 text-ui text-ink-soft">
           by{" "}
@@ -423,7 +453,7 @@ function Story({
           key={artifact.filename}
           artifact={artifact}
           heading={heading}
-          onTitle={at === 0 ? setTitle : undefined}
+          onTitle={at === 0 ? setReportTitle : undefined}
         />
       ))}
     </li>
@@ -487,7 +517,7 @@ function Shared({ artifact }: { artifact: RadarArtifact }) {
       loading="lazy"
       alt={artifact.subject || artifact.filename}
       src={artifact.preview_url}
-      className="h-(--size-band) rounded-panel border border-edge object-cover object-top"
+      className="size-(--size-thumbnail) rounded-panel border border-edge object-cover object-top-left"
     />
   ) : (
     <span className="flex items-baseline gap-sm rounded-panel border border-edge px-lg py-sm">

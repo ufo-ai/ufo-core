@@ -3,6 +3,7 @@ import {
   IconApps,
   IconBook,
   IconBooks,
+  IconClockPlay,
   IconMessage,
   IconPlug,
   IconPlus,
@@ -52,6 +53,7 @@ const SECTION_ICONS: Record<Section, TablerIcon> = {
   wiki: IconBook,
   artifacts: IconBooks,
   radar: IconRadar,
+  tasks: IconClockPlay,
   connectors: IconPlug,
 };
 

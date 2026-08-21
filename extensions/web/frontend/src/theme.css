@@ -240,13 +240,17 @@
   --container-menu: 160px;
   --media-tall: 60vh;
   --media-card: 20rem;
-  /* The square one attached file is drawn in, in the composer and on the message it was sent with.
-     Large enough that a rendered document page reads as that page and not as a grey square, and
-     small enough that three of them stand across the reading column. */
+  /* The square one attached file is drawn in, wherever a file is drawn as a picture rather than a
+     name. Large enough that a rendered document page reads as that page and not as a grey square,
+     and small enough that three of them stand across the reading column. */
   --size-thumbnail: 132px;
-  /* The picture a digest entry carries: wide enough to read a chart's shape, short enough
-     that it never sets the height of an entry whose words are the point. */
-  --size-digest-picture: 72px;
+  /* The square a digest entry's picture is drawn in — small enough that the entry's words still set
+     its height, large enough that a chart's shape reads. Square because the pictures a run shares
+     are any shape at all, and a feed of one rectangle per entry ripples down its own right edge.
+     Every picture the radar draws crops to its top-left corner, which is where a chart's title and
+     axis, a capture's header and a page's first line all begin: a centred crop cuts a left-aligned
+     title mid-word and drops the axis a chart is read against. */
+  --size-digest-picture: 96px;
   --grid-slot: minmax(0, 1fr) var(--container-record);
   --size-avatar: 24px;
   --size-band: 128px;

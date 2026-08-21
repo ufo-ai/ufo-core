@@ -1,9 +1,9 @@
 import {
   IconApps,
+  IconClockPlay,
   IconFile,
   IconMessage,
   IconNote,
-  IconRadar,
   type TablerIcon,
 } from "@tabler/icons-react";
 
@@ -40,16 +40,16 @@ export type Group = {
   failed: string | null;
 };
 
-/** The object kinds the radar feed lists: the clock- and source-fired work an agent owns. Each is
- *  read across every agent the member reaches, and two agents may hold one name, so a hit is
- *  identified by the agent as well as the name. */
-const RADAR_KINDS = [
+/** The object kinds the tasks screen lists: the clock- and source-fired standing orders an agent
+ *  owns. Each is read across every agent the member reaches, and two agents may hold one name, so a
+ *  hit is identified by the agent as well as the name. */
+const TASK_KINDS = [
   { kind: "scheduled_task", label: "scheduled task" },
   { kind: "source_trigger", label: "source trigger" },
 ] as const;
 
 /** A hosted site is the workspace's, not an agent's, and it is listed and opened on the artifacts
- *  screen — the radar's filter holds no family for it. Its read names one agent because a read
+ *  screen — the tasks filter holds no family for it. Its read names one agent because a read
  *  naming none fans out per agent and answers the same site once for each. */
 const SITE_KIND = "site";
 
@@ -111,7 +111,7 @@ export async function searchEverywhere(
   const matched = agents.filter((agent) => agent.name.toLowerCase().includes(wanted.toLowerCase()));
   /** The agent a workspace-owned kind is read under — the main one, as the artifacts screen does. */
   const named = agents.find((agent) => agent.main) ?? agents[0];
-  const [conversations, files, sites, memory, radar] = await Promise.all([
+  const [conversations, files, sites, memory, tasks] = await Promise.all([
     group<"conversations">(
       "Conversations",
       IconMessage,
@@ -171,20 +171,20 @@ export async function searchEverywhere(
       signal,
     ),
     group<"objects">(
-      "Radar",
-      IconRadar,
-      RADAR_KINDS.map((entry) => "/objects/" + entry.kind + query(wanted)),
+      "Tasks",
+      IconClockPlay,
+      TASK_KINDS.map((entry) => "/objects/" + entry.kind + query(wanted)),
       (payload, path) => {
         const kind = path.slice("/objects/".length).split("?")[0];
         return payload.objects.map((row) => ({
           key: row.agent_id + "/" + kind + "/" + row.name,
-          hash: sectionHash("radar", {
+          hash: sectionHash("tasks", {
             chip: kind,
             agent: row.agent_id,
             open: "object/" + kind + "/" + row.name,
           }),
           primary: row.name,
-          fact: RADAR_KINDS.find((entry) => entry.kind === kind)?.label ?? kind,
+          fact: TASK_KINDS.find((entry) => entry.kind === kind)?.label ?? kind,
         }));
       },
       signal,
@@ -213,6 +213,6 @@ export async function searchEverywhere(
     conversations,
     artifacts,
     memory,
-    radar,
+    tasks,
   ].filter((entry) => entry.hits.length > 0 || entry.failed !== null);
 }

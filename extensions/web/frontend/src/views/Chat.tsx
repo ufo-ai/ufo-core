@@ -39,7 +39,7 @@ import {
   TranscriptScroll,
   useTakeMeToTheFoot,
 } from "@/kernel/messages";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { PressRow, PRESS_ROW, PRESS_ROW_ARROW } from "@/components/ui/pressrow";
 import { COLUMN } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -859,17 +859,6 @@ const STARTERS: { mark: string; title: string; body: string; ask: string }[] = [
  *  The arrow is drawn under the pointer or the focus outline rather than at rest: arrows standing on
  *  an idle screen say a row leads somewhere once per row. It holds its place while hidden, so the
  *  sentence truncates at the same character whether the row is under the pointer or not. */
-const STARTER_ROW = cn(
-  "group flex w-full items-center gap-md border-0 border-b border-edge bg-transparent",
-  "px-md py-lg text-start text-ui text-inherit no-underline last:border-b-0 hover:bg-fill",
-);
-
-const STARTER_ARROW = cn(
-  "size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100",
-  "ease-control group-hover:opacity-100 group-focus-visible:opacity-100",
-  "motion-reduce:transition-none",
-);
-
 const FALLBACK_ROWS: StarterRow[] = STARTERS.map((starter) => ({ kind: "app", ...starter }));
 
 /** The accounts an unlock names, said the way a person says them. */
@@ -903,52 +892,6 @@ function StarterMark({ row }: { row: StarterRow }) {
  *  the eye has just read is noise the member did not ask for. Whether a row is cut is measured, not
  *  assumed: the same sentence fits one viewport and not the next, so the answer is re-measured
  *  whenever the row's width changes. */
-function useCutLine(): [RefObject<HTMLSpanElement | null>, boolean] {
-  const line = useRef<HTMLSpanElement>(null);
-  const [cut, setCut] = useState(false);
-  useEffect(() => {
-    const node = line.current;
-    if (!node) return;
-    const measure = () => setCut(node.scrollWidth > node.clientWidth);
-    measure();
-    const watch = new ResizeObserver(measure);
-    watch.observe(node);
-    return () => watch.disconnect();
-  }, []);
-  return [line, cut];
-}
-
-function PressRow({
-  glyph,
-  title,
-  body,
-  onPress,
-}: {
-  glyph: ReactNode;
-  title: string;
-  body: string;
-  onPress: () => void;
-}) {
-  const [line, cut] = useCutLine();
-  return (
-    <Tooltip open={cut ? undefined : false}>
-      <TooltipTrigger asChild>
-        <button type="button" onClick={onPress} className={STARTER_ROW}>
-          {glyph}
-          <span ref={line} className="min-w-0 flex-1 truncate">
-            <span className="font-medium">{title}</span>
-            <span className="text-ink-soft"> {body}</span>
-          </span>
-          <IconArrowRight className={STARTER_ARROW} aria-hidden />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-hint rounded-panel">
-        <span className="font-medium">{title}</span> {body}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 function Starters({ agentId }: { agentId: string }) {
   const read = usePanelRead<StartersPayload>(STARTERS_READ, 0, STARTERS_EVERY_MS);
   const answered = read.phase === "ready" ? read.payload : null;
@@ -977,14 +920,14 @@ function Starters({ agentId }: { agentId: string }) {
           onPress={() => setPendingAsk(agentId, unlock.ask, true)}
         />
       ) : (
-        <a href={sectionHash("connectors")} className={STARTER_ROW}>
+        <a href={sectionHash("connectors")} className={PRESS_ROW}>
           <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
             <IconPlug className="size-(--size-glyph) text-ink-soft" aria-hidden />
           </span>
           <span className="min-w-0 flex-1 truncate text-ink-soft">
             Connect more accounts for better suggestions.
           </span>
-          <IconArrowRight className={STARTER_ARROW} aria-hidden />
+          <IconArrowRight className={PRESS_ROW_ARROW} aria-hidden />
         </a>
       )}
     </div>
