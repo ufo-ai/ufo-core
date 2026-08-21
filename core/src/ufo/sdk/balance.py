@@ -5,6 +5,9 @@ credits it when a payment settles — the rules stay core's, the extension decid
 surface lives in named modules like this one."""
 
 from ufo.balance import (
+    BILLING_SCREEN_FRAGMENT as BILLING_SCREEN_FRAGMENT,
+)
+from ufo.balance import (
     AutoTopup as AutoTopup,
 )
 from ufo.balance import (

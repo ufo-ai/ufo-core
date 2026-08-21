@@ -55,6 +55,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.accounting import UsageExport, metered_workspaces
 from ufo.sdk.balance import (
+    BILLING_SCREEN_FRAGMENT,
     AutoTopup,
     configured_auto_topup,
     credit,
@@ -465,7 +466,7 @@ async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolR
         record.stripe_customer_id,
         None,
         BILLING_TRANSPORT,
-        _billing_screen(ext.public_base_url),
+        ext.home_url(BILLING_SCREEN_FRAGMENT),
     )
     log("metronome.billing_portal", workspace_id=str(workspace_id))
     return _text_result({"portal_url": url, "stripe_customer_id": record.stripe_customer_id})
@@ -877,21 +878,9 @@ def _rfc3339(moment: datetime) -> str:
 
 
 BILLING_ROUTE_PATH = "billing"
-BILLING_SCREEN_PATH = "/surface/web#/workspace/billing"
 # How much of the credit history the screen states. Enough to show the rhythm of a workspace's
 # refills without becoming a ledger nobody reads to the end of.
 BILLING_PURCHASES_SHOWN = 10
-
-
-def _billing_screen(public_base_url: str | None) -> str | None:
-    """Where Stripe returns the member once they are done, or None on a deploy with no public base.
-
-    None is not a failure: the session is still created and still saves a card. It only means the
-    member is left at the provider rather than back on the screen that states what the workspace
-    has left."""
-    if not public_base_url:
-        return None
-    return f"{public_base_url.rstrip('/')}{BILLING_SCREEN_PATH}"
 
 
 def _billing_request_workspace(request: Request) -> UUID | None:

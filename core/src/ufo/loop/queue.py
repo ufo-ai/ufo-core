@@ -307,6 +307,7 @@ class Runtime:
     embed: EmbedClient
     artifact_token_secret: str
     billing_url: str | None = None
+    home_surface: str | None = None
     tailer: TurnTailer | None = None
     memory: MemorySearch | None = None
 
@@ -509,6 +510,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 runtime.embed,
                 audience=audience,
                 public_base_url=runtime.config.connect.public_base_url,
+                home_surface=runtime.home_surface,
                 artifact_token_secret=runtime.artifact_token_secret,
                 scheduled_member_id=(
                     turn.on_behalf_of_member_id

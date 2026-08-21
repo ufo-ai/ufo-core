@@ -417,6 +417,7 @@ def turn_tools(
     *,
     audience: Audience,
     public_base_url: str | None = None,
+    home_surface: str | None = None,
     artifact_token_secret: str = "",
     scheduled_member_id: UUID | None = None,
     member_context_blob: WorkspaceBlobStore | None = None,
@@ -430,7 +431,9 @@ def turn_tools(
     with none; a slot-declaring extension with no key set fails loud. Installation registration is
     limited to the surfaces that same manifest declares. Declared object kinds join one registry
     behind the five object verbs, each kind's store dispatching under its own extension's context
-    exactly as its tools do."""
+    exactly as its tools do. `public_base_url` and `home_surface` are the two halves of a link into
+    the browser portal, so a tool answering with somewhere for the member to go renders it through
+    `ctx.home_url` instead of assembling core's mount path itself."""
     tools: list[ToolDef] = list(BUILTIN_TOOLS)
     ext_by_tool: dict[str, ExtensionContext] = {}
     bound_kinds: list[BoundKind] = list(CORE_OBJECT_KINDS)
@@ -463,6 +466,7 @@ def turn_tools(
             credential_store=credential_store,
             audience=audience,
             public_base_url=public_base_url,
+            home_surface=home_surface,
             artifact_token_secret=artifact_token_secret,
             member_context_read=manifest.member_context_read,
             scheduled_member_id=scheduled_member_id,

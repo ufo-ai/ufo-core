@@ -1174,6 +1174,24 @@ async def test_a_route_is_handed_the_deploy_base_and_the_browser_home(
     }
 
 
+def test_a_tool_is_handed_the_deploy_base_and_the_browser_home() -> None:
+    """A tool that hands a member a link into the portal — the billing screen a card return lands on
+    — reads it off its own context, so no extension carries a surface name of its own. Both halves
+    come from core: a tool holding only the base would have to guess the name."""
+    manifest = _sample_manifest()
+    _tools, ext_by_tool = turn_tools(
+        (manifest,),
+        _credential_store(),
+        audience=conversation_audience(None),
+        public_base_url="https://ufo.test/",
+        home_surface="portal",
+    )
+    context = ext_by_tool[sample.TOOL_NAME]
+    assert context.home_url("#/workspace/billing") == (
+        "https://ufo.test/surface/portal#/workspace/billing"
+    )
+
+
 async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> None:
     first = await _workspace()
     await _seed_note(first)

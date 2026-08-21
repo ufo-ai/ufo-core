@@ -30,6 +30,7 @@ from ufo.accounting import (
     record_workspace_usage,
 )
 from ufo.balance import (
+    BILLING_SCREEN_FRAGMENT,
     TOPUP_GRACE_MICRO_USD,
     credit,
     debit,
@@ -794,6 +795,9 @@ class _StubDbos:
 STRIPE_KEY = "sk_test_0xfeedface"
 PORTAL_CONFIGURATION = "bpc_test_config"
 SAVED_CARD = "pm_card_visa"
+# Not "web": the surface a browser belongs on is a manifest flag, and a deploy naming it anything
+# else must still get a return that lands on its own portal.
+HOME_SURFACE = "portal"
 
 
 TOKEN_SECRET = "billing-page-secret"
@@ -992,13 +996,16 @@ async def _billing_seed() -> tuple[UUID, UUID, UUID, UUID]:
 
 
 def _billing_tool(
-    audience: Audience, public_base_url: str | None = None
+    audience: Audience,
+    public_base_url: str | None = None,
+    home_surface: str | None = HOME_SURFACE,
 ) -> tuple[ToolDef, ExtensionContext]:
     declared, ext_by_tool = turn_tools(
         (metronome.manifest(),),
         CredentialStore(fernet=Fernet(Fernet.generate_key())),
         audience=audience,
         public_base_url=public_base_url,
+        home_surface=home_surface,
     )
     tool = next(t for t in declared if t.name == metronome.MANAGE_BILLING_TOOL)
     return tool, ext_by_tool[metronome.MANAGE_BILLING_TOOL]
@@ -1011,10 +1018,11 @@ async def _manage_billing(
     disclosure_member_id: UUID | None,
     action: str,
     public_base_url: str | None = None,
+    home_surface: str | None = HOME_SURFACE,
     **extra: object,
 ) -> dict[str, object]:
     audience = conversation_audience(disclosure_member_id)
-    tool, ext = _billing_tool(audience, public_base_url)
+    tool, ext = _billing_tool(audience, public_base_url, home_surface)
     ctx = _tool_context(workspace_id, ext, tmp_path, speaker, audience)
     with ws(workspace_id):
         async with workspace_tx() as connection:
@@ -2032,7 +2040,9 @@ async def test_the_card_link_sends_the_member_back_to_their_billing_screen(
     strands them at the provider holding a card this deploy has not seen. The return lands on the
     one screen that reads the card from the provider and answers while the balance refuses turns,
     so the card becomes known at the moment it is saved rather than whenever something next looks.
-    """
+
+    The screen sits on the surface the deploy's own manifest marks as the browser home, which core
+    resolves and hands the context — a name this deploy does not call "web"."""
     _billing_env(monkeypatch)
     workspace_id, owner_id, _mate, _conv = await _billing_seed()
     providers = _Providers()
@@ -2043,7 +2053,34 @@ async def test_the_card_link_sends_the_member_back_to_their_billing_screen(
     )
 
     (session,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
-    assert _form(session)["return_url"] == "https://ufo.test/surface/web#/workspace/billing"
+    assert _form(session)["return_url"] == (
+        f"https://ufo.test/surface/{HOME_SURFACE}{BILLING_SCREEN_FRAGMENT}"
+    )
+
+
+async def test_a_deploy_with_no_browser_surface_still_saves_a_card(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deploy installing no browser surface has no screen to return anyone to, whatever its public
+    base says. The session still saves a card; the member is left at the provider."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    answer = await _manage_billing(
+        workspace_id,
+        tmp_path,
+        owner_id,
+        None,
+        "portal",
+        public_base_url="https://ufo.test/",
+        home_surface=None,
+    )
+
+    (session,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
+    assert "return_url" not in _form(session)
+    assert str(answer["portal_url"]).startswith("https://billing.stripe.com/")
 
 
 async def test_a_deploy_with_no_public_base_still_saves_a_card(

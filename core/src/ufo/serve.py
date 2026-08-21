@@ -242,7 +242,8 @@ def run() -> None:
     skills = skill_registry(manifests, (model_catalog_skill(registry),))
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
-    billing_url = billing_screen_url(config.connect.public_base_url, home_surface(manifests))
+    browser_home = home_surface(manifests)
+    billing_url = billing_screen_url(config.connect.public_base_url, browser_home)
     admission = Admission(
         dbos=dbos_client,
         durable_surfaces=durable_surfaces(manifests),
@@ -286,6 +287,7 @@ def run() -> None:
         memory=memory,
         artifact_token_secret=artifact_secret,
         billing_url=billing_url,
+        home_surface=browser_home,
         tailer=HubTailer(hub=hub, billing_url=billing_url),
     )
     init_runtime(runtime)
