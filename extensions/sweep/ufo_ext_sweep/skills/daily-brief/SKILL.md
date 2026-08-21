@@ -1,6 +1,6 @@
 ---
 name: daily-brief
-description: Load when the member asks to create, prepare, review, or approve a private Daily Brief application. Do not load for other reports or schedules.
+description: Load when a member asks an agent to prepare and deliver a recurring private Daily Brief. Not for a visual brief, page, website, or one-time report.
 ---
 # Daily brief
 

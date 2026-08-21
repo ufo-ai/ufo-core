@@ -10,7 +10,10 @@ section teaches the main agent to serve, validate, and hand back the hosted link
 the object kind are the two consumers of the one `hosted_site` registry the tools write: the frame
 gates each viewer on the site's visibility and lets its creator change it in place, and the kind
 gives chat the same act. One skill joins the loadable set: `website-building` routes by project type
-and carries the shared design system. Its `webapp/` subdirectory is a nested child skill
+and carries the shared design system. It names core's `ufo-style` in `depends`, so a page of ours —
+an app homepage, an internal screen — is built in the house style with no second load, while a site
+with a subject of its own still takes its art direction from that subject. Its `webapp/`
+subdirectory is a nested child skill
 (`website-building/webapp`, the fullstack template) the loader discovers and pulls in with its
 parent; its `game/`, `shared/`, and `informational/` subdirectories are ordinary bundled files."""
 

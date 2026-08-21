@@ -1,6 +1,9 @@
 ---
 name: design-foundations
 description: "Load before visual choices without a full brand system or as fallback: color, typography, and visual hierarchy across any artifact (websites, slides, charts, documents)."
+metadata:
+  depends:
+  - ufo-style
 ---
 # Design Foundations
 
@@ -12,6 +15,10 @@ Artifact-agnostic design guidance — works for CSS, PowerPoint, matplotlib, PDF
 2. **Purpose** — Every choice answers "what does this help the viewer understand?" Color encodes meaning, type size signals hierarchy, spacing groups content, animation reveals information.
 3. **No decoration** — Do not add illustrations, stock images, decorative icons, or clip art unless explicitly requested. Typography, whitespace, and layout are the primary visual tools.
 4. **Accessibility** — WCAG AA contrast (4.5:1 body, 3:1 large text). Never rely on color alone. 12px text floor, 16px body copy. Respect `prefers-reduced-motion`.
+
+## The default is the house style
+
+An artifact with no style direction of its own is drawn in the house style — the `ufo-style` skill this one pulled in, whose `references/tokens.css` holds the tokens. The references below are how that palette lands in a given medium, and what to derive when the member gave direction of their own. A member's own brand, palette, font or reference wins over the house style, whole and never mixed with it.
 
 ## References
 

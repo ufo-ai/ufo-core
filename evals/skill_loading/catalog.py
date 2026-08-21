@@ -782,6 +782,31 @@ CASES: tuple[SkillLoadCase, ...] = (
         "composition, and distribution.",
         expected="design-foundations",
     ),
+    # The house style answers two shapes of query: what our own look is, and hand me its values.
+    # Neither is a build, so neither routes to a skill that would pull `ufo-style` anyway. The
+    # negative is the neighbour that shares every word: changing the portal's own theme is a code
+    # change, and a skill describing the house colours must not take that query off `coding`.
+    SkillLoadCase(
+        "ufostyle-our-own-look",
+        "What are our own colours and fonts — the ones the product itself is painted in? I am "
+        "drawing a slide by hand and want to match them.",
+        expected="ufo-style",
+        forbidden=("office-pptx", "theme-factory"),
+    ),
+    SkillLoadCase(
+        "ufostyle-token-values",
+        "Give me the CSS variables our own interface uses — the palette, the type sizes and the "
+        "spacing steps — so I can paste them into a page I am writing myself.",
+        expected="ufo-style",
+        forbidden=("website-building",),
+    ),
+    SkillLoadCase(
+        "coding-portal-accent-change",
+        "Change the portal's accent colour in extensions/web/frontend/src/theme.css and update "
+        "whatever the palette gate compares it against.",
+        expected="coding",
+        forbidden=("ufo-style",),
+    ),
     SkillLoadCase(
         "docreview-proofread-docx",
         "Proofread the uploaded document at docs-in/proposal.docx and flag spelling errors, "
@@ -1021,6 +1046,35 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Create a stateful customer portal with a backend API, account routing, saved data, and "
         "live status updates.",
         expected="website-building/webapp",
+    ),
+    SkillLoadCase(
+        "site-internal-project-board",
+        "Build an internal project board for the ops team.",
+        expected="website-building",
+        forbidden=("website-building/webapp", "create-application"),
+    ),
+    SkillLoadCase(
+        "site-internal-call-notes",
+        "Build an internal notes page for one customer call.",
+        expected="website-building",
+        forbidden=("website-building/webapp", "create-application"),
+    ),
+    SkillLoadCase(
+        "site-internal-daily-brief",
+        "Build an internal daily brief page for the team.",
+        expected="website-building",
+        forbidden=(
+            "website-building/webapp",
+            "create-application",
+            "daily-brief",
+            "task-scheduling",
+        ),
+    ),
+    SkillLoadCase(
+        "site-application-homepage",
+        "Build your homepage as an interactive project board for the ops team.",
+        expected="website-building",
+        forbidden=("website-building/webapp", "create-application"),
     ),
     SkillLoadCase(
         "site-portfolio",

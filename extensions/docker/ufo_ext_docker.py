@@ -314,12 +314,24 @@ class DockerCarrier:
                 for arg in ("--env", f"{name}={value}")
             )
             code, stdout, stderr = await _docker(
-                "exec", *env_args, handle.container_id, *argv, timeout_s=timeout_s
+                "exec",
+                "--workdir",
+                WORKSPACE_DIR,
+                *env_args,
+                handle.container_id,
+                *argv,
+                timeout_s=timeout_s,
             )
             if code != 0 and NOT_RUNNING_MARKER in stderr.decode(errors="replace"):
                 if await self._revive(handle.conversation_id, handle.container_id):
                     code, stdout, stderr = await _docker(
-                        "exec", *env_args, handle.container_id, *argv, timeout_s=timeout_s
+                        "exec",
+                        "--workdir",
+                        WORKSPACE_DIR,
+                        *env_args,
+                        handle.container_id,
+                        *argv,
+                        timeout_s=timeout_s,
                     )
             timed_out = code == TIMED_OUT_CODE
             return ExecResult(

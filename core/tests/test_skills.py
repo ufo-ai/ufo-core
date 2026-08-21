@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -28,6 +29,9 @@ from ufo.skills.runtime import (
     parse_skill,
     parse_skill_content,
 )
+
+HOUSE_STYLE = "ufo-style"
+HOUSE_STYLE_TOKENS = "references/tokens.css"
 
 
 def _write_nested_child(
@@ -62,11 +66,46 @@ def test_core_ships_exactly_the_fixed_skills() -> None:
     assert {skill.name for skill in CORE_SKILLS} == set(CORE_SKILL_NAMES)
 
 
+def test_the_house_style_reaches_the_skill_index_as_a_routing_trigger() -> None:
+    description = dict(CORE_SKILL_REGISTRY.index())[HOUSE_STYLE]
+    assert description.startswith("Load when")
+    assert len(description.split()) <= 50
+
+
 def test_create_application_reaches_the_skill_index_as_a_routing_trigger() -> None:
     index = dict(CORE_SKILL_REGISTRY.index())
     description = index["create-application"]
-    assert description.startswith("Load when a member asks for a new application")
+    assert description.startswith("Load when a member asks to create a new application")
     assert len(description.split()) <= 50
+
+
+def test_creating_an_application_pulls_the_house_style_with_its_tokens() -> None:
+    """An app's homepage is one of ours, so the tokens arrive with the skill that designs it rather
+    than behind a second load the model may skip. The stylesheet is the whole point of the pull, so
+    a closure that resolves without it mounts a workflow pointing at nothing."""
+    closure = [ref.card.name for ref in CORE_SKILL_REGISTRY.closure("create-application")]
+    assert closure == ["create-application", HOUSE_STYLE]
+    house = CORE_SKILL_REGISTRY.named(HOUSE_STYLE)
+    assert HOUSE_STYLE_TOKENS in dict(house.files)
+    assert "--accent-primary" in dict(house.files)[HOUSE_STYLE_TOKENS].decode()
+
+
+def test_the_house_style_cites_only_paths_its_own_load_mounts() -> None:
+    """`ufo-style` is pulled on its own by app creation and alongside `design-foundations` by the
+    document skills, so it may name no other skill's mounted file: half its loads would put that
+    path nowhere. Another skill is named by name, and its own file by path."""
+    house = CORE_SKILL_REGISTRY.named(HOUSE_STYLE)
+    sources = (house.raw_skill_md, *(content.decode() for _, content in house.files))
+    cited = {path for text in sources for path in re.findall(r"\.skills/[\w./-]+", text)}
+    assert cited == {f".skills/{HOUSE_STYLE}/"}
+
+
+def test_the_house_style_states_that_the_members_own_style_wins() -> None:
+    """The default has to carry its own exception: the skill is pulled into every app build and
+    every artifact with no direction, and a member who named a brand must not be repainted in ours.
+    """
+    body = CORE_SKILL_REGISTRY.named(HOUSE_STYLE).instructions
+    assert "The member's own direction outranks this skill" in body
 
 
 def test_skill_named_unknown_fails_loud_and_suggests_only_the_closest() -> None:

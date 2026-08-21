@@ -240,6 +240,28 @@ pre {
 .artifact { display: flex; flex-direction: column; gap: 5px; max-width: 220px; }
 .artifact-thumb { max-width: 220px; max-height: 300px; border: 1px solid var(--line); border-radius: 4px; background: #fff; display: block; }
 .artifact-link { font-family: var(--mono); font-size: 11px; word-break: break-all; }
+.artifact-actions { display: flex; align-items: center; gap: 8px; }
+.artifact-preview {
+  padding: 0;
+  width: min(96vw, 1600px);
+  height: 94vh;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text);
+}
+.artifact-preview::backdrop { background: rgb(0 0 0 / 78%); }
+.artifact-preview-shell { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.artifact-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.artifact-preview-title { font: 600 11px var(--mono); overflow-wrap: anywhere; }
+.artifact-preview-frame { width: 100%; height: 100%; border: 0; background: #fff; }
 .call-grid { display: grid; gap: 9px; }
 .timing { width: 100%; border-collapse: collapse; font: 11px var(--mono); margin: 6px 0 12px; }
 .timing th, .timing td { border-bottom: 1px solid var(--line); padding: 3px 8px; text-align: left; }
@@ -286,6 +308,8 @@ pre {
 const data = JSON.parse(document.getElementById('eval-data').textContent);
 const runs = data.runs;
 const LEAF_PREFIXES = ['memory_100.', 'hle_gold.', 'dsqa_100.'];
+const APP_STATIC_PREVIEW_CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; base-uri 'none'; form-action 'none'">`;
+const APP_INTERACTIVE_PREVIEW_CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline' data:; font-src data:; media-src data: blob:; connect-src 'none'; base-uri 'none'; form-action 'none'">`;
 const hash = new URLSearchParams(location.hash.slice(1));
 const state = {
   current: hash.get('current') || data.current || (runs[0] && runs[0].id) || '',
@@ -297,6 +321,7 @@ const state = {
   trajectory: hash.get('trajectory') || ''
 };
 const app = document.getElementById('app');
+const previewArtifacts = new Map();
 
 function h(value) {
   return String(value == null ? '' : value)
@@ -653,7 +678,16 @@ function artifactsMarkup(attempt) {
     const preview = rasterImageSafeToOpenInline
       ? `<a href="${item.dataUri}" target="_blank" rel="noopener"><img class="artifact-thumb" src="${item.dataUri}" alt="${h(item.name)}"></a>`
       : '';
-    return `<div class="artifact">${preview}<a class="artifact-link" download="${h(item.name)}" href="${item.dataUri}">${h(item.name)}</a></div>`;
+    const htmlSafeToPreview = item.mediaType === 'text/html' || /\.html?$/i.test(item.name);
+    const previewKey = htmlSafeToPreview ? `artifact-${previewArtifacts.size}` : '';
+    if (previewKey) previewArtifacts.set(previewKey, item);
+    const previewLabel = /-interactive\.html?$/i.test(item.name)
+      ? 'Preview interactive app'
+      : /-static\.html?$/i.test(item.name) ? 'Preview snapshot' : 'Preview app';
+    const previewButton = previewKey
+      ? `<button type="button" class="button" data-preview="${previewKey}">${previewLabel}</button>`
+      : '';
+    return `<div class="artifact">${preview}<div class="artifact-actions">${previewButton}<a class="artifact-link" download="${h(item.name)}" href="${item.dataUri}">${h(item.name)}</a></div></div>`;
   }).join('');
   const extras = references.filter(ref => !linked.has(ref.name))
     .map(ref => `${ref.name} · ${ref.sizeBytes} bytes · ${ref.digest}`).join('\n');
@@ -666,6 +700,30 @@ function artifactsMarkup(attempt) {
     error,
   ].join('');
   return `<div class="section"><div class="section-title">Artifacts · ${count}</div>${body}</div>`;
+}
+function artifactText(dataUri) {
+  const comma = dataUri.indexOf(',');
+  if (comma === -1 || !dataUri.slice(0, comma).endsWith(';base64')) throw new Error('The HTML artifact is not a base64 data URI.');
+  const bytes = Uint8Array.from(atob(dataUri.slice(comma + 1)), value => value.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+function previewDocument(source, interactive) {
+  const policy = interactive ? APP_INTERACTIVE_PREVIEW_CSP : APP_STATIC_PREVIEW_CSP;
+  const head = source.match(/<head(?:\s[^>]*)?>/i);
+  if (!head || head.index == null) return policy + source;
+  const offset = head.index + head[0].length;
+  return source.slice(0, offset) + policy + source.slice(offset);
+}
+function openArtifactPreview(key) {
+  const item = previewArtifacts.get(key);
+  if (!item) return;
+  const dialog = document.getElementById('artifact-preview');
+  const frame = dialog.querySelector('iframe');
+  const interactive = /-interactive\.html?$/i.test(item.name);
+  dialog.querySelector('.artifact-preview-title').textContent = item.name;
+  frame.setAttribute('sandbox', interactive ? 'allow-scripts' : '');
+  frame.srcdoc = previewDocument(artifactText(item.dataUri), interactive);
+  dialog.showModal();
 }
 function attemptMarkup(attempt, index, selected, kind) {
   const attState = attemptState(attempt);
@@ -873,6 +931,7 @@ function render() {
     return;
   }
   let current = runById(state.current) || runs[0];
+  previewArtifacts.clear();
   state.current = current.id;
   let base = runById(state.baseline);
   const suiteNames = unionNames(current.reports, base && base.reports, 'name');
@@ -889,13 +948,20 @@ function render() {
         <div class="filters">${['all','regressions','failures','fixed','excluded'].map(name => `<button class="filter ${name === state.filter ? 'active' : ''}" data-filter="${name}">${name}</button>`).join('')}</div>
         <div class="list">${caseNames.map(name => caseMarkup(before, after, compatible(before, after), name, state.suite)).join('') || '<div class="empty">No cases match this filter.</div>'}</div></section>
       ${detailMarkup(base, current, before, after)}
-    </div></div>`;
+    </div></div>
+    <dialog class="artifact-preview" id="artifact-preview"><div class="artifact-preview-shell">
+      <header class="artifact-preview-head"><span class="artifact-preview-title"></span><button type="button" class="button" id="close-preview">Close</button></header>
+      <iframe class="artifact-preview-frame" title="Generated app preview" sandbox="" referrerpolicy="no-referrer"></iframe>
+    </div></dialog>`;
   persist();
   document.getElementById('current-run').addEventListener('change', event => { state.current = event.target.value; state.trajectory = ''; render(); });
   document.getElementById('baseline-run').addEventListener('change', event => { state.baseline = event.target.value; state.trajectory = ''; render(); });
   document.querySelectorAll('[data-suite]').forEach(node => node.addEventListener('click', () => { state.suite = node.dataset.suite; state.caseName = ''; state.trajectory = ''; render(); }));
   document.querySelectorAll('[data-case]').forEach(node => node.addEventListener('click', () => { state.caseName = node.dataset.case; state.trajectory = ''; render(); }));
   document.querySelectorAll('[data-filter]').forEach(node => node.addEventListener('click', () => { state.filter = node.dataset.filter; state.caseName = ''; state.trajectory = ''; render(); }));
+  document.querySelectorAll('[data-preview]').forEach(node => node.addEventListener('click', () => openArtifactPreview(node.dataset.preview)));
+  document.getElementById('close-preview').addEventListener('click', () => document.getElementById('artifact-preview').close());
+  document.getElementById('artifact-preview').addEventListener('close', event => { event.target.querySelector('iframe').srcdoc = ''; });
   document.getElementById('scoreboard').addEventListener('toggle', event => { state.scoresOpen = event.target.open; persist(); });
   document.getElementById('copy-link').addEventListener('click', async () => copyText(location.href, 'Link copied'));
   document.getElementById('copy-runs').addEventListener('click', async () => copyText([state.current, state.baseline].filter(Boolean).join(' '), 'Run IDs copied'));

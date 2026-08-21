@@ -173,7 +173,13 @@ def required_tools_scorer(
         if missing:
             return CapabilityVerdict(False, f"did not complete successfully: {', '.join(missing)}")
         for before, after in orderings:
-            if names.index(before) > names.index(after):
+            if not any(
+                before_index < after_index
+                for before_index, name in enumerate(names)
+                if name == before
+                for after_index, candidate in enumerate(names)
+                if candidate == after
+            ):
                 return CapabilityVerdict(False, f"{before} must precede {after}")
         return CapabilityVerdict(True, f"trajectory: {', '.join(names) or '(none)'}")
 

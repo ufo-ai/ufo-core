@@ -5,8 +5,10 @@ Each skill is a folder under `skills/` — its `SKILL.md` workflow plus the scri
 references — that the loader parses into the loadable-skill registry and mounts into the sandbox
 under `.skills/<name>/` when `load_skill` resolves it. `office-docx`, `office-pptx`, `pdf`, and
 `theme-factory` build on `design-foundations`, the shared visual baseline, which each names in its
-`depends` so loading any of them pulls it too. `document-review` reviews any of the office formats,
-loading their skills at runtime to annotate. `writing-drafts` covers the prose a document carries
+`depends` so loading any of them pulls it too. `design-foundations` names core's `ufo-style` the
+same way, so an artifact the member gave no style direction for is drawn in the house style
+whichever of these skills owns it. `document-review` reviews any of the office formats, loading
+their skills at runtime to annotate. `writing-drafts` covers the prose a document carries
 rather than its format, so it composes with whichever skill owns the artifact.
 
 `spawn("writing", {"objective": ...})` hands a draft or an edit to a child that already

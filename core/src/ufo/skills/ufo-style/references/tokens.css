@@ -1,0 +1,114 @@
+/* The house tokens, as the portal declares them apart from the one text step noted below. Copy this
+ * file into the project, import it before any other stylesheet, and name only these variables
+ * afterwards.
+ *
+ * A page that has to pin a scheme against the member's preference re-declares the eight palette
+ * steps under its own class and leaves everything below untouched. Nothing else is ever restated. */
+
+:root {
+  color-scheme: light dark;
+
+  /* The palette: three background steps, two text steps, the soft mark step, two accents.
+   * `light-dark()` picks the pair from the scheme, so a scheme is these eight declarations and no
+   * rule is written twice.
+   *
+   * `--text-secondary` diverges from the portal's `theme.css` on purpose: the portal writes
+   * `#919090`, which measures 3.0:1 on `#FAF9F7` and carries no word at body size, so the step for
+   * words here is the derived `#676767` (5.4:1 on `#FAF9F7`) that `design-foundations` declares.
+   * The raw portal value stays as `--mark-secondary`, for a hairline or a mark and never a word. */
+  --bkgd-100: light-dark(#FAF9F7, #191A1A);
+  --bkgd-200: light-dark(#F4F3F2, #262929);
+  --bkgd-300: light-dark(#EBEAE9, #323535);
+  --text-primary: light-dark(#191A1A, #F5F5F5);
+  --text-secondary: light-dark(#676767, #A7A9A9);
+  --mark-secondary: light-dark(#919090, #A7A9A9);
+  --accent-primary: #0095FF;
+  --accent-secondary: #FF6700;
+
+  /* The roles. A pane is `surface`, anything the pointer fills is `fill`, every hairline is `edge`.
+   * `link` and `attention-ink` hold their accents towards the text step so a word clears 4.5:1.
+   * `attention` is the second accent tinted over the pane. */
+  --color-surface: var(--bkgd-100);
+  --color-ink: var(--text-primary);
+  --color-ink-soft: var(--text-secondary);
+  --color-mark-soft: var(--mark-secondary);
+  --color-ink-faint: color-mix(in srgb, var(--mark-secondary) 50%, var(--bkgd-100));
+  --color-field: var(--bkgd-200);
+  --color-edge: var(--bkgd-300);
+  --color-edge-strong: var(--mark-secondary);
+  --color-link: color-mix(in srgb, var(--accent-primary) 70%, var(--text-primary));
+  --color-fill: var(--bkgd-200);
+  --color-fill-strong: var(--bkgd-300);
+  --color-scrim: color-mix(in srgb, var(--text-primary) 40%, transparent);
+  --color-affirm: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
+  --color-attention: color-mix(in srgb, var(--accent-secondary) 15%, var(--bkgd-100));
+  --color-attention-ink: color-mix(in srgb, var(--accent-secondary) 70%, var(--text-primary));
+
+  /* A word sitting on an accent or a semantic fill is the dark text step in either scheme — the
+   * fill does not change with the scheme, so neither does the label on it. */
+  --color-fill-ink: #191A1A;
+
+  /* Type. Inter and Roboto Mono are on Google Fonts. The display face is Georgia: the portal's own
+   * display face is licensed to the portal and belongs to `theme.css` alone — never add it to this
+   * stack or load it with an `@font-face` rule. */
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: Georgia, "Times New Roman", serif;
+
+  --text-mono: 11px;
+  --text-small: 12px;
+  --text-label: 13px;
+  --text-ui: 14px;
+  --text-body: 15px;
+  --text-subtitle: 16px;
+  --text-title: 24px;
+  /* The one step above the chrome scale: a screen's own title, once per screen and nowhere else. */
+  --text-display: 32px;
+
+  --leading-chrome: 1.5;
+  --leading-reading: 1.65;
+  --font-weight-strong: 600;
+
+  /* Spacing: a 2px hair, then a 2px-step ramp to the page's own gaps. */
+  --spacing-hair: 2px;
+  --spacing-2xs: 4px;
+  --spacing-xs: 6px;
+  --spacing-sm: 8px;
+  --spacing-md: 10px;
+  --spacing-lg: 12px;
+  --spacing-xl: 14px;
+  --spacing-2xl: 16px;
+  --spacing-3xl: 18px;
+  --spacing-4xl: 20px;
+  --spacing-5xl: 22px;
+  --spacing-6xl: 32px;
+  --spacing-7xl: 40px;
+  --spacing-8xl: 64px;
+
+  /* One radius carries every panel, control, card and menu. A row is the one pill. */
+  --radius: 0.25rem;
+  --radius-row: calc(infinity * 1px);
+
+  --shadow-raised:
+    0 8px 18px color-mix(in srgb, var(--text-primary) 10%, transparent),
+    0 22px 55px color-mix(in srgb, var(--text-primary) 16%, transparent);
+
+  --ease-control: cubic-bezier(0.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-leave: cubic-bezier(0.7, 0, 0.84, 0);
+
+  --opacity-muted: 0.6;
+  --disabled: 0.4;
+
+  /* The reading column and the breakpoint below which a page stacks. */
+  --container-section: 728px;
+  --breakpoint-narrow: 720px;
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--leading-chrome);
+}

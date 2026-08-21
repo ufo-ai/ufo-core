@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
@@ -24,6 +24,7 @@ from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     EvalTrajectory,
+    ProbeCommandResult,
     SharedArtifact,
     SharedArtifactReference,
     StoredCompaction,
@@ -31,6 +32,7 @@ from evals.harness.capability import (
     TurnLog,
     UndeliveredRound,
     WorkspaceFile,
+    WorkspaceProbe,
 )
 from evals.harness.handoff import handoff_record
 from evals.harness.harness import WAIT_EXPIRED, Json
@@ -38,6 +40,7 @@ from evals.harness.judge import JudgeLeg
 from evals.harness.timing import CaseTiming, TurnSteps, TurnTiming, case_timing, turn_timing
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.ext.context import ConversationProbes
 from ufo.schema import tables
 from ufo.schema.records import CredentialRequest, TerminalFrame, TurnStatus
 from ufo.sdk.context import ExtensionContext, Trajectory
@@ -105,6 +108,21 @@ class _Settled:
 
     result: TargetResult
     descendant_ids: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ConversationWorkspaceProbe(WorkspaceProbe):
+    probes: ConversationProbes
+    conversation_id: UUID
+
+    async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
+        result = await self.probes.run(self.conversation_id, command, timeout_s)
+        return ProbeCommandResult(
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            timed_out_after_s=result.timed_out_after_s,
+        )
 
 
 def _invoke_failure(conversation_id: UUID, error: Exception) -> TargetResult:
@@ -191,6 +209,7 @@ class InProcessTarget:
     mcp_atlas: McpAtlasTarget | None = None
     compaction: CompactionTarget | None = None
     loadable_skills: frozenset[str] | None = None
+    workspace_probe_for: Callable[[UUID], WorkspaceProbe] | None = None
 
     async def preflight_mcp_atlas(self, required_tool_servers: dict[str, str]) -> frozenset[str]:
         if self.mcp_atlas is None:
@@ -267,6 +286,25 @@ class InProcessTarget:
                 artifact_error=collected.error,
                 compactions=len(records),
                 compaction_records=compaction_snapshots(records),
+            )
+        if case.artifact_probe is not None:
+            if self.ctx.probes is not None:
+                probe: WorkspaceProbe = _ConversationWorkspaceProbe(
+                    self.ctx.probes, conversation_id
+                )
+            elif self.workspace_probe_for is not None:
+                probe = self.workspace_probe_for(conversation_id)
+            else:
+                raise RuntimeError("an artifact probe requires conversation probes")
+            captured = await case.artifact_probe(output, probe)
+            names = [artifact.name for artifact in (*output.artifacts, *captured.artifacts)]
+            if len(names) != len(set(names)):
+                raise RuntimeError("an artifact probe produced a duplicate artifact name")
+            errors = "; ".join(error for error in (output.artifact_error, captured.error) if error)
+            output = replace(
+                output,
+                artifacts=(*output.artifacts, *captured.artifacts),
+                artifact_error=errors,
             )
         return replace(result, output=output)
 

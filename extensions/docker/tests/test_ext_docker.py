@@ -107,6 +107,7 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     assert f"ANTHROPIC_API_KEY={SENTINEL_MODEL_KEY}" in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-1" in exec_argv
     assert exec_argv.index("cid1") > exec_argv.index(f"HTTPS_PROXY={proxy_url}")
+    assert exec_argv[exec_argv.index("--workdir") + 1] == WORKSPACE_DIR
     # The toolchains that ignore the system trust store are pointed at the proxy CA, so a MITM'd
     # host (a cache-fronted registry included) is trusted by pip and Node, not only by /etc/ssl.
     assert "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" in exec_argv
@@ -396,9 +397,10 @@ class _FakeDaemon:
                     return 0, f"{argv[1]}\n".encode(), b""
                 return 1, b"", f"Error: no such container: {argv[1]}".encode()
             case "exec":
-                container = next(
-                    arg for arg in argv[1:] if not arg.startswith("-") and "=" not in arg
-                )
+                offset = 1
+                while argv[offset].startswith("-"):
+                    offset += 2 if argv[offset] in {"--env", "--workdir"} else 1
+                container = argv[offset]
                 if container in self.stopped.values():
                     detail = f"Error response from daemon: container {container} is not running"
                     return 1, b"", detail.encode()

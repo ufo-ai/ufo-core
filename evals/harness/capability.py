@@ -46,6 +46,7 @@ PAGE_IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "i
 PAGE_IMAGE_SUFFIXES = tuple(PAGE_IMAGE_MEDIA_TYPES)
 ARTIFACT_MEDIA_TYPES = {
     **PAGE_IMAGE_MEDIA_TYPES,
+    ".html": "text/html",
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".svg": "image/svg+xml",
@@ -126,6 +127,30 @@ class SharedArtifactReference:
     blob_key: str
     digest: str
     size_bytes: int
+
+
+@dataclass(frozen=True)
+class ProbeCommandResult:
+    """One bounded command the harness ran in the evaluated conversation's sandbox."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out_after_s: int | None = None
+
+
+class WorkspaceProbe(Protocol):
+    """Run grader-owned commands in the evaluated conversation's sandbox."""
+
+    async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult: ...
+
+
+@dataclass(frozen=True)
+class ArtifactProbeResult:
+    """Artifacts and a terminal inspection error produced after an evaluated turn."""
+
+    artifacts: tuple[SharedArtifact, ...] = ()
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -212,6 +237,7 @@ class CapabilityOutput:
 
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 type CapabilityFollowup = Callable[[CapabilityOutput], Awaitable[str | None]]
+type ArtifactProbe = Callable[[CapabilityOutput, WorkspaceProbe], Awaitable[ArtifactProbeResult]]
 type EvalSeed = Callable[[UUID, UUID], Awaitable[None]]
 type CapabilitySeed = Callable[[UUID, UUID, WorkspaceBlobStore], Awaitable[None]]
 type WorkspacePrepare = Callable[[UUID, Path], Awaitable[None]]
@@ -304,7 +330,9 @@ class CapabilityCase:
     conversation's workspace directory exists and its files are staged, and before the turn opens,
     receiving (workspace_id, that directory) — for a case whose external environment must read the
     very files the agent will write, which `seed` runs too early to know. `undelivered` seeds the
-    agent's rounds from before the case message, so they answer the last of the `prior_messages`."""
+    agent's rounds from before the case message, so they answer the last of the `prior_messages`.
+    `artifact_probe`, when set, runs after the clean turn in the same sandbox and adds grader-only
+    artifacts without adding instructions or another turn to the evaluated trajectory."""
 
     name: str
     message: str
@@ -326,6 +354,7 @@ class CapabilityCase:
     followup: CapabilityFollowup | None = None
     seed: CapabilitySeed | None = None
     prepare: WorkspacePrepare | None = None
+    artifact_probe: ArtifactProbe | None = None
 
     def __post_init__(self) -> None:
         paths = tuple(reference.path for reference in self.references)
@@ -396,6 +425,8 @@ class CapabilityCase:
             payload["seed"] = source_digest(self.seed)
         if self.prepare is not None:
             payload["prepare"] = source_digest(self.prepare)
+        if self.artifact_probe is not None:
+            payload["artifactProbe"] = source_digest(self.artifact_probe)
         return payload
 
 

@@ -5,8 +5,10 @@ import asyncio
 import json
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 
+import ufo.workspace_changes as workspace_changes_module
 from ufo.db import workspace_tx
 from ufo.models.interface import ToolUseBlock
 from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
@@ -20,6 +22,8 @@ from ufo.workspace_changes import (
     change_targets,
     recorded_workspace_changes,
 )
+
+RECORDER_READ_TIMEOUT_SECONDS = 1.0
 
 
 def test_change_targets_mines_file_tool_paths_and_the_root_for_bash() -> None:
@@ -153,7 +157,9 @@ async def test_record_with_nothing_watched_stores_an_empty_scan(db: None) -> Non
     )
 
 
-async def test_concurrent_recorders_for_one_sandbox_both_land(db: None) -> None:
+async def test_concurrent_recorders_for_one_sandbox_both_land(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A parent and a background subagent share one sandbox and can end together. The slower
     recorder read the row before the faster one stored, so its scan never asked about the faster
     one's checkout — the store must keep those entries rather than replace them away."""
@@ -163,6 +169,18 @@ async def test_concurrent_recorders_for_one_sandbox_both_land(db: None) -> None:
     terminals.connect(conversation_id, "/p", None)
     handle = await carrier.create(_spec(conversation_id))
     sandbox = SandboxSession(carrier=carrier, handle=handle)
+    reads = 0
+    both_read = asyncio.Event()
+
+    async def read_changes(target_conversation_id: UUID) -> WorkspaceChanges:
+        nonlocal reads
+        changes = await recorded_workspace_changes(target_conversation_id)
+        reads += 1
+        if reads == 2:
+            both_read.set()
+        return changes
+
+    monkeypatch.setattr(workspace_changes_module, "recorded_workspace_changes", read_changes)
 
     slow = WorkspaceChangeRecorder(
         sandbox=sandbox,
@@ -174,6 +192,7 @@ async def test_concurrent_recorders_for_one_sandbox_both_land(db: None) -> None:
     exec_ok = json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode()
     listing = await _answer(terminals, conversation_id, exec_ok)
     assert json.loads(listing.params)["argv"][3:] == ["sh", "src"]
+    slow_scan_op = await terminals.next_op(conversation_id)
 
     fast = WorkspaceChangeRecorder(
         sandbox=sandbox,
@@ -182,13 +201,13 @@ async def test_concurrent_recorders_for_one_sandbox_both_land(db: None) -> None:
         targets=("repox/x.py",),
     )
     fast_recording = asyncio.ensure_future(fast.record())
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(both_read.wait(), RECORDER_READ_TIMEOUT_SECONDS)
 
     slow_scan = {
         "changes": [{"path": "src/y.py", "patch": "+y", "truncated": False}],
         "truncated": False,
     }
-    await _answer(terminals, conversation_id, json.dumps(slow_scan).encode())
+    assert terminals.resolve(conversation_id, slow_scan_op.op_id, json.dumps(slow_scan).encode())
     await slow_recording
     await _answer(terminals, conversation_id, exec_ok)
     fast_scan = {

@@ -99,11 +99,9 @@
   --color-edge: var(--bkgd-300);
   --color-edge-strong: var(--text-secondary);
 
-  /* A link's words are read, so the accent alone is not enough of one: #0095FF over the pane reads
-     at 2.96:1 and over a fill at 2.81:1, under the 3:1 a text tone answers for. The accent held
-     towards the text step keeps the hue the comps link in and carries both schemes, since the step
-     it is held towards is the one the scheme already picked. */
-  --color-link: color-mix(in srgb, var(--accent-primary) 80%, var(--text-primary));
+  /* A word clears 4.5:1. Each accent held towards the text step keeps its hue and carries both
+     schemes, since the step it is held towards is the one the scheme already picked. */
+  --color-link: color-mix(in srgb, var(--accent-primary) 70%, var(--text-primary));
 
   --color-fill: var(--bkgd-200);
   --color-fill-strong: var(--bkgd-300);
@@ -112,7 +110,7 @@
   /* Each accent laid over the pane at the one weight the comps tint a status at. */
   --color-affirm: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
   --color-attention: color-mix(in srgb, var(--accent-secondary) 15%, var(--bkgd-100));
-  --color-attention-ink: var(--accent-secondary);
+  --color-attention-ink: color-mix(in srgb, var(--accent-secondary) 70%, var(--text-primary));
   /* The two states a presence dot states, in the two accents the portal already answers with: the
      first marks what is live the way it marks a link, and the second is the one saturated tone a
      surface wears when it wants the member, which is what a stopped app is asking for. */

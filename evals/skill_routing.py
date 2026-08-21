@@ -13,6 +13,13 @@ REVENUE = (120, 135, 142, 160)
 
 CASES = (
     CapabilityCase(
+        "house-style-reference",
+        "State the exact house palette, typefaces, spacing steps, and corner radius that ufo uses. "
+        "Read the source of truth before you answer.",
+        skill_scorer("ufo-style", "website-building"),
+        digest_tag="skill:house-style-reference",
+    ),
+    CapabilityCase(
         "forecast-assumption-model",
         "Build an editable assumption model for the finance team from Q1 revenue 120, Q2 135, "
         "Q3 142, and Q4 160. Separate Inputs and Forecast into named tabs, calculate "

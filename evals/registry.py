@@ -35,6 +35,7 @@ from evals import (
     skill_routing,
     slack_message_block,
     tool_calling,
+    ufo_app_bench,
     web_research,
     writing_subagent,
 )
@@ -98,6 +99,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
+    capability_task("ufo-app-bench", ufo_app_bench.CASES, judge_model=VISUAL_JUDGE_MODEL),
     capability_task(
         "delegated_response_register",
         response_register.DELEGATED_CASES,

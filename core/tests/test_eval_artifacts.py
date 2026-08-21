@@ -1,10 +1,16 @@
 """Deterministic artifact graders inspect delivered bytes, not filenames or claims."""
 
+import asyncio
+from dataclasses import replace
 from gzip import compress
 from io import BytesIO
+from json import dumps, loads
 from tarfile import TarInfo
 from tarfile import open as open_tar
+from uuid import UUID
 from zipfile import ZIP_DEFLATED, ZipFile
+
+import pytest
 
 from evals.harness.artifact_checks import (
     JPEG_MAGIC,
@@ -28,10 +34,78 @@ from evals.harness.scorers import (
     pdf_document_scorer,
     png_image_scorer,
     rendered_pages_scorer,
+    shared_artifact_scorer,
     site_archive_scorer,
 )
+from evals.ufo_app_bench import (
+    AUDIT_CONTENT,
+    DESKTOP_HEIGHT,
+    DESKTOP_WIDTH,
+    HOUSE_CRITERIA,
+    INFORMATION_FACT_COUNTS,
+    INTERACTION_MIN_CONTROLS,
+    INTERACTION_MIN_SUCCESSES,
+    MEASURED_VIEWS,
+    MEMBER_QUERIES,
+    NARROW_HEIGHT,
+    NARROW_WIDTH,
+    PALETTE_STEPS,
+    SCHEMES,
+    AppBenchWorkspaceProbe,
+    _AppBenchProbe,
+    _declarations,
+    _interaction_screen,
+    _measured_screen,
+)
+from evals.ufo_app_bench import CASES as BENCH_CASES
+from evals.ufo_app_bench import (
+    WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS,
+)
+from ufo.skills.runtime import CORE_SKILLS_BY_NAME
 
 REVENUE = (120, 135, 142, 160)
+
+
+async def test_app_bench_workspace_probe_runs_in_the_conversation_container(monkeypatch) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"captured", b""
+
+    async def create(*args, **kwargs) -> Process:
+        calls.append(args)
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    conversation_id = UUID("11111111-1111-1111-1111-111111111111")
+
+    result = await AppBenchWorkspaceProbe(conversation_id).run("capture app", 17)
+
+    assert result.exit_code == 0
+    assert result.stdout == "captured"
+    assert calls == [
+        (
+            "docker",
+            "exec",
+            f"ufo-sbx-{conversation_id}",
+            "bash",
+            "-lc",
+            "capture app",
+        )
+    ]
+
+
+def test_app_bench_audit_builds_interactive_and_static_html() -> None:
+    source = AUDIT_CONTENT.decode()
+
+    assert "script.setAttribute('src', await asDataUrl(resource))" in source
+    assert "link.replaceWith(style)" in source
+    assert "image.setAttribute('src', await asDataUrl(resource))" in source
+    assert "fs.writeFileSync(interactivePath, await interactiveDocument(page))" in source
+    assert "fs.writeFileSync(staticPath, await page.content())" in source
 
 
 def _output(name: str, content: bytes) -> CapabilityOutput:
@@ -345,3 +419,247 @@ async def test_rendered_pages_scorer_rejects_a_corrupt_page_image() -> None:
 
     assert not verdict.passed
     assert "not a valid image" in verdict.reason
+
+
+def _measured(**overrides: object) -> bytes:
+    """An audit report over four clean views, with one view's measurements overridden."""
+    heights = {DESKTOP_WIDTH: DESKTOP_HEIGHT, NARROW_WIDTH: NARROW_HEIGHT}
+    views = [
+        {
+            "scheme": scheme,
+            "width": width,
+            "documentWidth": width,
+            "viewportWidth": width,
+            "documentHeight": heights[width],
+            "viewportHeight": heights[width],
+            "textChecked": 40,
+            "textUnderFloor": 0,
+            "text": [],
+            "pastViewport": [],
+            "clipped": [],
+            "console": [],
+        }
+        for scheme, width in MEASURED_VIEWS
+    ]
+    views[0].update(overrides)
+    return dumps(
+        {
+            "views": views,
+            "interaction": {
+                "controls": [
+                    {"selector": "#first", "name": "First action"},
+                    {"selector": "#second", "name": "Second action"},
+                ],
+                "successes": [
+                    {"selector": "#first", "name": "First action"},
+                    {"selector": "#second", "name": "Second action"},
+                ],
+                "console": [],
+            },
+        }
+    ).encode()
+
+
+async def test_measured_screen_scorer_recomputes_the_aa_threshold_per_string() -> None:
+    """The audit reports every string under the strict AA floor with its own size and weight, and
+    the grader decides which threshold each string owed: body text at 3.03:1 fails, a 32px title at
+    3.4:1 clears the large-text threshold and passes. The script cannot soften the verdict, because
+    it reports measurements and no thresholds."""
+    grader = shared_artifact_scorer(".json", _measured_screen)
+
+    clean = await grader(_output("audit.json", _measured()))
+    assert clean.passed, clean.reason
+
+    body = await grader(
+        _output(
+            "audit.json",
+            _measured(
+                text=[
+                    {
+                        "text": "UFO-820",
+                        "selector": "span.ref",
+                        "px": 11,
+                        "weight": 400,
+                        "ratio": 3.03,
+                    }
+                ]
+            ),
+        )
+    )
+    assert not body.passed
+    assert "3.03:1 needs 4.5:1" in body.reason
+
+    large = await grader(
+        _output(
+            "audit.json",
+            _measured(
+                text=[
+                    {"text": "Sprint 24", "selector": "h1", "px": 32, "weight": 400, "ratio": 3.4}
+                ]
+            ),
+        )
+    )
+    assert large.passed, large.reason
+
+
+async def test_measured_screen_scorer_fails_an_unmeasured_view_and_a_wide_document() -> None:
+    """A report that skipped a scheme or a width fails as unmeasured rather than passing on the
+    views that ran, and a document wider than its viewport at the narrow width fails on its own."""
+    grader = shared_artifact_scorer(".json", _measured_screen)
+
+    partial = loads(_measured())
+    partial["views"] = [view for view in partial["views"] if view["width"] != 390]
+    short = await grader(_output("audit.json", dumps(partial).encode()))
+    assert not short.passed
+    assert "measures no light at 390px, dark at 390px" in short.reason
+
+    narrow = loads(_measured())
+    narrow["views"][2]["documentWidth"] = 402
+    overflowing = await grader(_output("audit.json", dumps(narrow).encode()))
+    assert not overflowing.passed
+    assert "390px document is 402px" in overflowing.reason
+
+    tall = loads(_measured())
+    tall["views"][0]["documentHeight"] = DESKTOP_HEIGHT + 500
+    scrolls = await grader(_output("audit.json", dumps(tall).encode()))
+    assert scrolls.passed, scrolls.reason
+
+    narrow_tall = loads(_measured())
+    narrow_tall["views"][2]["documentHeight"] = NARROW_HEIGHT + 500
+    narrow_scrolls = await grader(_output("audit.json", dumps(narrow_tall).encode()))
+    assert narrow_scrolls.passed, narrow_scrolls.reason
+
+    empty = await grader(_output("audit.json", _measured(textChecked=0)))
+    assert not empty.passed
+    assert "read no text" in empty.reason
+
+    assert not (await grader(_output("audit.json", b"{"))).passed
+
+
+async def test_interaction_screen_requires_two_accessible_visible_state_changes() -> None:
+    clean = _interaction_screen("kanban-board", _measured())
+    assert clean.passed, clean.reason
+
+    too_few_controls = loads(_measured())
+    too_few_controls["interaction"]["controls"] = too_few_controls["interaction"]["controls"][:1]
+    controls = _interaction_screen("kanban-board", dumps(too_few_controls).encode())
+    assert not controls.passed
+    assert f"needs {INTERACTION_MIN_CONTROLS}" in controls.reason
+
+    one_change = loads(_measured())
+    one_change["interaction"]["successes"] = one_change["interaction"]["successes"][:1]
+    changes = _interaction_screen("kanban-board", dumps(one_change).encode())
+    assert not changes.passed
+    assert f"needs {INTERACTION_MIN_SUCCESSES}" in changes.reason
+
+    repeated = loads(_measured())
+    repeated["interaction"]["successes"][1]["selector"] = "#first"
+    distinct = _interaction_screen("kanban-board", dumps(repeated).encode())
+    assert not distinct.passed
+    assert "distinct" in distinct.reason
+
+    noisy = loads(_measured())
+    noisy["interaction"]["console"] = ["pageerror: broken"]
+    console = _interaction_screen("kanban-board", dumps(noisy).encode())
+    assert not console.passed
+    assert "pageerror: broken" in console.reason
+
+
+def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
+    return CapabilityOutput(
+        "Built the app.",
+        (
+            ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+            ToolInvocation("deploy_website", {}, "deployed", has_result=True),
+            ToolInvocation("set_homepage", {}, "bound", has_result=True),
+        ),
+        artifacts=tuple(SharedArtifact(name, content) for name, content in files.items()),
+    )
+
+
+async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
+    page = b"<main>Built app</main>"
+
+    assert [case.name for case in BENCH_CASES] == ["kanban-board", "call-notes", "daily-brief"]
+    assert UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS == 900.0
+    for case in BENCH_CASES:
+        assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in case.digest_tag
+        assert "interactive-homepage" in case.digest_tag
+        shots = {f"{case.name}-{scheme}.png": _png() for scheme in SCHEMES}
+        report = {f"{case.name}-audit.json": _measured()}
+        pages = {
+            f"{case.name}-interactive.html": page,
+            f"{case.name}-static.html": page,
+        }
+        built = await case.grader(_built_screen({**pages, **report, **shots}))
+        assert built.passed, case.name
+
+        unbound = replace(
+            _built_screen({**pages, **report, **shots}),
+            calls=(
+                ToolInvocation(
+                    "load_skill", {"name": "website-building"}, "loaded", has_result=True
+                ),
+                ToolInvocation("deploy_website", {}, "deployed", has_result=True),
+            ),
+        )
+        not_homepage = await case.grader(unbound)
+        assert not not_homepage.passed, case.name
+        assert "set_homepage" in not_homepage.reason
+
+        one_scheme = await case.grader(
+            _built_screen({**pages, **report, f"{case.name}-light.png": _png()})
+        )
+        assert not one_scheme.passed, case.name
+        assert "need 2" in one_scheme.reason
+
+        no_interactive = await case.grader(
+            _built_screen({f"{case.name}-static.html": page, **report, **shots})
+        )
+        assert not no_interactive.passed, case.name
+        assert "probe captured 0 -interactive.html artifacts" in no_interactive.reason
+
+        unmeasured = await case.grader(_built_screen({**pages, **shots}))
+        assert not unmeasured.passed, case.name
+        assert "probe captured 0 .json artifacts" in unmeasured.reason
+
+        assert not case.workspace_files
+        assert case.artifact_probe is not None
+        assert isinstance(case.artifact_probe, _AppBenchProbe)
+        probe_command = case.artifact_probe._command()
+        assert f'"$capture/{case.name}-interactive.html"' in probe_command
+        assert f'"$capture/{case.name}-static.html"' in probe_command
+        assert "artifactProbe" in case.payload()
+        assert case.visual_rubric[: len(HOUSE_CRITERIA)] == HOUSE_CRITERIA
+        assert len(case.visual_rubric) == len(HOUSE_CRITERIA) + 1
+        information = case.visual_rubric[-1]
+        facts = INFORMATION_FACT_COUNTS[case.name]
+        assert f"at least {facts} distinct requested facts" in information
+        assert f"{DESKTOP_WIDTH} x {DESKTOP_HEIGHT}" in information
+        assert "above the fold" in information
+        assert "oversized title" in information
+        assert case.message == MEMBER_QUERIES[case.name]
+        assert len(case.message.split()) <= 12
+        assert "interactive" in case.message.lower()
+        assert "homepage" in case.message.lower()
+        assert "Evaluation delivery" not in case.message
+        leaked = {"column", "attendee", "metric", "token", "viewport"}
+        assert not leaked & set(case.message.lower().split())
+
+
+def test_ufo_app_bench_rubric_reads_the_shipped_tokens() -> None:
+    """The visual rubric quotes the tokens rather than restating them, so the judge grades the
+    screenshot against the look the product ships; a token the skill no longer declares raises."""
+    tokens = dict(CORE_SKILLS_BY_NAME["ufo-style"].files)["references/tokens.css"].decode()
+    palette = HOUSE_CRITERIA[0]
+    assert all("legible" not in criterion for criterion in HOUSE_CRITERIA)
+    assert all("clipped" not in criterion for criterion in HOUSE_CRITERIA)
+
+    for step in PALETTE_STEPS:
+        declared = _declarations(step)
+        assert declared in palette
+        assert declared.partition(": ")[2] in tokens
+
+    assert _declarations("--radius") == "--radius: 0.25rem"
+    with pytest.raises(KeyError):
+        _declarations("--bkgd-400")

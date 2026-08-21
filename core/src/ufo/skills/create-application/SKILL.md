@@ -1,6 +1,9 @@
 ---
 name: create-application
-description: "Load when a member asks for a new application of their own: an app that watches something, a separate assistant for one job, an agent for the team. Not for setting up an app that already exists, and not for saving a skill."
+description: Load when a member asks to create a new application of their own, including an underspecified app, a separate assistant for one job, or an app that watches and acts. Not for a page, website, dashboard, or browser app.
+metadata:
+  depends:
+  - ufo-style
 ---
 # New application
 
@@ -97,6 +100,11 @@ prose describing it. `load_skill(name="website-building")` for the design system
 as static HTML in the sandbox, screenshot it at 1280×800 with the Playwright REPL, and share the
 PNG with `share_file`. The chat draws shared pictures inline, so the mock lands in the
 conversation itself.
+
+The page is one of ours, so it is drawn in the house style: the `ufo-style` tokens this skill
+pulled are the palette, type and spacing of the mock, and of the prompt's description of it. A
+member who names their own colours, font or brand gets theirs instead — say which of the two you
+took in the reply that carries the mock.
 
 One page, at most two variants, is the whole design pass. End with `ask_user`: `Build it`,
 `Change the design`. You do not build the live page from here: the application builds and binds

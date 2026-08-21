@@ -141,7 +141,14 @@ def test_manifest_declares_both_repls_with_verbatim_descriptions() -> None:
     manifest = repl.manifest()
     tools = {tool.name: tool for tool in manifest.tools}
     assert set(tools) == {"js_repl", "xlsx_repl"}
-    assert tools["js_repl"].description.startswith("Persistent Node.js REPL for Playwright")
+    description = tools["js_repl"].description
+    assert description.startswith("Persistent Node.js ES-module REPL")
+    assert "standalone Node scripts do not use its linked modules" in description
+    assert "close each browser in `finally`" in description
+    assert (
+        "`require` is unavailable"
+        in tools["js_repl"].input_model.model_json_schema()["properties"]["code"]["description"]
+    )
     assert "openpyxl" in tools["xlsx_repl"].description
     assert "code" in tools["js_repl"].input_model.model_json_schema()["properties"]
     assert manifest.sandbox_internet is True
@@ -254,6 +261,7 @@ def test_data_visualization_pulls_design_foundations() -> None:
     assert [ref.card.name for ref in registry.closure("data-visualization")] == [
         "data-visualization",
         "design-foundations",
+        "ufo-style",
     ]
 
 

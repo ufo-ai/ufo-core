@@ -12,6 +12,7 @@ from ufo.sandbox.session import WORKSPACE_DIR
 from ufo.skills.runtime import SKILL_MD, mount_skill
 
 DESIGN_FOUNDATIONS_DEPENDENTS = ("office-docx", "office-pptx", "pdf", "theme-factory")
+HOUSE_STYLE = "ufo-style"
 PHRASE_LENGTHS = (3, 4, 5)
 FINANCE_SPECIALIZATION = "specializations/finance.md"
 QUERY_FORMULATION = re.compile(r"^### Query Formulation$(.*?)^### ", re.M | re.S)
@@ -49,14 +50,33 @@ def test_documents_skills_parse_and_index() -> None:
 
 def test_pdf_pulls_its_design_foundations_dependency() -> None:
     registry = skill_registry((documents.manifest(),))
-    assert [ref.card.name for ref in registry.closure("pdf")] == ["pdf", "design-foundations"]
+    assert [ref.card.name for ref in registry.closure("pdf")] == [
+        "pdf",
+        "design-foundations",
+        HOUSE_STYLE,
+    ]
 
 
 def test_office_pptx_and_theme_factory_pull_design_foundations() -> None:
     registry = skill_registry((documents.manifest(),))
     for name in ("office-pptx", "theme-factory"):
         closure = [ref.card.name for ref in registry.closure(name)]
-        assert closure == [name, "design-foundations"]
+        assert closure == [name, "design-foundations", HOUSE_STYLE]
+
+
+def test_design_foundations_defaults_to_the_house_style_and_says_what_overrides_it() -> None:
+    """An artifact nobody gave a style direction for is drawn in the house palette, so
+    `design-foundations` pulls `ufo-style` and every skill that builds on it inherits that default.
+    The member's own direction has to stay the stated exception, or the default becomes a mandate
+    that repaints a member's own brand."""
+    registry = skill_registry((documents.manifest(),))
+    assert [ref.card.name for ref in registry.closure("design-foundations")] == [
+        "design-foundations",
+        HOUSE_STYLE,
+    ]
+    body = registry.named("design-foundations").instructions
+    assert HOUSE_STYLE in body
+    assert "wins over the house style" in body
 
 
 @pytest.mark.parametrize("dependent", DESIGN_FOUNDATIONS_DEPENDENTS)

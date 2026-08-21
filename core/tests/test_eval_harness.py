@@ -33,7 +33,7 @@ from httpx import AsyncClient
 import evals.harness.capability as harness_capability
 import evals.harness.target as harness_target
 from evals import coding_subagent, github_connections, low_stakes_default
-from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports
+from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports, _task_workflow_wait_seconds
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
@@ -50,10 +50,14 @@ from evals.driver import (
     resolve_workspace_and_agent,
     seed_candidate_agent,
 )
+from evals.driver import (
+    WORKFLOW_WAIT_SECONDS as DEFAULT_WORKFLOW_WAIT_SECONDS,
+)
 from evals.first_run import FIRST_RUN_PACKS, FIRST_RUN_SKILL
 from evals.harness.capability import (
     MAX_LINKED_ARTIFACT_BYTES,
     MAX_LINKED_TOTAL_BYTES,
+    ArtifactProbeResult,
     CapabilityCase,
     CapabilityOutput,
     CapabilityReference,
@@ -64,6 +68,7 @@ from evals.harness.capability import (
     TurnLog,
     UndeliveredRound,
     WorkspaceFile,
+    WorkspaceProbe,
     _linked_artifacts,
     _page_images,
     grading_statement,
@@ -160,6 +165,7 @@ from evals.response_register import (
     unwritten_reply_scorer,
     written_report_scorer,
 )
+from evals.ufo_app_bench import WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
 from ufo.accounting import Pricing
 from ufo.agents import AGENT_KIND
 from ufo.blob import FilesystemBlobStore, S3BlobStore
@@ -173,7 +179,13 @@ from ufo.credentials import (
     seal_installation,
 )
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_for
+from ufo.ext.context import (
+    ConversationProbes,
+    ExtensionContext,
+    ModelAccess,
+    Trajectory,
+    context_for,
+)
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.governance import Governance, prompt_digest
 from ufo.loop.transcript import Transcript
@@ -259,6 +271,28 @@ def test_first_run_refuses_to_run_outside_a_pack_that_carries_the_skill(
     )
 
 
+def test_ufo_app_bench_is_explicit_and_refuses_the_local_sandbox(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert "ufo-app-bench" not in {task.name for task in selected_run_tasks()}
+    assert [task.name for task in selected_run_tasks(("ufo-app-bench",))] == ["ufo-app-bench"]
+    monkeypatch.setattr(
+        "evals.__main__.load_config",
+        lambda: SimpleNamespace(
+            pack=SimpleNamespace(name="assistant_eval"),
+            sandbox=SimpleNamespace(backend="local"),
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        eval_main(["--only", "ufo-app-bench", "--out", str(tmp_path)])
+
+    assert (
+        "ufo-app-bench requires [sandbox] backend in ('docker',), found 'local'"
+        in capsys.readouterr().err
+    )
+
+
 def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     tasks = {task.name: task for task in TASKS}
 
@@ -278,6 +312,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["object_tools_flows"].simulator_model == SCENARIO_SIMULATOR_MODEL
     assert tasks["document_visual"].judge_model == VISUAL_JUDGE_MODEL
     assert tasks["document_visual"].simulator_model is None
+    assert tasks["ufo-app-bench"].judge_model == VISUAL_JUDGE_MODEL
+    assert tasks["ufo-app-bench"].simulator_model is None
     assert tasks["response_register"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["response_register"].simulator_model is None
     assert tasks["response_formatting"].judge_model == SEMANTIC_JUDGE_MODEL
@@ -315,6 +351,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "object_tools_flows",
             "new_application",
             "document_visual",
+            "ufo-app-bench",
             "response_register",
             "response_formatting",
             "delegated_response_register",
@@ -326,6 +363,17 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "credential_handoff",
             "report_digest",
         }
+    )
+
+
+def test_ufo_app_bench_uses_its_screen_build_wait_bound() -> None:
+    tasks = {task.name: task for task in TASKS}
+
+    assert _task_workflow_wait_seconds((tasks["ufo-app-bench"],)) == (
+        UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
+    )
+    assert _task_workflow_wait_seconds((tasks["ufo-app-bench"], tasks["basics"])) == (
+        DEFAULT_WORKFLOW_WAIT_SECONDS
     )
 
 
@@ -1623,6 +1671,61 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     assert len(cast(list[object], trajectory["messages"])) == len(_research_transcript())
 
 
+async def test_in_process_target_runs_an_artifact_probe_after_the_turn(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    commands: list[tuple[UUID, str, int]] = []
+
+    class Probes:
+        async def run(
+            self,
+            conversation_id: UUID,
+            command: str,
+            timeout_s: int,
+            acting_member_id: UUID | None = None,
+        ) -> SimpleNamespace:
+            commands.append((conversation_id, command, timeout_s))
+            return SimpleNamespace(
+                exit_code=0, stdout="captured", stderr="", timed_out_after_s=None
+            )
+
+    async def capture(output: CapabilityOutput, probe: WorkspaceProbe) -> ArtifactProbeResult:
+        result = await probe.run("capture app", 17)
+        assert result.stdout == "captured"
+        return ArtifactProbeResult((SharedArtifact("app.html", b"<main>app</main>"),))
+
+    ctx = context_for(
+        EXTENSION,
+        frozenset(),
+        blob=blob,
+        invoker=worker,
+        probes=cast(ConversationProbes, Probes()),
+    )
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id, worker),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+    case = CapabilityCase(
+        "capture-app",
+        "Build an app.",
+        exact_scorer("Done — found it and remembered it for the team."),
+        artifact_probe=capture,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(case)
+
+    assert result.clean
+    assert result.output.artifacts == (SharedArtifact("app.html", b"<main>app</main>"),)
+    assert len(commands) == 1
+    assert commands[0][1:] == ("capture app", 17)
+
+
 async def test_a_capability_seed_establishes_state_before_the_conversation_opens(
     db: None, tmp_path
 ) -> None:
@@ -2632,17 +2735,27 @@ async def test_web_dependent_case_behind_an_infra_outage_is_excluded_not_passed(
 
 
 async def test_required_tools_scorer_enforces_order() -> None:
-    output = CapabilityOutput(
+    reversed_output = CapabilityOutput(
         "answer",
         (
             ToolInvocation("memory_update", {}, has_result=True),
             ToolInvocation("search_web", {}, has_result=True),
         ),
     )
-    verdict = await required_tools_scorer(
+    recovered_output = CapabilityOutput(
+        "answer",
+        (
+            ToolInvocation("memory_update", {}, has_result=True),
+            ToolInvocation("search_web", {}, has_result=True),
+            ToolInvocation("memory_update", {}, has_result=True),
+        ),
+    )
+    grader = required_tools_scorer(
         ("search_web", "memory_update"), (("search_web", "memory_update"),)
-    )(output)
-    assert not verdict.passed
+    )
+
+    assert not (await grader(reversed_output)).passed
+    assert (await grader(recovered_output)).passed
 
 
 async def test_required_tools_scorer_rejects_error_and_missing_result() -> None:
@@ -4861,7 +4974,7 @@ def test_linked_artifacts_stop_at_the_cumulative_budget() -> None:
 
 
 def test_linked_artifacts_map_each_document_type_to_its_media_type() -> None:
-    names = ["a.pdf", "b.pptx", "c.xlsx", "d.gif", "e.webp", "f.svg", "g.bin"]
+    names = ["a.pdf", "b.pptx", "c.xlsx", "d.gif", "e.webp", "f.svg", "g.html", "h.bin"]
     linked = [
         cast(dict[str, str], item)
         for item in _linked_artifacts(tuple(SharedArtifact(name, b"x") for name in names))
@@ -4874,7 +4987,8 @@ def test_linked_artifacts_map_each_document_type_to_its_media_type() -> None:
     assert media["d.gif"] == "image/gif"
     assert media["e.webp"] == "image/webp"
     assert media["f.svg"] == "image/svg+xml"
-    assert media["g.bin"] == "application/octet-stream"
+    assert media["g.html"] == "text/html"
+    assert media["h.bin"] == "application/octet-stream"
     assert all(item["dataUri"].startswith(f"data:{item['mediaType']};base64,") for item in linked)
 
 
@@ -5628,7 +5742,14 @@ def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, obj
                     for tool in tools
                 ],
                 "toolErrors": ["boom: tool fell over"],
-                "artifacts": [],
+                "artifacts": ["index.html"],
+                "artifactContents": [
+                    {
+                        "name": "index.html",
+                        "mediaType": "text/html",
+                        "dataUri": "data:text/html;base64,PGgxPkFwcDwvaDE+",
+                    }
+                ],
                 "artifactReferences": [
                     {
                         "name": "report.pdf",
@@ -5754,6 +5875,14 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert '"intent":"keep the thread"' in html
     assert '"before_count":2' in html
     assert "report.pdf" in html
+    assert 'sandbox=""' in html
+    assert "Preview app" in html
+    assert "Preview interactive app" in html
+    assert "Preview snapshot" in html
+    assert "data:text/html;base64,PGgxPkFwcDwvaDE+" in html
+    assert "APP_STATIC_PREVIEW_CSP" in html
+    assert "APP_INTERACTIVE_PREVIEW_CSP" in html
+    assert "interactive ? 'allow-scripts' : ''" in html
     assert '"sizeBytes":2048' in html
     assert '"webDependent":true' in html
     assert '"suiteSpecificContext":{"snapshotEpoch":4}' in html

@@ -190,9 +190,13 @@ TIMEOUT_DESCRIPTION = (
     "task id, log path, and pid, while the REPL state stays where it was."
 )
 JS_REPL_DESCRIPTION = (
-    "Persistent Node.js REPL for Playwright browser automation and interactive website/game "
-    "testing. Variables, imports, and state persist across calls. The REPL starts automatically on "
-    "first use. Call emitImage(value, mediaType?) with a Buffer, Uint8Array, base64 string, or "
+    "Persistent Node.js ES-module REPL for Playwright browser automation and interactive "
+    "website/game testing. Use `await import(...)`; CommonJS `require` is unavailable. Variables, "
+    "imports, and state persist across calls. Every call must exit: close each browser in "
+    "`finally` and never keep browser, context, or page handles in globals. Keep browser checks in "
+    "this tool; standalone Node scripts do not use its linked modules. The REPL starts "
+    "automatically on first use. Call emitImage(value, mediaType?) with a Buffer, Uint8Array, "
+    "base64 string, or "
     f"{{bytes, mimeType}} to return images inline in the tool result — up to {EMIT_IMAGE_LIMIT} "
     f"per execution. {REPLAY_SEMANTICS}"
 )
@@ -205,7 +209,8 @@ XLSX_REPL_DESCRIPTION = (
 
 class JsReplInput(BaseModel):
     code: str = Field(
-        description="JavaScript code to execute. Variables and imports persist across calls."
+        description="JavaScript ES-module code to execute. Use `await import(...)`; `require` is "
+        "unavailable. Variables and imports persist across calls."
     )
     timeout: int | None = Field(default=None, description=TIMEOUT_DESCRIPTION)
     reset: bool | None = Field(

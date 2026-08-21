@@ -88,9 +88,11 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   or a foreign channel is its own memory space, so a write there stays keyed to that space — a
   member wanting a private note makes it in their own conversation.
 - **Skill loading** — skills are folders of files (SKILL.md + assets), mounted into the sandbox on
-  `load_skill`. **A skill ships with the thing it teaches**: core ships two folder skills — `sandbox`,
-  teaching core's own builtins, and `create-application`, teaching the `agent` kind a member asks
-  for in chat, and generates a `model-catalog` skill from
+  `load_skill`. **A skill ships with the thing it teaches**: core ships three folder skills —
+  `sandbox`, teaching core's own builtins, `create-application`, teaching the `agent` kind a member
+  asks for in chat, and `ufo-style`, carrying the portal theme's own tokens as the house style an
+  extension's design skills default to — core is the only tier every pack can name in `depends` —
+  and generates a `model-catalog` skill from
   the model registry at serve so the models a member can pin stay documented from the same records
   the runtime routes and bills on (RFC 0018); an extension's skills ride its manifest; a pack may
   add pack-level skills of its own (see Packs).

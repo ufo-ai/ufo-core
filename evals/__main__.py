@@ -108,6 +108,15 @@ from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
 from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
 from evals.skill_loading.runner import skill_loading_task
 from evals.turn_logs import TurnLogCollector
+from evals.ufo_app_bench import (
+    SUPPORTED_BACKENDS as UFO_APP_BENCH_BACKENDS,
+)
+from evals.ufo_app_bench import (
+    WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS,
+)
+from evals.ufo_app_bench import (
+    AppBenchWorkspaceProbe,
+)
 from evals.wandr.runner import (
     SUBMISSIONS_ROOT as WANDR_SUBMISSIONS_ROOT,
 )
@@ -158,6 +167,14 @@ MCP_ATLAS_JOB = "evals:mcp_atlas"
 MCP_ATLAS_URL_ENV = "MCP_ATLAS_URL"
 MCP_ATLAS_EXTERNAL_URL_ENV = "MCP_ATLAS_EXTERNAL_URL"
 MCP_ATLAS_TIMEOUT_SECONDS = 1_800.0
+
+
+def _task_workflow_wait_seconds(tasks: tuple[EvalTask, ...]) -> float:
+    if tasks and all(task.name == "document_visual" for task in tasks):
+        return DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
+    if tasks and all(task.name == "ufo-app-bench" for task in tasks):
+        return UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
+    return WORKFLOW_WAIT_SECONDS
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -510,6 +527,13 @@ def main(argv: list[str] | None = None) -> None:
             f"handbook grades the conversation workspace on the host, so it requires "
             f"[sandbox] backend in {HANDBOOK_BACKENDS}, found {config.sandbox.backend!r}"
         )
+    if any(task.name == "ufo-app-bench" for task in tasks) and (
+        config.sandbox.backend not in UFO_APP_BENCH_BACKENDS
+    ):
+        parser.error(
+            f"ufo-app-bench requires [sandbox] backend in {UFO_APP_BENCH_BACKENDS}, "
+            f"found {config.sandbox.backend!r}"
+        )
     for task in tasks:
         if task.packs and config.pack.name not in task.packs:
             parser.error(
@@ -544,7 +568,7 @@ def main(argv: list[str] | None = None) -> None:
             MEMORY_RECALL_EVENT,
         )
     )
-    workflow_wait_seconds = WORKFLOW_WAIT_SECONDS
+    workflow_wait_seconds = _task_workflow_wait_seconds(tasks)
     if gdpval_run is not None:
         workflow_wait_seconds = GDPVAL_WORKFLOW_WAIT_SECONDS
     if jobbench_tasks is not None:
@@ -559,8 +583,6 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = MEMORY_100_WORKFLOW_WAIT_SECONDS
     if memory_ingestion_run is not None:
         workflow_wait_seconds = MEMORY_INGESTION_WORKFLOW_WAIT_SECONDS
-    if tasks and all(task.name == "document_visual" for task in tasks):
-        workflow_wait_seconds = DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(
         _run(
             config,
@@ -745,6 +767,12 @@ async def _run(
                     ),
                     compaction=compaction,
                     loadable_skills=loadable_skills,
+                    workspace_probe_for=(
+                        AppBenchWorkspaceProbe
+                        if config.sandbox.backend in UFO_APP_BENCH_BACKENDS
+                        and any(task.name == "ufo-app-bench" for task in tasks)
+                        else None
+                    ),
                 )
                 targets = tuple(
                     replace(

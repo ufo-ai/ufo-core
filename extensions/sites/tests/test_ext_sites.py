@@ -41,6 +41,8 @@ from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext
 
 TOOL_NARRATION = "building the site"
+HOUSE_STYLE = "ufo-style"
+HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
 JS_CELL = re.compile(r"```javascript\n(.*?)```", re.S)
 
@@ -246,6 +248,7 @@ async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> No
     assert [ref.card.name for ref in registry.closure("website-building/webapp")] == [
         "website-building/webapp",
         "website-building",
+        HOUSE_STYLE,
     ]
 
     written: dict[str, bytes] = {}
@@ -261,6 +264,46 @@ async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> No
     assert "/workspace/.skills/website-building/webapp/SKILL.md" in written
     assert "/workspace/.skills/website-building/shared/01-design-tokens.md" in written
     assert not any(path.startswith("/workspace/.skills/website-building-") for path in written)
+
+
+async def test_website_building_pulls_the_house_style_and_scopes_it_to_our_own_pages() -> None:
+    """A page of ours is built in the house tokens with no second load, so the tokens mount with the
+    skill and the art-direction ladder states the exception before its first rung. A site with a
+    subject of its own, or a member who named a style, still overrides it — without that the ladder
+    below would be dead wording and every site would come out looking like the portal."""
+    registry = skill_registry((sites_manifest.manifest(),))
+    assert [ref.card.name for ref in registry.closure("website-building")] == [
+        "website-building",
+        HOUSE_STYLE,
+    ]
+
+    written: dict[str, bytes] = {}
+
+    class _Sandbox:
+        async def write_file(self, path: str, content: bytes) -> None:
+            written[path] = content
+
+    for entry in await registry.materialize(registry.closure("website-building")):
+        await mount_skill(_Sandbox(), entry.skill)
+    assert f"/workspace/.skills/{HOUSE_STYLE}/{HOUSE_STYLE_TOKENS}" in written
+
+    instructions = registry.named("website-building").instructions
+    assert HOUSE_STYLE in instructions
+    assert "Member-supplied design direction wins" in instructions
+
+
+def test_ufo_application_homepages_bind_only_after_browser_proof_and_deploy() -> None:
+    instructions = (
+        skill_registry((sites_manifest.manifest(),)).named("website-building").instructions
+    )
+    application = instructions.partition("## ufo application homepage")[2]
+
+    assert application
+    assert "shared/12-playwright-interactive.md" in application
+    assert "set_homepage" in application
+    assert application.index("browser QA") < application.index("deploy_website")
+    assert application.index("deploy_website") < application.index("set_homepage")
+    assert "visible state" in application
 
 
 def test_the_website_building_profile_names_only_meaningful_tools() -> None:

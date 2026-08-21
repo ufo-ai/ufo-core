@@ -5,9 +5,10 @@ A skill is a folder of files — a `SKILL.md` (YAML frontmatter + markdown workf
 A skill folder MAY nest child skills: an immediate subdirectory that itself holds a `SKILL.md` is a
 child, registered under the path-form name `<parent>/<child-dir>` and mounting nested under the
 parent. Nesting is naming only: a child that needs its parent's files says so with `depends`, the
-one mechanism that pulls another skill in. Core's own skills teach its builtins, held to a fixed set
-by `CORE_SKILL_NAMES` and a CI gate. Packs contribute more through the manifest `skills` point,
-which the loader aggregates with core's into one `SkillRegistry` per boot.
+one mechanism that pulls another skill in. Core's own skills teach its builtins and the house style
+every other skill defaults to, held to a fixed set by `CORE_SKILL_NAMES` and a CI gate. Packs
+contribute more through the manifest `skills` point, which the loader aggregates with core's into
+one `SkillRegistry` per boot.
 
 `load_skill` resolves the named skill and its transitive `depends` through `SkillRegistry.closure`,
 then for each: mounts its files into the conversation's workspace under `.skills/<name>/` — inside
@@ -34,7 +35,7 @@ SKILL_MD = "SKILL.md"
 FRONTMATTER_FENCE = "---\n"
 SKILLS_MOUNT_DIR = f"{WORKSPACE_DIR}/.skills"
 CORE_SKILLS_ROOT = Path(__file__).parent
-CORE_SKILL_NAMES = frozenset({"sandbox", "create-application"})
+CORE_SKILL_NAMES = frozenset({"sandbox", "create-application", "ufo-style"})
 TREE_INDENT = "  "
 SKILL_HEADER_PREFIX = "# Skill: "
 DEPENDENCY_SUFFIX = " (dependency of {puller})"
