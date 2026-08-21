@@ -1134,14 +1134,12 @@ def _validated_base_url(provider: str, base_url: str | None) -> str | None:
     """The tenant URL this binding stores, from what the submit typed — None where the provider
     needs none.
 
-    Which of the three connector address shapes the provider declares decides what a row may carry.
+    Which of the two connector address shapes the provider declares decides what a row may carry.
     A complete fixed host refuses any override. A per-tenant host (the class constant empty) needs
-    one and validates it against the provider's rule. A host that stops at the connected account
-    (`account_url_key`) accepts one under the same rule and needs none, since each run resolves the
-    account's own address from its connection."""
+    one and validates it against the provider's rule."""
     connector_cls = CONNECTORS[provider]
     value = base_url.strip() if base_url else None
-    if connector_cls.base_url and not connector_cls.account_url_key:
+    if connector_cls.base_url:
         if value is not None:
             raise ValueError(f"{provider!r} has a fixed API host; base_url cannot override it")
         return None
@@ -1150,8 +1148,6 @@ def _validated_base_url(provider: str, base_url: str | None) -> str | None:
         raise ValueError(f"{provider!r} has no safe tenant URL rule")
     host_pattern, path_pattern, example = rule
     if value is None:
-        if connector_cls.account_url_key:
-            return None
         raise ValueError(f"{provider!r} requires base_url, for example {example}")
     parsed = urlsplit(value)
     try:

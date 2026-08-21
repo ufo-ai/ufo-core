@@ -11,9 +11,6 @@ from ufo.connectors import (
     WORKSPACE_FILE_KEY as WORKSPACE_FILE_KEY,
 )
 from ufo.connectors import (
-    AccountParameters as AccountParameters,
-)
-from ufo.connectors import (
     BrokerFile as BrokerFile,
 )
 from ufo.connectors import (

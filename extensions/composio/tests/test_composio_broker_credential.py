@@ -1,12 +1,10 @@
 """The Composio broker's feed-sync credential end to end: `credential` confirms the account's owner
 from metadata (never a token) and returns a `Credential` whose transport proxies provider HTTP
-through Composio's proxy-execute, and `account_parameter` reads one identifier off that same
-confirmed metadata — the company id a per-company provider's API address carries. Composio's
-connected-account read and proxy-execute are mocked with `httpx.MockTransport` — no live API, no
-key, no direct provider call — so the real broker and proxy transport run against canned Composio
-responses. This proves the credential the `ConnectorRegistry` routes a brokered provider's feed-sync
-to; the source framework that consumes a `Credential` keeps its own proof in
-`extensions/sources/tests`."""
+through Composio's proxy-execute. Composio's connected-account read and proxy-execute are mocked
+with `httpx.MockTransport` — no live API, no key, no direct provider call — so the real broker and
+proxy transport run against canned Composio responses. This proves the credential the
+`ConnectorRegistry` routes a brokered provider's feed-sync to; the source framework that consumes a
+`Credential` keeps its own proof in `extensions/sources/tests`."""
 
 import json
 from collections.abc import Callable
@@ -199,72 +197,6 @@ async def test_composio_broker_refuses_an_account_on_another_toolkit(
     monkeypatch.setattr(composio, "composio_client", lambda: _client(owner, {"data": []}))
     with pytest.raises(composio.ComposioError, match="not 'github'"):
         await ComposioBroker().credential(workspace_id, "github", ACCOUNT)
-
-
-QUICKBOOKS_ACCOUNT = "ca_quickbooks_1"
-REALM = "9130347596"
-
-
-def _quickbooks_client(owner: str, state: dict[str, object]) -> composio.ComposioClient:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and "/connected_accounts/" in request.url.path:
-            return httpx.Response(
-                200,
-                json={
-                    "id": QUICKBOOKS_ACCOUNT,
-                    "user_id": owner,
-                    "status": "ACTIVE",
-                    "toolkit": {"slug": "quickbooks"},
-                    "state": state,
-                },
-            )
-        return httpx.Response(404, json={})
-
-    return composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
-
-
-async def test_composio_broker_reads_the_company_the_connection_carries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """QuickBooks addresses one company per request, and the id rides the connection Composio stored
-    at consent — nested under its auth state, beside credentials this read never returns."""
-    workspace_id = uuid4()
-    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
-    state = {"authScheme": "OAUTH2", "val": {"status": "ACTIVE", "realmId": REALM}}
-    monkeypatch.setattr(composio, "composio_client", lambda: _quickbooks_client(owner, state))
-
-    resolved = await ComposioBroker().account_parameter(
-        workspace_id, "quickbooks", QUICKBOOKS_ACCOUNT, "realmId"
-    )
-    assert resolved == REALM
-
-
-async def test_composio_broker_answers_no_company_when_the_connection_carries_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workspace_id = uuid4()
-    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
-    state = {"authScheme": "OAUTH2", "val": {"status": "ACTIVE"}}
-    monkeypatch.setattr(composio, "composio_client", lambda: _quickbooks_client(owner, state))
-
-    resolved = await ComposioBroker().account_parameter(
-        workspace_id, "quickbooks", QUICKBOOKS_ACCOUNT, "realmId"
-    )
-    assert resolved is None
-
-
-async def test_composio_broker_refuses_reading_a_foreign_accounts_company(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The confused-deputy guard covers the identifier read too: an account owned by another
-    workspace's broker user tells this workspace nothing about itself."""
-    foreign = f"{composio.EXTERNAL_USER_PREFIX}{uuid4()}"
-    state = {"authScheme": "OAUTH2", "val": {"status": "ACTIVE", "realmId": REALM}}
-    monkeypatch.setattr(composio, "composio_client", lambda: _quickbooks_client(foreign, state))
-    with pytest.raises(composio.ComposioError, match="owned by"):
-        await ComposioBroker().account_parameter(
-            uuid4(), "quickbooks", QUICKBOOKS_ACCOUNT, "realmId"
-        )
 
 
 async def test_composio_broker_says_reconnect_for_an_account_it_does_not_hold(

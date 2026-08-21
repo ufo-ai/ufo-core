@@ -1971,13 +1971,15 @@ def test_tenant_urls_reject_cross_provider_and_unsafe_origins(provider: str, bas
         _validated_base_url(provider, base_url)
 
 
-def test_a_provider_whose_host_names_the_connected_account_may_leave_base_url_unset() -> None:
-    """QuickBooks' host stops at `/v3/company`, so a binding either pins the company or leaves the
-    field empty for each run to resolve from the connection. A provider whose host is complete still
-    refuses any override, and a per-tenant provider still requires one."""
-    assert CONNECTORS["quickbooks"].account_url_key == "realmId"
-    assert _validated_base_url("quickbooks", None) is None
-    assert _validated_base_url("quickbooks", "") is None
+def test_quickbooks_requires_the_company_its_address_names() -> None:
+    """QBO addresses one company file per request and no broker holds that company id, so a binding
+    without the whole address could never run — it is refused at registration, where the agent can
+    ask the member for it, rather than failing every sync afterwards. A provider whose host is
+    complete still refuses any override."""
+    with pytest.raises(ValueError, match="requires base_url"):
+        _validated_base_url("quickbooks", None)
+    with pytest.raises(ValueError, match="requires base_url"):
+        _validated_base_url("quickbooks", "")
     with pytest.raises(ValueError, match="fixed API host"):
         _validated_base_url("asana", "https://app.asana.com/api/1.0")
     with pytest.raises(ValueError, match="requires base_url"):
