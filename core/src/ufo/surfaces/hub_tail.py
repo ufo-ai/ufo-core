@@ -4,7 +4,11 @@ A subscriber may attach after the publisher started — or after the turn alread
 loop — so two sources race into one queue: the hub subscription and a poll of the durable turn.
 Whichever delivers a stream-ending frame first wins. A frame lost to a full queue costs a redrawn
 token, never correctness — the durable terminal-or-parked state always arrives by the poll. A
-parked turn is non-terminal, so the poll reads the turn's status, not only its terminal frame."""
+parked turn is non-terminal, so the poll reads the turn's status, not only its terminal frame.
+
+The poll is what makes that arrival unconditional, so a read that fails costs one interval and
+nothing else: it is the only source that sees a turn committed on a peer loop, and a poll that
+stopped on a blip would leave the stream open until the caller gave up."""
 
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -74,15 +78,16 @@ async def _pump(
 async def _poll_status(
     turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]], billing_url: str | None
 ) -> None:
-    try:
-        while True:
-            await asyncio.sleep(TERMINAL_POLL_SECONDS)
+    while True:
+        await asyncio.sleep(TERMINAL_POLL_SECONDS)
+        try:
             frame = await turn_status_frame(turn_id, billing_url)
-            if frame is not None:
-                await frames.put(("", frame))
-                return
-    except Exception as error:
-        log("hub_tail.poll_failed", turn=str(turn_id), error=repr(error))
+        except Exception as error:
+            log("hub_tail.poll_failed", turn=str(turn_id), error=repr(error))
+            continue
+        if frame is not None:
+            await frames.put(("", frame))
+            return
 
 
 async def turn_status_frame(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:

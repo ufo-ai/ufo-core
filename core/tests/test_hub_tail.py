@@ -178,8 +178,8 @@ async def test_a_poisoned_subscribe_logs_and_the_poll_still_ends_the_tail(
 async def test_a_failing_poll_logs_and_the_live_leg_still_ends_the_tail(
     db: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The pre-check read returns None once, then every poll read raises — the poll's death must
-    land in the event log while the healthy hub still ends the stream on its Terminal."""
+    """The pre-check read returns None once, then every poll read raises — each failure must land
+    in the event log while the healthy hub still ends the stream on its Terminal."""
     caplog.set_level(logging.INFO, logger="ufo")
     monkeypatch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.01)
     reads = {"count": 0}
@@ -209,6 +209,53 @@ async def test_a_failing_poll_logs_and_the_live_leg_still_ends_the_tail(
         await asyncio.sleep(0.01)
     terminal = TerminalFrame(status="done", text="answered")
     await hub.publish(turn_id, Terminal(frame=terminal))
+    await asyncio.wait_for(task, timeout=5)
+    assert collected == [Terminal(frame=terminal)]
+    keep.cancel()
+
+
+async def test_a_read_that_fails_once_still_ends_the_tail_on_the_durable_state(
+    db: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A turn committed on a peer loop publishes nothing here, so the poll is the only thing that
+    can end this stream. One failed read must therefore cost one interval and nothing more: the
+    next read finds the committed terminal and the tail ends on it."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    monkeypatch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.01)
+    turn_id = await _seed_running_turn()
+    durable = hub_tail.turn_status_frame
+    reads = {"count": 0}
+
+    async def blips_on_the_first_poll(
+        turn: UUID, billing_url: str | None = None
+    ) -> LiveFrame | None:
+        reads["count"] += 1
+        if reads["count"] == 2:
+            raise RuntimeError("wedged query")
+        return await durable(turn, billing_url)
+
+    monkeypatch.setattr(hub_tail, "turn_status_frame", blips_on_the_first_poll)
+    hub = InProcessHub()
+    keep = await _keepalive(hub, turn_id)
+    collected: list[LiveFrame] = []
+
+    async def consume() -> None:
+        async for _cursor, frame in tail_frames(hub, turn_id):
+            collected.append(frame)
+
+    task = asyncio.create_task(consume())
+    deadline = asyncio.get_running_loop().time() + 5
+    while not any(record.message == "hub_tail.poll_failed" for record in caplog.records):
+        assert asyncio.get_running_loop().time() < deadline, "poll failure never logged"
+        await asyncio.sleep(0.01)
+    terminal = TerminalFrame(status="done", text="answered")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(status="done", terminal=terminal.model_dump(mode="json"))
+        )
+
     await asyncio.wait_for(task, timeout=5)
     assert collected == [Terminal(frame=terminal)]
     keep.cancel()
