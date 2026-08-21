@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import openai
 import pytest
 from openai.resources.embeddings import AsyncEmbeddings
 from ufo_ext_embed_openai import (
@@ -58,8 +59,9 @@ def test_build_boots_without_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_embed_without_a_key_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     """Boot is key-free, so the fail-loud moves to use: an embed call with no key raises a clear
     error rather than silently no-opping or falling back to another provider."""
+    monkeypatch.delenv(f"UFO_{API_KEY_ENV}", raising=False)
     monkeypatch.delenv(API_KEY_ENV, raising=False)
-    with pytest.raises(RuntimeError, match=f"{API_KEY_ENV} required to embed"):
+    with pytest.raises(RuntimeError, match=rf"UFO_{API_KEY_ENV} \(or {API_KEY_ENV}\) required"):
         await build(_ctx()).embed(("hello",))
 
 
@@ -88,3 +90,27 @@ async def test_embed_with_a_key_constructs_and_returns_vectors(
     assert seen["model"] == EMBED_MODEL
     assert seen["input"] == ("a", "bb")
     assert vectors == ((0.0, 1.0), (1.0, 2.0))
+
+
+async def test_embed_prefers_the_ufo_prefixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`UFO_OPENAI_API_KEY` scopes a key to ufo alone and wins over the bare upstream name."""
+    monkeypatch.setenv(f"UFO_{API_KEY_ENV}", "sk-ufo-scoped")
+    monkeypatch.setenv(API_KEY_ENV, "sk-ambient")
+
+    seen: dict[str, str] = {}
+    original_init = openai.AsyncOpenAI.__init__
+
+    def capture_init(self: openai.AsyncOpenAI, *, api_key: str, **kwargs: object) -> None:
+        seen["api_key"] = api_key
+        original_init(self, api_key=api_key, **kwargs)
+
+    async def fake_create(_self: object, *, model: str, input: list[str]) -> object:
+        rows = [SimpleNamespace(index=i, embedding=[0.0]) for i in range(len(input))]
+        return SimpleNamespace(data=rows)
+
+    monkeypatch.setattr(openai.AsyncOpenAI, "__init__", capture_init)
+    monkeypatch.setattr(AsyncEmbeddings, "create", fake_create)
+
+    await build(_ctx()).embed(("a",))
+
+    assert seen["api_key"] == "sk-ufo-scoped"

@@ -2,17 +2,18 @@
 
 Every deploy needs an embed client, so this extension is base-pinned and registers
 `EmbedBackendSpec` name `"default"` — the backend core resolves when `memory.embed_backend` is
-unset. Index derivation runs in the jobs/serve role on the deploy key (`OPENAI_API_KEY`), off the
-user write path, never through the sandbox proxy. `plan_embed_batches` bounds the request payload:
-it clips each item and packs batches under the item/char ceilings before the call.
+unset. Index derivation runs in the jobs/serve role on the deploy key (`UFO_OPENAI_API_KEY`, or
+`OPENAI_API_KEY`), off the user write path, never through the sandbox proxy. `plan_embed_batches`
+bounds the request payload: it clips each item and packs batches under the item/char ceilings
+before the call.
 """
 
-import os
 from dataclasses import dataclass
 
 import openai
 
 from ufo.sdk.context import ExtensionContext
+from ufo.sdk.credentials import deploy_env
 from ufo.sdk.index import EmbedClient
 from ufo.sdk.manifest import EmbedBackendSpec, Manifest
 
@@ -50,18 +51,19 @@ def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
 
 @dataclass(frozen=True)
 class OpenAIEmbedClient:
-    """text-embedding-3-large over the async OpenAI SDK. The deploy `OPENAI_API_KEY` is read from
-    the environment on each embed call, not at boot: a zero-config dev serve with no key boots, and
-    an embed call without one fails loud — the OpenAI SDK raises on an empty key at construction, so
-    the client is built here on use. The SDK retries transient transport and provider failures
-    with bounded backoff; embedding runs off the write path."""
+    """text-embedding-3-large over the async OpenAI SDK. The deploy key (`UFO_OPENAI_API_KEY`,
+    falling back to `OPENAI_API_KEY`) is read from the environment on each embed call, not at
+    boot: a zero-config dev serve with no key boots, and an embed call without one fails loud —
+    the OpenAI SDK raises on an empty key at construction, so the client is built here on use.
+    The SDK retries transient transport and provider failures with bounded backoff; embedding
+    runs off the write path."""
 
     model: str = EMBED_MODEL
 
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
-        key = os.environ.get(API_KEY_ENV, "")
+        key = deploy_env(API_KEY_ENV)
         if not key:
-            raise RuntimeError(f"{API_KEY_ENV} required to embed")
+            raise RuntimeError(f"UFO_{API_KEY_ENV} (or {API_KEY_ENV}) required to embed")
         client = openai.AsyncOpenAI(
             api_key=key, max_retries=PROVIDER_MAX_RETRIES, timeout=PROVIDER_TIMEOUT_SECONDS
         )
@@ -75,9 +77,9 @@ class OpenAIEmbedClient:
 
 def build(ctx: ExtensionContext) -> EmbedClient:
     """The deploy embed client core builds at boot. Construction is key-free — the OpenAI SDK client
-    is built on each embed call, keyed by the deploy `OPENAI_API_KEY` — so a zero-config dev serve
-    boots without one and embedding without a key fails loud on use. `ctx` is the workspace scope
-    the seam threads; this deploy-key backend reads no slot."""
+    is built on each embed call, keyed by the deploy `UFO_OPENAI_API_KEY`/`OPENAI_API_KEY` — so a
+    zero-config dev serve boots without one and embedding without a key fails loud on use. `ctx`
+    is the workspace scope the seam threads; this deploy-key backend reads no slot."""
     return OpenAIEmbedClient()
 
 

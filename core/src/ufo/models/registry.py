@@ -55,16 +55,16 @@ class ModelRegistry:
             key = await ws_current().credential(spec.key_slot, spec.key_env or None)
         except CredentialSlotUnset as unset:
             raise RuntimeError(
-                f"model {model!r} needs a key: set env {needed} or the workspace's "
-                f"{spec.key_slot!r} BYOK slot"
+                f"model {model!r} needs a key: set env UFO_{needed} (or {needed}) or the "
+                f"workspace's {spec.key_slot!r} BYOK slot"
             ) from unset
         try:
             key.encode("ascii")
         except UnicodeEncodeError as error:
             raise CredentialValueInvalid(
-                f"model {model!r} key contains non-ASCII characters: env {needed} or the "
-                f"workspace's {spec.key_slot!r} BYOK slot holds a value the provider wire "
-                "cannot carry."
+                f"model {model!r} key contains non-ASCII characters: env UFO_{needed} (or "
+                f"{needed}) or the workspace's {spec.key_slot!r} BYOK slot holds a value the "
+                "provider wire cannot carry."
             ) from error
         return spec.client(spec, key)
 

@@ -22,9 +22,9 @@ npm --prefix "$FRONTEND" ci
 npm --prefix "$FRONTEND" run build
 
 mkdir -p "$UFO_DEV_DIR" && cd "$UFO_DEV_DIR"
-export ANTHROPIC_API_KEY=...
+export UFO_ANTHROPIC_API_KEY=...
 uv run --project "$UFO_REPO" ufoctl init --email developer@local.test
-printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" >> "$UFO_DEV_DIR/.env"
+printf 'UFO_ANTHROPIC_API_KEY=%s\n' "$UFO_ANTHROPIC_API_KEY" >> "$UFO_DEV_DIR/.env"
 chmod 600 "$UFO_DEV_DIR/.env"
 ```
 

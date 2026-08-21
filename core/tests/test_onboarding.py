@@ -98,11 +98,21 @@ async def test_re_running_against_an_initialized_workspace_fails_loud(
     assert members == 1
 
 
-async def test_onboarding_requires_the_chosen_models_key_before_touching_the_db(
+async def test_onboarding_accepts_the_ufo_prefixed_model_key(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-test-onboard")
+    onboarded = await _onboarding(database_url, tmp_path).run()
+    assert onboarded.member_id is not None
+
+
+async def test_onboarding_requires_the_chosen_models_key_before_touching_the_db(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="UFO_ANTHROPIC_API_KEY"):
         await _onboarding(database_url, tmp_path).run()
     async with workspace_tx() as connection:
         workspaces = (

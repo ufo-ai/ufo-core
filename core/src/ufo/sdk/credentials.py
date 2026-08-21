@@ -19,5 +19,8 @@ from ufo.credentials import (
     credential_object_name as credential_object_name,
 )
 from ufo.credentials import (
+    deploy_env as deploy_env,
+)
+from ufo.credentials import (
     open_installation as open_installation,
 )

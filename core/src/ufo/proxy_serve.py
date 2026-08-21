@@ -7,6 +7,7 @@ the same resolution; the egress wire itself is the standalone Rust `ufo-egress` 
 import os
 
 from ufo.config import Config
+from ufo.credentials import deploy_env
 from ufo.egress_rules import Rule, ScopeRule, derive_model_rules
 
 MODEL_PROBES = ("claude-opus-4-8", "gpt-5")
@@ -23,7 +24,7 @@ def model_rule_base(config: Config) -> tuple[Rule, ...]:
     hosts: set[str] = set()
     rules: list[Rule] = []
     for env_name, probe in zip(key_envs, MODEL_PROBES, strict=True):
-        key = os.environ.get(env_name)
+        key = deploy_env(env_name)
         if not key:
             continue
         for rule in derive_model_rules(probe, key):

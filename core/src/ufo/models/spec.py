@@ -81,8 +81,9 @@ class ModelSpec:
         tell which of the two sources the registry read, so the message names both."""
         needed = self.key_env or self.key_slot.upper()
         return CredentialValueInvalid(
-            f"model {self.id!r} key was rejected by the provider: env {needed} or the workspace's "
-            f"{self.key_slot!r} BYOK slot holds a key {self.provider} does not accept. Replace it."
+            f"model {self.id!r} key was rejected by the provider: env UFO_{needed} (or {needed}) "
+            f"or the workspace's {self.key_slot!r} BYOK slot holds a key {self.provider} does not "
+            "accept. Replace it."
         )
 
     def wire_reasoning(

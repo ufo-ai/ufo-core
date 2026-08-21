@@ -8,14 +8,13 @@ installed extension's onboarding steps then fire with that extension's scoped `E
 — the same handle its jobs receive. Onboarding runs within an already-open db boundary; the CLI
 owns migrations because Alembic drives its own event loop."""
 
-import os
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
 from ufo.config import Config
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialStore, deploy_env
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.manifest import Manifest
@@ -121,9 +120,10 @@ class Onboarding:
         env_name = self._model_key_env()
         if env_name is None:
             return
-        if not os.environ.get(env_name):
+        if not deploy_env(env_name):
             raise RuntimeError(
-                f"model {self.model!r} needs {env_name} set before the first turn can run"
+                f"model {self.model!r} needs UFO_{env_name} (or {env_name}) set before the "
+                "first turn can run"
             )
 
     def _model_key_env(self) -> str | None:

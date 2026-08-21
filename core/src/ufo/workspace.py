@@ -10,14 +10,13 @@ the block exits. The workspace is never an argument: binding it once at
 the turn or job boundary scopes credentials, billing, and RLS within — so a job bills the same
 workspace the same way a turn does, by construction."""
 
-import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from uuid import UUID
 
 from ufo.accounting import record_workspace_usage
-from ufo.credentials import CredentialSlotUnset, CredentialStore
+from ufo.credentials import CredentialSlotUnset, CredentialStore, deploy_env
 from ufo.db import current_workspace, workspace_tx
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
@@ -67,8 +66,9 @@ class WorkspaceScope:
 
     async def credential(self, slot: str, env: str | None = None) -> str:
         """This workspace's secret for `slot`: its stored BYOK value if set, else the platform
-        default read live from env (`env` name, or `SLOT` upper-cased). The single path to any
-        secret — fetching one asserts a bound workspace, so a key is always the right workspace's.
+        default read live from env through `deploy_env` (`UFO_`-prefixed name first, then the
+        `env` name or `SLOT` upper-cased). The single path to any secret — fetching one asserts a
+        bound workspace, so a key is always the right workspace's.
         Missing or empty raises `CredentialSlotUnset`, so an unconfigured key fails the call
         needing it, never silently."""
         if _store is not None:
@@ -76,7 +76,7 @@ class WorkspaceScope:
                 return await _store.get(self.workspace_id, slot)
             except CredentialSlotUnset:
                 pass
-        value = os.environ.get(env or slot.upper())
+        value = deploy_env(env or slot.upper())
         if not value:
             raise CredentialSlotUnset(slot)
         return value

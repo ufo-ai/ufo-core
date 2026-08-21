@@ -60,6 +60,7 @@ from ufo.serve import run as serve_run
 from ufo.workspace import ws
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
+RESERVED_DOTENV_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 PORTAL_REACH_TIMEOUT_SECONDS = 5.0
 HANDOFF_PATH_BYTES = 24
 LOOPBACK = "127.0.0.1"
@@ -151,10 +152,21 @@ def _dotenv_pairs(text: str) -> list[tuple[str, str]]:
 
 
 def _load_dotenv() -> None:
+    """Load `.env` into the process, refusing the bare provider-key names first: every tool
+    reading `.env` picks those up, so a key meant for ufo lives under its `UFO_`-prefixed name and
+    a bare name in ufo's own config surface is always a mistake — refused before any of it enters
+    the environment."""
     dotenv = _dotenv_path()
     if not dotenv.exists():
         return
-    for name, value in _dotenv_pairs(dotenv.read_text()):
+    pairs = _dotenv_pairs(dotenv.read_text())
+    for name, _ in pairs:
+        if name in RESERVED_DOTENV_NAMES:
+            raise click.ClickException(
+                f"{dotenv} sets {name}, which every tool reading .env picks up — rename it to "
+                f"UFO_{name} to scope it to ufo"
+            )
+    for name, value in pairs:
         os.environ[name] = value
 
 
@@ -211,11 +223,12 @@ def init(email: str, model: str) -> None:
 
 
 def _missing_deploy_keys(config: Config) -> tuple[str, ...]:
-    """The provider keys this pack's extensions declared and the environment does not carry. Nobody
-    can mint one, so `init` names them where the developer is already configuring rather than
-    leaving the first job that needs one to raise into a log hours later. It reports rather than
-    refuses: a serve with no key still boots, which is what makes a zero-config checkout worth
-    having."""
+    """The provider keys this pack's extensions declared and the environment does not carry —
+    reported by their `UFO_`-prefixed names, the form `.env.template` scaffolds and `deploy_env`
+    resolves first (the bare upstream name also satisfies a declaration). Nobody can mint one, so
+    `init` names them where the developer is already configuring rather than leaving the first job
+    that needs one to raise into a log hours later. It reports rather than refuses: a serve with
+    no key still boots, which is what makes a zero-config checkout worth having."""
     declared = {
         key for manifest in load_manifests(config.pack.name) for key in manifest.deploy_keys
     }
@@ -225,7 +238,7 @@ def _missing_deploy_keys(config: Config) -> tuple[str, ...]:
         else set()
     )
     present |= {name for name in os.environ if os.environ[name]}
-    return tuple(sorted(declared - present))
+    return tuple(sorted(f"UFO_{name}" for name in declared if not present & {f"UFO_{name}", name}))
 
 
 def _write_dev_secrets(config: Config) -> tuple[str, ...]:

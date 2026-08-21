@@ -19,8 +19,8 @@ search_provider = "perplexity"
 Set the model keys before `serve` starts:
 
 ```bash
-export ANTHROPIC_API_KEY=...
-export OPENAI_API_KEY=...
+export UFO_ANTHROPIC_API_KEY=...
+export UFO_OPENAI_API_KEY=...
 ```
 
 Set the search-provider credential through its hidden credential prompt:
@@ -77,7 +77,7 @@ If a run fails, check these conditions:
 1. The member who created the task has a seat.
 2. The application has one active scheduled task.
 3. The task reports to the registered conversation that owns the bound site.
-4. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and the search-provider credential are valid.
+4. `UFO_ANTHROPIC_API_KEY`, `UFO_OPENAI_API_KEY`, and the search-provider credential are valid.
 5. `sweep`, `memory`, `objectives`, `todos`, `scheduled_tasks`, `sites`, and the search provider are
    active.
 

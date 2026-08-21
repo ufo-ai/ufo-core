@@ -56,7 +56,7 @@ init: ## Write ufo.toml, apply the schema, onboard the workspace (EMAIL=you@exam
 	@test -n "$(EMAIL)" || { echo "EMAIL is required: make init EMAIL=you@example.com"; exit 1; }
 	uv run ufoctl init --email $(EMAIL)
 
-serve: ## Run surfaces + workers, no sandbox egress (needs ANTHROPIC_API_KEY; `make stack` adds the ufo-egress rig)
+serve: ## Run surfaces + workers, no sandbox egress (needs UFO_ANTHROPIC_API_KEY; `make stack` adds the ufo-egress rig)
 	uv run ufoctl serve
 
 portal: ## Open the portal in a browser, signed in with this machine's CLI token
@@ -82,6 +82,11 @@ ifneq ($(WT),)
 		exec $(MAKE) -C "$$wt_path" stack STACK=$(STACK) WT=
 else
 	@set -e; \
+		for name in ANTHROPIC_API_KEY OPENAI_API_KEY; do \
+			if grep -Eq "^(export )?$$name=" .env; then \
+				echo ".env sets $$name, which every tool reading .env picks up — rename it to UFO_$$name." >&2; exit 1; \
+			fi; \
+		done; \
 		names="$$(cut -d= -f1 .env.template)"; \
 		for name in $$names; do unset "$$name"; done; \
 		set -a; . ./.env; set +a; \

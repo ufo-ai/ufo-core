@@ -221,6 +221,22 @@ async def test_a_stored_slot_is_told_apart_from_the_platform_default(
         assert await ws_current().credential_is_stored("sample_api")
 
 
+async def test_platform_default_prefers_the_ufo_prefixed_env(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every slot's platform default resolves `UFO_<NAME>` before `<NAME>`, so a repo `.env` can
+    hold a key scoped to ufo alone without handing it to every other tool reading the bare name;
+    an environment exporting only the bare name still serves."""
+    workspace_id = await _workspace()
+    init_workspace_credentials(_store())
+    monkeypatch.setenv("UFO_SAMPLE_API", "ufo-scoped")
+    monkeypatch.setenv("SAMPLE_API", "ambient")
+    with ws(workspace_id):
+        assert await ws_current().credential("sample_api") == "ufo-scoped"
+        monkeypatch.setenv("UFO_SAMPLE_API", "")
+        assert await ws_current().credential("sample_api") == "ambient"
+
+
 def test_credential_request_seal_round_trips_and_expires() -> None:
     """The sealed grant a `request_credentials` call hands a surface: opens to exactly what was
     sealed, and refuses garbage, a foreign key, or a seal older than the TTL."""

@@ -9,6 +9,7 @@ and fulfillment verifies the seal before writing — the plaintext travels membe
 never through the transcript or the sandbox."""
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from typing import Protocol
@@ -23,6 +24,15 @@ from ufo.schema import tables
 
 CREDENTIAL_REQUEST_TTL_SECONDS = 900
 NAME_DIGEST_LENGTH = 8
+
+
+def deploy_env(name: str) -> str | None:
+    """The deploy-level platform secret named `name`: `UFO_<name>` first, then `name`, empty
+    counting as unset. The prefixed form scopes a key to ufo alone, so a repo `.env` can hold
+    `UFO_ANTHROPIC_API_KEY` for the stack without handing that key to every other tool reading
+    `ANTHROPIC_API_KEY`; the bare form keeps an environment that already exports the upstream
+    name working."""
+    return os.environ.get(f"UFO_{name}") or os.environ.get(name) or None
 
 
 def credential_object_name(slot: str) -> str:

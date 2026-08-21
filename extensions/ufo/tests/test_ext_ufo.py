@@ -181,15 +181,17 @@ def test_terminal_frame_maps_by_status_and_streamed() -> None:
             error_class="CredentialValueInvalid",
             error_message=(
                 "model 'anthropic.claude-opus-5' key contains non-ASCII characters: "
-                "env AWS_BEARER_TOKEN_BEDROCK or the workspace's 'bedrock_api_key' BYOK slot "
-                "holds a value the provider wire cannot carry."
+                "env UFO_AWS_BEARER_TOKEN_BEDROCK (or AWS_BEARER_TOKEN_BEDROCK) or the "
+                "workspace's 'bedrock_api_key' BYOK slot holds a value the provider wire "
+                "cannot carry."
             ),
         )
     )
     assert directives_for(invalid_credential, streamed=True) == (
         b"say\tmodel 'anthropic.claude-opus-5' key contains non-ASCII characters: "
-        b"env AWS_BEARER_TOKEN_BEDROCK or the workspace's 'bedrock_api_key' BYOK slot "
-        b"holds a value the provider wire cannot carry.\n",
+        b"env UFO_AWS_BEARER_TOKEN_BEDROCK (or AWS_BEARER_TOKEN_BEDROCK) or the "
+        b"workspace's 'bedrock_api_key' BYOK slot holds a value the provider wire "
+        b"cannot carry.\n",
         b"ask\t>\n",
     )
     assert directives_for(Parked(message="over cap"), False) == (b"say\tover cap\n", b"ask\t>\n")

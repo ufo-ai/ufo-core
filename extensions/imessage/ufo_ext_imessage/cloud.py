@@ -1,5 +1,4 @@
 import asyncio
-import os
 import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -11,6 +10,7 @@ import grpc
 import httpx
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
+from ufo.sdk.credentials import deploy_env
 from ufo_ext_imessage.proto.photon.imessage.v1 import (
     attachment_service_pb2,
     attachment_service_pb2_grpc,
@@ -311,11 +311,12 @@ class SpectrumProject:
 
 @cache
 def spectrum_project() -> SpectrumProject:
-    project_id = os.environ.get(SPECTRUM_PROJECT_ID_ENV)
-    project_secret = os.environ.get(SPECTRUM_PROJECT_SECRET_ENV)
+    project_id = deploy_env(SPECTRUM_PROJECT_ID_ENV)
+    project_secret = deploy_env(SPECTRUM_PROJECT_SECRET_ENV)
     if not project_id or not project_secret:
         raise ProviderNotConfigured(
-            f"Set {SPECTRUM_PROJECT_ID_ENV} and {SPECTRUM_PROJECT_SECRET_ENV}"
+            f"Set UFO_{SPECTRUM_PROJECT_ID_ENV} and UFO_{SPECTRUM_PROJECT_SECRET_ENV} "
+            f"(or {SPECTRUM_PROJECT_ID_ENV} and {SPECTRUM_PROJECT_SECRET_ENV})"
         )
     return SpectrumProject(
         project_id=project_id,

@@ -104,6 +104,8 @@ def cli_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[CliRun
     and session files never touch the developer's home. The artifact-token secret starts unset —
     `init` exports what it mints into this process, so a prior test's mint would otherwise
     suppress minting here."""
+    monkeypatch.delenv("UFO_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("UFO_OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-cli")
     monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
     monkeypatch.delenv("UFO_ARTIFACT_TOKEN_SECRET", raising=False)
@@ -163,25 +165,66 @@ def test_init_names_a_declared_deploy_key_the_environment_lacks(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
     assert result.exit_code == 0, result.output
-    assert "OPENAI_API_KEY is unset" in result.output
+    assert "UFO_OPENAI_API_KEY is unset" in result.output
 
 
 def test_init_names_an_empty_deploy_key_in_dotenv(
     cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    Path(".env").write_text("OPENAI_API_KEY=\n")
-    monkeypatch.setenv("OPENAI_API_KEY", "outer-openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    Path(".env").write_text("UFO_OPENAI_API_KEY=\n")
+    monkeypatch.setenv("UFO_OPENAI_API_KEY", "outer-openai")
 
     result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
 
     assert result.exit_code == 0, result.output
-    assert "OPENAI_API_KEY is unset" in result.output
+    assert "UFO_OPENAI_API_KEY is unset" in result.output
+
+
+@pytest.mark.parametrize("name", ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"))
+def test_a_bare_provider_key_in_dotenv_is_refused(name: str, cli_home: CliRunner) -> None:
+    """Every tool reading `.env` picks up the bare provider names, so ufo's own config surface
+    refuses them before any verb runs — the key it should hold is the `UFO_`-prefixed one."""
+    Path(".env").write_text(f"{name}=sk-bare\n")
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code != 0
+    assert f"rename it to UFO_{name}" in result.output
+
+
+def test_init_runs_on_the_ufo_prefixed_model_key_alone(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ufo-scoped")
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+
+
+def test_init_reads_the_ufo_prefixed_model_key_from_dotenv(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole client chain: `.env` autoloads on every verb, and the model-key check resolves
+    the `UFO_`-prefixed name it finds there."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    Path(".env").write_text("UFO_ANTHROPIC_API_KEY=sk-ufo-file\n")
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
 
 
 def test_init_stays_quiet_about_a_deploy_key_already_set(
     cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-present")
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+    assert "OPENAI_API_KEY is unset" not in result.output
+
+
+def test_init_counts_the_ufo_prefixed_form_as_the_deploy_key(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("UFO_OPENAI_API_KEY", "sk-ufo-scoped")
     result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
     assert result.exit_code == 0, result.output
     assert "OPENAI_API_KEY is unset" not in result.output

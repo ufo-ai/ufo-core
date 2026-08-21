@@ -17,7 +17,9 @@ system for everything else (connectors, data sources, tools, subagents, onboardi
 `reinstall`).
 
 `make setup` creates `.env` once and leaves an existing file unchanged. Set
-`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` there before starting either topology.
+`UFO_ANTHROPIC_API_KEY` and `UFO_OPENAI_API_KEY` there before starting either topology. `.env`
+refuses the bare names — every tool reading the file picks those up; a bare `ANTHROPIC_API_KEY`
+or `OPENAI_API_KEY` exported in the environment still serves as a fallback.
 
 **Zero services** — SQLite, filesystem blobs, in-process hub; one process, no Docker:
 

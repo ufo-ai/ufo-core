@@ -798,16 +798,17 @@ REJECTED_KEY_CLIENTS = [
     pytest.param(
         lambda create: AnthropicClient(client=anthropic_sdk(create), spec=KEYED_ANTHROPIC_SPEC),
         anthropic.APIStatusError,
-        r"model 'claude-opus-4-8' key was rejected by the provider: env ANTHROPIC_API_KEY or the "
-        r"workspace's 'anthropic_api_key' BYOK slot holds a key anthropic does not accept\. "
-        r"Replace it\.",
+        r"model 'claude-opus-4-8' key was rejected by the provider: env UFO_ANTHROPIC_API_KEY "
+        r"\(or ANTHROPIC_API_KEY\) or the workspace's 'anthropic_api_key' BYOK slot holds a key "
+        r"anthropic does not accept\. Replace it\.",
         id="anthropic",
     ),
     pytest.param(
         lambda create: OpenAIClient(client=openai_sdk(create), spec=KEYED_OPENAI_SPEC),
         openai.APIStatusError,
-        r"model 'gpt-5\.5' key was rejected by the provider: env OPENAI_API_KEY or the workspace's "
-        r"'openai_api_key' BYOK slot holds a key openai does not accept\. Replace it\.",
+        r"model 'gpt-5\.5' key was rejected by the provider: env UFO_OPENAI_API_KEY "
+        r"\(or OPENAI_API_KEY\) or the workspace's 'openai_api_key' BYOK slot holds a key openai "
+        r"does not accept\. Replace it\.",
         id="openai-chat",
     ),
     pytest.param(
@@ -816,8 +817,9 @@ REJECTED_KEY_CLIENTS = [
             spec=replace(KEYED_OPENAI_SPEC, api_surface="responses"),
         ),
         openai.APIStatusError,
-        r"model 'gpt-5\.5' key was rejected by the provider: env OPENAI_API_KEY or the workspace's "
-        r"'openai_api_key' BYOK slot holds a key openai does not accept\. Replace it\.",
+        r"model 'gpt-5\.5' key was rejected by the provider: env UFO_OPENAI_API_KEY "
+        r"\(or OPENAI_API_KEY\) or the workspace's 'openai_api_key' BYOK slot holds a key openai "
+        r"does not accept\. Replace it\.",
         id="openai-responses",
     ),
 ]
@@ -1589,6 +1591,24 @@ async def test_registry_builds_core_clients_from_their_specs(
     assert openai_client.spec is registry.spec("gpt-5.4")
 
 
+async def test_registry_resolves_the_ufo_prefixed_key_over_the_bare_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`UFO_ANTHROPIC_API_KEY` scopes a key to ufo alone and wins over the bare upstream name; with
+    only the bare name set, it still serves."""
+    seen: list[str] = []
+    monkeypatch.setattr("ufo.models.catalog.anthropic_sdk_client", lambda key: seen.append(key))
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ufo-scoped")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ambient")
+    registry = model_registry(_config(tmp_path), ())
+    with ws(uuid4()):
+        await registry.client_for("claude-opus-4-8")
+    monkeypatch.delenv("UFO_ANTHROPIC_API_KEY")
+    with ws(uuid4()):
+        await registry.client_for("claude-opus-4-8")
+    assert seen == ["sk-ufo-scoped", "sk-ambient"]
+
+
 @pytest.mark.parametrize(
     ("model_id", "key_env", "key_slot"),
     (
@@ -1603,14 +1623,15 @@ async def test_registry_rejects_non_ascii_core_provider_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv(f"UFO_{key_env}", raising=False)
     monkeypatch.setenv(key_env, "—")
     registry = model_registry(_config(tmp_path), ())
     with ws(uuid4()):
         with pytest.raises(
             CredentialValueInvalid,
             match=(
-                rf"model {model_id!r} key contains non-ASCII characters: env {key_env} "
-                rf"or the workspace's {key_slot!r} BYOK slot holds a value "
+                rf"model {model_id!r} key contains non-ASCII characters: env UFO_{key_env} \(or "
+                rf"{key_env}\) or the workspace's {key_slot!r} BYOK slot holds a value "
                 r"the provider wire cannot carry\."
             ),
         ):

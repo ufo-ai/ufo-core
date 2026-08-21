@@ -26,7 +26,7 @@ from ufo.config import (
 )
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.egress_rules import ScopeRule
+from ufo.egress_rules import InjectionRule, ScopeRule
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.ext.surface import SurfaceSpec
 from ufo.models.catalog import CORE_PRICING
@@ -43,6 +43,8 @@ RUN_TOKENS = RunTokenCodec(b"serve-test-run-token-secret")
 @pytest.fixture(autouse=True)
 def _run_token_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "serve-test-run-token-secret")
+    monkeypatch.delenv("UFO_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("UFO_OPENAI_API_KEY", raising=False)
 
 
 class ShutdownProbe:
@@ -399,6 +401,31 @@ def test_dbos_destroy_contract_for_the_executor_drain(tmp_path: Path) -> None:
     assert evidence["active_after_main_loop_teardown"] == 2
     assert evidence["retained_is_stubborn"] is True
     assert evidence["destroy_seconds"] < 30
+
+
+def test_model_rule_base_prefers_the_ufo_prefixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`UFO_ANTHROPIC_API_KEY` scopes a key to ufo alone, winning over the bare upstream name; an
+    empty prefixed value (compose interpolates `${UFO_ANTHROPIC_API_KEY:-}`) counts as unset and
+    falls back to the bare name."""
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ant-ufo-scoped")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
+    assert [rule.real for rule in injected] == ["sk-ant-ufo-scoped"]
+
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "")
+    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
+    assert [rule.real for rule in injected] == [ANTHROPIC_KEY]
+
+
+def test_model_rule_base_boots_on_the_ufo_prefixed_key_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ant-ufo-scoped")
+    injected = [r for r in model_rule_base(_hosted_config()) if isinstance(r, InjectionRule)]
+    assert [rule.real for rule in injected] == ["sk-ant-ufo-scoped"]
 
 
 def test_proxy_endpoint_is_built_from_config_and_the_shared_ca(

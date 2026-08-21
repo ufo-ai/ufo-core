@@ -330,7 +330,8 @@ async def test_registry_rejects_a_non_ascii_openrouter_key(
             CredentialValueInvalid,
             match=(
                 r"model 'google/gemini-2\.5-pro' key contains non-ASCII characters: "
-                rf"env {openrouter.OPENROUTER_API_KEY_ENV} or the workspace's "
+                rf"env UFO_{openrouter.OPENROUTER_API_KEY_ENV} "
+                rf"\(or {openrouter.OPENROUTER_API_KEY_ENV}\) or the workspace's "
                 rf"{openrouter.OPENROUTER_KEY_SLOT!r} BYOK slot holds a value "
                 r"the provider wire cannot carry\."
             ),

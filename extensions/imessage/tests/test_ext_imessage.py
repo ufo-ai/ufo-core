@@ -667,6 +667,29 @@ async def test_spectrum_project_uses_one_client_per_event_loop() -> None:
     await main_state.client.aclose()
 
 
+async def test_spectrum_project_resolves_the_ufo_prefixed_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `deploy_keys` seam's contract: `ufoctl init` reports a missing key by its `UFO_`-prefixed
+    name and counts that form as present, so the reader must resolve it — an operator who follows
+    the init notice gets a working provider, not a `ProviderNotConfigured` at first use."""
+    for name in ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"UFO_{name}", raising=False)
+    cloud.spectrum_project.cache_clear()
+    with pytest.raises(ProviderNotConfigured, match="UFO_SPECTRUM_PROJECT_ID"):
+        cloud.spectrum_project()
+    monkeypatch.setenv("UFO_SPECTRUM_PROJECT_ID", "project")
+    monkeypatch.setenv("UFO_SPECTRUM_PROJECT_SECRET", "secret")
+    cloud.spectrum_project.cache_clear()
+    project = cloud.spectrum_project()
+    try:
+        assert (project.project_id, project.project_secret) == ("project", "secret")
+    finally:
+        await project.client.aclose()
+        cloud.spectrum_project.cache_clear()
+
+
 async def test_spectrum_invalid_payload_is_an_external_provider_error() -> None:
     project = SpectrumProject(
         project_id="project",

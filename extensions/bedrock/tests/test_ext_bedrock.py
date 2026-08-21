@@ -79,7 +79,8 @@ async def test_registry_rejects_a_non_ascii_bedrock_key(
             CredentialValueInvalid,
             match=(
                 rf"model {model_id!r} key contains non-ASCII characters: "
-                rf"env {bedrock.BEDROCK_API_KEY_ENV} or the workspace's "
+                rf"env UFO_{bedrock.BEDROCK_API_KEY_ENV} \(or {bedrock.BEDROCK_API_KEY_ENV}\) "
+                rf"or the workspace's "
                 rf"{bedrock.BEDROCK_KEY_SLOT!r} BYOK slot holds a value "
                 r"the provider wire cannot carry\."
             ),
