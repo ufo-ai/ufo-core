@@ -7,6 +7,7 @@ stored ranking never states a claim about access that a connect made stale.
 """
 
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -17,7 +18,10 @@ import sqlalchemy as sa
 from pydantic import ValidationError
 from ufo_ext_web.panels import FIRST_RUN_PROVIDER_NAMES, UNLOCKS, UNLOCKS_BY_NAME, Unlock
 from ufo_ext_web.starters import (
+    BODY_CHARS,
+    SLATE_SYSTEM,
     SLATE_TOOL,
+    TITLE_CHARS,
     CheckIn,
     RankedUnlock,
     Slate,
@@ -109,6 +113,11 @@ def test_a_row_needing_nothing_is_ready_in_an_empty_workspace() -> None:
 def test_the_slate_is_stored_under_the_members_own_subject() -> None:
     member_id = uuid4()
     assert starters_key(member_id).endswith(member_subject(member_id))
+
+
+def test_the_prompt_states_the_character_budget_the_schema_enforces() -> None:
+    stated = [int(cap) for cap in re.findall(r"at most (\d+) characters", SLATE_SYSTEM)]
+    assert stated == [TITLE_CHARS, BODY_CHARS]
 
 
 def test_a_reply_recording_no_call_raises_rather_than_settling_an_empty_slate() -> None:
@@ -384,6 +393,32 @@ async def test_a_workspace_that_has_not_moved_costs_no_model_call(db: None) -> N
         assert client.calls == 1
 
         recall.texts = ("We ship a payments product.", "We moved to annual billing.")
+        await rank_starters(ctx)
+        assert client.calls == 2
+
+
+async def test_a_narrowed_character_budget_re_ranks_the_slate_the_read_would_refuse(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, _member_id = await _seed_member()
+    client = _SlateClient(RANKED_ARGUMENTS)
+    recall = _Recall(("We ship a payments product.",))
+    with ws(workspace_id):
+        ctx = context_for(
+            "web",
+            frozenset(),
+            model_resolver=_Resolver(client),
+            model_job="web:starters",
+            member_context_read=True,
+            memory=MemorySearch(provider=recall),
+        )
+        await rank_starters(ctx)
+        assert client.calls == 1
+
+        monkeypatch.setattr(
+            "ufo_ext_web.starters.SLATE_SYSTEM",
+            SLATE_SYSTEM.replace("68 characters", "40 characters"),
+        )
         await rank_starters(ctx)
         assert client.calls == 2
 

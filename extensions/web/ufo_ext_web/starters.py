@@ -29,8 +29,8 @@ STARTERS_KEY_PREFIX = "starters"
 MEMORY_LIMIT = 60
 MEMORY_TEXT_CHARS = 400
 RANKED_MAX = 8
-TITLE_CHARS = 28
-BODY_CHARS = 96
+TITLE_CHARS = 20
+BODY_CHARS = 68
 ASK_CHARS = 320
 SLATE_MAX_TOKENS = 4096
 SLATE_TOOL = "record_slate"
@@ -43,7 +43,7 @@ member = sa.table(
     sa.column("seated_at", sa.DateTime(timezone=True)),
 )
 
-SLATE_SYSTEM = """\
+SLATE_SYSTEM = f"""\
 You rank the start screen of a work assistant for one member. The screen shows three rows they can \
 press, and each row says one sentence on their behalf.
 
@@ -56,9 +56,10 @@ already does. Rank at most eight, best first; rank fewer rather than padding wit
 gives you no reason for.
 
 For each ranked row write:
-- title: the application's name in the member's own words. Sentence case, at most 28 characters.
-- body: what it does for this team, in one sentence of at most 96 characters. State the work, not \
-the accounts it reads.
+- title: the application's name in the member's own words. Sentence case, at most \
+{TITLE_CHARS} characters.
+- body: what it does for this team, in one sentence of at most {BODY_CHARS} characters. State \
+the work, not the accounts it reads.
 - ask: the sentence the member says by pressing the row, first person, asking for the application. \
 Name the work concretely. Do not mention connecting an account: the assistant asks for what it \
 needs once the work is agreed.
@@ -90,8 +91,9 @@ class Slate(BaseModel):
     """What one member's start screen ranks, and the fingerprint of the state it was ranked from.
 
     The fingerprint is the whole regeneration rule: a tick that computes the same one skips the
-    model call. There is no age floor — a workspace whose memory and applications have not moved
-    has nothing new to say."""
+    model call. It covers the ranking instructions as well as the memory and the applications, so
+    a narrowed character budget re-ranks the slates the read would otherwise refuse whole. There
+    is no age floor — a member for whom none of that has moved has nothing new to say."""
 
     fingerprint: str
     ranked: tuple[RankedUnlock, ...] = ()
@@ -147,7 +149,7 @@ class _MemberSlate:
         return tuple(match.text[:MEMORY_TEXT_CHARS] for match in page.rows)
 
     def _fingerprint(self, recalled: tuple[str, ...]) -> str:
-        state = json.dumps([list(recalled), list(self.agents)], separators=(",", ":"))
+        state = json.dumps([list(recalled), list(self.agents), SLATE_SYSTEM], separators=(",", ":"))
         return hashlib.sha256(state.encode()).hexdigest()
 
     async def _rank(self, recalled: tuple[str, ...], fingerprint: str) -> Slate:
