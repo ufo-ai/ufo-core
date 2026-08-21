@@ -272,14 +272,22 @@ body {
 /* --- phone ---------------------------------------------------------------
    A phone sits on both clamp floors above — 40px of headline under 88px of
    padding — which reads small and hangs the line under the bar rather than
-   centring it in the sky. 20.5vw is 80px at 390 and 74px at 360, the widest
-   "Go further." that still holds one line inside the gutters there; 84px caps
-   a 480px phone. The art is square and cover-fit, so the heads land at 0.406
-   of the viewport height, and 88px + 8vh centres the line above them at 360,
-   390 and 430. Stops at 480 so nothing between 481 and 640 moves. */
+   centring it in the sky. 70px is 1.75x that 40px, and 18vw reaches it at 390
+   and holds it to 480; below 390 the line steps down instead of breaking, to
+   65px at 360 and 58px at 320, inside the gutters at each. The art is square
+   and cover-fit, so the heads land at 0.406 of the viewport height, and
+   88px + 8.6vh centres the line above them at 360 and 390. Stops at 480 so
+   nothing between 481 and 640 moves.
+
+   The designer holds two of these as a standing rule: keep this padding-top,
+   and keep the headline on one line, because a second line orphans a word.
+   "Go further." measures 4.21px of width for each 1px of font-size, and the
+   gutters take 32px of the viewport. So any later edit to the headline copy
+   must be re-checked for one-line fit at 320, 360, 390, 430 and 480 against
+   that measure before it lands. */
 @media (max-width: 480px) {
-  .hero { padding-top: calc(88px + 8vh); }
-  .display { font-size: clamp(40px, 20.5vw, 84px); }
+  .hero { padding-top: calc(88px + 8.6vh); }
+  .display { font-size: clamp(40px, 18vw, 70px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
