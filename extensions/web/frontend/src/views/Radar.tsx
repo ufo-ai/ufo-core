@@ -3,7 +3,6 @@ import { useLayoutEffect, useState } from "react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Filter } from "@/components/ui/filter";
-import { Reveal } from "@/components/ui/reveal";
 import { Sheet } from "@/components/ui/sheet";
 import { ARTIFACT_TEXT_BYTES, useTextArtifact } from "@/kernel/artifact";
 import { useBeside } from "@/kernel/beside";
@@ -320,7 +319,7 @@ function Entry({
               loading="lazy"
               alt=""
               src={picture.preview_url ?? ""}
-              className="h-(--size-digest-picture) w-(--container-attachment) shrink-0 rounded-panel border border-edge object-cover"
+              className="h-(--size-digest-picture) w-(--container-attachment) shrink-0 rounded-panel border border-edge object-cover object-top"
             />
           ) : null}
         </a>
@@ -439,12 +438,13 @@ function titled(text: string): { title: string | null; body: string } {
   return { title: opening[1], body: text.slice(opening[0].length) };
 }
 
-/** The report the run published, read as the story's own body: the document flows inline down the
- *  feed and one longer than the fold opens on the member's word, because a box that scrolls inside
- *  a page that scrolls traps the wheel over the very thing the member came to read. The title line
- *  is dropped where the story already stands under it, and a second document — which titles nothing
- *  above it — keeps its own. The story is told the title before the frame is painted, so no reader
- *  ever catches a report saying its own name twice. */
+/** The report the run published, read as the story's own body: a member standing on one report's own
+ *  address came for that report, so the document flows whole down the page with nothing to press —
+ *  neither a fold to open nor a box that scrolls inside a page that scrolls, which would trap the
+ *  wheel over the very thing the member came to read. The title line is dropped where the story
+ *  already stands under it, and a second document — which titles nothing above it — keeps its own.
+ *  The story is told the title before the frame is painted, so no reader ever catches a report
+ *  saying its own name twice. */
 function Report({
   artifact,
   heading,
@@ -465,11 +465,9 @@ function Report({
   if (body === null) return <div>Loading…</div>;
   return (
     <>
-      <Reveal bare>
-        <div className="text-body leading-reading">
-          <Markdown text={read.title === heading ? read.body : body} />
-        </div>
-      </Reveal>
+      <div className="text-body leading-reading">
+        <Markdown text={read.title === heading ? read.body : body} />
+      </div>
       {bounded ? (
         <div className="font-mono text-small text-ink-soft">
           First {formatSize(ARTIFACT_TEXT_BYTES)} shown.
@@ -489,7 +487,7 @@ function Shared({ artifact }: { artifact: RadarArtifact }) {
       loading="lazy"
       alt={artifact.subject || artifact.filename}
       src={artifact.preview_url}
-      className="h-(--size-band) rounded-panel border border-edge object-cover"
+      className="h-(--size-band) rounded-panel border border-edge object-cover object-top"
     />
   ) : (
     <span className="flex items-baseline gap-sm rounded-panel border border-edge px-lg py-sm">

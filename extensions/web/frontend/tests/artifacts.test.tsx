@@ -494,7 +494,7 @@ test("the artifacts listing renders as tiles, each led by its own picture", asyn
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
-test("an image artifact fills its band, and a dead link leaves the placeholder", async () => {
+test("an image artifact fills its band from the top, and a dead link leaves the placeholder", async () => {
   only([artifact({ media_type: "image/png", filename: "shot.png" })]);
   render(
     <MainAgentProvider agents={[AGENT]}>
@@ -509,6 +509,8 @@ test("an image artifact fills its band, and a dead link leaves the placeholder",
   const image = band.querySelector("img") as HTMLImageElement;
   expect(image.getAttribute("src")).toBe(TEXT_URL);
   expect(image.getAttribute("alt")).toBe("");
+  expect(image.className).toContain("object-cover");
+  expect(image.className).toContain("object-top");
 
   image.dispatchEvent(new Event("error"));
   await waitFor(() => expect(band.querySelector("img")).toBeNull());

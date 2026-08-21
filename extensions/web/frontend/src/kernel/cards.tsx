@@ -252,7 +252,7 @@ function Picture({
           alt=""
           src={src}
           onError={() => setFailed(true)}
-          className="size-full object-cover"
+          className="size-full object-cover object-top"
         />
       ) : neared ? (
         (body ?? null)

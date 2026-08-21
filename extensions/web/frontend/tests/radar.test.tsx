@@ -152,12 +152,14 @@ test("the whole entry opens the report it describes", async () => {
   expect(opened.getAttribute("href")).toBe("#/radar?open=run%2F" + RUN.turn_id);
 });
 
-test("a picture the report made is drawn beside the entry", async () => {
+test("a picture the report made is drawn beside the entry, cropped from its top", async () => {
   wire({ "/workspace/radar": () => json({ runs: [RUN], older: null }) });
   mountRadarSection();
 
   const picture = await screen.findByRole("presentation");
   expect(picture.getAttribute("src")).toBe("/dl/queue.png?preview");
+  expect(picture.className).toContain("object-cover");
+  expect(picture.className).toContain("object-top");
 });
 
 test("a report with no entry yet stands on its task and states nothing it cannot", async () => {
@@ -243,6 +245,8 @@ test("a story is what a run made, never what it said", async () => {
 
   const preview = screen.getByRole("img", { name: "the queue" });
   expect(preview.getAttribute("src")).toBe("/dl/queue.png?preview");
+  expect(preview.className).toContain("object-cover");
+  expect(preview.className).toContain("object-top");
   expect(preview.closest("a")).toBeNull();
   expect(preview.closest("button")).toBeTruthy();
   expect(screen.getByText("brief.pdf").closest("a")).toBeNull();
@@ -294,37 +298,41 @@ test("a story is titled the way its report titles itself, and says that title on
   expect(screen.getByText("by").textContent).toBe("by assistant morning-digest");
 });
 
-test("a report reads inline behind a fold, never inside a box of its own that scrolls", async () => {
+const LONG_REPORT =
+  "# Standup\n\n" + "Two blockers cleared. ".repeat(80) + "\n\nThe queue is empty.";
+
+test("a permalinked report reads whole, with no fold and no box of its own that scrolls", async () => {
   const restore = laid(900, 280);
   wire({
     "/workspace/radar": () => json({ runs: [RUN], older: null }),
-    "/dl/notes.md": () => new Response("# Standup\n\n" + "Two blockers cleared. ".repeat(80)),
+    "/dl/notes.md": () => new Response(LONG_REPORT),
   });
   mountPinnedRun(RUN);
 
-  const more = await screen.findByRole("button", { name: "Show more" });
-  const region = document.getElementById(String(more.getAttribute("aria-controls")));
-  expect(region?.className).toContain("max-h-(--size-reveal)");
-  const story = more.closest("li");
+  const story = (await screen.findByText("The queue is empty.")).closest("li");
+  expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Show less" })).toBeNull();
+  expect(story?.querySelector("[data-slot='reveal']")).toBeNull();
+  expect(story?.innerHTML).not.toContain("max-h-(--size-reveal)");
   expect(story?.querySelector("[data-artifact-document]")).toBeNull();
   expect(story?.querySelector(".overflow-y-auto")).toBeNull();
-
-  await userEvent.click(more);
-  const less = screen.getByRole("button", { name: "Show less" });
-  expect(less.getAttribute("aria-expanded")).toBe("true");
-  expect(region?.className).not.toContain("max-h-(--size-reveal)");
   restore();
 });
 
-test("a report that fits is offered no fold", async () => {
-  const restore = laid(120, 280);
+test("the feed reads the roll-up of every report, held to its own lines", async () => {
+  const restore = laid(900, 280);
   wire({
     "/workspace/radar": () => json({ runs: [RUN], older: null }),
-    "/dl/notes.md": () => new Response("# Standup\n\nTwo blockers cleared."),
+    "/dl/notes.md": () => new Response(LONG_REPORT),
   });
-  mountPinnedRun(RUN);
+  mountRadarSection();
 
-  expect(await screen.findByText("Two blockers cleared.")).toBeTruthy();
+  const entry = (
+    await screen.findByRole("heading", { level: 3, name: WRITTEN.title })
+  ).closest("li") as HTMLElement;
+  expect(within(entry).getByRole("heading", { level: 3 }).className).toContain("line-clamp-2");
+  expect(within(entry).getByText(WRITTEN.summary).className).toContain("line-clamp-2");
+  expect(screen.queryByText("The queue is empty.")).toBeNull();
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   restore();
 });
