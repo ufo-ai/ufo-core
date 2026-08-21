@@ -39,6 +39,7 @@ import {
   TranscriptScroll,
   useTakeMeToTheFoot,
 } from "@/kernel/messages";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { COLUMN } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -892,6 +893,58 @@ function StarterMark({ row }: { row: StarterRow }) {
   );
 }
 
+/** A row is one line, and the sentence it holds is the member's own work said back to them, so a
+ *  measure too narrow to hold it must not be where it goes unread. The cut text is stated in full
+ *  on hover, and a row that already fits states nothing a second time — a tooltip repeating a line
+ *  the eye has just read is noise the member did not ask for. Whether a row is cut is measured, not
+ *  assumed: the same sentence fits one viewport and not the next, so the answer is re-measured
+ *  whenever the row's width changes. */
+function useCutLine(): [RefObject<HTMLSpanElement | null>, boolean] {
+  const line = useRef<HTMLSpanElement>(null);
+  const [cut, setCut] = useState(false);
+  useEffect(() => {
+    const node = line.current;
+    if (!node) return;
+    const measure = () => setCut(node.scrollWidth > node.clientWidth);
+    measure();
+    const watch = new ResizeObserver(measure);
+    watch.observe(node);
+    return () => watch.disconnect();
+  }, []);
+  return [line, cut];
+}
+
+function PressRow({
+  glyph,
+  title,
+  body,
+  onPress,
+}: {
+  glyph: ReactNode;
+  title: string;
+  body: string;
+  onPress: () => void;
+}) {
+  const [line, cut] = useCutLine();
+  return (
+    <Tooltip open={cut ? undefined : false}>
+      <TooltipTrigger asChild>
+        <button type="button" onClick={onPress} className={STARTER_ROW}>
+          {glyph}
+          <span ref={line} className="min-w-0 flex-1 truncate">
+            <span className="font-medium">{title}</span>
+            <span className="text-ink-soft"> {body}</span>
+          </span>
+          <IconArrowRight className={STARTER_ARROW} aria-hidden />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-hint rounded-panel">
+        <span className="font-medium">{title}</span> {body}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function Starters({ agentId }: { agentId: string }) {
   const read = usePanelRead<StartersPayload>(STARTERS_READ);
   const answered = read.phase === "ready" ? read.payload : null;
@@ -900,35 +953,25 @@ function Starters({ agentId }: { agentId: string }) {
   return (
     <div className="mt-2xl flex flex-col">
       {rows.map((row) => (
-        <button
+        <PressRow
           key={row.title}
-          type="button"
-          onClick={() => setPendingAsk(agentId, row.ask, true)}
-          className={STARTER_ROW}
-        >
-          <StarterMark row={row} />
-          <span className="min-w-0 flex-1 truncate">
-            <span className="font-medium">{row.title}</span>
-            <span className="text-ink-soft"> {row.body}</span>
-          </span>
-          <IconArrowRight className={STARTER_ARROW} aria-hidden />
-        </button>
+          glyph={<StarterMark row={row} />}
+          title={row.title}
+          body={row.body}
+          onPress={() => setPendingAsk(agentId, row.ask, true)}
+        />
       ))}
       {unlock ? (
-        <button
-          type="button"
-          onClick={() => setPendingAsk(agentId, unlock.ask, true)}
-          className={STARTER_ROW}
-        >
-          <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
-            <BrandMark provider={unlock.providers[0].name} />
-          </span>
-          <span className="min-w-0 flex-1 truncate">
-            <span className="font-medium">{unlock.title}</span>
-            <span className="text-ink-soft"> Connect {namedTiles(unlock.providers)}.</span>
-          </span>
-          <IconArrowRight className={STARTER_ARROW} aria-hidden />
-        </button>
+        <PressRow
+          glyph={
+            <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
+              <BrandMark provider={unlock.providers[0].name} />
+            </span>
+          }
+          title={unlock.title}
+          body={"Connect " + namedTiles(unlock.providers) + "."}
+          onPress={() => setPendingAsk(agentId, unlock.ask, true)}
+        />
       ) : (
         <a href={workspaceHash("connectors")} className={STARTER_ROW}>
           <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">

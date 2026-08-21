@@ -3147,6 +3147,61 @@ test("a ranked slate replaces every row the screen ships with", async () => {
   expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
 });
 
+/** jsdom lays nothing out, so every width reads 0 and no line is ever cut. These stub the two the
+ *  row measures, which is the whole input to whether the sentence is readable where it stands. */
+function measureLines(scroll: number, client: number): () => void {
+  const widths = ["scrollWidth", "clientWidth"] as const;
+  const held = widths.map((name) => Object.getOwnPropertyDescriptor(HTMLElement.prototype, name));
+  Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+    configurable: true,
+    get: () => scroll,
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get: () => client,
+  });
+  return () => {
+    widths.forEach((name, i) => {
+      if (held[i]) Object.defineProperty(HTMLElement.prototype, name, held[i]);
+      else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
+    });
+  };
+}
+
+test("a sentence the row cannot hold is stated in full on hover", async () => {
+  const restore = measureLines(600, 200);
+  try {
+    wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
+    location.hash = "#/";
+    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+    const row = await screen.findByRole("button", { name: /Runway report/ });
+    await userEvent.hover(row);
+
+    const tip = await screen.findByRole("tooltip");
+    expect(tip.textContent).toContain("Reports cash, burn, and the months of runway left.");
+  } finally {
+    restore();
+  }
+});
+
+test("a sentence the row holds whole is never said a second time", async () => {
+  const restore = measureLines(200, 200);
+  try {
+    wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
+    location.hash = "#/";
+    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+    const row = await screen.findByRole("button", { name: /Runway report/ });
+    await userEvent.hover(row);
+
+    await new Promise((wake) => setTimeout(wake, 250));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  } finally {
+    restore();
+  }
+});
+
 test("a ranked starter says its own sentence, and a check-in asks after work", async () => {
   const said: string[] = [];
   wire({
