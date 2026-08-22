@@ -60,6 +60,7 @@ from ufo.sources import rest, sync
 from ufo.sources.backend import ConnectorSourceConfig
 from ufo.sources.sync import (
     FOLDER_BACKEND,
+    SOURCE_SYNC_CHECK,
     SOURCE_SYNC_FAILED_METRIC,
     SOURCE_SYNC_JOB,
     SYNC_PROVIDER_FAULT_MAX_CHARS,
@@ -2833,6 +2834,60 @@ async def test_a_provider_fault_is_bounded_before_it_reaches_the_record(
     assert len(fault) == SYNC_PROVIDER_FAULT_MAX_CHARS
 
 
+async def test_a_failing_stream_holds_a_critical_check_until_a_run_succeeds(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flake and an outage read the same on a counter — one failure, counted — so what separates
+    them is the state the next run reports. Every run submits its own outcome under the row's own
+    tags: the failed run holds that row CRITICAL and names how many runs failed in a row, and the
+    run that succeeds submits OK on the same tags, which is what takes the alert down with no
+    operator and no window to wait out. The row id is one of those tags, because a check instance is
+    its name, host, and tags together — without it the other workspace that connects the same
+    provider stream submits its OK onto this row's status history and clears an alert it knows
+    nothing about. The counter keeps the stream dimensions alone, with the class that raised."""
+    reader = _meter(monkeypatch)
+    submitted: list[tuple[str, int, str, dict[str, str]]] = []
+
+    async def _record(name: str, status: int, message: str = "", /, **tags: str) -> None:
+        submitted.append((name, status, message, tags))
+
+    monkeypatch.setattr(sync, "emit_service_check", _record)
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id)
+    page = Page(
+        source_ref="C1/1700000000.1",
+        body="the deploy is green",
+        stream=CONNECTOR_STREAM,
+        title="#general",
+    )
+    driver = _connector_driver(
+        [TimeoutError("provider timed out"), SyncResult(pages=(page,))],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    await _sync(driver)
+    await _make_due()
+    await _sync(driver)
+
+    tags = {"provider": CONNECTOR_PROVIDER, "stream": CONNECTOR_STREAM}
+    check_tags = {**tags, "source_id": str(source_id)}
+    assert submitted == [
+        (
+            SOURCE_SYNC_CHECK,
+            o11y.SERVICE_CHECK_CRITICAL,
+            "1 consecutive failed runs, last TimeoutError",
+            check_tags,
+        ),
+        (SOURCE_SYNC_CHECK, o11y.SERVICE_CHECK_OK, "", check_tags),
+    ]
+    assert SOURCE_SYNC_CHECK in o11y.SERVICE_CHECKS
+    assert _metric_points(reader, SYNC_METRIC) == [{**tags, "error_class": "TimeoutError"}]
+
+
 async def test_telemetry_that_raises_never_breaks_the_sync_run(
     db: None,
     database_url: str,
@@ -2870,9 +2925,16 @@ async def test_telemetry_that_raises_never_breaks_the_sync_run(
         success.append((fields["provider"], fields["stream"], fields["pages_written"]))
         raise RuntimeError("log pipeline unreachable")
 
+    submitted: list[int] = []
+
+    async def _intake_gone(name: str, status: int, message: str = "", /, **tags: str) -> None:
+        submitted.append(status)
+        raise RuntimeError("check intake unreachable")
+
     monkeypatch.setattr(sync, "emit_metric", _collector_gone)
     monkeypatch.setattr(sync, "log_error", _log_error_gone)
     monkeypatch.setattr(sync, "log", _log_gone)
+    monkeypatch.setattr(sync, "emit_service_check", _intake_gone)
 
     await _sync(driver)
 
@@ -2881,6 +2943,7 @@ async def test_telemetry_that_raises_never_breaks_the_sync_run(
     assert await _claims(driver) == ()
     assert failure == [(CONNECTOR_PROVIDER, CONNECTOR_STREAM, "RuntimeError")]
     assert success == [(FOLDER_BACKEND, "", 1)]
+    assert submitted == [o11y.SERVICE_CHECK_CRITICAL, o11y.SERVICE_CHECK_OK]
 
 
 def test_source_sync_and_turn_dispatch_register_as_core_jobs(

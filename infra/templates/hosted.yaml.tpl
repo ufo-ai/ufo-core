@@ -726,6 +726,13 @@ spec:
             - name: UFO_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            # The Datadog key the source-sync job submits the `ufo.source_sync` service check with.
+            # OTLP defines no service check, so the collector this pod exports every metric and log
+            # through cannot carry one — the submission goes to Datadog's own intake, and it reads the
+            # same Secret the collector does rather than a second copy of the key.
+            - name: DD_API_KEY
+              valueFrom:
+                secretKeyRef: {name: datadog-api-key, key: DD_API_KEY}
           volumeMounts:
             # The rendered shared-fleet config replaces the image's baked dev ufo.toml.
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}

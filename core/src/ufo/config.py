@@ -159,8 +159,20 @@ class SkillsConfig(BaseModel):
 
 
 class O11yConfig(BaseModel):
+    """`otlp_endpoint` is the collector every metric, log, and span exports to.
+
+    `datadog_check_url` is Datadog's `check_run` intake, which a service check is submitted to
+    directly — OTLP defines no service check, so nothing the collector carries can hold one.
+    `datadog_env` is the `env` tag those submissions carry, which is the scope a monitor selects
+    them by; `datadog_api_key_env` names the env var holding the key the intake authenticates. Unset
+    `datadog_check_url` reports no service check at all, which is every deploy no monitor watches —
+    a developer's node, the eval stack."""
+
     model_config = ConfigDict(extra="forbid")
     otlp_endpoint: str | None = None
+    datadog_check_url: str | None = None
+    datadog_env: str | None = None
+    datadog_api_key_env: str = "DD_API_KEY"
 
 
 class SandboxConfig(BaseModel):

@@ -16,7 +16,9 @@ to a downstream indexer under a `(revision, id)` cursor. The core `page` row car
 substrate and browse metadata;
 derivation state lives in the indexer's own mirror. The driver polls; it never fires on the writes
 it makes. `source_sync.failed` and `source_sync_failed_total` name a failed provider stream;
-`source_sync.ok` records what a successful run wrote."""
+`source_sync.ok` records what a successful run wrote; the `ufo.source_sync` service check carries
+each source row's current state, CRITICAL from the run that failed until the run that
+succeeds."""
 
 import asyncio
 import hashlib
@@ -39,7 +41,14 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.connectors import AuthProxy, SourceCredentialResolver
 from ufo.db import owner_tx, workspace_tx
-from ufo.o11y import emit_metric, log, log_error
+from ufo.o11y import (
+    SERVICE_CHECK_CRITICAL,
+    SERVICE_CHECK_OK,
+    emit_metric,
+    emit_service_check,
+    log,
+    log_error,
+)
 from ufo.schema import tables
 from ufo.subjects import SHARED_SUBJECT
 
@@ -52,6 +61,7 @@ CLAIM_LEASE_SECONDS = 300
 DUE_BATCH_MAX_SOURCES = 50
 SOURCE_BLOB_PREFIX = "sources"
 SOURCE_SYNC_FAILED_METRIC = "source_sync_failed_total"
+SOURCE_SYNC_CHECK = "source_sync"
 SYNC_PROVIDER_FAULT_MAX_CHARS = 500
 
 
@@ -389,6 +399,17 @@ def _stream_tags(source: ClaimedSource) -> dict[str, str]:
     return {"provider": source.backend, "stream": _config_value(source, "stream")}
 
 
+def _check_tags(source: ClaimedSource) -> dict[str, str]:
+    """Which source row a sync outcome belongs to, as service-check tags. Datadog identifies a check
+    instance by the check name, the host, and the tags together, so the row id has to be one of
+    them: the provider stream alone puts every row that shares it on one status history — two
+    workspaces that each connect Slack — where the healthy row's OK lands on the tags holding the
+    failing row's CRITICAL, no run accumulates a second consecutive CRITICAL, and a source that
+    cannot sync raises no alert. The id stays off the metric dimensions, which the backends' own
+    vocabulary bounds."""
+    return {**_stream_tags(source), "source_id": str(source.source_id)}
+
+
 def _config_value(source: ClaimedSource, key: str) -> str:
     value = source.config.get(key)
     return value if isinstance(value, str) else ""
@@ -465,7 +486,7 @@ class SyncDriver:
             except Exception as error:
                 cursor_reset = isinstance(error, CursorExpired)
                 errors, next_sync_at = self._error_backoff(source, datetime.now(UTC))
-                self._report_failed(source, error, cursor_reset, errors, next_sync_at)
+                await self._report_failed(source, error, cursor_reset, errors, next_sync_at)
                 await self._release(source, cursor_reset, errors, next_sync_at)
 
     async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]:
@@ -582,7 +603,7 @@ class SyncDriver:
             deleted,
             result.snapshot,
         )
-        self._report_ok(source, len(result.pages), len(changed) + len(metadata), tombstoned)
+        await self._report_ok(source, len(result.pages), len(changed) + len(metadata), tombstoned)
 
     async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool, PageBrowse]]:
         async with workspace_tx() as connection:
@@ -742,19 +763,27 @@ class SyncDriver:
             )
         return tombstoned
 
-    def _report_ok(
+    async def _report_ok(
         self, source: ClaimedSource, fetched: int, written: int, tombstoned: int
     ) -> None:
+        """One stream's successful run: what it wrote, as a log, and the stream's state, as an OK
+        service check. The check is what ends an alert on that row — a counter says a failure
+        happened and never that it stopped, so nothing but the passage of time took a recovered
+        stream out of a window over one. Each emission is suppressed on its own, as on the failure
+        path."""
+        tags = _stream_tags(source)
         with suppress(Exception):
             log(
                 "source_sync.ok",
                 source_id=str(source.source_id),
-                **_stream_tags(source),
+                **tags,
                 account_id=_config_value(source, "account"),
                 pages_fetched=fetched,
                 pages_written=written,
                 pages_tombstoned=tombstoned,
             )
+        with suppress(Exception):
+            await emit_service_check(SOURCE_SYNC_CHECK, SERVICE_CHECK_OK, **_check_tags(source))
 
     def _error_backoff(self, source: ClaimedSource, now: datetime) -> tuple[int, datetime]:
         """A failing source's new error count and the moment its backoff lets the next run start:
@@ -766,7 +795,7 @@ class SyncDriver:
         )
         return errors, now + timedelta(seconds=backoff)
 
-    def _report_failed(
+    async def _report_failed(
         self,
         source: ClaimedSource,
         error: Exception,
@@ -814,6 +843,13 @@ class SyncDriver:
             )
         with suppress(Exception):
             emit_metric(SOURCE_SYNC_FAILED_METRIC, **tags, error_class=error_class)
+        with suppress(Exception):
+            await emit_service_check(
+                SOURCE_SYNC_CHECK,
+                SERVICE_CHECK_CRITICAL,
+                f"{errors} consecutive failed runs, last {error_class}",
+                **_check_tags(source),
+            )
 
     async def _release(
         self, source: ClaimedSource, cursor_reset: bool, errors: int, next_sync_at: datetime

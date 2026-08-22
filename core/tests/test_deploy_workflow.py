@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from infra.testing_secrets import SECRET_INPUTS
-from ufo.sources.sync import SOURCE_SYNC_FAILED_METRIC
+from ufo.sources.sync import SOURCE_SYNC_CHECK
 
 ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -4005,16 +4005,54 @@ def test_every_monitor_notifies_a_reachable_handle(environment: str) -> None:
 
 
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
-def test_source_sync_failure_monitor_consumes_the_reported_metric(environment: str) -> None:
-    assert _monitor_attribute("source_sync_failed", "query", environment) == (
-        f"sum(last_15m):sum:ufo.{SOURCE_SYNC_FAILED_METRIC}{{env:{environment}}} "
-        "by {provider,stream}.as_count() >= 1"
+def test_the_source_sync_monitor_watches_the_check_the_reporters_submit(environment: str) -> None:
+    """The two numbers are the whole behaviour asked of this monitor: a single failed run is one
+    CRITICAL out of the last two statuses and pages nobody, the second consecutive one alerts, and a
+    single OK clears it. The grouping is the tags `_check_tags` submits, down to the source row —
+    two workspaces that each connect Slack run one provider stream, and a group over both would let
+    the healthy row's OK clear the failing row's alert. The check name is the one the fleet reports
+    under: a monitor over any other name would read as permanently green."""
+    query = _monitor_attribute("source_sync_failed", "query", environment)
+    parsed = re.fullmatch(
+        r'"([\w.]+)"\.over\("([^"]+)"\)\.by\(([^)]+)\)\.last\((\d+)\)\.count_by_status\(\)', query
     )
+    assert parsed
+    assert _monitor_attribute("source_sync_failed", "type", environment) == "service check"
+    assert parsed.group(1) == f"ufo.{SOURCE_SYNC_CHECK}"
+    assert parsed.group(2) == f"env:{environment}"
+    assert re.findall(r'"(\w+)"', parsed.group(3)) == ["provider", "stream", "source_id"]
+    assert _monitor_attribute("source_sync_failed", "critical", environment) == "2"
+    assert _monitor_attribute("source_sync_failed", "ok", environment) == "1"
+    assert int(parsed.group(4)) >= 2
+    assert _monitor_attribute("source_sync_failed", "notify_no_data", environment) == "false"
     message = _monitor_attribute("source_sync_failed", "message", environment)
     assert "{{provider.name}}" in message
     assert "{{stream.name}}" in message
-    assert _monitor_attribute("source_sync_failed", "critical", environment) == "1"
-    assert _monitor_attribute("source_sync_failed", "require_full_window", environment) == "false"
+    assert "{{source_id.name}}" in message
+
+
+@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
+def test_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read(
+    environment: str,
+) -> None:
+    """The monitor and the reporter are configured in different files and neither fails when they
+    disagree: a check submitted to another Datadog site, or tagged with another env, leaves the
+    monitor's scope holding no status for any stream — which reads exactly like a fleet whose
+    streams all sync. So the fleet's own intake and env tag are held against the provider the
+    monitors talk to and the intake the deploy reporter already uses, and against the pod's key."""
+    config = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+    check_url = re.search(r'datadog_check_url = "(\S+)"', config)
+    api_url = re.search(r'^  api_url += +"(\S+)"$', MONITORS[environment].read_text(), re.MULTILINE)
+    assert check_url and api_url
+    assert urlparse(check_url.group(1)).hostname == urlparse(api_url.group(1)).hostname
+    deploy_reporter = _step("deploy", "Report the deploy conclusion to Datadog")["env"]
+    assert isinstance(deploy_reporter, dict)
+    assert check_url.group(1) == deploy_reporter["DD_CHECK_URL"]
+    environment_tag = re.search(r'datadog_env = "(\w+)"', config)
+    assert environment_tag
+    assert environment_tag.group(1) == environment
+    hosted = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    assert "secretKeyRef: {name: datadog-api-key, key: DD_API_KEY}" in hosted
 
 
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
@@ -4037,7 +4075,6 @@ def test_surface_listener_park_monitor_consumes_the_reported_metric(environment:
     [
         "db_tx_unavailable",
         "db_pool_exhausted",
-        "source_sync_failed",
         "surface_listener_parked",
     ],
 )

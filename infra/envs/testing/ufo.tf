@@ -147,6 +147,8 @@ locals {
 
     [o11y]
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+    datadog_check_url = "https://api.us5.datadoghq.com/api/v1/check_run"
+    datadog_env = "testing"
   TOML
 }
 

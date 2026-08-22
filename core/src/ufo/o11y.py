@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import cast
 from uuid import UUID
 
+import httpx
 from opentelemetry import _logs, metrics, trace
 from opentelemetry._logs import SeverityNumber
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -121,6 +122,11 @@ HISTOGRAMS = {
 UP_DOWN_METRICS = {
     "model_round_active": ("model", "provider", PROFILE_DIMENSION),
 }
+SERVICE_CHECKS = ("source_sync",)
+SERVICE_CHECK_OK = 0
+SERVICE_CHECK_CRITICAL = 2
+SERVICE_CHECK_HOST = "ufo-fleet"
+SERVICE_CHECK_TIMEOUT_SECONDS = 10
 HISTOGRAM_AGGREGATION: dict[type, Aggregation] = {
     HistogramInstrument: ExponentialBucketHistogramAggregation()
 }
@@ -247,6 +253,35 @@ type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, J
 _counters: dict[str, Counter] = {}
 _histograms: dict[str, Histogram] = {}
 _up_down_counters: dict[str, UpDownCounter] = {}
+
+
+@dataclass(frozen=True)
+class _ServiceCheckIntake:
+    url: str
+    api_key: str
+    env: str
+
+
+_service_check_intake: _ServiceCheckIntake | None = None
+
+
+def init_service_checks(url: str | None, env: str | None, api_key: str | None) -> None:
+    """Point `emit_service_check` at Datadog's check intake. No url leaves every submission a no-op,
+    which is a developer's node and the eval stack: they hold no fleet state anything alerts on.
+
+    A configured url with no env tag or no key fails loud here. Either one lands the deploy in the
+    worst reading of this signal — a check tagged with no env sits outside every monitor's scope,
+    and a keyless submission is refused at the intake — and a check that never arrives reads in
+    Datadog exactly like a stream that is syncing."""
+    global _service_check_intake
+    if url is None:
+        _service_check_intake = None
+        return
+    if not env:
+        raise RuntimeError(f"o11y.datadog_env is unset but the check intake {url} is configured")
+    if not api_key:
+        raise RuntimeError(f"no Datadog api key in the environment but {url} is configured")
+    _service_check_intake = _ServiceCheckIntake(url=url, api_key=api_key, env=env)
 
 
 def init_o11y(otlp_endpoint: str | None) -> None:
@@ -604,3 +639,38 @@ def emit_up_down_metric(name: str, amount: int, /, **dimensions: str) -> None:
         counter = metrics.get_meter(INSTRUMENTATION_NAME).create_up_down_counter(f"ufo.{name}")
         _up_down_counters[name] = counter
     counter.add(amount, attributes=dimensions)
+
+
+async def emit_service_check(name: str, status: int, message: str = "", /, **tags: str) -> None:
+    """Submit one status for a registered service check, tagged with this deploy's env and the
+    keywords given; an unregistered name fails loud. What is reported is positional so that every
+    keyword is a tag.
+
+    A check holds its last status per instance, and the instance is the check name, the host, and
+    the tags together — so a monitor over it reads the current state of one tagged thing rather than
+    a window over occurrences, and a later OK on the same tags is what clears the alert. That is
+    what no counter can do: a counter reports that a failure happened, never that it stopped.
+
+    The submission goes straight to Datadog's own intake. OTLP defines no service check, so the
+    collector that carries every metric, log, and span here has nothing to put one in.
+
+    The host is a constant because it is part of the instance the consecutive statuses accumulate
+    on. A pod name would open a new instance on every roll and leave the retired one holding
+    CRITICAL with nothing left to report an OK against."""
+    if name not in SERVICE_CHECKS:
+        raise ValueError(f"unknown service check: {name}")
+    intake = _service_check_intake
+    if intake is None:
+        return
+    report = {
+        "check": f"{INSTRUMENTATION_NAME}.{name}",
+        "host_name": SERVICE_CHECK_HOST,
+        "status": status,
+        "message": message,
+        "tags": [f"env:{intake.env}", *(f"{tag}:{value}" for tag, value in tags.items())],
+    }
+    async with httpx.AsyncClient(timeout=SERVICE_CHECK_TIMEOUT_SECONDS) as client:
+        response = await client.post(
+            intake.url, json=[report], headers={"DD-API-KEY": intake.api_key}
+        )
+        response.raise_for_status()

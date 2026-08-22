@@ -82,17 +82,30 @@ resource "datadog_monitor" "db_pool_exhausted" {
   tags = ["env:testing", "managed-by:terraform"]
 }
 
+# One source row's current sync state. `_report_failed` and `_report_ok` submit every run's outcome
+# as the `ufo.source_sync` service check, tagged with `_check_tags` — the provider stream it ran for
+# and the row id — so each row holds its own last status and the alert is that row's state rather
+# than a window over the failure counter. The grouping carries the row id for the same reason the
+# submission does: two workspaces that each connect Slack run the same provider stream, and one
+# group over both would let the healthy row's OK clear the failing row's alert. Two consecutive
+# CRITICAL runs are what alerts: one provider blip fails a single run and is not an incident, while a
+# stream that cannot sync fails every run at the sync interval. One OK clears it, so the recovered
+# stream needs no operator and no waiting for a window to roll off. The failure counter stands
+# alongside, with its `error_class` dimension, for what failed rather than whether it is still
+# failing. No no-data clause: a source a member removed reports nothing again by design, and a fleet
+# whose telemetry stopped is what the silence monitor above alerts on.
 resource "datadog_monitor" "source_sync_failed" {
-  name    = "ufo testing source sync failed"
-  type    = "query alert"
-  query   = "sum(last_15m):sum:ufo.source_sync_failed_total{env:testing} by {provider,stream}.as_count() >= 1"
-  message = "{{provider.name}} {{stream.name}} source sync failed {{value}} times in 15 minutes. Search source_sync.failed for the source, account, error class, and next attempt. @ops@flyingobject.ai @slack-alerts"
+  name    = "ufo testing source sync failing"
+  type    = "service check"
+  query   = "\"ufo.source_sync\".over(\"env:testing\").by(\"provider\",\"stream\",\"source_id\").last(2).count_by_status()"
+  message = "{{provider.name}} {{stream.name}} source sync failed two runs in a row and is still failing for source {{source_id.name}}. Search source_sync.failed for that source id, its account, error class, and next attempt. The next successful run clears this. @ops@flyingobject.ai @slack-alerts"
 
   monitor_thresholds {
-    critical = 1
+    critical = 2
+    ok       = 1
   }
 
-  require_full_window = false
+  notify_no_data = false
 
   tags = ["env:testing", "managed-by:terraform"]
 }

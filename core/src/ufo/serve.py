@@ -128,7 +128,7 @@ from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
-from ufo.o11y import init_o11y, log
+from ufo.o11y import init_o11y, init_service_checks, log
 from ufo.objects import BoundKind
 from ufo.onboard_control import ONBOARD_CONTROL_TOKEN_ENV, OnboardControl
 from ufo.preview_renderer import PREVIEW_SERVICE_URL_ENV, PREVIEW_TOKEN_ENV, PreviewRenderer
@@ -210,6 +210,11 @@ def run() -> None:
     transaction by the ambient `current_workspace`."""
     config = load_config()
     init_o11y(config.o11y.otlp_endpoint)
+    init_service_checks(
+        config.o11y.datadog_check_url,
+        config.o11y.datadog_env,
+        os.environ.get(config.o11y.datadog_api_key_env),
+    )
     init_db(config.database.url)
     manifests = load_manifests(config.pack.name)
     key = os.environ.get(config.credentials.key_env)

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import socket
@@ -568,6 +569,104 @@ def _init_o11y_against_an_intake(
     provider = installed[0]
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
     return provider, exported, server
+
+
+async def test_a_service_check_carries_one_stream_status_to_the_datadog_intake(monkeypatch):
+    """What a monitor reads a stream's current state off is one status per submission, under the
+    check's own name, tagged with the env the monitor scopes by and the stream it belongs to. The OK
+    submission is the point of the whole signal: it lands on the same check instance as the CRITICAL
+    before it — same name, same host, same tags — which is what makes a later success clear the
+    alert the failure raised."""
+    received, server = _a_check_intake()
+    monkeypatch.setattr(o11y, "_service_check_intake", None)
+    o11y.init_service_checks(
+        f"http://127.0.0.1:{server.server_port}/api/v1/check_run", "prod", "dd-key"
+    )
+    await o11y.emit_service_check(
+        "source_sync",
+        o11y.SERVICE_CHECK_CRITICAL,
+        "2 consecutive failed runs, last TimeoutError",
+        provider="github",
+        stream="issues",
+    )
+    await o11y.emit_service_check(
+        "source_sync", o11y.SERVICE_CHECK_OK, provider="github", stream="issues"
+    )
+    server.shutdown()
+    assert [request["path"] for request in received] == ["/api/v1/check_run"] * 2
+    assert [request["api_key"] for request in received] == ["dd-key"] * 2
+    critical, ok = (request["reports"] for request in received)
+    assert critical == [
+        {
+            "check": "ufo.source_sync",
+            "host_name": o11y.SERVICE_CHECK_HOST,
+            "status": 2,
+            "message": "2 consecutive failed runs, last TimeoutError",
+            "tags": ["env:prod", "provider:github", "stream:issues"],
+        }
+    ]
+    assert ok == [
+        {
+            "check": "ufo.source_sync",
+            "host_name": o11y.SERVICE_CHECK_HOST,
+            "status": 0,
+            "message": "",
+            "tags": ["env:prod", "provider:github", "stream:issues"],
+        }
+    ]
+
+
+async def test_an_unregistered_service_check_fails_loud_before_any_intake_is_read(monkeypatch):
+    """The name is judged first, so a typo raises on a developer's node too — where no intake is
+    configured and every submission is otherwise a no-op, which is the one place a wrong check name
+    would never be noticed."""
+    monkeypatch.setattr(o11y, "_service_check_intake", None)
+    with pytest.raises(ValueError, match=r"unknown service check: deploy\.main"):
+        await o11y.emit_service_check("deploy.main", o11y.SERVICE_CHECK_OK)
+    assert (
+        await o11y.emit_service_check(
+            "source_sync", o11y.SERVICE_CHECK_OK, provider="folder", stream=""
+        )
+        is None
+    )
+
+
+def test_a_check_intake_without_an_env_tag_or_a_key_fails_loud_at_boot(monkeypatch):
+    """Both halves are as bad as no reporter and worse to read: an untagged check sits outside every
+    monitor's scope and a keyless one is refused at the intake, and either way Datadog holds no
+    status for a stream — which looks exactly like a stream that is syncing."""
+    monkeypatch.setattr(o11y, "_service_check_intake", None)
+    intake = "https://api.us5.datadoghq.com/api/v1/check_run"
+    with pytest.raises(RuntimeError, match="datadog_env"):
+        o11y.init_service_checks(intake, None, "dd-key")
+    with pytest.raises(RuntimeError, match="api key"):
+        o11y.init_service_checks(intake, "prod", None)
+    assert o11y._service_check_intake is None
+
+
+def _a_check_intake() -> tuple[list[dict[str, object]], HTTPServer]:
+    """A stand-in Datadog check intake: the requests that reach it, and the server to shut down."""
+    received: list[dict[str, object]] = []
+
+    class Intake(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            received.append(
+                {
+                    "path": self.path,
+                    "api_key": self.headers["DD-API-KEY"],
+                    "reports": json.loads(self.rfile.read(int(self.headers["content-length"]))),
+                }
+            )
+            self.send_response(202)
+            self.send_header("content-length", "0")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Intake)
+    Thread(target=server.serve_forever, daemon=True).start()
+    return received, server
 
 
 def test_turn_span_yields_and_closes():
