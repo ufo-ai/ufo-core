@@ -12,6 +12,7 @@ from evals.harness.timing import (
     case_timing,
     turn_timing,
 )
+from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 
 TURN = uuid4()
 CHILD = uuid4()
@@ -45,6 +46,53 @@ def test_a_turn_divides_its_span_into_model_rounds_tools_and_the_rest() -> None:
     assert timing.cost_micro_usd == 9
     assert [item.name for item in timing.steps] == ["model round", "bash", "model round"]
     assert [item.kind for item in timing.steps] == ["model_round", "tool_call", "model_round"]
+
+
+def test_steps_carry_resources_and_link_to_their_exact_transcript_rows() -> None:
+    messages = (
+        Message(role="user", content="prior question"),
+        Message(role="assistant", content="prior answer"),
+        Message(role="user", content="begin"),
+        Message(
+            role="assistant",
+            content=(
+                TextBlock(text="checking"),
+                ToolUseBlock(id="call-1", name="bash", input={"command": "pwd"}),
+            ),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="call-1", content="ok"),)),
+        Message(role="assistant", content="done"),
+    )
+    steps = (
+        TurnStep(
+            function_name=f"E.{MODEL_ROUND_STEP}",
+            started_at_epoch_ms=0,
+            completed_at_epoch_ms=10,
+            call_ids=("call-1",),
+            tokens=120,
+            cost_micro_usd=8,
+        ),
+        step(f"E.{TOOL_CALL_STEP}", 10, 30, "call-1"),
+        TurnStep(
+            function_name=f"E.{MODEL_ROUND_STEP}",
+            started_at_epoch_ms=30,
+            completed_at_epoch_ms=40,
+            tokens=40,
+            cost_micro_usd=3,
+        ),
+    )
+
+    timing = turn_timing(TURN, "evaluated", steps, {"call-1": "bash"}, messages=messages)
+
+    first_round, tool, final_round = timing.steps
+    assert [item.number for item in timing.steps] == [1, 2, 3]
+    assert [item.turn_id for item in timing.steps] == [TURN, TURN, TURN]
+    assert [item.message_index for item in timing.steps] == [4, 4, 6]
+    assert (first_round.tokens, first_round.cost_micro_usd) == (120, 8)
+    assert (final_round.tokens, final_round.cost_micro_usd) == (40, 3)
+    assert tool.call_id == "call-1"
+    assert tool.tokens is None
+    assert tool.cost_micro_usd is None
 
 
 def test_a_tool_call_is_named_by_the_call_id_its_step_recorded() -> None:

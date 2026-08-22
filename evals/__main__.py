@@ -773,6 +773,7 @@ async def _run(
             recorder.agent_prompt = agent_prompt
             blob = WorkspaceBlobStore(backend=blob_store_for(config.blob))
             dbos = replay_safe_client(config.database.system_url)
+            registry = model_registry(config, manifests)
             driver = WorkspaceDriver(
                 workspace_id,
                 agent_id,
@@ -781,9 +782,9 @@ async def _run(
                 dbos,
                 config.sandbox.workspace_root,
                 agent_model,
+                pricing=registry.pricing,
                 workflow_wait_seconds=workflow_wait_seconds,
             )
-            registry = model_registry(config, manifests)
             ctx = context_for(
                 "evals",
                 frozenset(),

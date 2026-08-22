@@ -28,10 +28,12 @@ from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
 from ufo.governance import prompt_digest
-from ufo.loop.engine import DispatchResult
+from ufo.loop.engine import DispatchResult, StreamResult
+from ufo.models.catalog import CORE_PRICING
+from ufo.models.pricing import Pricing
 from ufo.object_name import validate_object_name
 from ufo.schema import tables
-from ufo.schema.records import PENDING, ReasoningEffort, TurnContext
+from ufo.schema.records import PENDING, ReasoningEffort, TurnContext, Usage
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
@@ -159,6 +161,7 @@ class WorkspaceDriver:
     dbos: DBOSClient
     workspace_root: Path
     agent_model: str = "eval"
+    pricing: Pricing = CORE_PRICING
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS
 
@@ -248,21 +251,86 @@ class WorkspaceDriver:
 
     async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]:
         """The turn's durable engine steps, in the order the workflow recorded them. A tool call's
-        step carries the tool-use id its result was memoized under, which is what names it."""
+        step carries the tool-use id its result was memoized under, which is what names it.
+
+        A round's cost is reported only as far as the record supports it, never inferred and never
+        raised over. A terminal with no model — the frame a cancel writes for a turn the harness
+        stopped waiting on — prices nothing, so those rounds carry their tokens and no cost. The
+        rounds are also only part of what a turn spends: a compaction rides its own step, the
+        browser `find` ranking meters onto a dispatch, and a resumed attempt bills on top of a step
+        log that starts empty, so the terminal's residual cost lands on the last round only when the
+        rounds account for every token the terminal counts."""
         recorded = await self.dbos.list_workflow_steps_async(str(turn_id))
+        stream_usage: dict[int, Usage] = {}
+        for index, step in enumerate(recorded):
+            output = step.get("output")
+            if not isinstance(output, StreamResult):
+                continue
+            stream_usage[index] = Usage(
+                input_tokens=sum(item.input_tokens for item in output.usages),
+                output_tokens=sum(item.output_tokens for item in output.usages),
+                cache_read_tokens=sum(item.cache_read_tokens for item in output.usages),
+                cache_write_5m_tokens=sum(item.cache_write_5m_tokens for item in output.usages),
+                cache_write_30m_tokens=sum(item.cache_write_30m_tokens for item in output.usages),
+                cache_write_1h_tokens=sum(item.cache_write_1h_tokens for item in output.usages),
+            )
+        resources: dict[int, tuple[int, int | None]] = {}
+        if stream_usage:
+            async with workspace_tx() as connection:
+                terminal = (
+                    await connection.execute(
+                        sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn_id)
+                    )
+                ).scalar_one()
+            model = terminal.get("model", "") if terminal else ""
+            terminal_tokens = terminal.get("tokens", 0) if terminal else 0
+            terminal_cost = terminal.get("cost_micro_usd", 0) if terminal else 0
+            costs: dict[int, int] = {}
+            for index, usage in stream_usage.items():
+                tokens = sum(
+                    (
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_write_5m_tokens,
+                        usage.cache_write_30m_tokens,
+                        usage.cache_write_1h_tokens,
+                    )
+                )
+                if model:
+                    costs[index] = self.pricing.micro_usd(model, usage) if tokens else 0
+                resources[index] = (tokens, costs.get(index))
+            if costs and sum(tokens for tokens, _cost in resources.values()) == terminal_tokens:
+                last = next(reversed(costs))
+                costs[last] += terminal_cost - sum(costs.values())
+                if costs[last] < 0:
+                    raise RuntimeError(f"turn {turn_id} step cost exceeds its terminal")
+                resources[last] = (resources[last][0], costs[last])
         steps: list[TurnStep] = []
-        for step in recorded:
+        for index, step in enumerate(recorded):
             match step.get("output"):
                 case DispatchResult() as dispatched:
                     call_id = dispatched.tool_use_id
+                    call_ids: tuple[str, ...] = ()
+                    step_tokens: int | None = None
+                    step_cost_micro_usd: int | None = None
+                case StreamResult() as streamed:
+                    step_tokens, step_cost_micro_usd = resources[index]
+                    call_id = ""
+                    call_ids = tuple(call.id for call in streamed.tool_calls)
                 case _:
                     call_id = ""
+                    call_ids = ()
+                    step_tokens = step_cost_micro_usd = None
             steps.append(
                 TurnStep(
                     function_name=step["function_name"],
                     started_at_epoch_ms=step.get("started_at_epoch_ms"),
                     completed_at_epoch_ms=step.get("completed_at_epoch_ms"),
                     call_id=call_id,
+                    call_ids=call_ids,
+                    tokens=step_tokens,
+                    cost_micro_usd=step_cost_micro_usd,
                 )
             )
         return tuple(steps)

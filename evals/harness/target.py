@@ -261,7 +261,12 @@ class InProcessTarget:
         wall_ms = round((perf_counter() - started) * 1_000)
         result = settled.result
         turn_ids = (turn_id, *settled.descendant_ids)
-        timing = await self._case_timing(wall_ms, turn_ids, result.output)
+        timing = await self._case_timing(
+            wall_ms,
+            turn_ids,
+            result.output,
+            result.trajectory.messages if result.trajectory is not None else (),
+        )
         result = replace(result, output=replace(result.output, timing=timing))
         if not result.clean:
             if self.logs is not None:
@@ -309,7 +314,11 @@ class InProcessTarget:
         return replace(result, output=output)
 
     async def _case_timing(
-        self, wall_ms: int, turn_ids: tuple[UUID, ...], output: CapabilityOutput
+        self,
+        wall_ms: int,
+        turn_ids: tuple[UUID, ...],
+        output: CapabilityOutput,
+        messages: tuple[Message, ...],
     ) -> CaseTiming:
         """Where the case's wall-clock went, per turn. Tool names come from the merged trajectory,
         which already carries the evaluated turn's calls and every delegated child's, each keyed by
@@ -329,6 +338,7 @@ class InProcessTarget:
                     names,
                     tokens,
                     cost_micro_usd,
+                    messages if index == 0 else (),
                 )
             )
         return case_timing(wall_ms, tuple(turns))

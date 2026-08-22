@@ -1309,6 +1309,10 @@ async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(
         assert turn.model_round_ms + turn.tool_call_ms + turn.unaccounted_ms == turn.span_ms
         assert turn.tokens == spend[turn.turn_id].tokens
         assert turn.cost_micro_usd == spend[turn.turn_id].cost_micro_usd
+        model_steps = [step for step in turn.steps if step.kind == "model_round"]
+        assert sum(step.tokens or 0 for step in model_steps) == turn.tokens
+        assert sum(step.cost_micro_usd or 0 for step in model_steps) == turn.cost_micro_usd
+        assert [step.number for step in turn.steps] == sorted(step.number for step in turn.steps)
     assert (evaluated.rounds, child.rounds) == (2, 1)
     assert evaluated.tool_calls == 1
     assert evaluated.tool_call_ms > 0
@@ -1316,6 +1320,12 @@ async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(
     assert "spawn" in [step.name for step in evaluated.steps]
     assert "spawn" in [step.name for step in timing.slowest]
     assert UNNAMED_TOOL not in [step.name for step in timing.slowest]
+    spawn = next(step for step in evaluated.steps if step.name == "spawn")
+    assert spawn.call_id
+    assert spawn.message_index is not None
+    assert all(
+        step.message_index is not None for step in evaluated.steps if step.kind == "model_round"
+    )
 
 
 def _runtime_parts() -> tuple[Config, Hub, FilesystemBlobStore]:

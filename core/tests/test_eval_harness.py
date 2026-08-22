@@ -197,6 +197,7 @@ from ufo.ext.context import (
 )
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.governance import Governance, prompt_digest
+from ufo.loop.engine import StreamResult
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
@@ -5554,6 +5555,140 @@ async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path
         await driver.open("missing-member", "missing@eval.invalid")
 
 
+@dataclass(frozen=True)
+class RecordedStepsDbos:
+    """A workflow whose durable step log is fixed."""
+
+    recorded: tuple[dict[str, object], ...]
+
+    async def list_workflow_steps_async(self, workflow_id: str) -> list[dict[str, object]]:
+        return list(self.recorded)
+
+
+def _round_step(usage: Usage, started: int, completed: int) -> dict[str, object]:
+    return {
+        "function_name": "Engine._stream_once",
+        "output": StreamResult(usages=(usage,)),
+        "started_at_epoch_ms": started,
+        "completed_at_epoch_ms": completed,
+    }
+
+
+async def _seed_terminal_turn(
+    workspace_id: UUID, agent_id: UUID, conversation_id: UUID, terminal: dict[str, object]
+) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status=terminal["status"],
+                inbound="test",
+                terminal=terminal,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def _recorded_steps(
+    tmp_path: Path,
+    terminal: dict[str, object],
+    recorded: tuple[dict[str, object], ...],
+) -> tuple[TurnStep, ...]:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversation_id = await DbConversations(workspace_id).open("step-resources")
+    turn_id = await _seed_terminal_turn(workspace_id, agent_id, conversation_id, terminal)
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path),
+        cast(DBOSClient, RecordedStepsDbos(recorded)),
+        tmp_path / "workspaces",
+    )
+
+    with ws(workspace_id):
+        return await driver.steps(turn_id)
+
+
+async def test_step_resources_price_each_round_and_settle_the_terminals_residual_on_the_last(
+    db: None, tmp_path
+) -> None:
+    """The rounds carry the whole terminal here, so the terminal's own cost is authoritative and its
+    residual — what the price table rounds off — lands on the last round."""
+    steps = await _recorded_steps(
+        tmp_path,
+        {
+            "status": "done",
+            "text": "Done.",
+            "model": MODEL,
+            "tokens": 330_000,
+            "cost_micro_usd": 2_250_007,
+        },
+        (
+            _round_step(Usage(input_tokens=200_000, output_tokens=20_000), 0, 10),
+            _round_step(Usage(input_tokens=100_000, output_tokens=10_000), 10, 20),
+        ),
+    )
+
+    assert [step.tokens for step in steps] == [220_000, 110_000]
+    assert [step.cost_micro_usd for step in steps] == [1_500_000, 750_007]
+
+
+async def test_step_resources_leave_the_residual_alone_when_a_compaction_spent_off_the_rounds(
+    db: None, tmp_path
+) -> None:
+    """A compaction bills into the terminal from its own step, so the rounds account for less than
+    the terminal counts. Each round still reports what it used, and the unattributed remainder stays
+    off the last round rather than failing the case the harness is measuring."""
+    steps = await _recorded_steps(
+        tmp_path,
+        {
+            "status": "done",
+            "text": "Done.",
+            "model": MODEL,
+            "tokens": 385_000,
+            "cost_micro_usd": 2_625_000,
+        },
+        (
+            _round_step(Usage(input_tokens=200_000, output_tokens=20_000), 0, 10),
+            {
+                "function_name": "Compaction._compact",
+                "output": ((), (Usage(input_tokens=50_000, output_tokens=5_000),)),
+                "started_at_epoch_ms": 10,
+                "completed_at_epoch_ms": 20,
+            },
+            _round_step(Usage(input_tokens=100_000, output_tokens=10_000), 20, 30),
+        ),
+    )
+
+    assert [step.tokens for step in steps] == [220_000, None, 110_000]
+    assert [step.cost_micro_usd for step in steps] == [1_500_000, None, 750_000]
+
+
+async def test_step_resources_report_tokens_without_a_cost_when_the_terminal_records_no_model(
+    db: None, tmp_path
+) -> None:
+    """A turn the harness stopped waiting on is cancelled, and the cancel's frame carries no model
+    to price its rounds by. The rounds report the tokens they spent and no cost, so the overdue case
+    stays the handled outcome it was."""
+    steps = await _recorded_steps(
+        tmp_path,
+        {"status": "cancelled", "text": "", "model": "", "tokens": 0, "cost_micro_usd": 0},
+        (_round_step(Usage(input_tokens=200_000, output_tokens=20_000), 0, 10),),
+    )
+
+    assert [step.tokens for step in steps] == [220_000]
+    assert [step.cost_micro_usd for step in steps] == [None]
+
+
 async def test_a_shared_case_leaves_the_conversation_unowned_and_speaks_through_the_turn(
     db: None, tmp_path
 ) -> None:
@@ -6087,6 +6222,84 @@ def test_eval_viewer_sums_attempt_cost_and_latency_per_archived_case() -> None:
 
 
 def test_eval_viewer_trajectory_shows_attempt_resources_and_latency() -> None:
+    evidence = _debug_evidence("done")
+    attempt = cast(list[dict[str, object]], evidence["attempts"])[0]
+    attempt["trajectory"] = {
+        "conversation_id": "11111111-1111-1111-1111-111111111111",
+        "turn_id": "22222222-2222-2222-2222-222222222222",
+        "status": "done",
+        "messages": [
+            {"role": "user", "content": "exercise the capability"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "checking"},
+                    {"type": "tool_use", "id": "call-1", "name": "bash", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}],
+            },
+            {"role": "assistant", "content": "done"},
+        ],
+        "error": "",
+    }
+    steps = [
+        {
+            "turn_id": "22222222-2222-2222-2222-222222222222",
+            "number": 3,
+            "kind": "model_round",
+            "name": "model round",
+            "duration_ms": 2_500,
+            "tokens": 100,
+            "cost_micro_usd": 6,
+            "message_index": 2,
+            "call_id": "",
+        },
+        {
+            "turn_id": "22222222-2222-2222-2222-222222222222",
+            "number": 4,
+            "kind": "tool_call",
+            "name": "bash",
+            "duration_ms": 1_000,
+            "tokens": None,
+            "cost_micro_usd": None,
+            "message_index": 2,
+            "call_id": "call-1",
+        },
+        {
+            "turn_id": "22222222-2222-2222-2222-222222222222",
+            "number": 5,
+            "kind": "model_round",
+            "name": "model round",
+            "duration_ms": 500,
+            "tokens": 40,
+            "cost_micro_usd": 3,
+            "message_index": 4,
+            "call_id": "",
+        },
+    ]
+    attempt["timing"] = {
+        "wall_ms": 4_000,
+        "turns": [
+            {
+                "turn_id": "22222222-2222-2222-2222-222222222222",
+                "role": "evaluated",
+                "span_ms": 4_000,
+                "model_round_ms": 3_000,
+                "tool_call_ms": 1_000,
+                "unaccounted_ms": 0,
+                "rounds": 2,
+                "tool_calls": 1,
+                "tokens": 140,
+                "cost_micro_usd": 9,
+                "steps": steps,
+            }
+        ],
+        "slowest": steps,
+        "error": "",
+    }
     report = EvalReport(
         name="resource-detail",
         suite="capability",
@@ -6096,7 +6309,7 @@ def test_eval_viewer_trajectory_shows_attempt_resources_and_latency() -> None:
                 name="case",
                 passed=True,
                 reason="ok",
-                evidence=_debug_evidence("done"),
+                evidence=evidence,
             ),
         ),
     )
@@ -6136,7 +6349,19 @@ def test_eval_viewer_trajectory_shows_attempt_resources_and_latency() -> None:
     assert "9 micro-USD" in rendered
     assert "1 compaction" in rendered
     assert "4.0s wall" in rendered
-    assert "Stored transcript snapshot · 2 messages" in rendered
+    assert "Stored transcript snapshot · 4 messages" in rendered
+    assert 'data-step-target="message-2"' in rendered
+    assert 'data-step-target="tool-call-1"' in rendered
+    assert 'id="message-2"' in rendered
+    assert 'id="tool-call-1"' in rendered
+    assert "$0.000009" in rendered
+    assert '<table class="timing timing-summary">' in rendered
+    assert '<table class="timing timing-steps">' in rendered
+    assert "<th>kind</th>" not in rendered
+    assert ">#3</button>" in rendered
+    assert ">22222222 · #3</button>" not in rendered
+    assert "step 3 · 2.5s · 100 tokens · $0.000006" in rendered
+    assert "step 4 · 1.0s" in rendered
 
 
 @pytest.mark.docker

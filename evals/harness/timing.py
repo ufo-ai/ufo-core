@@ -23,6 +23,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.models import Message, ToolUseBlock
+
 MODEL_ROUND_STEP = "_stream_once"
 TOOL_CALL_STEP = "_dispatch_step"
 SLOWEST_STEPS = 12
@@ -41,14 +43,23 @@ class TurnStep(BaseModel):
     started_at_epoch_ms: int | None = None
     completed_at_epoch_ms: int | None = None
     call_id: str = ""
+    call_ids: tuple[str, ...] = ()
+    tokens: int | None = Field(default=None, ge=0)
+    cost_micro_usd: int | None = Field(default=None, ge=0)
 
 
 class StepTiming(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    turn_id: UUID | None = None
+    number: int = Field(default=0, ge=0)
     kind: StepKind
     name: str
     duration_ms: int = Field(ge=0)
+    tokens: int | None = Field(default=None, ge=0)
+    cost_micro_usd: int | None = Field(default=None, ge=0)
+    message_index: int | None = Field(default=None, ge=1)
+    call_id: str = ""
 
 
 class TurnTiming(BaseModel):
@@ -96,30 +107,88 @@ def turn_timing(
     tool_names: Mapping[str, str],
     tokens: int = 0,
     cost_micro_usd: int = 0,
+    messages: tuple[Message, ...] = (),
 ) -> TurnTiming:
     """One turn's timing from its durable steps, with each tool call named by the transcript entry
     its recorded call id belongs to."""
     timed = tuple(step for step in steps if step.started_at_epoch_ms is not None)
     dispatches = tuple(step for step in steps if step.function_name.endswith(TOOL_CALL_STEP))
     entries: list[StepTiming] = []
-    for step in steps:
+    assistant_messages = tuple(
+        index for index, message in enumerate(messages, 1) if message.role == "assistant"
+    )
+    tool_messages = {
+        block.id: index
+        for index, message in enumerate(messages, 1)
+        if not isinstance(message.content, str)
+        for block in message.content
+        if isinstance(block, ToolUseBlock)
+    }
+    model_steps = tuple(
+        step
+        for step in steps
+        if step.function_name.endswith(MODEL_ROUND_STEP)
+        and step.started_at_epoch_ms is not None
+        and step.completed_at_epoch_ms is not None
+    )
+    aligned_model_messages = (
+        assistant_messages[-len(model_steps) :]
+        if model_steps and len(assistant_messages) >= len(model_steps)
+        else ()
+    )
+    model_index = 0
+    for number, step in enumerate(steps, 1):
         if step.started_at_epoch_ms is None or step.completed_at_epoch_ms is None:
             continue
         duration = max(step.completed_at_epoch_ms - step.started_at_epoch_ms, 0)
         if step.function_name.endswith(TOOL_CALL_STEP):
             entries.append(
                 StepTiming(
+                    turn_id=turn_id,
+                    number=number,
                     kind="tool_call",
                     name=tool_names.get(step.call_id, UNNAMED_TOOL),
                     duration_ms=duration,
+                    tokens=step.tokens,
+                    cost_micro_usd=step.cost_micro_usd,
+                    message_index=tool_messages.get(step.call_id),
+                    call_id=step.call_id,
                 )
             )
         elif step.function_name.endswith(MODEL_ROUND_STEP):
-            entries.append(StepTiming(kind="model_round", name="model round", duration_ms=duration))
+            exact_messages = {
+                tool_messages[call_id] for call_id in step.call_ids if call_id in tool_messages
+            }
+            message_index = (
+                exact_messages.pop()
+                if len(exact_messages) == 1
+                else aligned_model_messages[model_index]
+                if aligned_model_messages
+                else None
+            )
+            entries.append(
+                StepTiming(
+                    turn_id=turn_id,
+                    number=number,
+                    kind="model_round",
+                    name="model round",
+                    duration_ms=duration,
+                    tokens=step.tokens,
+                    cost_micro_usd=step.cost_micro_usd,
+                    message_index=message_index,
+                )
+            )
+            model_index += 1
         else:
             entries.append(
                 StepTiming(
-                    kind="other", name=step.function_name.rsplit(".", 1)[-1], duration_ms=duration
+                    turn_id=turn_id,
+                    number=number,
+                    kind="other",
+                    name=step.function_name.rsplit(".", 1)[-1],
+                    duration_ms=duration,
+                    tokens=step.tokens,
+                    cost_micro_usd=step.cost_micro_usd,
                 )
             )
     starts = tuple(

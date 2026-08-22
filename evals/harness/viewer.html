@@ -269,10 +269,21 @@ pre {
 .artifact-preview-title { font: 600 11px var(--mono); overflow-wrap: anywhere; }
 .artifact-preview-frame { width: 100%; height: 100%; border: 0; background: #fff; }
 .call-grid { display: grid; gap: 9px; }
-.timing { width: 100%; border-collapse: collapse; font: 11px var(--mono); margin: 6px 0 12px; }
-.timing th, .timing td { border-bottom: 1px solid var(--line); padding: 3px 8px; text-align: left; }
+.timing { width: 100%; table-layout: fixed; border-collapse: collapse; font: 11px var(--mono); margin: 6px 0 12px; }
+.timing th, .timing td { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: left; overflow-wrap: anywhere; }
 .timing th { color: var(--muted); font-weight: 500; }
 .timing .num { text-align: right; }
+.timing-summary th:first-child { width: 25%; }
+.timing-steps th:nth-child(1) { width: 10%; }
+.timing-steps th:nth-child(2) { width: 32%; }
+.timing-steps th:nth-child(3) { width: 18%; }
+.timing-steps th:nth-child(4) { width: 18%; }
+.timing-steps th:nth-child(5) { width: 22%; }
+.step-link { padding: 0; border: 0; background: transparent; color: var(--blue); font: inherit; cursor: pointer; }
+.step-link:hover { text-decoration: underline; }
+.step-meta { margin-left: auto; color: var(--muted); font: 10px var(--mono); text-transform: none; letter-spacing: 0; }
+.call > summary .step-meta { float: right; margin-left: 12px; }
+.step-focus { border-color: var(--blue); }
 .trajectory-link { color: var(--blue); font: 11px var(--mono); text-decoration: none; }
 .trajectory-link:hover { text-decoration: underline; }
 .trajectory-head { padding: 18px 20px; border-bottom: 1px solid var(--line); }
@@ -280,7 +291,7 @@ pre {
 .trajectory-meta { color: var(--muted); font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
 .trajectory-body { padding: 20px; max-width: 1200px; }
 .message { margin: 9px 0; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
-.message-head { padding: 7px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.message-head { display: flex; align-items: center; gap: 12px; padding: 7px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
 .message-body { padding: 10px; }
 .message-body pre + pre { margin-top: 8px; }
 .empty { padding: 32px 20px; color: var(--muted); }
@@ -805,9 +816,30 @@ function paneMarkup(kind, run, report, item) {
     ${jsonSection('Other evidence', unrendered(evidence, CASE_EVIDENCE_KEYS))}
   </section>`;
 }
-function blockMarkup(block) {
+function stepTarget(step) {
+  if (!step) return '';
+  if (step.kind === 'tool_call' && step.call_id) return `tool-${encodeURIComponent(step.call_id)}`;
+  return step.message_index ? `message-${step.message_index}` : '';
+}
+function stepId(step) {
+  if (!step || !step.number) return '';
+  const turn = (step.turn_id || '').slice(0, 8);
+  return `${turn ? turn + ' · ' : ''}#${step.number}`;
+}
+function stepMeta(step) {
+  if (!step) return '';
+  return [
+    step.number ? `step ${step.number}` : '',
+    duration(step.duration_ms),
+    step.tokens == null ? '' : `${step.tokens.toLocaleString()} tokens`,
+    step.cost_micro_usd == null ? '' : usd(step.cost_micro_usd),
+  ].filter(Boolean).join(' · ');
+}
+function blockMarkup(block, steps) {
   if (block.type === 'tool_use') {
-    return `<details class="call"><summary>Tool call · ${h(block.name)}</summary><div class="call-body"><pre>${h(JSON.stringify(block.input, null, 2))}</pre></div></details>`;
+    const step = steps.find(item => item.kind === 'tool_call' && item.call_id === block.id);
+    const id = stepTarget(step);
+    return `<details class="call"${id ? ` id="${h(id)}"` : ''}><summary>Tool call · ${h(block.name)}${step ? `<span class="step-meta">${h(stepMeta(step))}</span>` : ''}</summary><div class="call-body"><pre>${h(JSON.stringify(block.input, null, 2))}</pre></div></details>`;
   }
   if (block.type === 'tool_result') {
     const content = typeof block.content === 'string'
@@ -819,14 +851,19 @@ function blockMarkup(block) {
   }
   return `<pre>${h(block.text || '')}</pre>`;
 }
-function messageMarkup(message, index) {
+function messageMarkup(message, index, steps) {
+  const messageIndex = index + 1;
+  const step = steps.find(item => item.kind === 'model_round' && item.message_index === messageIndex);
   const content = typeof message.content === 'string'
     ? `<pre>${h(message.content)}</pre>`
-    : (message.content || []).map(blockMarkup).join('');
-  return `<article class="message"><div class="message-head">${index + 1} · ${h(message.role)}</div><div class="message-body">${content}</div></article>`;
+    : (message.content || []).map(block => blockMarkup(block, steps)).join('');
+  const id = stepTarget(step);
+  return `<article class="message"${id ? ` id="${h(id)}"` : ''}><div class="message-head"><span>${messageIndex} · ${h(message.role)}</span>${step ? `<span class="step-meta">${h(stepMeta(step))}</span>` : ''}</div><div class="message-body">${content}</div></article>`;
 }
-function messagesMarkup(messages) {
-  return messages.length ? messages.map(messageMarkup).join('') : '<div class="empty">No messages.</div>';
+function messagesMarkup(messages, steps = []) {
+  return messages.length
+    ? messages.map((message, index) => messageMarkup(message, index, steps)).join('')
+    : '<div class="empty">No messages.</div>';
 }
 function duration(ms) {
   if (ms == null) return '—';
@@ -836,7 +873,7 @@ function duration(ms) {
   return `${minutes}m ${Math.round((ms % 60000) / 1000)}s`;
 }
 
-function timingMarkup(timing) {
+function timingMarkup(timing, linked = false) {
   if (!timing) return '';
   const turns = timing.turns || [];
   const slowest = timing.slowest || [];
@@ -844,29 +881,35 @@ function timingMarkup(timing) {
     return `<div class="section"><div class="section-title">Latency</div><pre>${h(duration(timing.wall_ms))} wall${timing.error ? ` · ${h(timing.error)}` : ''}</pre></div>`;
   }
   const rows = turns.map(turn => `<tr>
-      <td>${h(turn.role)} ${h((turn.turn_id || '').slice(0, 8))}</td>
+      <td>${h(turn.role)}${linked ? '' : ` ${h((turn.turn_id || '').slice(0, 8))}`}</td>
       <td class="num">${h(duration(turn.span_ms))}</td>
       <td class="num">${h(duration(turn.model_round_ms))}</td>
       <td class="num">${h(duration(turn.tool_call_ms))}</td>
-      <td class="num">${h(duration(turn.unaccounted_ms))}</td>
-      <td class="num">${h(turn.rounds)}</td>
-      <td class="num">${h(turn.tool_calls)}</td>
       <td class="num">${h(turn.tokens)}</td>
-      <td class="num">${h(((turn.cost_micro_usd || 0) / 1e6).toFixed(2))}</td>
+      <td class="num">${h(usd(turn.cost_micro_usd || 0))}</td>
     </tr>`).join('');
-  const steps = slowest.map(step => `<tr>
+  const steps = slowest.map(step => {
+    const target = linked ? stepTarget(step) : '';
+    const id = linked && step.number != null ? `#${step.number}` : stepId(step) || '—';
+    return `<tr>
+      <td>${target ? `<button type="button" class="step-link" data-step-target="${h(target)}" title="${h(stepId(step))}">${h(id)}</button>` : h(id)}</td>
       <td>${h(step.name)}</td>
-      <td>${h(step.kind)}</td>
       <td class="num">${h(duration(step.duration_ms))}</td>
-    </tr>`).join('');
+      <td class="num">${step.tokens == null ? '—' : h(step.tokens.toLocaleString())}</td>
+      <td class="num">${step.cost_micro_usd == null ? '—' : h(usd(step.cost_micro_usd))}</td>
+    </tr>`;
+  }).join('');
   return `<div class="section"><div class="section-title">Latency · ${h(duration(timing.wall_ms))} wall</div>
-    <table class="timing"><thead><tr><th>turn</th><th class="num">span</th><th class="num">model</th><th class="num">tools</th><th class="num">other</th><th class="num">rounds</th><th class="num">calls</th><th class="num">tokens</th><th class="num">USD</th></tr></thead><tbody>${rows}</tbody></table>
-    ${slowest.length ? `<div class="section-title">Slowest steps</div><table class="timing"><thead><tr><th>step</th><th>kind</th><th class="num">duration</th></tr></thead><tbody>${steps}</tbody></table>` : ''}
+    <table class="timing timing-summary"><thead><tr><th>turn</th><th class="num">wall</th><th class="num">model</th><th class="num">tools</th><th class="num">tokens</th><th class="num">cost</th></tr></thead><tbody>${rows}</tbody></table>
+    ${slowest.length ? `<div class="section-title">Slowest steps</div><table class="timing timing-steps"><thead><tr><th>id</th><th>step</th><th class="num">duration</th><th class="num">tokens</th><th class="num">cost</th></tr></thead><tbody>${steps}</tbody></table>` : ''}
     ${timing.error ? `<pre>${h(timing.error)}</pre>` : ''}</div>`;
 }
 
 function trajectoryMarkup(kind, run, report, item, attempt, index) {
   const trajectory = attempt.trajectory;
+  const steps = (attempt.timing && attempt.timing.turns || [])
+    .filter(turn => turn.turn_id === trajectory.turn_id)
+    .flatMap(turn => turn.steps || []);
   const agentPrompt = run.agent_prompt
     ? `<details class="attempt"><summary>Agent base prompt · ${h(run.agent)}</summary><div class="attempt-body"><pre>${h(run.agent_prompt)}</pre></div></details>`
     : '';
@@ -879,9 +922,9 @@ function trajectoryMarkup(kind, run, report, item, attempt, index) {
       ${trajectory.error ? `<div class="reason negative">${h(trajectory.error)}</div>` : ''}
       ${agentPrompt}
       ${resourcesMarkup(attempt)}
-      ${timingMarkup(attempt.timing)}
+      ${timingMarkup(attempt.timing, true)}
       ${compactionsMarkup(attempt)}
-      <div class="section"><div class="section-title">Stored transcript snapshot · ${(trajectory.messages || []).length} messages</div>${messagesMarkup(trajectory.messages || [])}</div>
+      <div class="section"><div class="section-title">Stored transcript snapshot · ${(trajectory.messages || []).length} messages</div>${messagesMarkup(trajectory.messages || [], steps)}</div>
     </div>
   </section>`;
 }
@@ -977,6 +1020,13 @@ function render() {
   document.querySelectorAll('[data-case]').forEach(node => node.addEventListener('click', () => { state.caseName = node.dataset.case; state.trajectory = ''; render(); }));
   document.querySelectorAll('[data-filter]').forEach(node => node.addEventListener('click', () => { state.filter = node.dataset.filter; state.caseName = ''; state.trajectory = ''; render(); }));
   document.querySelectorAll('[data-preview]').forEach(node => node.addEventListener('click', () => openArtifactPreview(node.dataset.preview)));
+  document.querySelectorAll('[data-step-target]').forEach(node => node.addEventListener('click', () => {
+    const target = document.getElementById(node.dataset.stepTarget);
+    if (!target) return;
+    document.querySelectorAll('.step-focus').forEach(item => item.classList.remove('step-focus'));
+    target.classList.add('step-focus');
+    target.scrollIntoView({behavior: 'smooth', block: 'center'});
+  }));
   document.getElementById('close-preview').addEventListener('click', () => document.getElementById('artifact-preview').close());
   document.getElementById('artifact-preview').addEventListener('close', event => { event.target.querySelector('iframe').srcdoc = ''; });
   document.getElementById('scoreboard').addEventListener('toggle', event => { state.scoresOpen = event.target.open; persist(); });
