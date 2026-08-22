@@ -581,22 +581,27 @@ function NewObject({
 }
 
 /** One object's record, beside the screen that opened it: the record-panel heading and way out
- *  every opened record wears, over the record's own groups. */
+ *  every opened record wears, over the record's own groups. `lead` stands above those groups —
+ *  the one thing a kind can show that its facts cannot, a site's own live page — supplied by the
+ *  screen that knows the kind, so this panel stays ignorant of any one of them. */
 export function ObjectDetail({
   agentId,
   kind,
   name,
+  lead,
   onOpen,
   onBack,
 }: {
   agentId: string;
   kind: string;
   name: string;
+  lead?: ReactNode;
   onOpen: (at: ObjectAddress) => void;
   onBack: () => void;
 }) {
   return (
     <RecordPanel title={name} onClose={onBack}>
+      {lead}
       <ObjectRecord agentId={agentId} kind={kind} name={name} onOpen={onOpen} onBack={onBack} />
     </RecordPanel>
   );

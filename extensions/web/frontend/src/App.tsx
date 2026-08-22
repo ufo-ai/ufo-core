@@ -62,8 +62,6 @@ import {
 } from "@/lib/audience";
 import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Pane, PaneHeader } from "@/kernel/pane";
-import { usePanelRead } from "@/kernel/panel";
-import type { HomepageRead } from "@/views/AgentPane";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { MainAgentProvider } from "@/lib/mainAgent";
@@ -985,53 +983,6 @@ function ApplicationsFlyout({
   );
 }
 
-const PREVIEW_PAGE_WIDTH = 1280;
-const PREVIEW_PAGE_HEIGHT = 800;
-const PREVIEW_SCALE = 0.175;
-
-/** The site, live in the sidebar at a glance's size: the main app's homepage in the frame the apps
- *  screen trusts whole — the page is the app's own and carries the sandbox around the
- *  model-authored bytes itself, so the iframe takes no sandbox attribute — laid out at a desktop
- *  page's width and scaled to the column. The frame takes no pointer: at this size the page is a
- *  picture, and the card is one act, the way to the screen where the site stands full-size. Drawn
- *  only while a homepage is bound; a build in flight is the apps screen's wait, not the sidebar's. */
-function SitePreview({
-  agent,
-  collapsed,
-  onOpen,
-}: {
-  agent: Agent;
-  collapsed: boolean;
-  onOpen: () => void;
-}) {
-  const site = usePanelRead<HomepageRead>("/agents/" + agent.id + "/homepage");
-  if (site.phase !== "ready" || site.payload.state !== "set") return null;
-  return (
-    <div className={cn("shrink-0 px-sm", collapsed && "hidden")}>
-      <div className="relative aspect-[16/10] w-full overflow-hidden rounded-panel border border-edge">
-        <iframe
-          src={site.payload.url}
-          title={agentName(agent.name) + " homepage preview"}
-          tabIndex={-1}
-          className="pointer-events-none absolute left-0 top-0 border-0"
-          style={{
-            width: PREVIEW_PAGE_WIDTH,
-            height: PREVIEW_PAGE_HEIGHT,
-            transform: "scale(" + PREVIEW_SCALE + ")",
-            transformOrigin: "top left",
-          }}
-        />
-        <button
-          type="button"
-          aria-label={agentName(agent.name) + " homepage"}
-          onClick={onOpen}
-          className="absolute inset-0 rounded-panel border-0 bg-transparent"
-        />
-      </div>
-    </div>
-  );
-}
-
 /** The shell's one nav: the mark and its fold control, search, the new-conversation act, the
  *  Applications section with the cross-app reads under it, the conversations rail, and the
  *  workspace-wide destinations at the foot. At a desk width it is the left column, folding to a
@@ -1212,13 +1163,6 @@ function WorkspaceSidebar({
           onRetry={onRetry}
         />
       </div>
-      {mainAgent ? (
-        <SitePreview
-          agent={mainAgent}
-          collapsed={collapsed}
-          onOpen={() => onOpenAgent(mainAgent.id)}
-        />
-      ) : null}
       <ul className="m-0 mt-auto flex shrink-0 list-none flex-col gap-px px-sm py-0">
         <li>
           <NavRow

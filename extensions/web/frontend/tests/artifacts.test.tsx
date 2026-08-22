@@ -1028,3 +1028,60 @@ test("the scope toggle judges sites by their owner", async () => {
   expect(await screen.findByText("docs-abc")).toBeTruthy();
   expect(screen.getByText("mine-site")).toBeTruthy();
 });
+
+const DOCS_DETAIL = {
+  ...SITE_KIND,
+  name: "docs-abc",
+  summary: "docs · workspace · sandbox port 3000",
+  spec: null,
+  status: { visibility: "workspace", site_url: DOCS_URL, owner_email: "member@example.com" },
+  links: [],
+  created_at: "2026-07-01T09:00:00Z",
+  updated_at: null,
+};
+
+test("an opened site leads its record with the live page, full width and interactive", async () => {
+  wire({
+    "/objects/site/docs-abc": () => json(DOCS_DETAIL),
+    "/objects/site": () => objectIndex(SITE_KIND, [DOCS]),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" place={{ open: "object/site/docs-abc" }} />
+    </MainAgentProvider>,
+  );
+
+  const record = await screen.findByRole("complementary", { name: "docs-abc" });
+  const frame = await within(record).findByTitle("docs-abc");
+  expect(frame.tagName).toBe("IFRAME");
+  expect(frame.getAttribute("src")).toBe(DOCS_URL);
+  expect(frame.hasAttribute("sandbox")).toBe(false);
+  expect(frame.className).not.toContain("pointer-events-none");
+  expect(frame.style.transform).toContain("scale");
+  const view = frame.parentElement;
+  expect(view?.className).toContain("w-full");
+});
+
+test("an opened site the frame cannot reach leads with no frame", async () => {
+  wire({
+    "/objects/site/notes-def": () =>
+      json({
+        ...DOCS_DETAIL,
+        name: "notes-def",
+        summary: "notes · private · sandbox port 3001",
+        status: { visibility: "private", owner_email: "member@example.com" },
+      }),
+    "/objects/site": () => objectIndex(SITE_KIND, [NOTES]),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" place={{ open: "object/site/notes-def" }} />
+    </MainAgentProvider>,
+  );
+
+  const record = await screen.findByRole("complementary", { name: "notes-def" });
+  await within(record).findByText("site");
+  expect(record.querySelector("iframe")).toBeNull();
+});

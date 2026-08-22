@@ -1,5 +1,5 @@
 import { IconWorldWww } from "@tabler/icons-react";
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/filter";
@@ -261,6 +261,44 @@ function objectAt(open: string | undefined): ObjectAddress | null {
   return cut < 0 ? null : { kind: rest.slice(0, cut), name: rest.slice(cut + 1) };
 }
 
+const SITE_VIEW_PAGE_WIDTH = 1280;
+const SITE_VIEW_PAGE_HEIGHT = 800;
+
+/** The site itself at the head of its record: the page the shelf's card only pictures, live and
+ *  taking the pointer, laid out at a desktop page's width and scaled to the record column — the
+ *  column is fluid, so the scale follows its measure. The frame is the site surface's own trusted
+ *  page and carries the sandbox around the model-authored bytes itself, so this iframe takes no
+ *  sandbox attribute, for the reason the apps screen's frame states. */
+function SiteView({ url, name }: { url: string; name: string }) {
+  const [width, setWidth] = useState(SITE_VIEW_PAGE_WIDTH);
+  const measure = useCallback((node: HTMLDivElement | null) => {
+    if (node === null) return undefined;
+    const read = () => setWidth(node.clientWidth || SITE_VIEW_PAGE_WIDTH);
+    read();
+    const watcher = new ResizeObserver(read);
+    watcher.observe(node);
+    return () => watcher.disconnect();
+  }, []);
+  return (
+    <div
+      ref={measure}
+      className="relative aspect-[16/10] w-full shrink-0 overflow-hidden rounded-panel border border-edge"
+    >
+      <iframe
+        src={url}
+        title={name}
+        className="absolute left-0 top-0 border-0"
+        style={{
+          width: SITE_VIEW_PAGE_WIDTH,
+          height: SITE_VIEW_PAGE_HEIGHT,
+          transform: "scale(" + width / SITE_VIEW_PAGE_WIDTH + ")",
+          transformOrigin: "top left",
+        }}
+      />
+    </div>
+  );
+}
+
 export function Artifacts({
   place,
   onPlace,
@@ -304,6 +342,11 @@ export function Artifacts({
   );
 
   const at = objectAt(place.open);
+  const openedSite =
+    at !== null && at.kind === SITE_KIND && held.phase === "ready"
+      ? held.payload.objects.find((row) => row.name === at.name)
+      : undefined;
+  const siteUrl = typeof openedSite?.site_url === "string" ? openedSite.site_url : null;
   const detail = useBeside(
     at !== null && at.name !== null && mainAgent ? (
       <ObjectDetail
@@ -311,6 +354,7 @@ export function Artifacts({
         agentId={mainAgent.id}
         kind={at.kind}
         name={at.name}
+        lead={siteUrl && at.name ? <SiteView url={siteUrl} name={at.name} /> : undefined}
         onOpen={(next) => onPlace({ open: OBJECT_PREFIX + next.kind + "/" + (next.name ?? "") })}
         onBack={() => onPlace({ open: undefined })}
       />
