@@ -1,0 +1,30 @@
+name = "asd-writing-single-rules"
+base = "cdbb70520d65f22c6e9e4a3a6ab62531c4de82b5"
+suites = ["asd_writing", "report_digest"]
+repeats = 3
+concurrency = 1
+max_stacks = 3
+budget_usd = 60.0
+est_usd_per_case = 0.10
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5542/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+
+[[arm]]
+name = "ste"
+[arm.files]
+"extensions/report_digest/ufo_ext_report_digest/skills/report-digest/SKILL.md" = "arms/ste-report-digest-skill.md"
+
+[[arm]]
+name = "rank"
+[arm.files]
+"extensions/report_digest/ufo_ext_report_digest/skills/report-digest/SKILL.md" = "arms/rank-report-digest-skill.md"
+
+[[arm]]
+name = "glance"
+[arm.files]
+"extensions/report_digest/ufo_ext_report_digest/skills/report-digest/SKILL.md" = "arms/glance-report-digest-skill.md"

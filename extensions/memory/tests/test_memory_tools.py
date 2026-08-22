@@ -20,8 +20,11 @@ from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
-from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, MemoryObjects
+from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, SUMMARY_MAX, MemoryObjects
 from ufo_ext_memory.store import (
+    MEMORY_BODY_MAX_CHARS,
+    OVERVIEW_BODY_MAX_CHARS,
+    SEMANTIC,
     MemoryIndexer,
     MemoryStore,
     MemoryWrite,
@@ -363,14 +366,63 @@ async def test_recall_hook_observes_search_failure_without_denial(
     assert record.ufo["error_class"] == error_name[: memory.MAX_RECALL_ERROR_CLASS_CHARS]
 
 
-def test_memory_write_rejects_an_oversized_body() -> None:
-    with pytest.raises(ValidationError):
-        memory.MemoryWrite(subject="shared", body="x" * (memory.MEMORY_BODY_MAX_CHARS + 1))
+async def test_a_body_commits_to_the_budget_of_its_own_class(db: None) -> None:
+    """A wiki row and the consolidated Overview item are read in different ways and written to
+    different lengths, so the commit seam bounds a body by the class it carries. One number over
+    both measures a paragraph against a row, and the Overview summary is what it refuses — the band
+    of the wiki that would then stand empty however often the consolidation job ran."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        store = _store(StubEmbed(vec((0, 1.0))))
+        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body="r" * MEMORY_BODY_MAX_CHARS))
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body="o" * OVERVIEW_BODY_MAX_CHARS,
+                item_class=SEMANTIC,
+            )
+        )
+        assert sorted(len(body) for body in await _live_bodies(SHARED_SUBJECT)) == [
+            MEMORY_BODY_MAX_CHARS,
+            OVERVIEW_BODY_MAX_CHARS,
+        ]
+
+    with pytest.raises(ValidationError) as long_row:
+        MemoryWrite(subject=SHARED_SUBJECT, body="r" * (MEMORY_BODY_MAX_CHARS + 1))
+    assert f"a fact body runs to {MEMORY_BODY_MAX_CHARS} characters" in str(long_row.value)
+
+    with pytest.raises(ValidationError) as long_overview:
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="o" * (OVERVIEW_BODY_MAX_CHARS + 1),
+            item_class=SEMANTIC,
+        )
+    assert f"a semantic body runs to {OVERVIEW_BODY_MAX_CHARS} characters" in str(
+        long_overview.value
+    )
 
 
 def test_memory_update_input_rejects_an_oversized_body() -> None:
     with pytest.raises(ValidationError):
         memory.MemoryUpdateInput(body="x" * (memory.MEMORY_BODY_MAX_CHARS + 1))
+
+
+def test_memory_update_offers_the_item_classes_an_agent_records() -> None:
+    """A hand-written ledger reached the wiki's Overview because `item_class` took whatever class
+    the model named. `semantic` is the band the consolidation job writes from facts that agree —
+    which is what the page tells the member it is — so the tool offers what an agent records and
+    that job stays the one producer."""
+    with pytest.raises(ValidationError) as refused:
+        memory.MemoryUpdateInput(
+            body="a ledger of the whole sweep",
+            item_class="semantic",
+            user_description=TOOL_NARRATION,
+        )
+    assert refused.value.errors()[0]["loc"] == ("item_class",)
+    recorded = memory.MemoryUpdateInput(
+        body="Acme Corp — Moved the launch to March.", user_description=TOOL_NARRATION
+    )
+    assert recorded.item_class == "fact"
 
 
 async def _retire(body: str, superseded_by: UUID) -> None:
@@ -1199,7 +1251,7 @@ async def test_the_memory_kind_filters_and_orders_on_its_declared_fields(
             "memory_update",
             alice_ctx,
             body="alice prefers plaintext email",
-            item_class="semantic",
+            item_class="episodic",
             memory_kind="preference",
         )
         await _run(
@@ -1217,7 +1269,7 @@ async def test_the_memory_kind_filters_and_orders_on_its_declared_fields(
         ordered = await listed(order_by="memory_kind")
 
     assert {row["memory_kind"] for row in rows} == {"preference", "event"}
-    assert {row["item_class"] for row in rows} == {"semantic", "fact"}
+    assert {row["item_class"] for row in rows} == {"episodic", "fact"}
     assert {row["subject"] for row in rows} == {member_subject(alice)}
     assert [row["memory_kind"] for row in by_kind] == ["preference"]
     assert [row["item_class"] for row in by_class] == ["fact"]
@@ -1476,6 +1528,58 @@ async def test_list_recent_carries_each_row_subject(db: None, tmp_path: Path) ->
         ("a private note", member_subject(member)),
         ("a team note", "shared"),
     }
+
+
+@pytest.mark.asyncio
+async def test_a_row_written_before_the_budget_is_cut_back_to_a_whole_word(
+    db: None, tmp_path: Path
+) -> None:
+    """Every truncated row a member reads today measures 119 or 120 characters and ends on a
+    fragment — "requested trying 2x and then viewing screen…". The write budget keeps a compliant
+    row whole and this branch never fires for it; a row that predates the budget gives up its last
+    word instead of half of one."""
+    workspace_id = await _workspace()
+    member = uuid4()
+    dm = conversation_audience(member)
+    ctx = _tool_ctx(
+        _ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))), dm),
+        member,
+        tmp_path,
+        workspace_id=workspace_id,
+        audience=dm,
+    )
+    body = (
+        "Rob Ryan described the direction as correct but probably slightly overshot, requested "
+        "trying 2x and then viewing screen sizes again."
+    )
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(memory_item).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    subject=member_subject(member),
+                    body=body,
+                    item_class="fact",
+                    memory_kind="preference",
+                    confidence=5,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        with agent(uuid4()):
+            page = await MemoryObjects().member_page(
+                ctx.ext,
+                member_id=member,
+                admin=False,
+                query=ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields),
+            )
+
+    summary = page.rows[0].summary
+    assert len(summary) <= SUMMARY_MAX
+    assert summary.endswith("…")
+    assert body.startswith(summary.removesuffix("…"))
+    assert summary.removesuffix("…")[-1].isalpha()
 
 
 @pytest.mark.asyncio

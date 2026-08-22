@@ -220,6 +220,7 @@ SAMPLE_SEARCH_TEXT = "the sample search backend answers a canned hit"
 SAMPLE_SEARCH_ANSWER = "the sample search backend answers directly"
 SAMPLE_MEMORY_TEXT = "the sample memory provider returns a scoped result"
 SAMPLE_MEMORY_KIND = "fact"
+SAMPLE_MEMORY_BODY_MAX_CHARS = 64
 MEMORY_SEARCH_KEY = "memory_search"
 MEMORY_RECENT_KEY = "memory_recent"
 MEMORY_SEARCH_PROVIDER = "sample"
@@ -1050,6 +1051,9 @@ class SampleMemorySearch:
 
     def listable_kinds(self) -> tuple[str, ...]:
         return (SAMPLE_MEMORY_KIND,)
+
+    def body_max_chars(self) -> int:
+        return SAMPLE_MEMORY_BODY_MAX_CHARS
 
     async def list_recent(
         self,

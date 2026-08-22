@@ -76,7 +76,14 @@ TYPE_DIVERSITY_RATIO = 0.6
 MAX_CONFIDENCE = 10
 DEFAULT_CONFIDENCE = 5
 MEMORY_INVENTORY_LIMIT = 500
-MEMORY_BODY_MAX_CHARS = 4_000
+MEMORY_BODY_MAX_CHARS = 115
+"""How long a committed row runs: one row of the member's wiki. A subject they recognise takes 30
+characters, the statement about it 85. Every object index in this repo renders a row at 120, so a
+body written to this budget reaches them whole and the ellipsis never appears."""
+OVERVIEW_BODY_MAX_CHARS = 900
+"""How long the consolidated Overview body runs: the one memory text a member reads whole rather
+than scans, so what bounds it is a paragraph and not the row the wiki's lists are scanned as. 900
+characters is what the 150 words the consolidation prompt asks for measure."""
 HALFLIFE_DAYS: dict[str, float] = {
     "fact": 365.0,
     "preference": 180.0,
@@ -88,9 +95,18 @@ HALFLIFE_DAYS: dict[str, float] = {
 logger = logging.getLogger(__name__)
 
 ItemClass = Literal["fact", "episodic", "semantic"]
-FACT: ItemClass = "fact"
+FACT: Literal["fact"] = "fact"
 EPISODIC: ItemClass = "episodic"
 SEMANTIC: ItemClass = "semantic"
+
+BODY_MAX_CHARS: dict[ItemClass, int] = {
+    FACT: MEMORY_BODY_MAX_CHARS,
+    EPISODIC: MEMORY_BODY_MAX_CHARS,
+    SEMANTIC: OVERVIEW_BODY_MAX_CHARS,
+}
+"""What each class of body is written to be, which is what the commit holds it to. A fact and an
+episodic breadcrumb are rows in a list a member scans; the Overview summary is a paragraph they
+read whole. One bound over both is one of the two shapes measured against the other's budget."""
 
 MemoryKind = Literal["fact", "preference", "decision", "event", "task"]
 KIND_FACT: MemoryKind = "fact"
@@ -164,6 +180,18 @@ mem_page = sa.Table(
 
 def recall_subjects(audience: Audience) -> frozenset[str]:
     return audience_subjects(audience)
+
+
+def clip_to_word(text: str, limit: int) -> str:
+    """`text` cut back to the last whole word that fits `limit`, with the ellipsis inside the count.
+    Text already inside the limit stands exactly as written. Every writer on this path is told its
+    budget, so a cut is what a model that overran leaves a member: half a word tells them less than
+    the word before it and costs the same line."""
+    if len(text) <= limit:
+        return text
+    kept = text[: limit - 1]
+    cut = kept.rfind(" ")
+    return (kept if cut < 0 else kept[:cut]).rstrip(" ,;:—-") + "…"
 
 
 def _granted_link(source_ids: frozenset[UUID]) -> ColumnElement[bool]:
@@ -296,10 +324,15 @@ class MemoryWrite(BaseModel):
     a derivation distilled it from, while `created_from_page_revision` binds it to that page
     version; `source_ref` is a free-form note for tool writes, `as_of` says when the source
     information was current, `memory_kind` selects the recency half-life
-    (fact/preference/decision/event/task), and `confidence` (1..10) scales a fact's decayed rank."""
+    (fact/preference/decision/event/task), and `confidence` (1..10) scales a fact's decayed rank.
+
+    The body is held to its own class's budget in `BODY_MAX_CHARS`, since what a member does with a
+    row and what they do with the Overview paragraph are different acts with different lengths. It
+    is a bound and never a cut: every writer on this path is told its budget, so a body that ran
+    past it is a writer that ignored one, and `clip_to_word` is where a caller decides to trim."""
 
     subject: str
-    body: str = Field(max_length=MEMORY_BODY_MAX_CHARS)
+    body: str
     item_class: ItemClass = FACT
     memory_kind: MemoryKind = KIND_FACT
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
@@ -308,6 +341,15 @@ class MemoryWrite(BaseModel):
     created_from_page_revision: int | None = None
     source_id: UUID | None = None
     as_of: datetime | None = None
+
+    @model_validator(mode="after")
+    def body_is_within_its_class_budget(self) -> Self:
+        limit = BODY_MAX_CHARS[self.item_class]
+        if len(self.body) > limit:
+            raise ValueError(
+                f"a {self.item_class} body runs to {limit} characters, not {len(self.body)}"
+            )
+        return self
 
     @model_validator(mode="after")
     def page_origin_is_complete(self) -> Self:
@@ -561,13 +603,18 @@ class MemoryStore:
     readable_page_states: ReadablePageStates | None = None
     readable_source_ids: ReadableSourceIds | None = None
 
-    async def commit(self, write: MemoryWrite) -> None:
-        """Persist one memory_item with no derived state: embedding_digest stays NULL, marking the
-        row due for the index job — the sole producer of chunks and embeddings. The id is
-        content-addressed over `(workspace, subject, item_class, body)`, so the same fact learned
-        from two sources is one row, not two; each page that derived it is recorded as an additive
-        `memory_source` link, one per page, and the row's own `(page, revision, source)` records
-        the derivation it currently binds to. Re-committing upserts the decay inputs in place rather
+    async def commit(self, write: MemoryWrite) -> UUID:
+        """Persist one memory_item with no derived state, and answer the row it landed on:
+        embedding_digest stays NULL, marking the row due for the index job — the sole producer of
+        chunks and embeddings. The id is content-addressed over
+        `(workspace, subject, item_class, body)`, so the same fact learned from two sources is one
+        row, not two; each page that derived it is recorded as an additive `memory_source` link, one
+        per page, and the row's own `(page, revision, source)` records the derivation it currently
+        binds to. The id comes back because a caller deriving a whole page's facts is the only thing
+        that knows which rows that page still stands behind, and `supersede_page_facts` retires the
+        rest by exactly that answer.
+
+        Re-committing upserts the decay inputs in place rather
         than accumulating a duplicate recallable row; a re-commit that binds it to another page
         revision makes it due again, since whether that revision may be published is the index job's
         question to answer, while an identical re-commit at the same binding leaves the existing
@@ -676,8 +723,9 @@ class MemoryStore:
                         },
                     )
                 )
+        return item_id
 
-    async def supersede_page_facts(self, page_id: UUID, revision: int | None) -> None:
+    async def supersede_page_facts(self, page_id: UUID, kept: frozenset[UUID] | None) -> None:
         """Retire what an earlier state of one page derived, by the link that page left — not by the
         fact's row. A fact learned from several feeds is one row a reader reaches through any of its
         `memory_source` links, keyed one per page it was derived from, so retiring one page drops
@@ -692,18 +740,23 @@ class MemoryStore:
         primary lands on the oldest surviving link anyway, and recall fences that binding by
         revision until the mirror catches up rather than serving a stale one.
 
-        A gone page (`revision` None) retires every link from it; a re-derived page retires only its
-        link at a stale revision, since `commit` already refreshed that page's link at the new one.
-        This is the only path that removes a page-derived memory, and the fact deriver its only
-        caller. Affected rows are locked in id order so concurrent retirements over different pages
-        of the same fact serialize on the row rather than racing its re-point; a second call over
-        the same revision finds no stale link, so a replayed batch retires each exactly once."""
+        A gone page (`kept` None) retires every link from it. Otherwise `kept` is the rows the
+        derivation just committed for this page, and every other link from it goes — the page's own
+        latest reading is the whole of what it stands behind, whether the page moved revision or was
+        read a second time at the revision it already had. A rebuild is that second reading, and a
+        test on the revision could not see it: the statements it replaces sit at the very revision
+        it settles on. This is the only path that removes a page-derived memory, and the fact
+        deriver its only caller. Affected rows are locked in id order so concurrent retirements over
+        different pages of the same fact serialize on the row rather than racing its re-point; a
+        replay commits the same rows, so it names the same `kept` and finds no stale link."""
+        if kept is not None and not kept:
+            raise ValueError("a page that settled no fact retires nothing")
         stale: tuple[ColumnElement[bool], ...] = (
             memory_source.c.workspace_id == self.workspace_id,
             memory_source.c.page_id == page_id,
         )
-        if revision is not None:
-            stale = (*stale, memory_source.c.revision.is_distinct_from(revision))
+        if kept is not None:
+            stale = (*stale, memory_source.c.memory_item_id.not_in(kept))
         deleted: list[UUID] = []
         async with self.transaction() as connection:
             affected = sorted(

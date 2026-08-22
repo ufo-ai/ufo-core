@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -242,4 +242,69 @@ test("each memory is a row carrying its class and date, never its raw ref", asyn
     (screen.getByText(text).closest("tr") as HTMLTableRowElement).cells[2].textContent;
   expect(audience("prefers terse answers")).toBe("Only you");
   expect(audience("half-migrated note")).toBe("Unknown");
+});
+
+test("the correction field holds the bound the read states, and says what is left", async () => {
+  wire({
+    "/workspace/memory": () =>
+      json({
+        available: true,
+        kinds: ["fact"],
+        matches: [MATCH],
+        body_max_chars: 40,
+        older: null,
+        newer: null,
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByText("the deploy runs on EKS"));
+  const field = screen.getByDisplayValue("the deploy runs on EKS") as HTMLInputElement;
+  expect(field.getAttribute("maxlength")).toBe("40");
+  expect(screen.getByText("18 characters left")).toBeTruthy();
+
+  await userEvent.type(field, " in us-west-2, and also in eu-central-1");
+  expect(field.value).toBe("the deploy runs on EKS in us-west-2, and");
+  expect(screen.getByText("0 characters left")).toBeTruthy();
+});
+
+test("a memory past the bound opens the correction empty beside the text it corrects", async () => {
+  const overview =
+    "The zephyr protocol handshake rotates every hour, and each rotation issues a fresh nonce.";
+  const posted: string[] = [];
+  wire({
+    "/workspace/memory": () =>
+      json({
+        available: true,
+        kinds: ["semantic"],
+        matches: [{ ...MATCH, text: overview, kind: "semantic" }],
+        body_max_chars: 40,
+        older: null,
+        newer: null,
+      }),
+    "/intents": (_url: string, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).body);
+      return json({ applied: true, message: "" });
+    },
+  });
+  open();
+
+  await userEvent.click(await screen.findByText(overview));
+  const dialog = within(screen.getByRole("dialog"));
+  expect(
+    dialog.getByText(
+      "This memory is longer than a correction may run. Write the corrected statement.",
+    ),
+  ).toBeTruthy();
+  expect(dialog.getByText(overview)).toBeTruthy();
+
+  const field = dialog.getByLabelText("Memory") as HTMLInputElement;
+  expect(field.value).toBe("");
+  expect(dialog.getByText("40 characters left")).toBeTruthy();
+
+  await userEvent.type(field, "The handshake rotates every hour.");
+  expect(dialog.getByText("7 characters left")).toBeTruthy();
+  await userEvent.click(dialog.getByRole("button", { name: "Record correction" }));
+  await waitFor(() => expect(posted).toEqual(["The handshake rotates every hour."]));
+  expect(posted[0].length).toBeLessThanOrEqual(40);
 });

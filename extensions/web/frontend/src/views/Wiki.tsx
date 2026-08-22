@@ -18,6 +18,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { Dialog } from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -30,6 +31,7 @@ import { ObjectDetail, type ObjectAddress } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { BANDS, COLUMN, PageHeader } from "@/kernel/pane";
 import { Panel, PanelBlank, usePanelRead } from "@/kernel/panel";
+import { RebuildDialog } from "@/kernel/rebuild";
 import { RowLines } from "@/kernel/rows";
 import { isMemberAudience, SHARED_SUBJECT, useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
@@ -322,17 +324,22 @@ function usePresence() {
   return { present, report, updated: stamps.at(-1) ?? null };
 }
 
-/** The one control the page's own acts hang off, and the stamp saying how current it is. Rebuild
- *  re-reads every part: a topic is a live projection of `memory_item`, so a fresh read is the whole
- *  of what rebuilding can mean from a portal read. It does not re-run the consolidator — those
- *  summaries are written by its own hourly pass, which nothing here can bring forward. */
+/** The one control the page's own acts hang off, and the stamp saying how current it is.
+ *
+ *  The two acts are not the same act. Reload re-reads every part: a topic is a live projection of
+ *  `memory_item`, so a fresh read is the whole of what a portal read can do on its own. Rebuilding
+ *  the page facts asks the derivation pass to write those rows again from the pages they came from,
+ *  and it reaches nothing else — so the act is named for the band it reaches and the dialog states
+ *  the two bands it leaves alone. A control named for the page while it redoes one part of it reads
+ *  as a promise, and the rows it would quietly skip are the ones nothing can write a second time. */
 function Acts({
   updated,
-  onRebuild,
+  onReload,
 }: {
   updated: string | null;
-  onRebuild: () => void;
+  onReload: () => void;
 }) {
+  const [rebuilding, setRebuilding] = useState(false);
   return (
     <div className="flex items-center gap-md">
       {updated === null ? null : (
@@ -347,9 +354,34 @@ function Acts({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={onRebuild}>Rebuild</DropdownMenuItem>
+          <DropdownMenuItem onSelect={onReload}>Reload</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setRebuilding(true)}>
+            Rebuild page facts
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      <Dialog open={rebuilding} onOpenChange={setRebuilding}>
+        {rebuilding ? (
+          <RebuildDialog
+            title="Rebuild Page Facts"
+            action="Rebuild page facts"
+            verb="rebuild_page_facts"
+          >
+            <p className="m-0">
+              Rows derived from synced pages are written again from those pages, as the derivation
+              pass reaches each one. No row is dropped before its replacement is written.
+            </p>
+            <p className="m-0">
+              Overview summaries are not rebuilt. The consolidation pass writes them from facts that
+              agree, and re-forms them on its own as facts age into a cluster.
+            </p>
+            <p className="m-0">
+              Rows an app recorded in a conversation are not rebuilt. They came from conversations
+              that have ended, and nothing can write them a second time.
+            </p>
+          </RebuildDialog>
+        ) : null}
+      </Dialog>
     </div>
   );
 }
@@ -395,12 +427,7 @@ function Workspace({
         <div className="flex flex-col gap-2xs">
           <PageHeader
             title="Wiki"
-            action={
-              <Acts
-                updated={updated}
-                onRebuild={() => setReloads((run) => run + 1)}
-              />
-            }
+            action={<Acts updated={updated} onReload={() => setReloads((run) => run + 1)} />}
           />
           {viewer === null ? null : (
             <p className="m-0 text-label leading-chrome">{viewer}</p>
@@ -536,12 +563,7 @@ function Member({
         <div className="flex flex-col gap-2xs">
           <PageHeader
             title="Wiki"
-            action={
-              <Acts
-                updated={updated}
-                onRebuild={() => setReloads((run) => run + 1)}
-              />
-            }
+            action={<Acts updated={updated} onReload={() => setReloads((run) => run + 1)} />}
           />
           <Breadcrumb>
             <BreadcrumbList>

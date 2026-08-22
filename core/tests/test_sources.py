@@ -31,6 +31,7 @@ from ufo.ext.context import (
     context_for,
 )
 from ufo.ext.manifest import (
+    PAGE_CHANGE_CURSOR_KEY,
     HookContext,
     HookOutcome,
     HookSpec,
@@ -41,7 +42,6 @@ from ufo.ext.manifest import (
 from ufo.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.jobs import (
     CORE_EXTENSION,
-    PAGE_CHANGE_CURSOR_KEY,
     PAGE_CHANGE_JOB,
     RESULT_DELIVERY_JOB,
     TURN_DISPATCH_JOB,

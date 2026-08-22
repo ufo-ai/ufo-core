@@ -19,7 +19,15 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
+from ufo_ext_memory.manifest import MemoryUpdateInput
+from ufo_ext_memory.store import (
+    MEMORY_BODY_MAX_CHARS,
+    MemoryIndexer,
+    MemoryStore,
+    MemoryWrite,
+    mem_page,
+    memory_item,
+)
 from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
 from ufo_ext_scheduled_tasks.schedules import ScheduleStore
 from ufo_ext_scheduled_tasks.tools import (
@@ -33,6 +41,7 @@ from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
+from ufo_ext_web.panels import FIRST_RUN_PROVIDERS, TOOLING_PREFIX, _tools_recorded
 from ufo_ext_web.surface import MEMORY_RECENT_LIMIT
 from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY
 
@@ -679,6 +688,29 @@ async def test_memory_listing_is_newest_first_and_bounded(portal, tmp_path: Path
     assert {"note 000", "note 001"}.isdisjoint(listed)
 
 
+async def test_the_memory_read_states_the_bound_the_writing_tool_holds_a_body_to(
+    db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The correction form on this page collects a body the memory tool refuses past, so the read
+    that draws the rows carries how long one may run — from the installed provider, which is what
+    enforces it. Both shapes state it, because either can be the read a correction is opened from,
+    and the number is the tool's own: a copy kept in the portal would drift the day the provider
+    moves its bound, and the member would meet the difference as a refusal."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    workspace_id, _agent_a, _agent_b = await _seed_workspace()
+    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    app = _mount_portal(tmp_path, with_memory=True)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
+        listing = (await client.get("/surface/web/workspace/memory", headers=headers)).json()
+        searched = (
+            await client.get("/surface/web/workspace/memory?q=anything", headers=headers)
+        ).json()
+
+    written = MemoryUpdateInput.model_json_schema()["properties"]["body"]["maxLength"]
+    assert listing["body_max_chars"] == written
+    assert searched["body_max_chars"] == written
+
+
 async def test_a_memoryless_deploy_never_claims_availability(
     db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -909,3 +941,25 @@ async def test_the_subject_fence_holds_on_every_page(
 
     walked = await _walk_older(client, "/surface/web/workspace/memory", headers)
     assert sorted(walked) == ["mine 0", "mine 1", "mine 2"]
+
+
+def test_the_first_run_records_every_pick_inside_the_row_it_is_drawn_as() -> None:
+    """A member may pick every tile. Naming all 21 runs to 208 characters and nine of the longer
+    labels to 120, so the sentence is built to the bound rather than refused after they continue."""
+    labels = tuple(tile.label for tile in FIRST_RUN_PROVIDERS)
+    for picked in range(1, len(labels) + 1):
+        body = _tools_recorded(labels[:picked], MEMORY_BODY_MAX_CHARS)
+        assert len(body) <= MEMORY_BODY_MAX_CHARS, (picked, len(body), body)
+        assert body.startswith(TOOLING_PREFIX)
+        memory_manifest_module.MemoryUpdateInput(
+            body=body, user_description="Record what the team uses from the first run."
+        )
+
+
+def test_the_first_run_says_how_many_picks_it_could_not_name() -> None:
+    labels = tuple(tile.label for tile in FIRST_RUN_PROVIDERS)
+    whole = _tools_recorded(labels[:2], MEMORY_BODY_MAX_CHARS)
+    assert whole == f"{TOOLING_PREFIX}{labels[0]}, {labels[1]}."
+    every = _tools_recorded(labels, MEMORY_BODY_MAX_CHARS)
+    named = every.removeprefix(TOOLING_PREFIX).split(", and ")[0].split(", ")
+    assert every.endswith(f", and {len(labels) - len(named)} more.")

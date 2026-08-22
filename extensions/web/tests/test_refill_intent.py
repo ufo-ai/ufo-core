@@ -9,6 +9,7 @@ and what the figures mean.
 import json
 from uuid import uuid4
 
+from ufo_ext_memory.store import MEMORY_BODY_MAX_CHARS
 from ufo_ext_web.panels import (
     PanelIntent,
     PaymentMethodIntent,
@@ -27,7 +28,7 @@ CARD = {"verb": "save_card", "kind": "billing"}
 def _prepared(submitted: dict[str, object]) -> ToolIntent:
     intent = PanelIntent.model_validate({"submitted": submitted}).submitted
     assert isinstance(intent, RefillIntent)
-    return _tool_intent(intent, None)
+    return _tool_intent(intent, None, MEMORY_BODY_MAX_CHARS)
 
 
 def test_the_screen_arranges_a_refill_through_the_verb_an_admin_speaks() -> None:
@@ -59,7 +60,7 @@ def test_the_screen_reaches_a_provider_through_the_verb_a_spent_balance_admits()
     a provider at all."""
     intent = PanelIntent.model_validate({"submitted": CARD}).submitted
     assert isinstance(intent, PaymentMethodIntent)
-    prepared = _tool_intent(intent, None)
+    prepared = _tool_intent(intent, None, MEMORY_BODY_MAX_CHARS)
 
     assert prepared.tool == BILLING_INTENT_TOOL
     assert prepared.input["action"] == "portal"

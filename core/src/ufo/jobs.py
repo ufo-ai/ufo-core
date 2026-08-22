@@ -33,7 +33,14 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.candidates import WorkspaceCandidates
 from ufo.db import owner_tx, workspace_tx
 from ufo.ext.context import ConversationProbes, ExtensionContext, TurnInvoker, context_for
-from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChangeBatch
+from ufo.ext.manifest import (
+    PAGE_CHANGE_CURSOR_KEY,
+    HookContext,
+    HookSpec,
+    JobSpec,
+    Manifest,
+    PageChangeBatch,
+)
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import emit_metric, formatted_stack, log, log_error, warn
@@ -84,7 +91,6 @@ RESULT_DELIVERY_JOB = "result_delivery"
 RESULT_DELIVERY_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_JOB = "page_change"
 PAGE_CHANGE_SCHEDULE = "0 * * * * *"
-PAGE_CHANGE_CURSOR_KEY = "page_change_cursor"
 RENDER_PREVIEWS_JOB = "render_previews"
 RENDER_PREVIEWS_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_BATCH = 50

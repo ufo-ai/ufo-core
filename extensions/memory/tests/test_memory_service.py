@@ -27,6 +27,7 @@ from ufo_ext_memory.store import (
     MemoryWrite,
     PageIndexer,
     Recalled,
+    clip_to_word,
     decay_factor,
     drop_near_duplicates,
     enforce_type_diversity,
@@ -787,7 +788,7 @@ async def test_a_revision_bump_retires_only_the_stale_source_link(db: None) -> N
             )
         )
     next_revision = PAGE_REVISION + 1
-    await store.commit(
+    settled = await store.commit(
         MemoryWrite(
             subject=SHARED_SUBJECT,
             body="the ledger closes on friday",
@@ -797,7 +798,7 @@ async def test_a_revision_bump_retires_only_the_stale_source_link(db: None) -> N
         )
     )
     with ws(workspace_id):
-        await store.supersede_page_facts(page_a, next_revision)
+        await store.supersede_page_facts(page_a, frozenset({settled}))
 
     async with workspace_tx() as connection:
         shared_row = (
@@ -1533,6 +1534,32 @@ async def test_source_search_rechecks_the_current_page_subject(db: None) -> None
     assert pages == ()
 
 
+def test_clip_to_word_leaves_a_body_inside_the_budget_exactly_as_written() -> None:
+    """A body written to the budget every writer on this path is now told carries no ellipsis at
+    all — the mark appears only where something overran."""
+    exact = "Acme Corp — Moved the launch to March."
+    assert clip_to_word(exact, len(exact)) == exact
+    assert "…" not in clip_to_word(exact, len(exact))
+
+
+def test_clip_to_word_cuts_an_overlong_body_at_a_word_and_counts_the_ellipsis() -> None:
+    """The mid-word cut is what a member reads today: "requested trying 2x and then viewing
+    screen…" ends on a fragment. A cut lands on the last whole word, drops the punctuation left
+    hanging behind it, and the ellipsis is inside the budget rather than pushing past it."""
+    body = "Rob Ryan described the direction as correct, but probably slightly overshot."
+    cut = clip_to_word(body, 40)
+    assert len(cut) <= 40
+    assert cut == "Rob Ryan described the direction as…"
+    assert body.startswith(cut.removesuffix("…"))
+
+
+def test_clip_to_word_cuts_a_body_that_holds_no_space() -> None:
+    """One unbroken token has no word boundary to fall back to and still owes the budget."""
+    cut = clip_to_word("x" * 200, 40)
+    assert len(cut) <= 40
+    assert cut.endswith("…")
+
+
 def test_decay_factor_weights_recency_kind_and_confidence() -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     fresh = Recalled(
@@ -2031,7 +2058,8 @@ async def test_retirement_requeues_a_fact_rebound_while_its_index_is_deleted(
     """Retirement deletes the superseded row and then its index scope. A derivation that rebinds the
     identical body to the new revision in between lands on the same content-addressed id, so the
     scope delete strips a live row's chunks — the re-created row is due again and the index job
-    restores it, leaving nothing recallable-but-unindexed."""
+    restores it, leaving nothing recallable-but-unindexed. `replacement` is the row the settling
+    pass committed for this page, which is the row it keeps and every other one it drops."""
     workspace_id, page_id, source_id = await _workspace(), uuid4(), uuid4()
     body = "the acquisition plan has been redacted"
     probe = vec((8, 1.0))
@@ -2073,8 +2101,9 @@ async def test_retirement_requeues_a_fact_rebound_while_its_index_is_deleted(
         )
 
     index = RebindingIndex(store.index, recommit)
+    replacement = uuid4()
     with ws(workspace_id):
-        await replace(store, index=index).supersede_page_facts(page_id, new_revision)
+        await replace(store, index=index).supersede_page_facts(page_id, frozenset({replacement}))
         await MemoryIndexer(
             index=index,
             embed=store.embed,

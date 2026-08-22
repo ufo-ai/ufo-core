@@ -36,13 +36,13 @@ from ufo.balance import BalanceExhausted
 from ufo.cancellation import cancel_one_turn
 from ufo.contracts import Contract, input_contract, output_contract
 from ufo.db import workspace_tx
+from ufo.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.ext.context import TurnInvoker
 from ufo.ext.manifest import SubagentProfile
 from ufo.ext.surface import conversation_name
 from ufo.loop.prompts.render import (
     CITATION_BLOCK,
     CITATION_SLOT,
-    DELIVERY_REGISTER_BLOCK,
     DELIVERY_REGISTER_SLOT,
     PROMPT_VAR_RE,
     SKILL_INDEX_SLOT,

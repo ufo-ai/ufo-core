@@ -20,6 +20,8 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
+from ufo.delivery_register import DELIVERY_REGISTER_BLOCK
+
 PROMPT_VAR_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 BLANK_RUN_RE = re.compile(r"\n{3,}")
 
@@ -32,7 +34,6 @@ KNOWLEDGE_CUTOFF_SLOT = "{{knowledge_cutoff}}"
 CUTOFF_VAR = "{{cutoff}}"
 
 _PROMPTS_DIR = Path(__file__).parent
-DELIVERY_REGISTER_BLOCK = (_PROMPTS_DIR / "delivery_register.md").read_text().strip()
 SHELL = (
     (_PROMPTS_DIR / "shell.md").read_text().replace(DELIVERY_REGISTER_SLOT, DELIVERY_REGISTER_BLOCK)
 )

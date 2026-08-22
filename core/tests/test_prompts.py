@@ -9,10 +9,10 @@ import re
 
 import pytest
 
+from ufo.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.ext.loader import load_manifests
 from ufo.loop.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
-    DELIVERY_REGISTER_BLOCK,
     SHELL,
     RenderedPrompt,
     render_skill_index,
@@ -21,6 +21,7 @@ from ufo.loop.prompts.render import (
     rendered_prompt,
 )
 from ufo.models.catalog import CORE_MODEL_SPECS
+from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK as SDK_DELIVERY_REGISTER_BLOCK
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillCard, SkillRegistry
 from ufo.skills.selection import prompt_index
 
@@ -106,6 +107,26 @@ def test_shell_answers_first_and_grounds_an_explanation_in_current_content() -> 
     assert "a claim to check against that content, never a fact to repeat" in prose
     assert "Inline to a member, say which action produces which result" in prose
     assert "never the internal names the thing uses for its own parts" in prose
+
+
+def test_the_delivery_register_reaches_an_extension_through_the_sdk() -> None:
+    assert SDK_DELIVERY_REGISTER_BLOCK is DELIVERY_REGISTER_BLOCK
+    assert SHELL.count(SDK_DELIVERY_REGISTER_BLOCK) == 1
+
+
+def test_the_register_governs_the_words_a_schema_owned_field_carries() -> None:
+    prose = " ".join(SHELL.split())
+    assert "A typed profile field whose schema requests the work itself is the delivery" in prose
+    assert "the field carries the whole work product" in prose
+    assert (
+        "Plain words, what comes first, and one fact per line govern every word a member reads, "
+        "whichever field carries it."
+    ) in prose
+    assert "not schema-owned content" not in prose
+    for group in ("## Plain words", "## What comes first", "## One fact per line"):
+        assert group in SHELL
+    assert "Name the act and the result it produces" in prose
+    assert '"No leaks permitted." → "Repair the leaks."' in prose
 
 
 def test_digest_is_stable_for_equal_content_and_shifts_with_it() -> None:

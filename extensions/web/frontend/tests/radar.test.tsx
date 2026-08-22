@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -495,4 +495,57 @@ test("a shared file with no picture opens on its name with its download", async 
   expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
     "/dl/brief.pdf",
   );
+});
+
+const ENTRIES_QUEUED =
+  "The last seven days' entries are written again — 4 reports. Each stands on its task's name " +
+  "until the digest job reaches it.";
+
+test("the feed states the window a rebuild reaches before it is pressed", async () => {
+  wire({ "/workspace/radar": () => json({ runs: [RUN], older: null }) });
+  mountRadarSection();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Rebuild entries" }));
+  await screen.findByRole("heading", { name: "Rebuild Entries" });
+  expect(screen.getByText(/last seven days is read again/)).toBeTruthy();
+  expect(screen.getByText(/older than seven days keeps the entry it has/)).toBeTruthy();
+});
+
+test("a rebuild rides the main agent's intent lane and states what it queued", async () => {
+  const posted: unknown[] = [];
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: ENTRIES_QUEUED });
+    },
+  });
+  mountRadarSection();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Rebuild entries" }));
+  const dialog = screen.getByRole("dialog");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Rebuild entries" }));
+
+  await waitFor(() => expect(posted).toEqual([{ verb: "rebuild_reports" }]));
+  expect(await screen.findByText(ENTRIES_QUEUED)).toBeTruthy();
+  expect(within(dialog).queryByRole("button", { name: "Rebuild entries" })).toBeNull();
+});
+
+test("a refused rebuild is read back in the dialog, and the act stands", async () => {
+  wire({
+    "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/intents": () =>
+      json({ applied: false, message: "Only a workspace admin can write the radar entries again." }),
+  });
+  mountRadarSection();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Rebuild entries" }));
+  const dialog = screen.getByRole("dialog");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Rebuild entries" }));
+
+  const notice = await screen.findByText(
+    "Only a workspace admin can write the radar entries again.",
+  );
+  expect(notice.className).toContain("bg-attention");
+  expect(within(dialog).getByRole("button", { name: "Rebuild entries" })).toBeTruthy();
 });

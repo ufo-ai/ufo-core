@@ -424,6 +424,13 @@ class PageChangeBatch:
     changes: tuple[PageChange, ...]
 
 
+PAGE_CHANGE_CURSOR_KEY = "page_change_cursor"
+"""The prefix the runner keys a `page_change` consumer's cursor by inside the declaring extension's
+own ScopedStore, `{prefix}:{handler name}`. It sits with the payload rather than with the runner
+because an extension sending its own consumer back over pages it already drained clears that key,
+and the format has one home whichever side reads it."""
+
+
 HookPayload = (
     PreToolUse
     | PostToolUse

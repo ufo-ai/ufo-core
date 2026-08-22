@@ -215,6 +215,8 @@ class ToolIntent(BaseModel):
         "manage_billing",
         "slack_connect",
         "connect_github",
+        "rebuild_report_digest",
+        "rebuild_page_facts",
     ]
     input: dict[str, JsonValue]
 

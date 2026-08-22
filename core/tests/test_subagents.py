@@ -19,12 +19,12 @@ from ufo.audience import (
 from ufo.balance import BalanceExhausted, credit, set_reserve
 from ufo.config import Config
 from ufo.db import workspace_tx
+from ufo.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.durability import replay_safe_client
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.ext.surface import conversation_name
 from ufo.hub import InProcessHub
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
-from ufo.loop.prompts.render import DELIVERY_REGISTER_BLOCK
 from ufo.loop.queue import _commit_failed_terminal, _load_turn, _subagent_tools
 from ufo.loop.subagents import (
     FINISH_CONTRACT,
@@ -97,6 +97,13 @@ def test_system_prompt_carries_instructions_and_the_finish_contract() -> None:
     assert prompt.count(DELIVERY_REGISTER_BLOCK) == 1
     assert "result returned to a parent" in prompt
     assert prompt.endswith(FINISH_CONTRACT)
+
+
+def test_system_prompt_governs_the_words_of_a_schema_owned_answer() -> None:
+    prose = " ".join(subagent_system_prompt(_profile("research")).split())
+    assert "A typed profile field whose schema requests the work itself is the delivery" in prose
+    assert "whichever field carries it." in prose
+    assert "## Plain words" in prose
 
 
 def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:

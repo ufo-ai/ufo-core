@@ -20,17 +20,20 @@ thread carries, never the loop."""
 import asyncio
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import batched
+from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.sql.elements import ColumnElement
 
 from ufo.sdk.context import JsonValue, ModelAccess, ScopedStore
+from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.sdk.index import EmbedClient
 from ufo.sdk.models import Message, ModelRequest, ToolSchema, ToolUseBlock
 from ufo.sdk.sources import PageChange
@@ -40,13 +43,17 @@ from ufo_ext_memory.store import (
     KIND_FACT,
     MAX_CONFIDENCE,
     MEMORY_BODY_MAX_CHARS,
+    OVERVIEW_BODY_MAX_CHARS,
     SEMANTIC,
     MemoryKind,
     MemoryStore,
     MemoryWrite,
     Transaction,
+    clip_to_word,
     memory_item,
 )
+
+PROMPTS = Path(__file__).parent / "prompts"
 
 MAX_PAGE_BODY_CHARS = 8_000
 MIN_PAGE_BODY_CHARS = 40
@@ -57,14 +64,13 @@ FACT_EXTRACT_TOOL_DESCRIPTION = (
     "Record every concrete, source-supported fact from the source pages, one entry per fact."
 )
 FACT_EXTRACT_SYSTEM = (
-    "Extract every concrete claim from the source pages the user sends as JSON "
-    '({"pages":[{"page_id":"...","body":"..."}]}). Preserve exact names, quantities, dates, '
-    "places, lists, negation, conditions, qualifiers, and causal or temporal relations. Do not "
-    "drop a claim because it is narrow or appears once. Do not infer claims the source does not "
-    "state. Exclude greetings, generic advice, pure questions, and text with no concrete claim. "
-    "Write each fact as a concise third-person claim that stands alone without the page, carrying "
-    "its source page_id, a memory_kind (one of fact, preference, decision, event, task), and a "
-    f"confidence 1-10. Record them with the {FACT_EXTRACT_TOOL} tool."
+    DELIVERY_REGISTER_BLOCK + "\n\n" + (PROMPTS / "fact_extract.md").read_text().strip()
+)
+EXTRACT_RESTATEMENT_OVERLAP = 0.9
+MIN_RESTATEMENT_WORDS = 4
+FILLER_WORDS = frozenset(
+    "a an and as at be been by for from had has have in is it its of on or that the their there "
+    "this to was were which who whose will with".split()
 )
 DEDUP_GROUP_MAX = 2_000
 DEDUP_EMBED_BATCH = 100
@@ -82,27 +88,36 @@ MAX_BUCKET_FACTS = 100
 CONSOLIDATION_SCAN_MAX = 500
 CONSOLIDATE_EMBED_CHARS = 2_000
 CONSOLIDATE_FACT_CHARS = 1_000
-MAX_SUMMARY_CHARS = 2_000
+MAX_SUMMARY_WORDS = 150
+MAX_SUMMARY_SENTENCES = 5
+"""The shape of the consolidated Overview item, the one memory text a member reads whole rather
+than scans: a paragraph of at most 150 words in at most 5 sentences, where the plain-language
+guidance the comps study collected settles. What those words measure is `OVERVIEW_BODY_MAX_CHARS`,
+which sits with the commit that holds a body to it."""
 CONSOLIDATE_MAX_TOKENS = 1_024
 CONSOLIDATE_REASONING: Literal["low"] = "low"
 CONSOLIDATE_SYSTEM = (
-    "You are consolidating several related memory facts into one durable summary. The user sends "
-    'the facts as JSON ({"facts":["...","..."]}). Write a single concise standalone statement, in '
-    "the third person, that captures their combined and most current meaning — resolving overlap "
-    "or contradiction in favor of the more specific or more recent claim. Return only the summary "
-    "text, no preamble and no JSON."
+    DELIVERY_REGISTER_BLOCK + "\n\n" + (PROMPTS / "consolidate.md").read_text().strip()
 )
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
 class ExtractedFact(BaseModel):
     """One fact the extraction model read out of a source page — untrusted model output validated
     at this boundary before it reaches `memory_item`. `page_id` maps the fact back to the page that
-    scopes its subject."""
+    scopes its subject. The row budget is part of that validation: the prompt states it, and a body
+    that overran it arrives cut back to its last whole word, so what a member reads is a row that
+    ends on a word rather than one the object index ends mid-word with an ellipsis."""
 
     page_id: str
     body: str
     memory_kind: MemoryKind = KIND_FACT
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
+
+    @field_validator("body")
+    @classmethod
+    def within_row_budget(cls, body: str) -> str:
+        return clip_to_word(body, MEMORY_BODY_MAX_CHARS)
 
 
 class ExtractedFacts(BaseModel):
@@ -128,8 +143,10 @@ class FactDeriver:
     batch with no model wired, it holds the cursor where it stands so the next tick replays those
     pages, rather than advancing past facts nothing will ever derive again. Once-delivery is the
     cursor's guarantee — each changed page reaches this handler once; the content-addressed commit
-    dedups an identical re-derivation onto the same row, and the retirement finds nothing left on a
-    replay, so a replayed batch settles on the same rows."""
+    dedups an identical re-derivation onto the same row, so a replayed batch names the same rows and
+    the retirement finds nothing left. What each pass retires is every other link the page still
+    carries, which is what makes a rebuild work: the cursor is sent back over pages whose revisions
+    never moved, and the statements being replaced sit at the very revision the pass settles on."""
 
     store: MemoryStore
     model: ModelAccess
@@ -147,13 +164,14 @@ class FactDeriver:
             and len(change.body) >= MIN_PAGE_BODY_CHARS
         )
         for group in batched(eligible, EXTRACT_PAGE_BATCH):
-            for settled in await self._derive(group):
-                await self.store.supersede_page_facts(settled.page_id, settled.revision)
+            for page_id, kept in (await self._derive(group)).items():
+                await self.store.supersede_page_facts(page_id, kept)
 
-    async def _derive(self, pages: tuple[PageChange, ...]) -> tuple[PageChange, ...]:
+    async def _derive(self, pages: tuple[PageChange, ...]) -> dict[UUID, frozenset[UUID]]:
         """Commit the kept facts of one bounded model pass over the pages still exactly where the
-        change found them, and return the pages a fact actually landed for — the only pages whose
-        other revisions now have a replacement to retire."""
+        change found them, and return, for each page a fact actually landed for, the rows that page
+        then stands behind — the only pages with a replacement to retire anything against, and the
+        only account of what that replacement is."""
         current = await self.store.page_states(tuple(page.page_id for page in pages))
         authorized = tuple(
             page
@@ -163,10 +181,10 @@ class FactDeriver:
             and state.revision == page.revision
         )
         if not authorized:
-            return ()
+            return {}
         extracted = await self._extract(authorized)
         by_id = {str(page.page_id): page for page in authorized}
-        settled: dict[UUID, PageChange] = {}
+        settled: dict[UUID, frozenset[UUID]] = {}
         for fact in extracted:
             page = by_id.get(fact.page_id)
             if page is None:
@@ -174,10 +192,10 @@ class FactDeriver:
             latest = (await self.store.page_states((page.page_id,))).get(page.page_id)
             if latest is None or latest.subject != page.subject or latest.revision != page.revision:
                 continue
-            await self.store.commit(
+            landed = await self.store.commit(
                 MemoryWrite(
                     subject=page.subject,
-                    body=fact.body[:MEMORY_BODY_MAX_CHARS],
+                    body=fact.body,
                     item_class=FACT,
                     memory_kind=fact.memory_kind,
                     confidence=fact.confidence,
@@ -187,8 +205,8 @@ class FactDeriver:
                     as_of=page.as_of,
                 )
             )
-            settled[page.page_id] = page
-        return tuple(settled.values())
+            settled[page.page_id] = settled.get(page.page_id, frozenset()) | {landed}
+        return settled
 
     async def _extract(self, pages: tuple[PageChange, ...]) -> tuple[ExtractedFact, ...]:
         """The one bounded metered model pass over a group, returning the facts it recorded. The
@@ -198,12 +216,23 @@ class FactDeriver:
         is validated on its own, so an entry the contract does not satisfy drops without taking the
         rest with it, while a reply carrying no recorded facts at all raises: it is not the same
         answer as "these pages hold nothing", and the caller must settle nothing for the group.
+        Each page carries its title and stream into the payload, because a fact naming "the pull
+        request" reads as a subject to a model holding the page and as nothing to the member who
+        meets that row alone. One reply is also the one place a page's restatements of a single
+        claim are visible to each other — the store's content address catches only identical text,
+        and the dedup sweep never reads a page-derived row — so a restatement collapses here onto
+        the entry that carries the most.
         The request asks for reasoning off to avoid paying for optional background thinking; a
         model that requires reasoning uses its minimum adaptive effort, which supports forced tool
         use."""
         payload = {
             "pages": [
-                {"page_id": str(page.page_id), "body": page.body[:MAX_PAGE_BODY_CHARS]}
+                {
+                    "page_id": str(page.page_id),
+                    "title": page.title,
+                    "stream": page.stream,
+                    "body": page.body[:MAX_PAGE_BODY_CHARS],
+                }
                 for page in pages
             ]
         }
@@ -241,10 +270,41 @@ class FactDeriver:
         facts: list[ExtractedFact] = []
         for entry in entries:
             try:
-                facts.append(ExtractedFact.model_validate(entry))
+                fact = ExtractedFact.model_validate(entry)
             except ValidationError:
                 continue
+            restated = next(
+                (
+                    index
+                    for index, kept in enumerate(facts)
+                    if kept.page_id == fact.page_id and _restates(kept.body, fact.body)
+                ),
+                None,
+            )
+            if restated is None:
+                facts.append(fact)
+            elif len(fact.body) > len(facts[restated].body):
+                facts[restated] = fact
         return tuple(facts)
+
+
+def _content_words(body: str) -> frozenset[str]:
+    return frozenset(word for word in re.split(r"\W+", body.lower()) if word) - FILLER_WORDS
+
+
+def _restates(kept: str, candidate: str) -> bool:
+    """Whether one entry of a reply says what another entry already says. The measure is how much of
+    the shorter entry's content the other one covers, because a restatement is one claim carrying
+    extra words: "Ivan suggested that Marshall book a call with Nalu, who was identified as a
+    co-founder of Idler.ai" is covered whole by the same sentence naming the scheduling link. Two
+    entries that share a topic while each carries content of its own stay apart, which a measure
+    dividing by the union does not manage on this data — those two sentences score 0.23 against a
+    threshold no distinct pair of claims survives."""
+    left, right = _content_words(kept), _content_words(candidate)
+    smaller = min(len(left), len(right))
+    if smaller < MIN_RESTATEMENT_WORDS:
+        return False
+    return len(left & right) / smaller >= EXTRACT_RESTATEMENT_OVERLAP
 
 
 def cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
@@ -442,7 +502,22 @@ class MemoryConsolidator:
             conversation_cache_ttl="5m",
             reasoning=CONSOLIDATE_REASONING,
         )
-        return (await model.complete(request)).strip()[:MAX_SUMMARY_CHARS]
+        return _to_overview_budget((await model.complete(request)).strip())
+
+
+def _to_overview_budget(summary: str) -> str:
+    """The consolidated entry cut to the budget the prompt states, on whole sentences. A summary
+    inside the budget stands exactly as written. One that overran gives up its last sentences, which
+    is what the item's own reader loses least by: the entry opens on what the cluster amounts to,
+    and the sentences that fall are the elaboration behind it. A first sentence alone past the
+    character budget has no sentence boundary to cut on and falls back to the word."""
+    kept: list[str] = []
+    for sentence in SENTENCE_END.split(summary)[:MAX_SUMMARY_SENTENCES]:
+        candidate = " ".join((*kept, sentence))
+        if len(candidate) > OVERVIEW_BODY_MAX_CHARS or len(candidate.split()) > MAX_SUMMARY_WORDS:
+            break
+        kept.append(sentence)
+    return " ".join(kept) if kept else clip_to_word(summary, OVERVIEW_BODY_MAX_CHARS)
 
 
 def _recency(fact: _AgedFact) -> tuple[datetime, UUID]:

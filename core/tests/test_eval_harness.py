@@ -178,7 +178,13 @@ from evals.ufo_app_bench import WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_
 from ufo.accounting import Pricing
 from ufo.agents import AGENT_KIND
 from ufo.blob import FilesystemBlobStore, S3BlobStore
-from ufo.config import DEFAULT_AMBIENT_REPLY_MODEL, BlobConfig, Config, DatabaseConfig
+from ufo.config import (
+    DEFAULT_AMBIENT_REPLY_MODEL,
+    DEFAULT_BACKGROUND_JOBS_MODEL,
+    BlobConfig,
+    Config,
+    DatabaseConfig,
+)
 from ufo.credentials import (
     CredentialRequests,
     CredentialSlotUnset,
@@ -346,6 +352,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["report_digest"].simulator_model is None
     assert tasks["slack_silence"].judge_model == DEFAULT_AMBIENT_REPLY_MODEL
     assert tasks["slack_silence"].simulator_model is None
+    assert tasks["asd_writing"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["asd_writing"].simulator_model == DEFAULT_BACKGROUND_JOBS_MODEL
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
@@ -353,6 +361,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
         not in {
             "semantic_quality",
             "slack_silence",
+            "asd_writing",
             "scenario_smoke",
             "scenario_env",
             "authority_handoff",

@@ -56,6 +56,7 @@ from ufo.blob import BlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
+from ufo.ext.manifest import PAGE_CHANGE_CURSOR_KEY
 from ufo.indexing import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
@@ -64,7 +65,6 @@ from ufo.indexing import (
     IndexBackend,
     IndexScope,
 )
-from ufo.jobs import PAGE_CHANGE_CURSOR_KEY
 from ufo.schema import tables
 from ufo.workspace import ws
 

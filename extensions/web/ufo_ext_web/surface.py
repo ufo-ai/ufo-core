@@ -2259,13 +2259,18 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
     by ref: the reader contract stays per-agent, so source-page fencing becomes "any agent the
     member reaches" — live reachability, the same authority chat's tools exercise agent by agent.
     The filter is the listing's alone: recall ranks by similarity and mixes in source pages, which
-    carry no item class to narrow on."""
+    carry no item class to narrow on.
+
+    Either shape states how long a body the provider stores, because the correction form on this
+    page collects one and has to stop the member at the bound the memory tool enforces rather than
+    refuse what they already wrote."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, audience = resolved
     if not ctx.memory_available:
         return JSONResponse({"available": False, "matches": []})
+    body_max_chars = ctx.memory_body_max_chars
     subjects = audience_subjects(conversation_audience(member_id))
     query = request.query_params.get("q", "").strip()
     if not query:
@@ -2292,6 +2297,7 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
                 "matches": _memory_rows(page.rows),
                 "kinds": list(offered),
                 "kind": selected or None,
+                "body_max_chars": body_max_chars,
                 "older": None if page.older is None else page.older.encode(),
                 "newer": None if page.newer is None else page.newer.encode(),
             }
@@ -2316,7 +2322,13 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
             if key not in deduped:
                 deduped[key] = match
     found = tuple(deduped.values())[:MEMORY_RESULT_LIMIT]
-    return JSONResponse({"available": True, "matches": _memory_rows(found)})
+    return JSONResponse(
+        {
+            "available": True,
+            "matches": _memory_rows(found),
+            "body_max_chars": body_max_chars,
+        }
+    )
 
 
 def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]:

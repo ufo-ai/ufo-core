@@ -5,7 +5,12 @@ surface lives in named modules like this one. `owner_candidates` is how an exten
 workspaces its job has work in — a builder, invoked per tick, of a select over its own tables
 projecting distinct `workspace_id`, which core runs through the one RLS-bypass read to name the
 workspaces the dispatcher binds. Building per tick lets dueness be time-relative: compute `now`
-inside the builder and embed the cutoff."""
+inside the builder and embed the cutoff.
+
+`PAGE_CHANGE_CURSOR_KEY` is the prefix core keys a `page_change` consumer's cursor by inside the
+declaring extension's own ScopedStore, `{prefix}:{handler name}`. An extension that sends its own
+consumer back over pages it already drained clears that key rather than spelling core's format
+itself."""
 
 from ufo.candidates import (
     WorkspaceCandidates as WorkspaceCandidates,
@@ -24,6 +29,9 @@ from ufo.ext.context import (
 )
 from ufo.ext.context import (
     untitled_conversation_workspaces as untitled_conversation_workspaces,
+)
+from ufo.ext.manifest import (
+    PAGE_CHANGE_CURSOR_KEY as PAGE_CHANGE_CURSOR_KEY,
 )
 from ufo.ext.manifest import (
     JobSpec as JobSpec,

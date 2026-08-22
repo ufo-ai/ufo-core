@@ -56,6 +56,15 @@ report_digest_entry = sa.table(
     sa.column("written_at", sa.DateTime(timezone=True)),
 )
 
+"""A report the writer read that held no change. The feed still shows the run, names its task and
+links what it published, so the reader loses nothing by the entry being unwritten — and the row is
+what stops the job reading the same quiet report every tick until it ages out of the window."""
+report_digest_unchanged = sa.table(
+    "report_digest_unchanged",
+    sa.column("workspace_id", sa.Uuid),
+    sa.column("turn_id", sa.Uuid),
+)
+
 _turn = sa.table(
     "turn",
     sa.column("id", sa.Uuid),
@@ -122,12 +131,18 @@ class DigestWriter:
             return
         reader = self._reader(report)
         entry = await self._written(body, reader)
-        if entry is not None:
+        if entry is None:
+            return
+        if entry.holds_a_change:
             await self._store(report, entry, reader)
+            return
+        await self._store_unchanged(report)
 
     async def _unwritten(self) -> tuple[Report, ...]:
         """Every scheduled run inside the window that ended well, published a markdown report and
-        has no entry, newest first — the whole of the job's due-work definition.
+        the writer has not read, newest first — the whole of the job's due-work definition. A run
+        the writer read is one it wrote an entry for or one it found no change in; either way its
+        report is settled and reading it again would buy the same answer for a second model call.
 
         A run that did not end well is not a candidate. Its report is whatever it had written when
         it stopped, and what the member needs from it is the reason it stopped — which the feed
@@ -141,8 +156,11 @@ class DigestWriter:
         member reads the feed for what
         happened lately, and because it is what keeps a report the writer cannot finish from
         standing at the head of every tick until someone notices."""
-        written = sa.select(report_digest_entry.c.turn_id).where(
+        has_entry = sa.select(report_digest_entry.c.turn_id).where(
             report_digest_entry.c.workspace_id == self.ctx.store.workspace_id
+        )
+        held_no_change = sa.select(report_digest_unchanged.c.turn_id).where(
+            report_digest_unchanged.c.workspace_id == self.ctx.store.workspace_id
         )
         first_report = (
             sa.select(_shared_artifact.c.blob_key)
@@ -175,7 +193,8 @@ class DigestWriter:
                 _turn.c.status == DONE,
                 _shared_artifact.c.blob_key == first_report,
                 _turn.c.created_at >= datetime.now(UTC) - WINDOW,
-                _turn.c.id.not_in(written),
+                _turn.c.id.not_in(has_entry),
+                _turn.c.id.not_in(held_no_change),
             )
             .order_by(_turn.c.created_at.desc())
             .limit(BATCH)
@@ -258,6 +277,14 @@ class DigestWriter:
                     return DigestEntry.model_validate(block.input)
         return None
 
+    async def _store_unchanged(self, report: Report) -> None:
+        async with self.ctx.transaction() as connection:
+            await connection.execute(
+                sa.insert(report_digest_unchanged).values(
+                    workspace_id=self.ctx.store.workspace_id, turn_id=report.turn_id
+                )
+            )
+
     async def _store(self, report: Report, entry: DigestEntry, reader: str) -> None:
         async with self.ctx.transaction() as connection:
             await connection.execute(
@@ -274,14 +301,55 @@ class DigestWriter:
             )
 
 
+@dataclass(frozen=True)
+class DigestRebuild:
+    """Make every report inside the window due again, so the job writes its entry a second time.
+
+    The rows this drops are the job's own — an entry it wrote, or the note that it read a report and
+    found no change — and the reports behind them are still in the store, so the writer rebuilds
+    both from what it read the first time. The window is the writer's own: a report that has aged
+    out is never read again, so dropping its entry would empty its story for good rather than
+    rewrite it. The unchanged notes go with the entries, because a report held quiet under one
+    standard is exactly the report a new standard is meant to reach, and a note left behind keeps it
+    out of the candidate read as firmly as an entry would.
+
+    A report stands on its task's name between the drop and the next tick, which is how the feed
+    already draws a report published since the job last ran."""
+
+    ctx: ExtensionContext
+
+    async def run(self) -> int:
+        in_window = sa.select(_turn.c.id).where(
+            _turn.c.workspace_id == self.ctx.store.workspace_id,
+            _turn.c.created_at >= datetime.now(UTC) - WINDOW,
+        )
+        async with self.ctx.transaction() as connection:
+            dropped = await connection.execute(
+                sa.delete(report_digest_entry).where(
+                    report_digest_entry.c.workspace_id == self.ctx.store.workspace_id,
+                    report_digest_entry.c.turn_id.in_(in_window),
+                )
+            )
+            quiet = await connection.execute(
+                sa.delete(report_digest_unchanged).where(
+                    report_digest_unchanged.c.workspace_id == self.ctx.store.workspace_id,
+                    report_digest_unchanged.c.turn_id.in_(in_window),
+                )
+            )
+        return dropped.rowcount + quiet.rowcount
+
+
 def undigested_workspaces() -> sa.Select[tuple[UUID]]:
-    """Workspaces holding a report inside the window, from a run that ended well, with no entry.
-    The job's own due-work test, folded into the candidate read so a quiet workspace costs the tick
-    nothing, and cut off at the
+    """Workspaces holding a report inside the window, from a run that ended well, that the writer
+    has not read. The job's own due-work test, folded into the candidate read so a quiet workspace
+    costs the tick nothing, and cut off at the
     same window the writer works to — the read is over `turn`, and one without a floor would grow
     with every turn the deploy has ever run."""
-    written = sa.select(report_digest_entry.c.turn_id).where(
+    has_entry = sa.select(report_digest_entry.c.turn_id).where(
         report_digest_entry.c.workspace_id == _turn.c.workspace_id
+    )
+    held_no_change = sa.select(report_digest_unchanged.c.turn_id).where(
+        report_digest_unchanged.c.workspace_id == _turn.c.workspace_id
     )
     return (
         sa.select(_turn.c.workspace_id)
@@ -291,7 +359,8 @@ def undigested_workspaces() -> sa.Select[tuple[UUID]]:
             _turn.c.status == DONE,
             _shared_artifact.c.media_type == MARKDOWN_MEDIA_TYPE,
             _turn.c.created_at >= datetime.now(UTC) - WINDOW,
-            _turn.c.id.not_in(written),
+            _turn.c.id.not_in(has_entry),
+            _turn.c.id.not_in(held_no_change),
         )
         .group_by(_turn.c.workspace_id)
     )

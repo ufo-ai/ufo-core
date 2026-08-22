@@ -23,17 +23,24 @@ from ufo_ext_memory.condenser import (
     DEDUP_CURSOR_KEY,
     DEDUP_MIN_AGE,
     FACT_EXTRACT_TOOL,
+    MAX_SUMMARY_SENTENCES,
+    MAX_SUMMARY_WORDS,
     MIN_CLUSTER_FACTS,
     MIN_OLDEST_AGE,
+    SENTENCE_END,
     FactDeriver,
     MemoryConsolidator,
     MemoryDeduper,
+    _restates,
+    _to_overview_budget,
     cosine,
 )
+from ufo_ext_memory.manifest import RebuildPageFactsInput
 from ufo_ext_memory.store import (
     FACT,
     KIND_FACT,
     MEMORY_BODY_MAX_CHARS,
+    OVERVIEW_BODY_MAX_CHARS,
     SEMANTIC,
     MemoryIndexer,
     MemoryStore,
@@ -44,6 +51,7 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.accounting import Pricing
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
@@ -76,14 +84,17 @@ from ufo.models.interface import (
 )
 from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
-from ufo.schema.records import Usage
+from ufo.schema.records import Agent, Turn, Usage
+from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.sources.sync import CorePageFeed, FolderSource, PageChange, SyncDriver
 from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.tools.context import ToolContext
 from ufo.workspace import ws
 
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 AUTO_MODEL = "claude-opus-4-8"
 CONSOLIDATE_MODEL_JOB = f"memory:{memory_manifest.CONSOLIDATE_JOB}"
+REBUILD_TOOL = "rebuild_page_facts"
 DERIVE_MODEL_JOB = "core:page_change:memory:derive_facts"
 PAGE_BODY = "The acquisition codename is polaris and the deal closes in the third quarter."
 EDITED_PAGE_BODY = "The acquisition codename is meridian and the deal closes in the third quarter."
@@ -345,7 +356,13 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -> tuple[UUID, UUID]:
+async def _seed_page(
+    blob: FilesystemBlobStore,
+    workspace_id: UUID,
+    body: str,
+    title: str = "",
+    stream: str = "",
+) -> tuple[UUID, UUID]:
     source_id, page_id = uuid4(), uuid4()
     await blob.put(f"pages/{page_id}", body.encode())
     async with workspace_tx() as connection:
@@ -369,6 +386,8 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
                 digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
                 body_ref=f"pages/{page_id}",
                 subject=SHARED_SUBJECT,
+                title=title,
+                stream=stream,
                 tombstone=False,
                 created_at=WHEN,
                 updated_at=WHEN,
@@ -542,6 +561,47 @@ def _derive_consumer(runner: PageChangeRunner) -> object:
     return next(c for c in runner.consumers() if c.discriminator == "derive_facts")
 
 
+async def _seed_admin(workspace_id: UUID, admin: bool = True) -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id}@example.com",
+                timezone="UTC",
+                is_admin=admin,
+                seated_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
+
+
+def _rebuild_ctx(workspace_id: UUID, member_id: UUID) -> ToolContext:
+    return ToolContext(
+        sandbox=None,  # type: ignore[arg-type]
+        blob=None,  # type: ignore[arg-type]
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=1,
+            status="running",
+            inbound="rebuild",
+            created_at=datetime.now(UTC),
+        ),
+        agent=Agent(prompt="p", model="auto"),
+        spawn=None,  # type: ignore[arg-type]
+        speaker_member_id=member_id,
+        audience=conversation_audience(member_id),
+        artifact_token_secret="",
+        ext=context_for(memory_manifest.NAME, frozenset()),
+    )
+
+
 def _scripted(store: MemoryStore, *payloads: str) -> FactDeriver:
     return FactDeriver(
         store=store,
@@ -683,9 +743,136 @@ async def test_derive_facts_writes_each_source_supported_fact_through_page_chang
     assert fact.created_from_page_id == page_id
 
 
-async def test_derive_facts_truncates_an_oversized_model_body(db: None, tmp_path: object) -> None:
-    """`ExtractedFact.body` is untrusted model output with no bound of its own — the deriver
-    truncates at the `MemoryWrite` boundary rather than letting a long extraction raise."""
+async def test_the_extraction_payload_names_what_each_page_is_about(
+    db: None, tmp_path: object
+) -> None:
+    """A page's `subject` is the visibility audience, so it names nothing a member would recognise;
+    the page's own title and stream do. They ride the payload because "The pull request was created
+    at ..." is unambiguous to a model holding the page and empty to the member who meets that row
+    alone months later — a model cannot name a subject it was never shown."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    page_id, _source_id = await _seed_page(
+        blob,
+        workspace_id,
+        "The reviewer list is empty and no assignee is set.",
+        title="Pull request 2189: pin the adapter",
+        stream="pull_requests",
+    )
+    client = RecordingExtractionClient(
+        _extraction(page_id, "Pull request 2189 — Has no assignee and no reviewer.")
+    )
+    runner = _runner(blob, vec((22, 1.0)), _registry(client))
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+
+    sent = json.loads(client.requests[0].messages[0].content)["pages"][0]
+    assert sent["page_id"] == str(page_id)
+    assert sent["title"] == "Pull request 2189: pin the adapter"
+    assert sent["stream"] == "pull_requests"
+
+
+async def test_the_extraction_writes_to_the_house_register(db: None, tmp_path: object) -> None:
+    """The condenser is a direct model call, so it never met the register the shell and every
+    subagent prompt carry. It prepends the one copy rather than restating its rules, and adds only
+    what is specific to writing a memory item."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    page_id, _source_id = await _seed_page(
+        blob, workspace_id, "Acme Corp moved the launch to March, and Rob Ryan owns the rollout."
+    )
+    client = RecordingExtractionClient(
+        _extraction(page_id, "Acme Corp — Moved the launch to March.")
+    )
+    runner = _runner(blob, vec((23, 1.0)), _registry(client))
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+
+    system = client.requests[0].system
+    assert system.startswith(DELIVERY_REGISTER_BLOCK)
+    assert system.count(DELIVERY_REGISTER_BLOCK) == 1
+    assert "the reader sees this item alone, months later" in system
+
+
+async def test_one_reply_records_a_page_restatement_once(db: None, tmp_path: object) -> None:
+    """Four restatements of one introduction email reach a member as four rows today, and nothing
+    downstream collapses them: the store's content address catches identical text only, the dedup
+    sweep never reads a page-derived row, and consolidation excludes them by predicate. One reply is
+    the one place they are visible to each other, so the entry carrying the most content survives
+    and the entries it already covers do not — while a claim of its own stands beside it."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    page_id, _source_id = await _seed_page(
+        blob, workspace_id, "Ivan introduced Marshall to Nalu Concepcion of Idler.ai."
+    )
+    covered = "Ivan asked Marshall to book a call with Nalu, a co-founder of Idler.ai."
+    specific = "Ivan asked Marshall to book a call with Nalu, an Idler.ai co-founder, by her link."
+    distinct = "Nalu Concepcion sent Marshall her scheduling link on 20 August 2026."
+    payload = json.dumps(
+        {
+            "facts": [
+                {"page_id": str(page_id), "memory_kind": "task", "confidence": 7, "body": body}
+                for body in (covered, specific, distinct)
+            ]
+        }
+    )
+    client = ExtractionModelClient(payload, Usage(input_tokens=50, output_tokens=20))
+    runner = _runner(blob, vec((24, 1.0)), _registry(client))
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+
+    assert set(await _page_facts(page_id)) == {specific, distinct}
+
+
+def test_an_entry_that_covers_another_is_a_restatement_and_a_distinct_claim_is_not() -> None:
+    """The measure is how much of the shorter entry the longer one covers, not how much the two
+    share of everything they say between them. The two real Idler.ai sentences score 0.23 by the
+    second measure and are caught by the first."""
+    covered = "Ivan suggested that Marshall book a call with Nalu, who was identified as a "
+    "co-founder of Idler.ai."
+    carrying_more = (
+        "Ivan suggested that Marshall book a call with Nalu, identified as an Idler.ai "
+        "co-founder, using the Idler scheduling link."
+    )
+    apart = "Nalu Concepcion looked forward to the call and to learning how Idler.ai might help."
+    assert _restates(covered, carrying_more)
+    assert not _restates(covered, apart)
+    assert not _restates("Acme ships friday", "Acme ships")
+
+
+def test_an_overview_entry_inside_the_budget_stands_and_one_past_it_loses_whole_sentences() -> None:
+    """The Overview item is the one memory text a member reads whole rather than scans, so it is cut
+    on sentences: the entry keeps what it opens with and gives up the elaboration behind it, never
+    ending a member's paragraph mid-word."""
+    inside = "Acme Corp moved the launch to March. Rob Ryan owns the rollout."
+    assert _to_overview_budget(inside) == inside
+
+    over = " ".join(f"Sentence number {index} carries its own clause." for index in range(20))
+    kept = _to_overview_budget(over)
+    assert len(kept) <= OVERVIEW_BODY_MAX_CHARS
+    assert len(kept.split()) <= MAX_SUMMARY_WORDS
+    assert len(SENTENCE_END.split(kept)) <= MAX_SUMMARY_SENTENCES
+    assert over.startswith(kept)
+    assert kept.endswith(".")
+
+
+def test_an_overview_entry_of_one_unbroken_sentence_falls_back_to_the_word() -> None:
+    """A single sentence past the character budget has no sentence boundary to cut on, and a member
+    still reads a paragraph that ends on a word."""
+    unbroken = "the launch slipped again " * 100
+    kept = _to_overview_budget(unbroken)
+    assert len(kept) <= OVERVIEW_BODY_MAX_CHARS
+    assert kept.endswith("…")
+    assert unbroken.startswith(kept.removesuffix("…"))
+    assert kept.removesuffix("…")[-1].isalpha()
+
+
+async def test_derive_facts_cuts_an_oversized_model_body_back_to_a_whole_word(
+    db: None, tmp_path: object
+) -> None:
+    """`ExtractedFact.body` is untrusted model output carrying the row budget the prompt states, so
+    a body the model ran past arrives cut back to its last whole word rather than dropped or left
+    for the object index to end mid-word. The fact still lands: a batch keeps its recall."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     page_id, _source_id = await _seed_page(
@@ -712,7 +899,9 @@ async def test_derive_facts_truncates_an_oversized_model_body(db: None, tmp_path
 
     rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
     assert len(rows) == 1
-    assert rows[0].body == oversized[:MEMORY_BODY_MAX_CHARS]
+    assert len(rows[0].body) <= MEMORY_BODY_MAX_CHARS
+    assert rows[0].body.endswith("ships…")
+    assert oversized.startswith(rows[0].body.removesuffix("…"))
 
 
 async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
@@ -942,7 +1131,7 @@ async def test_the_extraction_compels_the_recording_tool_instead_of_asking_for_j
     assert request.reasoning == "off"
     assert request.tools[0].input_schema["properties"]["facts"]["type"] == "array"
     assert "notability" not in json.dumps(request.tools[0].input_schema)
-    assert "Preserve exact names, quantities, dates" in request.system
+    assert "Record them with the record_facts tool." in request.system
     assert await _page_facts(page_id) == {body: 1}
 
 
@@ -1579,6 +1768,66 @@ async def test_consolidation_supersedes_originals_and_recall_surfaces_the_summar
         ).run()
     after = [row for row in await _facts(workspace_id) if row.item_class == SEMANTIC]
     assert len(after) == 1
+
+
+OVERVIEW_PARAGRAPH = " ".join(
+    (
+        "The zephyr protocol handshake rotates every hour, and each rotation issues a fresh nonce"
+        " that the client must echo before the gateway will open an authenticated session for it.",
+        "Rob Ryan owns the rotation schedule and reviews it with the platform infrastructure group"
+        " at the start of every quarter, alongside the audit record the gateway writes for each"
+        " issued credential.",
+        "A token that is not redeemed within sixty seconds expires, and the client falls back to"
+        " the previous nonce only when the gateway has already acknowledged that older credential.",
+        "Acme Corp runs the same handshake in its staging infrastructure, where the hour is"
+        " shortened to five minutes so that a rotation defect surfaces in a working day rather"
+        " than a fortnight.",
+        "The team measured the change over thirteen months and recorded no session lost to a"
+        " rotation, so the shortened window stands as the default for every new deployment.",
+    )
+)
+"""A summary written to the whole of the Overview budget: the paragraph shape the consolidation
+prompt asks a model for, at the exact length the commit admits."""
+
+
+async def test_consolidation_commits_a_summary_written_to_the_whole_overview_budget(
+    db: None,
+) -> None:
+    """The Overview band of the wiki reaches a member only if a paragraph-length body survives the
+    write, so the job is run over a model returning one at the full budget and the row is read back
+    whole. Clipping the summary to the budget proves nothing about that: the clipper answers the
+    prompt, and the commit is what decides whether a member ever sees the answer."""
+    assert len(OVERVIEW_PARAGRAPH) == OVERVIEW_BODY_MAX_CHARS
+    assert len(OVERVIEW_PARAGRAPH.split()) <= MAX_SUMMARY_WORDS
+    assert len(SENTENCE_END.split(OVERVIEW_PARAGRAPH)) <= MAX_SUMMARY_SENTENCES
+
+    workspace_id = await _workspace()
+    probe = vec((11, 1.0))
+    for body in (
+        "the zephyr protocol handshake rotates every hour",
+        "the zephyr protocol handshake issues a fresh nonce",
+        "the zephyr protocol handshake token expires in a minute",
+    ):
+        await _seed_aged_fact(workspace_id, body, probe, 7)
+    with ws(workspace_id):
+        await MemoryConsolidator(
+            embed=StubEmbed(probe),
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            model=_model(OVERVIEW_PARAGRAPH),
+        ).run()
+
+    summaries = [row for row in await _facts(workspace_id) if row.item_class == SEMANTIC]
+    assert [row.body for row in summaries] == [OVERVIEW_PARAGRAPH]
+
+    with ws(workspace_id):
+        recalled = await _store(workspace_id, probe).recall(
+            "zephyr protocol handshake",
+            frozenset({SHARED_SUBJECT}),
+            10,
+            source_reader=_reader(frozenset({SHARED_SUBJECT})),
+        )
+    assert [item.memory_id for item in recalled] == [summaries[0].id]
 
 
 async def test_consolidation_without_a_model_writes_nothing(db: None) -> None:
@@ -2389,3 +2638,87 @@ async def test_one_pass_settles_only_the_pages_its_own_facts_replace(
         "the acquisition codename is meridian": restated_revision
     }
     assert await _page_facts(passed_over) == {"the security review is scheduled": 1}
+
+
+async def test_a_page_read_again_at_one_revision_keeps_only_its_latest_reading(db: None) -> None:
+    """What makes a rebuild a rebuild. The cursor is sent back over pages whose content never
+    changed, so a page is read a second time at the revision it already had and the statement being
+    replaced is bound to that very revision — a test on the revision alone would find nothing stale
+    and leave the member reading one page twice. The pass retires every link the page carries other
+    than the rows it just committed, so the older reading goes and its replacement stands."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(workspace_id, vec((31, 1.0)))
+    change = _change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page")
+    with ws(workspace_id):
+        await _scripted(store, _extraction(page_id, "the codename is polaris")).apply((change,))
+        assert await _page_facts(page_id) == {"the codename is polaris": 1}
+        await _scripted(store, _extraction(page_id, "the codename is meridian")).apply((change,))
+
+    assert await _page_facts(page_id) == {"the codename is meridian": 1}
+
+
+async def test_a_page_read_again_that_derives_no_fact_keeps_the_reading_it_has(db: None) -> None:
+    """Nothing goes before its replacement is committed. A pass that records no fact for a page
+    settles nothing for it, so the retirement never runs — a rebuild changes what the member reads
+    only where it has something to put there."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(workspace_id, vec((32, 1.0)))
+    change = _change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page")
+    with ws(workspace_id):
+        await _scripted(store, _extraction(page_id, "the codename is polaris")).apply((change,))
+        await _scripted(store, json.dumps({"facts": []})).apply((change,))
+
+    assert await _page_facts(page_id) == {"the codename is polaris": 1}
+
+
+async def test_rebuilding_the_page_facts_clears_the_cursor_the_deriver_rides(
+    db: None, tmp_path: object
+) -> None:
+    """The whole of what the tool does: the cursor goes, so the next tick replays every page the
+    workspace holds to the deriver. It writes nothing itself — the pass that owns this text does
+    that — and the indexer's cursor beside it is untouched, since only the derived facts are being
+    written again."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    page_id, _source_id = await _seed_page(blob, workspace_id, PAGE_BODY)
+    client = RecordingExtractionClient(_extraction(page_id, "the codename is polaris"))
+    runner = _runner(blob, vec((34, 1.0)), _registry(client))
+    scoped = ScopedStore(extension=memory_manifest.NAME)
+    (tool,) = (one for one in memory_manifest.manifest().tools if one.name == REBUILD_TOOL)
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+        await runner.drive(
+            next(one for one in runner.consumers() if one.discriminator == "index_pages")
+        )
+        indexed = await scoped.get("page_change_cursor:index_pages")
+        assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) is not None
+
+        member_id = await _seed_admin(workspace_id)
+        answered = await tool.handler(
+            _rebuild_ctx(workspace_id, member_id),
+            RebuildPageFactsInput(user_description="write the page facts again"),
+        )
+        assert answered.content[0].text == memory_manifest.REBUILD_QUEUED
+        assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) is None
+        assert await scoped.get("page_change_cursor:index_pages") == indexed
+
+
+async def test_only_an_admin_can_ask_for_the_page_facts_to_be_written_again(db: None) -> None:
+    """The tool is the whole act the portal button submits, so its gate is the button's gate: the
+    cursor stands where it was and the pass reads nothing twice."""
+    workspace_id = await _workspace()
+    scoped = ScopedStore(extension=memory_manifest.NAME)
+    (tool,) = (one for one in memory_manifest.manifest().tools if one.name == REBUILD_TOOL)
+    with ws(workspace_id):
+        await scoped.put(memory_manifest.DERIVE_CURSOR_KEY, "a-cursor")
+        member_id = await _seed_admin(workspace_id, admin=False)
+        with pytest.raises(ValueError, match=memory_manifest.REBUILD_ADMIN_ONLY):
+            await tool.handler(
+                _rebuild_ctx(workspace_id, member_id),
+                RebuildPageFactsInput(user_description="write the page facts again"),
+            )
+        assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) == "a-cursor"

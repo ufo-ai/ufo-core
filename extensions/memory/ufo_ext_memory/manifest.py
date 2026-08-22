@@ -1,7 +1,8 @@
-"""The memory extension's declared points: the two tools, the `memory` object kind, the recall
+"""The memory extension's declared points: the three tools, the `memory` object kind, the recall
 hook, two page-change consumers, three derivation jobs.
 
-`memory_search` and `memory_update` are the agent's durable-memory tools; the `user_prompt_submit`
+`memory_search` and `memory_update` are the agent's durable-memory tools and `rebuild_page_facts`
+sends the fact deriver back over every synced page; the `user_prompt_submit`
 hook auto-injects relevant memory into the turn's context before the model runs. Two `page_change`
 hooks ride independent core-runner cursors: `index_pages` turns each replayed source-page change
 into index chunks + a mirror row, and `derive_facts` distills each into durable `fact`
@@ -18,7 +19,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import zip_longest
-from typing import get_args
+from typing import Literal, get_args
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -26,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.context import ExtensionContext, SourceReader
 from ufo.sdk.index import TextChunker
-from ufo.sdk.jobs import JobSpec, owner_candidates
+from ufo.sdk.jobs import PAGE_CHANGE_CURSOR_KEY, JobSpec, owner_candidates
 from ufo.sdk.listings import ListingCursor, ListingPage, page_of, page_query
 from ufo.sdk.manifest import (
     HookContext,
@@ -98,6 +99,11 @@ CONSOLIDATE_JOB = "memory_consolidate"
 CONSOLIDATE_SCHEDULE = "0 0 * * * *"
 DEDUP_JOB = "memory_dedup"
 DEDUP_SCHEDULE = "0 30 * * * *"
+REBUILD_QUEUED = (
+    "The facts derived from synced pages are written again as the derivation pass reaches each "
+    "page. Overview summaries and items an app recorded in a conversation are untouched."
+)
+REBUILD_ADMIN_ONLY = "Only a workspace admin can rebuild the facts derived from synced pages."
 logger = logging.getLogger(__name__)
 
 
@@ -123,17 +129,26 @@ class MemorySearchInput(BaseModel):
     )
 
 
+RecordedClass = Literal["fact", "episodic"]
+"""The classes an agent records. `semantic` is the wiki's Overview band, which the consolidation job
+writes from facts that agree — the page tells the member exactly that, so it stays the one producer
+and a ledger an agent hand-wrote never lands under that heading."""
+
+
 class MemoryUpdateInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     body: str = Field(
         max_length=MEMORY_BODY_MAX_CHARS,
-        description="A durable fact to remember about the user, written from their perspective "
-        "(e.g. 'I prefer concise summaries'). Store persistent facts — role, company, team, "
-        "preferences, projects, key people — never ephemeral instructions like 'make it shorter'.",
+        description="One row of the member's wiki, in the third person: a subject they recognise, "
+        "an em dash, then one sentence about it, inside 115 characters — 'Acme Corp — Moved the "
+        "billing migration to 4 March.' Write the full name of every person, company, and thing "
+        "you mention, because the reader sees this item alone, months later.",
     )
-    item_class: ItemClass = Field(
-        default=FACT, description="The memory item class; defaults to a fact."
+    item_class: RecordedClass = Field(
+        default=FACT,
+        description="fact for something that stays true; episodic for a breadcrumb of what "
+        "happened, which recall offers as a topic to open rather than quoting back.",
     )
     memory_kind: MemoryKind = Field(
         default=KIND_FACT,
@@ -259,6 +274,12 @@ class MemorySearchService:
         """The item classes this store writes, read off `ItemClass` itself so a class added there
         reaches a consumer's filter without a second list to remember."""
         return get_args(ItemClass)
+
+    def body_max_chars(self) -> int:
+        """How long a body this store commits, which is the bound `memory_update` refuses past. A
+        portal form that records one reads it here and stops the member at the same length, so the
+        rule is stated once by whoever enforces it."""
+        return MEMORY_BODY_MAX_CHARS
 
     async def list_recent(
         self,
@@ -492,6 +513,37 @@ async def derive_facts(ctx: HookContext) -> HookOutcome:
     return None
 
 
+DERIVE_CURSOR_KEY = f"{PAGE_CHANGE_CURSOR_KEY}:{derive_facts.__name__}"
+"""The cursor core drives `derive_facts` from, keyed off the handler core discriminates it by, so
+the two cannot drift apart under a rename."""
+
+
+class RebuildPageFactsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_description: str = Field(
+        description="Why the facts are being written again, in plain language for the activity "
+        "timeline."
+    )
+
+
+async def rebuild_page_facts_handler(ctx: ToolContext, args: RebuildPageFactsInput) -> ToolResult:
+    """Mark every synced page due for derivation again and return. Nothing is written or removed
+    here: clearing the cursor sends `derive_facts` back over every page, and that pass — which owns
+    this derived state — writes each page's facts and retires the reading they replace. A page the
+    pass leaves without a fact keeps the one it has, so no row goes before its replacement exists.
+
+    A tick already running holds the cursor value it read, so its own advance loses the
+    compare-and-set against the cleared key and it stops where it stands; the next tick starts from
+    the beginning."""
+    if ctx.ext is None:
+        raise RuntimeError("rebuild_page_facts dispatched without its ExtensionContext")
+    if not await ctx.speaker_is_admin():
+        raise ValueError(REBUILD_ADMIN_ONLY)
+    await ctx.ext.store.delete(DERIVE_CURSOR_KEY)
+    return ToolResult(content=(TextContent(text=REBUILD_QUEUED),))
+
+
 async def consolidate_memory(ctx: ExtensionContext) -> None:
     if ctx.embed is None:
         raise RuntimeError("memory_consolidate requires the embed backend; none is wired")
@@ -590,21 +642,39 @@ def manifest() -> Manifest:
             ToolDef(
                 name="memory_update",
                 description=(
-                    "Record a durable memory item so later turns and conversations can recall it. "
-                    "Writes only to the current conversation audience: a private conversation "
-                    "writes that member's memory; a shared conversation writes shared memory. "
-                    "Use proactively when learning persistent facts — name, "
-                    "role, company, team, colleagues, preferences, projects, tools, key people, "
-                    "communication style. Set `memory_kind` (fact/preference/decision/event/task) "
-                    "so recency decay matches how fast the fact goes stale, and `confidence` "
-                    "(1-10) for how sure you are. Do NOT store ephemeral instructions (e.g. 'make "
-                    "it shorter'); only store persistent information. Task-execution state and "
-                    "per-run/scheduled-run output are NOT durable memory — keep in-task working "
-                    "state in workspace files or todo items, and let per-run output live in the "
-                    "delivered post or artifact, not here."
+                    "Record a durable memory item so later turns and conversations can recall it, "
+                    "and so it reads as one row of the member's wiki. Writes only to the current "
+                    "conversation audience: a private conversation writes that member's memory; a "
+                    "shared conversation writes shared memory. Use it as you learn what lasts — a "
+                    "name, role, company, team, colleague, preference, project, tool, or working "
+                    "style. Record what a person would act on or repeat months from now: a "
+                    "decision, an owner, a commitment, a date, a standing rule. Leave to the "
+                    "system the values it reports about itself and can read again on demand — a "
+                    "last-updated time, a count, an identifier, a status flag. Set `memory_kind` "
+                    "(fact/preference/decision/event/task) so recency decay matches how fast the "
+                    "item goes stale, and `confidence` (1-10) for how sure you are it is true. "
+                    "A one-off instruction ('make it shorter') belongs in the turn, in-task "
+                    "working state in workspace files or todo items, and per-run output in the "
+                    "delivered post or artifact."
                 ),
                 input_model=MemoryUpdateInput,
                 handler=memory_update_handler,
+                side_effecting=True,
+            ),
+            ToolDef(
+                name="rebuild_page_facts",
+                description=(
+                    "Write the workspace's page-derived facts again, for a workspace admin who "
+                    "says the wiki rows drawn from synced documents read badly. It marks every "
+                    "synced page due and returns: the derivation pass replaces each page's facts "
+                    "as it reaches them, and no row goes before its replacement is written. It "
+                    "redoes nothing else — Overview summaries are the consolidation pass's, and an "
+                    "item recorded through memory_update came from a conversation that cannot be "
+                    "held again. Use it for the whole workspace's page facts, never to change one "
+                    "row: a single wrong statement is corrected by recording the right one."
+                ),
+                input_model=RebuildPageFactsInput,
+                handler=rebuild_page_facts_handler,
                 side_effecting=True,
             ),
         ),

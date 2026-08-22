@@ -525,7 +525,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "sites_0006",
         "web_0002",
         "sweep_0002",
-        "report_digest_0001",
+        "report_digest_0002",
     } <= set(heads)
     assert len(heads) == 16
 

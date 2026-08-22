@@ -37,6 +37,8 @@ from evals.harness.harness import JsonObject
 
 ANSWER_TOLERANCE = 0.05
 
+CONTENT_WORD = re.compile(r"[a-z0-9]+(?:['\u2019][a-z]+)?", re.IGNORECASE)
+
 WEB_TOOLS = ("search_web", "fetch_url")
 LOCAL_FS_TOOLS = frozenset({"read", "write", "edit", "bash", "grep", "glob"})
 
@@ -95,6 +97,33 @@ WRITER_COMMANDS = frozenset(
         "zsh",
     }
 )
+
+
+def content_words(text: str, excluded: frozenset[str] = frozenset()) -> frozenset[str]:
+    """The words a passage carries its meaning in: its tokens, casefolded, less the stop words and
+    any term the caller holds constant across the passages it is comparing."""
+    return frozenset(
+        word
+        for match in CONTENT_WORD.finditer(text)
+        if (word := match.group(0).casefold()) not in excluded
+    )
+
+
+def max_pairwise_overlap(
+    passages: tuple[str, ...], excluded: frozenset[str] = frozenset()
+) -> float:
+    """The widest Jaccard overlap of content words between any two of the passages: what a reader
+    meets as one fact written twice."""
+    sets = tuple(content_words(passage, excluded) for passage in passages)
+    return max(
+        (
+            len(left & right) / len(left | right)
+            for index, left in enumerate(sets)
+            for right in sets[index + 1 :]
+            if left or right
+        ),
+        default=0.0,
+    )
 
 
 def answer_text(text: str) -> str:

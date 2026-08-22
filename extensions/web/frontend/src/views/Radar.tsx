@@ -1,7 +1,8 @@
 import { useLayoutEffect, useState } from "react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Dialog, DialogTrigger } from "@/components/ui/dialog";
 import { PressRow } from "@/components/ui/pressrow";
 import { Sheet } from "@/components/ui/sheet";
 import { ARTIFACT_TEXT_BYTES, useTextArtifact } from "@/kernel/artifact";
@@ -10,6 +11,7 @@ import { ObjectDetail, type ObjectAddress } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
 import { PageHeader } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
+import { RebuildDialog } from "@/kernel/rebuild";
 import { slackLink } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
@@ -105,13 +107,38 @@ export function Radar({
       {pinned ? (
         <Back label={title ?? "Radar"} onGo={() => onPlace({ open: undefined })} />
       ) : title ? (
-        <PageHeader title={title} />
+        <PageHeader title={title} action={<RebuildEntries />} />
       ) : null}
       <Section>
         <Feed place={place} onPlace={onPlace} />
       </Section>
       {detail}
     </>
+  );
+}
+
+/** The feed's one act: the entries under the reports, written again. What a report says is the
+ *  report's own and is never touched — this reaches the title and the lines the digest job wrote
+ *  over it, which that job can write again from the report it read the first time. The window is
+ *  the job's, and the dialog says so, because a report the job will never read again would lose its
+ *  entry rather than gain a better one. */
+function RebuildEntries() {
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button size="bar">Rebuild entries</Button>
+      </DialogTrigger>
+      <RebuildDialog title="Rebuild Entries" action="Rebuild entries" verb="rebuild_reports">
+        <p className="m-0">
+          Every report published in the last seven days is read again, and the title and lines
+          standing over it are written from scratch.
+        </p>
+        <p className="m-0">
+          A report older than seven days keeps the entry it has. The digest job does not read that
+          far back.
+        </p>
+      </RebuildDialog>
+    </Dialog>
   );
 }
 

@@ -31,7 +31,7 @@ from ufo.sdk.objects import (
     object_page,
 )
 from ufo.sdk.tools import ToolContext
-from ufo_ext_memory.store import memory_item
+from ufo_ext_memory.store import clip_to_word, memory_item
 
 MEMORY_KIND = "memory"
 PAGE_OBJECT_KIND = "page"
@@ -81,7 +81,7 @@ def _row(
 ) -> ObjectRow:
     return ObjectRow(
         name=name,
-        summary=body if len(body) <= SUMMARY_MAX else body[: SUMMARY_MAX - 1].rstrip() + "…",
+        summary=clip_to_word(body, SUMMARY_MAX),
         fields={
             "subject": subject,
             "item_class": item_class,

@@ -8,7 +8,9 @@ nothing even then. The refusal polarities: a malformed or cross-paired intent is
 turn, a walled agent is not-found, and another member's private item is untouchable — a correction
 naming it still writes only the corrector's own subject, invisible to the named item's owner. The
 first run's picks ride the same lane to the same tool, recording what the team uses under the
-picking member's own subject."""
+picking member's own subject. The wiki's rebuild rides it too, to `rebuild_page_facts`: that intent
+writes no memory at all — it clears the cursor the fact deriver rides, and the pass that owns those
+rows writes them again."""
 
 import json
 from collections.abc import AsyncIterator, Iterator
@@ -588,3 +590,51 @@ async def test_a_malformed_or_walled_correction_writes_nothing(
         ).scalar_one()
     assert turns == 0
     assert items == 0
+
+
+async def test_the_wiki_rebuild_clears_the_derive_cursor_through_the_lane(
+    memory_web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The rebuild's whole chain: the page's intent is admitted as a turn, the turn dispatches
+    `rebuild_page_facts` verbatim, and the cursor the fact deriver rides is gone — so the next tick
+    replays every page and writes each one's facts again. The turn writes no memory itself, because
+    the pass that owns that text is what writes it.
+
+    The gate is the tool's, exercised through the lane the button uses: a member who is not an admin
+    reads the tool's refusal and the cursor stands exactly where it was."""
+    client, workspace_id, agent_id = memory_web
+    member_id, token = await _seed_member(workspace_id, "rebuilder@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    cursor = ScopedStore(extension=memory_manifest_module.NAME)
+    with ws(workspace_id):
+        await cursor.put(memory_manifest_module.DERIVE_CURSOR_KEY, "2026-08-01T00:00:00+00:00|page")
+
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "rebuild_page_facts"},
+        headers=cookie,
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False
+    assert refused.json()["message"] == memory_manifest_module.REBUILD_ADMIN_ONLY
+    with ws(workspace_id):
+        assert await cursor.get(memory_manifest_module.DERIVE_CURSOR_KEY) is not None
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).where(tables.member.c.id == member_id).values(is_admin=True)
+        )
+    queued = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "rebuild_page_facts"},
+        headers=cookie,
+    )
+    assert queued.status_code == 200
+    assert queued.json()["applied"] is True
+    assert queued.json()["message"] == memory_manifest_module.REBUILD_QUEUED
+    with ws(workspace_id):
+        assert await cursor.get(memory_manifest_module.DERIVE_CURSOR_KEY) is None
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(sa.select(sa.func.count()).select_from(memory_item))
+        ).scalar_one() == 0

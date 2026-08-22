@@ -27,7 +27,7 @@ from pydantic import BaseModel, ValidationError
 from ufo_ext_composio.client import BANNED
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.store import recall_subjects
+from ufo_ext_memory.store import MEMORY_BODY_MAX_CHARS, recall_subjects
 from ufo_ext_pipedream.client import CONNECTORS as PIPEDREAM_CONNECTORS
 from ufo_ext_report_digest.manifest import manifest as report_digest_manifest
 from ufo_ext_report_digest.writer import report_digest_entry
@@ -66,6 +66,7 @@ from ufo_ext_web.panels import (
     PanelIntent,
     _connect_outcome,
     _outcome,
+    _rebuild_outcome,
     _tool_intent,
 )
 from ufo_ext_web.surface import (
@@ -9767,9 +9768,52 @@ def test_the_first_run_connect_steps_prepare_the_install_tools_verbatim() -> Non
     prepared here."""
     for verb, tool in (("connect_slack", "slack_connect"), ("connect_github", "connect_github")):
         submitted = PanelIntent.model_validate({"submitted": {"verb": verb}}).submitted
-        prepared = _tool_intent(submitted, None)
+        prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
         assert prepared.tool == tool
         assert set(prepared.input) == {"user_description"}
+
+
+def test_the_rebuild_intents_prepare_their_own_extensions_tools_verbatim() -> None:
+    """Each rebuild names the tool that owns the text being written again and carries nothing but
+    the line the activity timeline reads. Neither panel holds a window, a batch size, or a rule
+    about who may press it: the tool that drains the work states the first two and its own admin
+    gate decides the third, so nothing about a rebuild is answered twice."""
+    for verb, tool in (
+        ("rebuild_reports", "rebuild_report_digest"),
+        ("rebuild_page_facts", "rebuild_page_facts"),
+    ):
+        submitted = PanelIntent.model_validate({"submitted": {"verb": verb}}).submitted
+        prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
+        assert prepared.tool == tool
+        assert set(prepared.input) == {"user_description"}
+
+
+def test_a_rebuild_outcome_carries_the_tools_own_account_of_what_it_queued() -> None:
+    """A rebuild changes nothing the member can see when they press it — the job it marked work for
+    writes the new text minutes later — so the answer is the tool's own sentence rather than the
+    bare `Saved.` a mutation gets, and a refusal reads back the way every other refusal does."""
+    turn_id = uuid4()
+    queued = _rebuild_outcome(
+        TerminalFrame(status="done", text="The last seven days' entries are written again."),
+        turn_id,
+    ).body
+    assert json.loads(queued) == {
+        "applied": True,
+        "message": "The last seven days' entries are written again.",
+        "turn_id": str(turn_id),
+    }
+    refused = _rebuild_outcome(
+        TerminalFrame(
+            status="failed",
+            error_message="ValueError: Only a workspace admin can write the radar entries again.",
+        ),
+        turn_id,
+    ).body
+    assert json.loads(refused) == {
+        "applied": False,
+        "message": "Only a workspace admin can write the radar entries again.",
+        "turn_id": str(turn_id),
+    }
 
 
 def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:

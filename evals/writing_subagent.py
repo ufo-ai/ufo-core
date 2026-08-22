@@ -14,13 +14,12 @@ from evals.harness.capability import (
     WorkspaceFile,
 )
 from evals.harness.harness import JsonObject
-from evals.harness.scorers import combine, lane_scorer
+from evals.harness.scorers import CONTENT_WORD, combine, lane_scorer, max_pairwise_overlap
 
 TWEET_RE = re.compile(r"^\s*[1-3][.)]\s+(.+?)\s*$", re.MULTILINE)
 THREAD_POST_RE = re.compile(
     r"^\s*([1-5])/5\s+(.+?)(?=^\s*(?:[1-5]/5|\[)|\Z)", re.MULTILINE | re.DOTALL
 )
-WORD_RE = re.compile(r"[a-z0-9]+(?:['\u2019][a-z]+)?", re.IGNORECASE)
 STOP_WORDS = frozenset(
     {
         "a",
@@ -286,7 +285,7 @@ class LaunchThreadGrader:
 
 
 def _words(text: str) -> tuple[str, ...]:
-    return tuple(match.group(0).casefold() for match in WORD_RE.finditer(text))
+    return tuple(match.group(0).casefold() for match in CONTENT_WORD.finditer(text))
 
 
 def _language_metrics(
@@ -294,26 +293,12 @@ def _language_metrics(
     comparison_exclusions: frozenset[str] = frozenset(),
 ) -> tuple[tuple[tuple[str, ...], ...], float, float, float]:
     words = tuple(_words(passage) for passage in passages)
-    content_sets = tuple(
-        frozenset(
-            word for word in tokens if word not in STOP_WORDS and word not in comparison_exclusions
-        )
-        for tokens in words
-    )
     all_words = tuple(token for tokens in words for token in tokens)
     density_words = tuple(token for token in all_words if token not in STOP_WORDS)
     comparison_words = tuple(token for token in density_words if token not in comparison_exclusions)
     density = len(density_words) / len(all_words) if all_words else 0.0
     diversity = len(set(comparison_words)) / len(comparison_words) if comparison_words else 0.0
-    overlap = max(
-        (
-            len(left & right) / len(left | right)
-            for index, left in enumerate(content_sets)
-            for right in content_sets[index + 1 :]
-            if left or right
-        ),
-        default=0.0,
-    )
+    overlap = max_pairwise_overlap(passages, STOP_WORDS | comparison_exclusions)
     return words, density, diversity, overlap
 
 

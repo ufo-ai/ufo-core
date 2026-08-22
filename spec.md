@@ -735,10 +735,20 @@ the chat verbs write.
 Agent delete stays refused — the cascade over an agent's conversations, memory, and resources is
 unbuilt. A workspace-scoped view has no agent of its own, so its intents ride the main agent's
 lane — the agent every surface already routes an unbound member to: a source's resync, share, and
-remove; a memory correction; and a credential slot's set, replace, and clear. Setting a slot's
+remove; a memory correction; the radar's and the wiki's rebuilds; and a credential slot's set,
+replace, and clear. Setting a slot's
 value is the one mutation whose payload never enters an intent: the intent asks for the same
 sealed `request_credentials` prompt a chat turn produces, and the value crosses only in that
 prompt's private fulfillment, so a secret reaches no turn, transcript, or intent response.
+
+A rebuild is the lane's one act that writes nothing. The radar's entries and the wiki's
+page-derived rows are a job's text, and derived state is a job's to produce, so the intent marks
+that work due — dropping the entries inside the digest job's own window, clearing the cursor the
+fact deriver rides — and the job writes it on its own interval. Each control names the band it
+reaches rather than the page it stands on: a report the job will not read that far back for, a
+consolidated summary the hourly pass re-forms on its own terms, and an item an agent recorded in a
+conversation that has ended are not a rebuild's to redo, and a control named for the whole page
+would promise them.
 
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one

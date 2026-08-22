@@ -183,12 +183,40 @@ class CorrectionIntent(BaseModel):
     audience, naming the corrected item in `source_ref`. The named item is never edited or removed:
     the memory kind refuses apply and delete, and both statements stand until the dedup sweep
     retires a near-duplicate original toward the newest statement — the correction — leaving the row
-    and its provenance in place."""
+    and its provenance in place.
+
+    A correction is therefore a row the member writes, whatever shape the item it names has, and how
+    long a row may run is the memory provider's answer rather than a number repeated here: the
+    memory read carries `body_max_chars`, and the form holds the member to it — an item longer than
+    that bound opens the form empty beside its current text, so what is collected is a statement
+    written to the bound rather than a body the tool refuses. A second copy of the bound in this
+    extension is a second answer that drifts the day the provider moves its own, and the tool stays
+    the enforcer either way."""
 
     verb: Literal["record"]
     kind: Literal["memory"]
     corrects: UUID
     body: str = Field(min_length=1)
+
+
+class DigestRebuildIntent(BaseModel):
+    """The radar's rebuild, prepared by the feed and dispatched verbatim to `rebuild_report_digest`
+    on the main agent's lane. The tool's own admin gate answers who may spend a workspace's balance
+    writing its whole feed again, and the tool marks the reports due rather than writing anything —
+    the digest job owns that text and drains the backlog on its own interval."""
+
+    verb: Literal["rebuild_reports"]
+
+
+class PageFactRebuildIntent(BaseModel):
+    """The wiki's rebuild, prepared by the page and dispatched verbatim to `rebuild_page_facts`. It
+    reaches exactly the rows a job can produce again — the facts derived from synced pages, which
+    the pages themselves still hold. The consolidated Overview summaries re-form on the
+    consolidation job's own terms as facts age into a cluster, and an item an app recorded in a
+    conversation came from a turn that has ended, so neither is this intent's to redo; the page
+    states both before the member presses it."""
+
+    verb: Literal["rebuild_page_facts"]
 
 
 class ProviderTile(BaseModel):
@@ -500,6 +528,23 @@ UNLOCKS = (
 UNLOCKS_BY_NAME = {unlock.name: unlock for unlock in UNLOCKS}
 
 
+TOOLING_PREFIX = "My team uses "
+
+
+def _tools_recorded(labels: tuple[str, ...], budget: int) -> str:
+    """The first-run picks as one row of the member's wiki. A member may pick every tile and the
+    tiles carry labels rather than slugs, so the sentence is built to the row it is drawn as: it
+    names the tools that fit and counts the rest. A sentence cut at the ceiling instead loses
+    whichever names fall past it and says nothing about how many there were."""
+    for named in range(len(labels), 0, -1):
+        rest = len(labels) - named
+        tail = f", and {rest} more." if rest else "."
+        body = TOOLING_PREFIX + ", ".join(labels[:named]) + tail
+        if len(body) <= budget:
+            return body
+    return f"{TOOLING_PREFIX}{len(labels)} tools."
+
+
 class ToolingIntent(BaseModel):
     """What the team already uses, picked on the first run and recorded through `memory_update` —
     exactly the write chat performs when a member says it, so the item lands under the picking
@@ -559,6 +604,8 @@ class PanelIntent(BaseModel):
         | ConnectSlackIntent
         | CorrectionIntent
         | CredentialIntent
+        | DigestRebuildIntent
+        | PageFactRebuildIntent
         | PaymentMethodIntent
         | RefillIntent
         | ToolingIntent
@@ -575,12 +622,15 @@ def _tool_intent(
         | ConnectSlackIntent
         | CorrectionIntent
         | CredentialIntent
+        | DigestRebuildIntent
+        | PageFactRebuildIntent
         | PaymentMethodIntent
         | RefillIntent
         | ToolingIntent
         | TranscriptIntent
     ),
     slot: CredentialSlotView | None,
+    body_max_chars: int,
 ) -> ToolIntent:
     match submitted:
         case RefillIntent():
@@ -631,13 +681,23 @@ def _tool_intent(
                     "user_description": "Correct a memory from the portal.",
                 },
             )
+        case DigestRebuildIntent():
+            return ToolIntent(
+                tool="rebuild_report_digest",
+                input={"user_description": "Write the radar entries again from the portal."},
+            )
+        case PageFactRebuildIntent():
+            return ToolIntent(
+                tool="rebuild_page_facts",
+                input={"user_description": "Write the wiki's page facts again from the portal."},
+            )
         case ToolingIntent():
             picked = set(submitted.providers)
-            labels = [tile.label for tile in FIRST_RUN_PROVIDERS if tile.name in picked]
+            labels = tuple(tile.label for tile in FIRST_RUN_PROVIDERS if tile.name in picked)
             return ToolIntent(
                 tool="memory_update",
                 input={
-                    "body": f"My team uses {', '.join(labels)}.",
+                    "body": _tools_recorded(labels, body_max_chars),
                     "source_ref": "first run",
                     "user_description": "Record what the team uses from the first run.",
                 },
@@ -772,6 +832,16 @@ def _portal_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
     return JSONResponse({"applied": True, "message": "", "url": link, "turn_id": str(turn_id)})
 
 
+def _rebuild_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
+    """What a rebuild made due, in the tool's own words. A rebuild changes nothing the member can
+    see when they press it — the job it marked work for writes the new text minutes later — so the
+    answer has to say what was queued and what was left alone, and the tool that knows both is what
+    says it. A refusal keeps the tool's words the way every other outcome does."""
+    if frame.status != "done":
+        return _outcome(frame, turn_id)
+    return JSONResponse({"applied": True, "message": frame.text, "turn_id": str(turn_id)})
+
+
 async def submit_intent(
     ctx: SurfaceContext, request: Request, agent_id: UUID, member_id: UUID, email: str
 ) -> Response:
@@ -842,7 +912,10 @@ async def submit_intent(
             return JSONResponse(
                 {"applied": False, "message": f"No credential slot named {submitted.name!r}."}
             )
-    intent = _tool_intent(submitted, slot)
+    if isinstance(submitted, CorrectionIntent | ToolingIntent) and not ctx.memory_available:
+        return JSONResponse({"applied": False, "message": "This deploy runs without memory."})
+    body_max_chars = ctx.memory_body_max_chars if ctx.memory_available else 0
+    intent = _tool_intent(submitted, slot, body_max_chars)
     if intent.tool == "object_apply":
         manifest = intent.input.get("manifest")
         if not isinstance(manifest, str):
@@ -878,6 +951,8 @@ async def submit_intent(
                             return _connect_outcome(submitted, frame.frame, admitted.turn_id)
                         if isinstance(submitted, PaymentMethodIntent):
                             return _portal_outcome(frame.frame, admitted.turn_id)
+                        if isinstance(submitted, DigestRebuildIntent | PageFactRebuildIntent):
+                            return _rebuild_outcome(frame.frame, admitted.turn_id)
                         return _outcome(frame.frame, admitted.turn_id)
                     case Parked():
                         return JSONResponse(

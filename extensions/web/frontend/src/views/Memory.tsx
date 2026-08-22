@@ -9,7 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/field";
+import { Hint, Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Td } from "@/components/ui/table";
 import { Pager, type Placement } from "@/kernel/pager";
@@ -24,6 +24,7 @@ import {
   type NoticeState,
 } from "@/kernel/panel";
 import { DataTable, type Column } from "@/kernel/table";
+import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
 import { postIntent } from "@/lib/api";
 import { subjectLabel } from "@/lib/audience";
@@ -41,6 +42,10 @@ type MemoryPayload = {
   available: boolean;
   kinds: string[];
   matches: Match[];
+  /** How long a body the installed memory provider stores, stated by the read rather than held as
+   *  a number here: the tool refuses past it, so the form has to stop the member at the same
+   *  length, and a copy kept in the portal would drift the day the provider moves its own. */
+  body_max_chars?: number;
   newer?: string | null;
   older?: string | null;
 };
@@ -156,6 +161,7 @@ export function Memory({
         {correcting ? (
           <CorrectionDialog
             match={correcting}
+            limit={state.phase === "ready" ? state.payload.body_max_chars : undefined}
             onSuccess={() => {
               setCorrecting(null);
               setReloads((count) => count + 1);
@@ -167,9 +173,24 @@ export function Memory({
   );
 }
 
-function CorrectionDialog({ match, onSuccess }: { match: Match; onSuccess: () => void }) {
+/** One memory restated. `limit` is the provider's own body bound, carried by the read that drew
+ *  this row: the field stops there and says how much is left, so the member meets the rule while
+ *  they write rather than as a refusal after they submit. A correction is a new statement and
+ *  never an edit of the row it names, so a row past the bound — the Overview paragraph is one —
+ *  opens the field empty with its current text above it to write against, rather than seeding a
+ *  body the tool would refuse and a count that has already run out. */
+function CorrectionDialog({
+  match,
+  limit,
+  onSuccess,
+}: {
+  match: Match;
+  limit?: number;
+  onSuccess: () => void;
+}) {
   const mainAgent = useMainAgent();
-  const [body, setBody] = useState(match.text);
+  const overlong = limit !== undefined && match.text.length > limit;
+  const [body, setBody] = useState(overlong ? "" : match.text);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
 
@@ -192,17 +213,35 @@ function CorrectionDialog({ match, onSuccess }: { match: Match; onSuccess: () =>
     <DialogContent>
       <DialogHeader>
         <DialogTitle>Correct Memory</DialogTitle>
-        <DialogDescription>The correction replaces this memory.</DialogDescription>
+        <DialogDescription>
+          {overlong
+            ? "This memory is longer than a correction may run. Write the corrected statement."
+            : "The correction replaces this memory."}
+        </DialogDescription>
       </DialogHeader>
       <OutcomeNotice state={notice} />
       <form id="correct-memory" onSubmit={submit} className="flex flex-col items-start gap-sm">
+        {overlong ? (
+          <p
+            className={cn(
+              "w-full rounded-panel bg-fill px-lg py-md",
+              "text-subtitle narrow:text-ui text-ink-soft",
+            )}
+          >
+            {match.text}
+          </p>
+        ) : null}
         <Input
           autoFocus
           aria-label="Memory"
+          maxLength={limit}
           value={body}
           onChange={(event) => setBody(event.target.value)}
           className="max-w-none w-full"
         />
+        {limit === undefined ? null : (
+          <Hint className="m-0">{limit - body.length} characters left</Hint>
+        )}
       </form>
       <DialogFooter>
         <Button

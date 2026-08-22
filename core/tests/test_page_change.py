@@ -32,11 +32,17 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.loader import load_manifests
-from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest, PageChangeBatch
+from ufo.ext.manifest import (
+    PAGE_CHANGE_CURSOR_KEY,
+    HookContext,
+    HookOutcome,
+    HookSpec,
+    Manifest,
+    PageChangeBatch,
+)
 from ufo.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_BATCH,
-    PAGE_CHANGE_CURSOR_KEY,
     PAGE_CHANGE_JOB,
     PageChangeRunner,
     TurnDispatcher,

@@ -2291,6 +2291,15 @@ class SurfaceContext:
             raise RuntimeError("no memory-search provider is installed — gate on memory_available")
         return self._memory.listable_kinds()
 
+    @property
+    def memory_body_max_chars(self) -> int:
+        """How long a body the installed provider stores — what a portal form that records one
+        holds its member to, so the length is answered by whoever enforces it and a member is
+        stopped at the bound rather than refused after they submit."""
+        if self._memory is None:
+            raise RuntimeError("no memory-search provider is installed — gate on memory_available")
+        return self._memory.body_max_chars()
+
     async def agent_spend(self, agent_id: UUID, window_seconds: int | None) -> AgentSpendReport:
         """One agent's usage for a selected range or all time, plus its caps."""
         async with workspace_tx() as connection:

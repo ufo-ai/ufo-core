@@ -39,6 +39,7 @@ from evals import (
     web_research,
     writing_subagent,
 )
+from evals.asd_writing import asd_writing_task
 from evals.harness.registry import (
     EvalTask,
     arc_task,
@@ -120,6 +121,7 @@ TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("connector_connections", connector_connections.CASES, serial=True),
     capability_task("report_digest", report_digest.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
+    asd_writing_task(SEMANTIC_JUDGE_MODEL),
     skill_loading_task(SKILL_LOADING_CASES, packs=SKILL_LOADING_PACKS),
     skill_loading_task(SKILL_MEMBER_CASES, name="skill_loading_member"),
     skill_selection_task(),
