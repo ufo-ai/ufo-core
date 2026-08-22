@@ -81,7 +81,11 @@ only ablated: run the relevant evals with and without the changed wording, and w
 section covering the same ground, and keep only what the arms prove load-bearing. A prompt change
 no eval can measure gets that eval first. `python -m evals.ablate experiment.toml` runs the arms —
 one isolated stack per text variant beside an always-run control, verdicts at sample level (the
-README's Evals section shows the experiment file).
+README's Evals section shows the experiment file). A variant may be searched for rather than drafted:
+`python -m evals.gepa optimize.toml` evolves the wording against the suites that score it and writes
+its winners as arms plus the `experiment.toml` that measures them — one module per candidate, every
+verdict a paired run, gated on the whole suites and on its claims before it counts. It writes no repo
+file: GEPA proposes, the ablation decides.
 
 ## Skills
 

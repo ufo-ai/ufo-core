@@ -123,6 +123,65 @@ name = "no-topic-list"
 "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "arms/no-topic-list.py"
 ```
 
+`python -m evals.gepa optimize.toml` writes the variants an ablation then measures. It runs GEPA
+(Genetic-Pareto reflective prompt evolution, [Agrawal et al.](https://arxiv.org/abs/2507.19457))
+over the `modules` the config names — a skill description, a skill body, a corpus reference, or a
+pack prompt section. The scored cases split into a minibatch source and a held-out `D_pareto`, and
+each iteration picks a parent off the Pareto frontier (the candidates best on at least one case,
+dominated ones pruned, weighted by how many cases they lead), takes one module round-robin, samples
+a minibatch, and asks the reflector model to rewrite that module. The reflection reads the case's
+structured evidence — the member message, the answer, every tool call with its result, each judge
+criterion's own rationale, and the rig signatures the harness owns — never the case's top-level
+reason, which `combine` builds by joining every grader's phrasing into one line.
+
+One candidate changes exactly one module, so a rollout measures one lever; candidates that changed
+disjoint modules merge by concatenating their diffs. Every verdict is a paired run: the proposal and
+the parent reduced to that same module run at the same moment over the minibatch plus the `controls`
+the change could break, and a proposal is accepted only when it gains on the targets and loses no
+control. A comparison reads the cases both arms scored: an instance one arm's stack infra-excluded
+scored nothing there, and a pair with no case in common accepts nothing. Scores from two runs are
+never compared — identical-text controls have swung 4/6 → 0/6 → 3/6 on one family. Cases the
+environment cannot pass go in `unscorable` and leave the task set before optimizing; a case the seed
+rollout could not score drops the same way. A module longer than the reflector reads whole is
+refused when the config loads, because the reply replaces the file and would come back missing the
+tail. `--dry-run` prints the plan and the estimate and spends nothing.
+
+Before anything ships, every arm — the top `arms` candidates and the merge of the disjoint winners
+— is measured against the base over the whole suites in one paired run, because a minibatch cannot
+see a neighbour regression, and then passes the claims gate: fitting a rubric is not truth, so text
+that wins a judge by asserting something false about the product is refused. A clause-level question
+— whether one sentence carries weight — belongs in `evals.ablate`, not here.
+
+GEPA proposes; the ablation decides. No repo file is written: a shipped candidate lands as
+`eval-reports/experiments/<name>/arms/<module>.<candidate>.<ext>` beside a ready-to-run
+`experiment.toml` naming them as `[[arm]]` blocks, and `state.jsonl` holds every candidate, its
+paired scores, its ancestry, its gate verdicts and its spend, so an interrupted run resumes instead
+of restarting. A stack exits nonzero as soon as one case fails, which is data: its records are
+archived first and scored whatever the exit code was, and only a stack that wrote no record is an
+error.
+
+```toml
+name = "digest-routing"
+base = "origin/main"
+suites = ["report_digest", "skill_routing", "daily_brief"]
+cases = ["report-digest-attributed-findings", "report-digest-outside-companies"]
+controls = ["board-visual-narrative", "forecast-assumption-model"]
+unscorable = ["connector-composio-install"]
+modules = [
+  "extensions/report_digest/ufo_ext_report_digest/skills/report-digest/SKILL.md",
+  "packs/assistant_hosted/ufo_pack_assistant_hosted.py",
+]
+iterations = 6
+minibatch_size = 2
+budget_usd = 180.0
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+```
+
 Each invocation records an immutable JSON run under `eval-reports/runs/` and rebuilds the offline
 `eval-reports/index.html` viewer. Every case shows its full setup (message or scenario, rubric,
 member binding) and every attempt its tool trajectory, tool errors, per-criterion judge verdicts,
