@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod osc;
 pub mod picker;
 pub mod plain;
+pub mod probe;
 pub mod retained;
 pub mod select;
 pub mod status;
@@ -38,6 +39,7 @@ use crate::ui::editor::{AskState, Key, Outcome};
 use crate::ui::history::History;
 use crate::ui::osc::{Caps, ImageProtocol};
 use crate::ui::picker::{PickKey, PickOutcome, Picker};
+use crate::ui::probe::Probe;
 use crate::ui::retained::{Entry, Retained, Step};
 use crate::ui::select::{ClickTracker, Grain, Selection};
 use crate::ui::status::{Activity, Progress, Signals, StatusRow};
@@ -91,24 +93,30 @@ pub struct RawGuard {
 }
 
 impl RawGuard {
-    pub fn new() -> RawGuard {
-        let kitty = terminal::supports_keyboard_enhancement().unwrap_or(false);
+    /// Take the terminal, and ask it what it is while nothing else is reading it: raw mode first,
+    /// or the reply is line-buffered; the probe next, holding the tty alone; then the modes whose
+    /// own events would otherwise land in the probe's read, and the flags the probe asked about.
+    ///
+    /// The probe's scheme and the keys the member typed into it come back to the caller, which is
+    /// the only reader of either.
+    pub fn enter() -> (RawGuard, Probe) {
         #[cfg(unix)]
         crate::interrupt::hold_modes();
         let _ = terminal::enable_raw_mode();
+        let probe = Probe::query();
         let _ = crossterm::execute!(
             io::stdout(),
             EnableBracketedPaste,
             EnableMouseCapture,
             EnableFocusChange
         );
-        if kitty {
+        if probe.kitty {
             let _ = crossterm::execute!(
                 io::stdout(),
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             );
         }
-        RawGuard { kitty }
+        (RawGuard { kitty: probe.kitty }, probe)
     }
 }
 
@@ -232,8 +240,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(home_root: &std::path::Path, host: String, channel: String, cwd: PathBuf) -> App {
-        let theme = Theme::detect(false);
+    pub fn new(
+        home_root: &std::path::Path,
+        theme: Theme,
+        host: String,
+        channel: String,
+        cwd: PathBuf,
+    ) -> App {
         let caps = Caps::detect();
         let (cols, rows) = sane_size();
         let mut screen = AltScreen::new(io::stdout(), theme.mode);

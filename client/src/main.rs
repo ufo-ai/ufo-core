@@ -14,7 +14,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{Event as TermEvent, KeyEventKind};
+use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
 
 use crate::clipboard::Clip;
 use crate::ops::OpRuntime;
@@ -367,11 +367,12 @@ fn pick_resume(home: &config::Home) -> String {
         die("No conversation on this machine to resume.");
     }
     let rows = ui::history::conversation_rows(&items);
-    let theme = ui::theme::Theme::detect(false);
-    let raw = ui::RawGuard::new();
+    let (raw, probe) = ui::RawGuard::enter();
+    let theme = ui::theme::Theme::detect(false, probe.scheme);
     let mut dock = ui::term::DockTerm::new(std::io::stdout(), theme.mode);
     let mut picker = Picker::new(rows);
     picker.set_page(RESUME_ROWS);
+    let mut typed: VecDeque<KeyEvent> = probe.typeahead.into();
     let picked = loop {
         let mut lines = vec![ratatui::text::Line::styled(
             "Resume a conversation".to_string(),
@@ -379,11 +380,14 @@ fn pick_resume(home: &config::Home) -> String {
         )];
         lines.extend(picker.render(&theme, 80, RESUME_ROWS));
         let _ = dock.frame(&[], &lines, None);
-        let event = match crossterm::event::read() {
-            Ok(event) => event,
-            Err(_) => break None,
+        let key = match typed.pop_front() {
+            Some(key) => key,
+            None => match crossterm::event::read() {
+                Ok(TermEvent::Key(key)) => key,
+                Ok(_) => continue,
+                Err(_) => break None,
+            },
         };
-        let TermEvent::Key(key) = event else { continue };
         if key.kind == KeyEventKind::Release {
             continue;
         }
@@ -832,11 +836,15 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     let pr_cwd = runtime.cwd.clone();
     let workspace_url = session.workspace_url.clone();
 
-    let raw = ui::RawGuard::new();
-    let mut app = App::new(&home.root, host, channel_name.clone(), cwd);
+    let (raw, probe) = ui::RawGuard::enter();
+    let theme = ui::theme::Theme::detect(false, probe.scheme);
+    let mut app = App::new(&home.root, theme, host, channel_name.clone(), cwd);
     let (evt_tx, evt_rx) = channel::<LoopEvent>();
     let (cmd_tx, cmd_rx) = channel::<WireCmd>();
 
+    for key in probe.typeahead {
+        let _ = evt_tx.send(LoopEvent::Term(TermEvent::Key(key)));
+    }
     let term_tx = evt_tx.clone();
     thread::spawn(move || loop {
         match crossterm::event::read() {

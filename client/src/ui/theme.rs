@@ -6,9 +6,6 @@
 //! their terminal was configured for. Only the signal roles carry a hue, and every hue is chosen
 //! twice: bright on a dark background, dark and saturated on a light one.
 
-#[cfg(unix)]
-use std::time::{Duration, Instant};
-
 use ratatui::style::{Color, Modifier, Style};
 
 /// How much color the terminal takes.
@@ -111,12 +108,12 @@ const LIGHT: Palette = Palette {
 };
 
 impl Theme {
-    /// Resolve the palette for the running terminal: mode from `COLORTERM`/`TERM`, scheme from
-    /// [`detect_background`], plain under `NO_COLOR`.
+    /// Resolve the palette for the running terminal: mode from `COLORTERM`/`TERM`, plain under
+    /// `NO_COLOR`, and the scheme the startup probe read off the terminal's background.
     ///
-    /// Inherits that function's constraint — call this once, at startup, before the input event
-    /// loop exists. A terminal that names no background gets the dark palette.
-    pub fn detect(plain: bool) -> Theme {
+    /// A terminal that named no background falls back to what `COLORFGBG` states, and then to the
+    /// dark palette.
+    pub fn detect(plain: bool, probed: Option<Scheme>) -> Theme {
         let mode = if plain || std::env::var_os("NO_COLOR").is_some() {
             ColorMode::Plain
         } else {
@@ -132,7 +129,9 @@ impl Theme {
         };
         let scheme = match mode {
             ColorMode::Plain => Scheme::Dark,
-            _ => detect_background().unwrap_or(Scheme::Dark),
+            _ => probed
+                .or_else(|| scheme_from_colorfgbg(&std::env::var("COLORFGBG").ok()?))
+                .unwrap_or(Scheme::Dark),
         };
         Theme::for_mode(mode, scheme)
     }
@@ -251,116 +250,6 @@ const LIGHT_LUMA: f32 = 0.5;
 
 fn luma(rgb: Rgb) -> f32 {
     (0.2126 * rgb.0 as f32 + 0.7152 * rgb.1 as f32 + 0.0722 * rgb.2 as f32) / 255.0
-}
-
-/// Ask the terminal what its background is and answer the scheme that implies, falling back to
-/// what `COLORFGBG` states.
-///
-/// Call this exactly once, at startup, **before the input event loop exists**: it puts the tty in
-/// raw mode for the length of the query, writes OSC 11, and reads the answer straight off the
-/// tty — a reader running alongside would swallow the reply, and a reply arriving after this
-/// returns would land in the member's first keystrokes. The query carries a primary device
-/// attributes request behind it, which every terminal answers, so a terminal that ignores OSC 11
-/// is known to have ignored it instead of being waited on, and nothing is left in the buffer.
-///
-/// Answers `None` when there is no tty, when nothing replies within 150ms, or on any I/O
-/// failure; raw mode is restored to what it was either way. The wait is `select` over a
-/// non-blocking descriptor of its own: Darwin's `poll` answers `POLLNVAL` for a tty the instant
-/// it is asked, so a client that trusted it would read a terminal that never spoke and hang
-/// there forever.
-pub fn detect_background() -> Option<Scheme> {
-    query_background().or_else(|| scheme_from_colorfgbg(&std::env::var("COLORFGBG").ok()?))
-}
-
-#[cfg(unix)]
-const BACKGROUND_QUERY: &[u8] = b"\x1b]11;?\x1b\\\x1b[c";
-#[cfg(unix)]
-const BACKGROUND_REPLY_TIMEOUT: Duration = Duration::from_millis(150);
-
-#[cfg(unix)]
-fn query_background() -> Option<Scheme> {
-    use crossterm::terminal;
-
-    let mut tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .ok()?;
-    let was_raw = terminal::is_raw_mode_enabled().ok()?;
-    if !was_raw {
-        terminal::enable_raw_mode().ok()?;
-    }
-    let reply = read_background_reply(&mut tty);
-    if !was_raw {
-        let _ = terminal::disable_raw_mode();
-    }
-    scheme_from_osc11(&reply?)
-}
-
-#[cfg(unix)]
-fn read_background_reply(tty: &mut std::fs::File) -> Option<String> {
-    use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
-
-    let fd = tty.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return None;
-    }
-    tty.write_all(BACKGROUND_QUERY).ok()?;
-    tty.flush().ok()?;
-    let deadline = Instant::now() + BACKGROUND_REPLY_TIMEOUT;
-    let mut reply = Vec::new();
-    while !attributes_answered(&reply) {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() || !readable_within(fd, left) {
-            break;
-        }
-        let mut chunk = [0u8; 64];
-        match tty.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(count) => reply.extend_from_slice(&chunk[..count]),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(_) => break,
-        }
-    }
-    Some(String::from_utf8_lossy(&reply).into_owned())
-}
-
-#[cfg(unix)]
-fn readable_within(fd: std::os::fd::RawFd, window: Duration) -> bool {
-    if fd < 0 || fd as usize >= libc::FD_SETSIZE {
-        return false;
-    }
-    let mut readable: libc::fd_set = unsafe { std::mem::zeroed() };
-    unsafe { libc::FD_SET(fd, &mut readable) };
-    let mut left = libc::timeval {
-        tv_sec: window.as_secs() as libc::time_t,
-        tv_usec: window.subsec_micros() as libc::suseconds_t,
-    };
-    let ready = unsafe {
-        libc::select(
-            fd + 1,
-            &mut readable,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut left,
-        )
-    };
-    ready > 0 && unsafe { libc::FD_ISSET(fd, &readable) }
-}
-
-#[cfg(unix)]
-fn attributes_answered(reply: &[u8]) -> bool {
-    reply
-        .windows(2)
-        .rposition(|pair| pair == b"\x1b[")
-        .is_some_and(|start| reply[start..].contains(&b'c'))
-}
-
-#[cfg(not(unix))]
-fn query_background() -> Option<Scheme> {
-    None
 }
 
 /// The scheme an OSC 11 reply states: `\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\`, `#1e1e2e`, and every
@@ -587,19 +476,5 @@ mod tests {
         assert_eq!(scheme_from_colorfgbg("default;default"), None);
         assert_eq!(scheme_from_colorfgbg("15;99"), None);
         assert_eq!(scheme_from_colorfgbg(""), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn attributes_reply_ends_the_read() {
-        assert!(!attributes_answered(b""));
-        assert!(!attributes_answered(b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"));
-        assert!(!attributes_answered(
-            b"\x1b]11;rgb:cccc/cccc/cccc\x1b\\\x1b[?6"
-        ));
-        assert!(attributes_answered(
-            b"\x1b]11;rgb:cccc/cccc/cccc\x1b\\\x1b[?62;1;4c"
-        ));
-        assert!(attributes_answered(b"\x1b[?1;2c"));
     }
 }

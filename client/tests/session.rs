@@ -258,8 +258,8 @@ fn run_client(url: &str, args: &[&str], stdin: &str, home: &std::path::Path) -> 
 }
 
 /// The client on a real terminal: the fullscreen loop only runs on a tty, and only a tty delivers
-/// a key. The child is its own session, so the terminal queries it makes of `/dev/tty` reach
-/// nothing and answer instantly.
+/// a key. Nothing here answers the startup probe, so the client pays its deadline once and reads
+/// the terminal's defaults — [`play_the_terminal`] is the rig that answers.
 #[cfg(unix)]
 struct OnPty {
     keys: std::fs::File,
@@ -298,15 +298,17 @@ impl OnPty {
     }
 }
 
-/// `workspace` is the surface a signed-in client posts to; `None` leaves the client signed out, so
-/// it drives the gateway's onboarding prompts instead.
+/// The client on a pty, with the leader handed back: whoever holds it types the keys and plays
+/// the terminal. `workspace` is the surface a signed-in client posts to; `None` leaves the client
+/// signed out, so it drives the gateway's onboarding prompts instead.
 #[cfg(unix)]
-fn run_client_on_pty(
+fn spawn_on_a_pty(
     url: &str,
     args: &[&str],
     home: &std::path::Path,
     workspace: Option<&str>,
-) -> OnPty {
+    truecolor: bool,
+) -> (std::fs::File, std::process::Child) {
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
 
@@ -337,6 +339,9 @@ fn run_client_on_pty(
         .env("PATH", path)
         .env_remove("NO_COLOR")
         .env_remove("UFO_PLAIN");
+    if truecolor {
+        command.env("COLORTERM", "truecolor");
+    }
     match workspace {
         Some(surface) => command.env("WORKSPACE_URL", surface),
         None => command.env_remove("WORKSPACE_URL"),
@@ -359,8 +364,167 @@ fn run_client_on_pty(
     }
     let child = command.spawn().expect("spawn client on a pty");
     unsafe { libc::close(follower) };
+    (unsafe { std::fs::File::from_raw_fd(leader) }, child)
+}
 
-    let keys = unsafe { std::fs::File::from_raw_fd(leader) };
+/// The terminal the client starts on, played from the pty leader: which of the startup queries get
+/// answered, how long the terminal takes to answer, and what the member types into the window the
+/// probe is reading in.
+#[cfg(unix)]
+struct Terminal {
+    replies: Vec<&'static str>,
+    after: Duration,
+    typeahead: &'static str,
+}
+
+#[cfg(unix)]
+const KITTY_REPLY: &str = "\x1b[?0u";
+#[cfg(unix)]
+const LIGHT_REPLY: &str = "\x1b]11;rgb:f5f5/f5f5/f4f4\x1b\\";
+#[cfg(unix)]
+const ATTRIBUTES_REPLY: &str = "\x1b[?62;1;6c";
+#[cfg(unix)]
+const PROBE_QUERY: &str = "\x1b]11;?";
+#[cfg(unix)]
+const MODES_ON: &str = "\x1b[?2004h";
+#[cfg(unix)]
+const FLAGS_PUSH: &str = "\x1b[>1u";
+#[cfg(unix)]
+const FLAGS_POP: &str = "\x1b[<1u";
+#[cfg(unix)]
+const DARK_PROMPT: &str = "38;2;255;135;255";
+#[cfg(unix)]
+const LIGHT_PROMPT: &str = "38;2;162;28;175";
+#[cfg(unix)]
+const PROMPT_GLYPH: &str = "\u{203a}";
+
+#[cfg(unix)]
+#[derive(Default)]
+struct Tape {
+    painted: Vec<u8>,
+    asked_at: Option<Duration>,
+    modes_at: Option<Duration>,
+    frame_at: Option<Duration>,
+}
+
+#[cfg(unix)]
+struct Played {
+    child: std::process::Child,
+    keys: std::fs::File,
+    tape: Arc<Mutex<Tape>>,
+}
+
+#[cfg(unix)]
+fn play_the_terminal(url: &str, home: &std::path::Path, terminal: Terminal) -> Played {
+    let (keys, child) = spawn_on_a_pty(url, &["go"], home, Some(url), true);
+    let mut reader = keys.try_clone().expect("the leader duplicates");
+    let mut writer = keys.try_clone().expect("the leader duplicates");
+    let tape = Arc::new(Mutex::new(Tape::default()));
+    let played = Arc::clone(&tape);
+    let start = std::time::Instant::now();
+    thread::spawn(move || {
+        let mut buffer = [0u8; 8192];
+        let mut answered = false;
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0 {
+                return;
+            }
+            let at = start.elapsed();
+            let asked = {
+                let mut tape = played.lock().unwrap();
+                tape.painted.extend_from_slice(&buffer[..read]);
+                if tape.asked_at.is_none() && written(&tape.painted, PROBE_QUERY) {
+                    tape.asked_at = Some(at);
+                }
+                if tape.modes_at.is_none() && written(&tape.painted, MODES_ON) {
+                    tape.modes_at = Some(at);
+                }
+                if tape.frame_at.is_none() && written(&tape.painted, PROMPT_GLYPH) {
+                    tape.frame_at = Some(at);
+                }
+                tape.asked_at.is_some()
+            };
+            if asked && !answered {
+                answered = true;
+                let _ = writer.write_all(terminal.typeahead.as_bytes());
+                thread::sleep(terminal.after);
+                for reply in &terminal.replies {
+                    let _ = writer.write_all(reply.as_bytes());
+                }
+            }
+        }
+    });
+    Played { child, keys, tape }
+}
+
+#[cfg(unix)]
+fn written(painted: &[u8], marker: &str) -> bool {
+    painted
+        .windows(marker.len())
+        .any(|window| window == marker.as_bytes())
+}
+
+#[cfg(unix)]
+impl Played {
+    /// Wait for the composer to paint, and answer when it did.
+    fn framed(&self, within: Duration) -> Duration {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if let Some(at) = self.tape.lock().unwrap().frame_at {
+                return at;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the composer never painted:\n{}",
+                self.screen()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// What the client waited on the terminal: the probe goes out, and the modes it holds until the
+    /// read is done go out after.
+    fn probe_wait(&self) -> Duration {
+        let tape = self.tape.lock().unwrap();
+        let asked = tape.asked_at.expect("the client asked the terminal");
+        let done = tape.modes_at.expect("the client finished its read");
+        done - asked
+    }
+
+    fn painted(&self) -> String {
+        String::from_utf8_lossy(&self.tape.lock().unwrap().painted).to_string()
+    }
+
+    fn screen(&self) -> String {
+        let mut parser = vt100::Parser::new(24, 100, 0);
+        parser.process(&self.tape.lock().unwrap().painted);
+        parser.screen().contents()
+    }
+
+    fn press(&mut self, keys: &[u8]) {
+        self.keys.write_all(keys).expect("keys reach the pty");
+    }
+
+    fn ended(&mut self, within: Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if self.child.try_wait().expect("wait on the client").is_some() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+}
+
+#[cfg(unix)]
+fn run_client_on_pty(
+    url: &str,
+    args: &[&str],
+    home: &std::path::Path,
+    workspace: Option<&str>,
+) -> OnPty {
+    let (keys, child) = spawn_on_a_pty(url, args, home, workspace, false);
     let mut reader = keys.try_clone().expect("the leader duplicates");
     let painted = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&painted);
@@ -2274,6 +2438,201 @@ fn a_piped_session_counts_a_run_once_however_much_it_did() {
     assert!(
         stdout.contains("Completed 2 steps"),
         "the spawn and the run it opened are two steps: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_terminal_that_answers_sets_the_scheme_and_takes_the_kitty_flags() {
+    let served = serve(vec![Exchange {
+        delay_ms: 400,
+        status: 200,
+        reply_lines: &["ask\t>"],
+    }]);
+    let home = scratch_home("probe-answers");
+    let mut played = play_the_terminal(
+        &served.url,
+        &home,
+        Terminal {
+            replies: vec![KITTY_REPLY, LIGHT_REPLY, ATTRIBUTES_REPLY],
+            after: Duration::from_millis(1),
+            typeahead: "",
+        },
+    );
+    played.framed(Duration::from_secs(10));
+    let painted = played.painted();
+    assert!(
+        painted.contains(LIGHT_PROMPT) && !painted.contains(DARK_PROMPT),
+        "the color reply picks the light palette:\n{}",
+        played.screen()
+    );
+    assert!(painted.contains(FLAGS_PUSH), "the kitty flags are pushed");
+    played.press(b"\x03");
+    assert!(
+        played.ended(Duration::from_secs(10)),
+        "Ctrl+C ends the client"
+    );
+    assert!(
+        played.painted().contains(FLAGS_POP),
+        "the kitty flags are popped on the way out"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_terminal_that_answers_late_is_still_read() {
+    let served = serve(vec![Exchange {
+        delay_ms: 400,
+        status: 200,
+        reply_lines: &["ask\t>"],
+    }]);
+    let home = scratch_home("probe-late");
+    let mut played = play_the_terminal(
+        &served.url,
+        &home,
+        Terminal {
+            replies: vec![LIGHT_REPLY, ATTRIBUTES_REPLY],
+            after: Duration::from_millis(60),
+            typeahead: "",
+        },
+    );
+    played.framed(Duration::from_secs(10));
+    let wait = played.probe_wait();
+    assert!(
+        wait >= Duration::from_millis(60) && wait < Duration::from_millis(900),
+        "the read waited for the late answer and no longer: {wait:?}"
+    );
+    let painted = played.painted();
+    assert!(
+        painted.contains(LIGHT_PROMPT) && !painted.contains(DARK_PROMPT),
+        "the late color reply picks the light palette:\n{}",
+        played.screen()
+    );
+    assert!(
+        !painted.contains(FLAGS_PUSH),
+        "a terminal that named no flags gets none pushed"
+    );
+    played.press(b"\x03");
+    assert!(
+        played.ended(Duration::from_secs(10)),
+        "Ctrl+C ends the client"
+    );
+    assert!(
+        !played.painted().contains(FLAGS_POP),
+        "flags that were never pushed are never popped"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_terminal_that_answers_nothing_pays_one_deadline() {
+    let served = serve(vec![Exchange {
+        delay_ms: 400,
+        status: 200,
+        reply_lines: &["ask\t>"],
+    }]);
+    let home = scratch_home("probe-mute");
+    let mut played = play_the_terminal(
+        &served.url,
+        &home,
+        Terminal {
+            replies: Vec::new(),
+            after: Duration::from_millis(1),
+            typeahead: "",
+        },
+    );
+    played.framed(Duration::from_secs(10));
+    let wait = played.probe_wait();
+    assert!(
+        wait > Duration::from_millis(140) && wait < Duration::from_millis(900),
+        "a mute terminal waits its deadline out, and no hardcoded two seconds: {wait:?}"
+    );
+    let painted = played.painted();
+    assert!(
+        painted.contains(DARK_PROMPT) && !painted.contains(LIGHT_PROMPT),
+        "an unread background reads as dark:\n{}",
+        played.screen()
+    );
+    assert!(!painted.contains(FLAGS_PUSH), "no reply, no flags");
+    let _ = played.child.kill();
+    let _ = played.child.wait();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn typeahead_typed_into_the_probe_reaches_the_composer() {
+    for (name, replies) in [
+        (
+            "probe-typed-answers",
+            vec![KITTY_REPLY, LIGHT_REPLY, ATTRIBUTES_REPLY],
+        ),
+        ("probe-typed-mute", Vec::new()),
+    ] {
+        let served = serve(vec![Exchange {
+            delay_ms: 400,
+            status: 200,
+            reply_lines: &["ask\t>"],
+        }]);
+        let home = scratch_home(name);
+        let mut played = play_the_terminal(
+            &served.url,
+            &home,
+            Terminal {
+                replies,
+                after: Duration::from_millis(1),
+                typeahead: "hello",
+            },
+        );
+        played.framed(Duration::from_secs(10));
+        thread::sleep(Duration::from_millis(400));
+        assert!(
+            played.screen().contains("hello"),
+            "{name}: what was typed during the probe reaches the composer:\n{}",
+            played.screen()
+        );
+        let _ = played.child.kill();
+        let _ = played.child.wait();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_replayed_enter_sends_what_was_typed_into_the_probe() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 400,
+            status: 200,
+            reply_lines: &["say\there", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tgot it", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("probe-typed-enter");
+    let mut played = play_the_terminal(
+        &served.url,
+        &home,
+        Terminal {
+            replies: vec![KITTY_REPLY, LIGHT_REPLY, ATTRIBUTES_REPLY],
+            after: Duration::from_millis(1),
+            typeahead: "hi\r",
+        },
+    );
+    played.framed(Duration::from_secs(10));
+    assert!(played.ended(Duration::from_secs(20)), "the client exits");
+    let requests = served.handle.join().unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[0].body, "go");
+    assert_eq!(
+        requests[1].body, "hi",
+        "the Enter typed into the probe sends its line: {requests:?}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }
