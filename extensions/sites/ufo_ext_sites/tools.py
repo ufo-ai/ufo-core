@@ -90,8 +90,9 @@ except ContainmentError as error:
 
 WEBSITE_DESCRIPTION = "Build a website in the sandbox."
 START_SERVER_DESCRIPTION = (
-    "Start a server in the background with automatic port cleanup and readiness detection. Use "
-    "this instead of bash for servers — it polls until the port is listening and returns the route."
+    "Start a project in the background with automatic port cleanup and readiness detection. Omit "
+    "command to serve a static folder. Pass command only for a project's own app server. Use this "
+    "instead of bash — it polls until the port is listening and returns the route."
 )
 DEPLOY_WEBSITE_DESCRIPTION = (
     "Serve a website folder and host it at a permanent link the member can open. Pass the "
@@ -143,7 +144,10 @@ class WebsiteInput(BaseModel):
 
 
 class StartServerInput(BaseModel):
-    command: str = Field(description="The server command to run in the background.")
+    command: str | None = Field(
+        default=None,
+        description="The project's app-server command. Omit to serve the folder as static files.",
+    )
     project_path: str = Field(description="The project directory to run the command in.")
     port: int | None = Field(
         default=None, description="Port the server listens on; polled until it is reachable."
@@ -159,6 +163,8 @@ class StartServerInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_port(self) -> "StartServerInput":
+        if self.command is not None and not self.command.strip():
+            raise ValueError("command must contain a server command or be omitted for static files")
         if self.port is not None and not 0 < self.port < 65536:
             raise ValueError("port must be between 1 and 65535")
         return self
@@ -434,7 +440,8 @@ async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
     port = args.port or START_SERVER_PORT
     project = workspace_path(args.project_path)
     log_path = workspace_path(args.log_file or SERVER_LOG.format(port=port))
-    served = await _serve(ctx, args.command, project, port, log_path)
+    command = args.command or f"python3 -m http.server {port} --bind 0.0.0.0"
+    served = await _serve(ctx, command, project, port, log_path)
     return _json_result({**served, "project_path": project})
 
 

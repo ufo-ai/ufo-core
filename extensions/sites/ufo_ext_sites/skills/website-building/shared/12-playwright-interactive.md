@@ -260,15 +260,17 @@ Augment the numeric check with `getBoundingClientRect()` checks for the required
 
 Start the server **once** and leave it running for the entire session. It reads files from disk on every request — code edits appear on page reload. Never restart the server after editing code.
 
-Do NOT use `npx serve` (the npx→sh→node process chain breaks signal propagation). Do NOT use `python3 -m http.server` (single-threaded, fails under concurrent requests). Do NOT write an inline `node -e` server (fragile shell escaping, no error handling).
+Do not discover or install a static server, or run one through `bash`. `start_server` supplies the
+static server when `command` is absent. Do not write an inline server.
 
 **Step 1 — Start (once, at the beginning):**
 
 ```
-start_server(command="serve . -l 3000 --no-clipboard --single", project_path="/workspace/my-project", port=3000)
+start_server(project_path="/workspace/my-project", port=3000)
 ```
 
-`start_server` kills any existing process on the port, starts the command in the background, and polls until the port is listening. No manual health check needed. `serve` is pre-installed. `--single` enables SPA fallback (serves `index.html` for unmatched routes).
+`start_server` kills any existing process on the port, serves the static folder, and polls until the
+port is listening. No manual health check is needed.
 
 **After code edits:** Just reload the page in Playwright (`page.reload()`). Do NOT restart the server. Restarting wastes steps and causes port conflicts.
 

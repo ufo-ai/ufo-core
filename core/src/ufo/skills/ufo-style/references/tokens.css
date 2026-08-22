@@ -1,9 +1,23 @@
 /* The house tokens, as the portal declares them apart from the one text step noted below. Copy this
- * file into the project, import it before any other stylesheet, and name only these variables
- * afterwards.
+ * file and the skill's assets/fonts directory into the project with the same relative layout,
+ * import it before any other stylesheet, and name only these variables afterwards.
  *
  * A page that has to pin a scheme against the member's preference re-declares the eight palette
  * steps under its own class and leaves everything below untouched. Nothing else is ever restated. */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  src: url("./assets/fonts/Inter-VariableFont_wght.woff2") format("woff2-variations");
+}
+
+@font-face {
+  font-family: "Roboto Mono";
+  font-style: normal;
+  font-weight: 100 700;
+  src: url("./assets/fonts/RobotoMono-VariableFont_wght.ttf") format("truetype-variations");
+}
 
 :root {
   color-scheme: light dark;
@@ -48,9 +62,9 @@
    * fill does not change with the scheme, so neither does the label on it. */
   --color-fill-ink: #191A1A;
 
-  /* Type. Inter and Roboto Mono are on Google Fonts. The display face is Georgia: the portal's own
-   * display face is licensed to the portal and belongs to `theme.css` alone — never add it to this
-   * stack or load it with an `@font-face` rule. */
+  /* Type. The display face is Georgia: the portal's own display face is licensed to the portal and
+   * belongs to `theme.css` alone — never add it to this stack or load it with an `@font-face` rule.
+   */
   --font-sans: "Inter", system-ui, sans-serif;
   --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-display: Georgia, "Times New Roman", serif;

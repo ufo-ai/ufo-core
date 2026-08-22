@@ -13,8 +13,8 @@ Build the complete browser artifact in the sandbox, validate it, and return the 
 
 | Request | Action |
 |---|---|
-| Acting application's homepage | Follow the ufo application homepage workflow below. |
-| Internal page or simple site | Build direct HTML, CSS, and JavaScript. |
+| Interactive homepage, dashboard, tracker, board, console, or operational workspace | Follow the ufo application homepage workflow below. |
+| Non-interactive internal reference page or simple site | Build direct HTML, CSS, and JavaScript. |
 | Public informational site | Read `informational/informational.md`. |
 | Stateful app with a backend, accounts, or durable shared data | Load `website-building/webapp`. |
 | Browser game | Read `game/game.md` and `game/game-testing.md`. |
@@ -41,7 +41,8 @@ Read only a reference that the build needs:
 | Empty, loading, or error states | `shared/05-taste.md` |
 | Accessibility and performance | `shared/08-standards.md` |
 | Charts or dense data | `shared/10-charts-and-dataviz.md` |
-| Interactive browser QA | `shared/12-playwright-interactive.md` |
+| ufo application homepage QA | `shared/13-ufo-application-qa.md` |
+| Complex or multi-page browser QA | `shared/12-playwright-interactive.md` |
 | Backend behavior | `shared/19-backend.md` |
 | Runtime model calls | `shared/20-llm-api.md` |
 
@@ -53,9 +54,11 @@ Give the primary workflow at least two accessible controls. Each control must pr
 state change with the supplied or clearly synthetic data.
 
 Use the house style and direct HTML, CSS, and JavaScript unless the homepage needs a backend. Read
-`shared/12-playwright-interactive.md`, run browser QA at desktop and narrow widths, exercise every
-control, and fix failures until each action produces its expected visible state without a console
-error or horizontal overflow.
+`shared/13-ufo-application-qa.md`, run its batched browser QA, and fix failures until each action
+produces its expected visible state without a console error or horizontal overflow.
+
+Build this workflow directly. Do not call `build_website`: that profile repeats the complete build,
+browser QA, deployment, and homepage binding that remain yours.
 
 After browser QA passes, run `deploy_website`. For the first homepage, pass the exact site object
 name from that result to `set_homepage`. To update the bound homepage, deploy the same site name;
@@ -67,9 +70,10 @@ Build the requested artifact directly. Do not create a separate specification, r
 sites, initialize Git, make milestone commits, add a logo, or add unrequested features unless the
 member needs one of those outputs.
 
-Read `shared/12-playwright-interactive.md` for every build. Run browser QA at desktop and narrow
-widths, check both colour schemes, exercise every control, and check overflow and console errors.
-Fix each failure and run the failed check again. Deploy only after the checks pass.
+For a ufo application homepage, use its QA reference above. For every other build, read
+`shared/12-playwright-interactive.md`. Run browser QA at desktop and narrow widths, check both colour
+schemes, exercise every control, and check overflow and console errors. Fix each failure and run the
+failed check again. Deploy only after the checks pass.
 
 - Use `deploy_website(project_path=…, site_name=…, entry_point="index.html", visibility=…)` for a
   static folder. Reuse the requested site's name when updating it.

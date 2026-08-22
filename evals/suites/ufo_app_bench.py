@@ -61,6 +61,8 @@ WORKFLOW_WAIT_SECONDS = 900.0
 SUPPORTED_BACKENDS = ("docker",)
 INTERACTION_MIN_CONTROLS = 2
 INTERACTION_MIN_SUCCESSES = 2
+MAX_PREVIEW_SERVER_CALLS = 1
+MAX_BROWSER_QA_CALLS = 4
 INFORMATION_FACT_COUNTS = {
     "kanban-board": 18,
     "call-notes": 14,
@@ -373,6 +375,71 @@ def _screen_images_scorer() -> Grader:
     return DescribedGrader("the harness probe captures both valid screen images", grade)
 
 
+def _direct_application_build_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        delegated = tuple(call for call in output.calls if call.name == "build_website")
+        if delegated:
+            return CapabilityVerdict(
+                False,
+                f"used build_website {len(delegated)} time(s); build the application directly",
+            )
+        return CapabilityVerdict(True, "built the application without whole-site delegation")
+
+    return DescribedGrader(
+        "the application build does not delegate a second whole-site build", grade
+    )
+
+
+def _qa_efficiency_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        starts = tuple(call for call in output.calls if call.name == "start_server")
+        if len(starts) != MAX_PREVIEW_SERVER_CALLS:
+            return CapabilityVerdict(
+                False,
+                f"used start_server {len(starts)} time(s), needs {MAX_PREVIEW_SERVER_CALLS}",
+            )
+        if not starts[0].succeeded:
+            return CapabilityVerdict(False, "the preview server did not start successfully")
+        browser = tuple(call for call in output.calls if call.name == "js_repl")
+        if not browser:
+            return CapabilityVerdict(False, "used no js_repl browser QA batch")
+        if len(browser) > MAX_BROWSER_QA_CALLS:
+            return CapabilityVerdict(
+                False,
+                f"used {len(browser)} browser QA batches, needs at most {MAX_BROWSER_QA_CALLS}",
+            )
+        successful = tuple(call for call in browser if call.succeeded)
+        if len(successful) < 2:
+            return CapabilityVerdict(
+                False, f"used {len(successful)} successful browser QA batch(es), needs at least 2"
+            )
+        if not browser[-1].succeeded:
+            return CapabilityVerdict(False, "the final browser QA batch failed")
+        names = tuple(call.name for call in output.calls)
+        if "deploy_website" not in names or "set_homepage" not in names:
+            return CapabilityVerdict(
+                False, "browser QA must precede deploy_website and set_homepage"
+            )
+        start_index = names.index("start_server")
+        browser_indexes = tuple(index for index, name in enumerate(names) if name == "js_repl")
+        deploy_index = names.index("deploy_website")
+        homepage_index = names.index("set_homepage")
+        if not start_index < min(browser_indexes):
+            return CapabilityVerdict(False, "browser QA must run after start_server")
+        if not max(browser_indexes) < deploy_index:
+            return CapabilityVerdict(False, "browser QA must finish before deploy_website")
+        if not deploy_index < homepage_index:
+            return CapabilityVerdict(False, "set_homepage must run after deploy_website")
+        return CapabilityVerdict(
+            True,
+            f"started one preview server and used {len(browser)} browser QA batch(es)",
+        )
+
+    return DescribedGrader(
+        "one preview start and two to four browser QA batches ending in success", grade
+    )
+
+
 def _screen(name: str, information_inventory: str) -> CapabilityCase:
     return CapabilityCase(
         name,
@@ -383,6 +450,8 @@ def _screen(name: str, information_inventory: str) -> CapabilityCase:
                 ("deploy_website", "set_homepage"),
                 (("deploy_website", "set_homepage"),),
             ),
+            _direct_application_build_scorer(),
+            _qa_efficiency_scorer(),
             _captured_artifact_scorer("-interactive.html"),
             _captured_artifact_scorer("-static.html"),
             _captured_artifact_scorer(".json", _measured_screen),
@@ -390,7 +459,10 @@ def _screen(name: str, information_inventory: str) -> CapabilityCase:
             _screen_images_scorer(),
         ),
         visual_rubric=(*HOUSE_CRITERIA, _information_criterion(name, information_inventory)),
-        digest_tag=f"ufo-app-bench:{name}:interactive-homepage:wait-{WORKFLOW_WAIT_SECONDS:g}",
+        digest_tag=(
+            f"ufo-app-bench:{name}:interactive-homepage:qa-1x{MAX_BROWSER_QA_CALLS}:"
+            f"wait-{WORKFLOW_WAIT_SECONDS:g}"
+        ),
         artifact_probe=_AppBenchProbe(name),
     )
 

@@ -203,7 +203,7 @@ from ufo.ext.context import (
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.kinds.agents import AGENT_KIND
 from ufo.kinds.governance import Governance, prompt_digest
-from ufo.loop.engine import StreamResult
+from ufo.loop.engine import DispatchResult, StreamResult
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
@@ -1193,13 +1193,17 @@ class StubWorker:
                     seq=self.seq,
                     status=self.status,
                     inbound=message,
-                    terminal={
-                        "status": self.status,
-                        "text": "Done.",
-                        "model": MODEL,
-                        "tokens": self.tokens,
-                        "cost_micro_usd": self.cost_micro_usd,
-                    },
+                    terminal=(
+                        None
+                        if self.status in {"queued", "running"}
+                        else {
+                            "status": self.status,
+                            "text": "Done.",
+                            "model": MODEL,
+                            "tokens": self.tokens,
+                            "cost_micro_usd": self.cost_micro_usd,
+                        }
+                    ),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -1356,12 +1360,16 @@ class StalledHandle:
 @dataclass
 class CancellingDbos:
     cancelled: list[str] = field(default_factory=list)
+    steps: tuple[dict[str, object], ...] = ()
 
     async def retrieve_workflow_async(self, workflow_id: str) -> object:
         return StalledHandle()
 
     async def cancel_workflow_async(self, workflow_id: str) -> None:
         self.cancelled.append(workflow_id)
+
+    async def list_workflow_steps_async(self, workflow_id: str) -> list[dict[str, object]]:
+        return list(self.steps)
 
 
 @dataclass(frozen=True)
@@ -5466,6 +5474,87 @@ async def test_workspace_driver_deadline_cancels_a_running_turn(db: None, tmp_pa
         ).one()
     assert row.status == "cancelled"
     assert row.terminal["status"] == "cancelled"
+
+
+async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    await _seed_owner(workspace_id)
+    agent_id = await _seed_agent(workspace_id)
+    call = ToolUseBlock(id="call-1", name="bash", input={"command": "ls"})
+    dbos = CancellingDbos(
+        steps=(
+            {
+                "function_name": "ufo.loop.engine.Engine._stream_once",
+                "started_at_epoch_ms": 1_000,
+                "completed_at_epoch_ms": 2_000,
+                "output": StreamResult(text="I will inspect it.", tool_calls=(call,)),
+            },
+            {
+                "function_name": "ufo.loop.engine.Engine._dispatch_step",
+                "started_at_epoch_ms": 2_100,
+                "completed_at_epoch_ms": 3_200,
+                "output": DispatchResult(
+                    tool_use_id=call.id,
+                    text="index.html",
+                    is_error=False,
+                ),
+            },
+            {
+                "function_name": "ufo.loop.engine.Engine._stream_once",
+                "started_at_epoch_ms": 3_300,
+            },
+        )
+    )
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, None, status="running")
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        blob,
+        cast(DBOSClient, dbos),
+        tmp_path / "workspaces",
+        poll_interval_seconds=0.001,
+        workflow_wait_seconds=0.01,
+    )
+    target = InProcessTarget(
+        ctx=_context(blob, worker),
+        agent_id=agent_id,
+        conversations=DriverConversations(driver, worker),
+        outcome=driver,
+        turn_steps=driver,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(CapabilityCase("overdue", "Build the app.", exact_scorer("")))
+
+    assert not result.clean
+    assert result.failure_reason == WAIT_EXPIRED
+    assert result.trajectory is not None
+    assert result.trajectory.status == "cancelled"
+    assert result.trajectory.messages == (
+        Message(role="user", content="Build the app."),
+        Message(
+            role="assistant",
+            content=(TextBlock(text="I will inspect it."), call),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id=call.id, content="index.html"),),
+        ),
+    )
+    assert result.output.calls == (
+        ToolInvocation(
+            "bash",
+            {"command": "ls"},
+            "index.html",
+            has_result=True,
+            call_id=call.id,
+        ),
+    )
+    assert result.output.timing.slowest[0].name == "bash"
 
 
 async def test_workspace_driver_cancel_terminalizes_only_the_turn(db: None, tmp_path) -> None:

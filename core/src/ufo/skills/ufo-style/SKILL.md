@@ -24,9 +24,9 @@ so before the build is finished.
 
 `read` `references/tokens.css`. It is the copy-ready implementation: the eight palette declarations,
 the roles drawn from them, the type scale, the spacing ramp, the radii, the easings, and the one
-shadow. Write it into the project as its own stylesheet, import it first, and name only its
-variables afterwards — a raw hex or a raw measurement in the page is the drift this skill exists to
-stop.
+shadow. Copy it and `assets/fonts/` into the project with the same relative layout, import the
+stylesheet first, and name only its variables afterwards — a raw hex or a raw measurement in the
+page is the drift this skill exists to stop. Never fetch a house font from the network.
 
 Paths are relative to this skill's mounted directory (`.skills/ufo-style/`).
 

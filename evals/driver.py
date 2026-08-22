@@ -33,7 +33,14 @@ from ufo.models.pricing import Pricing
 from ufo.object_name import validate_object_name
 from ufo.schema import tables
 from ufo.schema.records import PENDING, ReasoningEffort, TurnContext, Usage
-from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sdk.models import (
+    ImageBlock,
+    ImageSource,
+    Message,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.turns.cancellation import cancel_one_turn
 from ufo.turns.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
@@ -259,7 +266,9 @@ class WorkspaceDriver:
         rounds are also only part of what a turn spends: a compaction rides its own step, the
         browser `find` ranking meters onto a dispatch, and a resumed attempt bills on top of a step
         log that starts empty, so the terminal's residual cost lands on the last round only when the
-        rounds account for every token the terminal counts."""
+        rounds account for every token the terminal counts. A completed model or tool step also
+        carries the message its memoized output rebuilds, so an eval timeout retains the trajectory
+        that finished before cancellation."""
         recorded = await self.dbos.list_workflow_steps_async(str(turn_id))
         stream_usage: dict[int, Usage] = {}
         for index, step in enumerate(recorded):
@@ -308,16 +317,56 @@ class WorkspaceDriver:
                 resources[last] = (resources[last][0], costs[last])
         steps: list[TurnStep] = []
         for index, step in enumerate(recorded):
+            messages: tuple[Message, ...] = ()
             match step.get("output"):
                 case DispatchResult() as dispatched:
                     call_id = dispatched.tool_use_id
                     call_ids: tuple[str, ...] = ()
                     step_tokens: int | None = None
                     step_cost_micro_usd: int | None = None
+                    if dispatched.image_refs:
+                        images: list[ImageBlock] = []
+                        for ref in dispatched.image_refs:
+                            images.append(
+                                ImageBlock(
+                                    source=ImageSource(
+                                        media_type=ref.media_type,
+                                        data=(await self.blob.get(ref.blob_key)).decode(),
+                                    )
+                                )
+                            )
+                        content: str | tuple[TextBlock | ImageBlock, ...] = (
+                            *((TextBlock(text=dispatched.text),) if dispatched.text else ()),
+                            *images,
+                        )
+                    else:
+                        content = dispatched.text
+                    messages = (
+                        Message(
+                            role="user",
+                            content=(
+                                ToolResultBlock(
+                                    tool_use_id=dispatched.tool_use_id,
+                                    content=content,
+                                    is_error=dispatched.is_error,
+                                    activity=dispatched.activity,
+                                ),
+                            ),
+                        ),
+                    )
                 case StreamResult() as streamed:
                     step_tokens, step_cost_micro_usd = resources[index]
                     call_id = ""
                     call_ids = tuple(call.id for call in streamed.tool_calls)
+                    blocks = (
+                        *streamed.reasoning,
+                        *((TextBlock(text=streamed.text),) if streamed.text else ()),
+                        *streamed.tool_calls,
+                    )
+                    if blocks:
+                        messages = (Message(role="assistant", content=blocks),)
+                    elif streamed.partial_output:
+                        messages = (Message(role="assistant", content=streamed.partial_output),)
                 case _:
                     call_id = ""
                     call_ids = ()
@@ -331,6 +380,7 @@ class WorkspaceDriver:
                     call_ids=call_ids,
                     tokens=step_tokens,
                     cost_micro_usd=step_cost_micro_usd,
+                    messages=messages,
                 )
             )
         return tuple(steps)

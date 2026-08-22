@@ -10,10 +10,10 @@ A delegated case's cost is mostly its child's, so every turn is reported separat
 summed: a case that took twelve minutes because one coding child ran eleven of them reads
 differently from one that spent them in the parent.
 
-A tool's name lives only in the transcript, while the timing lives only in the step record — but a
-dispatch step's durable output carries the tool-use id the transcript keyed that call by, so the
-two join exactly, with no assumption that steps and transcript calls fall in the same order. A step
-whose id resolves to no call is named generically rather than mislabeled."""
+Each completed model or tool step also carries the message that its durable output can rebuild. A
+timeout can therefore keep the work completed before cancellation and use the same call ids to
+join tool names to timing. A step whose id resolves to no call is named generically rather than
+mislabeled."""
 
 from __future__ import annotations
 
@@ -46,6 +46,7 @@ class TurnStep(BaseModel):
     call_ids: tuple[str, ...] = ()
     tokens: int | None = Field(default=None, ge=0)
     cost_micro_usd: int | None = Field(default=None, ge=0)
+    messages: tuple[Message, ...] = ()
 
 
 class StepTiming(BaseModel):

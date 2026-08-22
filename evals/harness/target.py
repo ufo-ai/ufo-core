@@ -257,7 +257,7 @@ class InProcessTarget:
             )
         except Exception as error:
             return _invoke_failure(conversation_id, error)
-        settled = await self._settled(conversation_id, turn_id)
+        settled = await self._settled(conversation_id, turn_id, case.message)
         wall_ms = round((perf_counter() - started) * 1_000)
         result = settled.result
         turn_ids = (turn_id, *settled.descendant_ids)
@@ -351,24 +351,40 @@ class InProcessTarget:
             turn_id = await self.conversations.admit(conversation_id, message, idempotency_key)
         except Exception as error:
             return _invoke_failure(conversation_id, error)
-        return (await self._settled(conversation_id, turn_id)).result
+        return (await self._settled(conversation_id, turn_id, message)).result
 
-    async def _settled(self, conversation_id: UUID, turn_id: UUID) -> _Settled:
+    async def _settled(self, conversation_id: UUID, turn_id: UUID, inbound: str) -> _Settled:
         trajectory = await self.outcome.settle(conversation_id, turn_id)
         if trajectory is None:
+            steps = () if self.turn_steps is None else await self.turn_steps.steps(turn_id)
+            messages = (
+                Message(role="user", content=inbound),
+                *(message for step in steps for message in step.messages),
+            )
+            output = capability_output(messages)
+            output = replace(
+                output,
+                own_tools=tuple(call.name for call in output.calls),
+                own_calls=tuple(output.calls),
+            )
             tokens, cost_micro_usd = await self._turn_resources((turn_id,))
+            output = replace(output, tokens=tokens, cost_micro_usd=cost_micro_usd)
+            snapshot = trajectory_snapshot(
+                conversation_id,
+                turn_id,
+                await self._turn_status(turn_id),
+                messages,
+            )
+            snapshot_error = (
+                WAIT_EXPIRED if not snapshot.error else f"{WAIT_EXPIRED}; {snapshot.error}"
+            )
+            snapshot = snapshot.model_copy(update={"error": snapshot_error})
             return _Settled(
                 TargetResult(
-                    CapabilityOutput("", (), (), tokens=tokens, cost_micro_usd=cost_micro_usd),
+                    output,
                     False,
                     WAIT_EXPIRED,
-                    trajectory=EvalTrajectory(
-                        conversation_id=conversation_id,
-                        turn_id=turn_id,
-                        status=await self._turn_status(turn_id),
-                        messages=(),
-                        error=WAIT_EXPIRED,
-                    ),
+                    trajectory=snapshot,
                 )
             )
         output = capability_output(trajectory.messages)

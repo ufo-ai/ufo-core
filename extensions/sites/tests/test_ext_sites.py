@@ -72,12 +72,18 @@ TOOL_NARRATION = "building the site"
 HOUSE_STYLE = "ufo-style"
 HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
+APPLICATION_QA_GUIDANCE = "shared/13-ufo-application-qa.md"
 JS_CELL = re.compile(r"```javascript\n(.*?)```", re.S)
 
 
 def _playwright_guidance() -> str:
     registry = skill_registry((sites_manifest.manifest(),))
     return dict(registry.named("website-building").files)[PLAYWRIGHT_GUIDANCE].decode()
+
+
+def _application_qa_guidance() -> str:
+    registry = skill_registry((sites_manifest.manifest(),))
+    return dict(registry.named("website-building").files)[APPLICATION_QA_GUIDANCE].decode()
 
 
 @dataclass
@@ -324,14 +330,83 @@ def test_ufo_application_homepages_bind_only_after_browser_proof_and_deploy() ->
     instructions = (
         skill_registry((sites_manifest.manifest(),)).named("website-building").instructions
     )
-    application = instructions.partition("## ufo application homepage")[2]
+    application = instructions.partition("## ufo application homepage")[2].partition(
+        "## Build and verify"
+    )[0]
 
     assert application
-    assert "shared/12-playwright-interactive.md" in application
+    assert APPLICATION_QA_GUIDANCE in application
+    assert PLAYWRIGHT_GUIDANCE not in application
     assert "set_homepage" in application
     assert application.index("browser QA") < application.index("deploy_website")
     assert application.index("deploy_website") < application.index("set_homepage")
     assert "visible state" in application
+    assert "Do not call `build_website`" in application
+
+
+def test_interactive_internal_homepages_route_to_the_application_workflow() -> None:
+    instructions = (
+        skill_registry((sites_manifest.manifest(),)).named("website-building").instructions
+    )
+    shape = instructions.partition("## Choose the build shape")[2].partition(
+        "For a sparse internal-page request"
+    )[0]
+
+    assert (
+        "Interactive homepage, dashboard, tracker, board, console, or operational workspace"
+        in shape
+    )
+    assert "Non-interactive internal reference page" in shape
+
+
+def test_ufo_application_qa_is_progressive_and_batches_full_proof() -> None:
+    guidance = _application_qa_guidance()
+
+    assert 'start_server(project_path="/workspace/my-project", port=3000)' in guidance
+    assert "Call 1 opens the page and completes every functional check" in guidance
+    assert "Call 2 completes every visual check" in guidance
+    assert "Call `emitImage` three times" in guidance
+    assert "Do not call `js_repl` a fifth time" in guidance
+    assert "separate smoke, setup" in guidance
+    assert "Never carry variables" in guidance
+    assert "Playwright objects across calls" in guidance
+    assert "console.log(JSON.stringify(out))" in guidance
+    assert "returns stdout, not the value of a final expression" in guidance
+    assert "complete defect-discovery pass" in guidance
+    assert "Reserve calls 3 and 4 for final repair proof" in guidance
+    assert "Do not edit after a repair-proof call" in guidance
+    assert "page default timeout to 5 seconds" in guidance
+    assert "accessible role and name" in guidance
+    assert "guessed CSS selector" in guidance
+    assert "every accessible control" in guidance
+    assert "light and dark" in guidance
+    assert "initial, hover, focus" in guidance
+    assert "phone width" in guidance
+    assert "Measure every visible text node" in guidance
+    assert "for contrast in light and dark modes" in guidance
+    assert "console errors" in guidance
+    assert "Do not use one call per control" in guidance
+    assert Path(PLAYWRIGHT_GUIDANCE).name in guidance
+    assert "--remote-debugging-port" in guidance
+    assert "background=true" in guidance
+    assert "connectOverCDP" in guidance
+    assert "browser.close()" in guidance
+
+
+def test_start_server_schema_makes_the_static_path_the_default() -> None:
+    schema = StartServerInput.model_json_schema()
+
+    assert "command" not in schema["required"]
+    assert (
+        "Omit to serve the folder as static files" in schema["properties"]["command"]["description"]
+    )
+    for command in ("", "   "):
+        with pytest.raises(ValidationError, match="command must contain"):
+            StartServerInput(
+                user_description=TOOL_NARRATION,
+                command=command,
+                project_path="/workspace/site",
+            )
 
 
 def test_the_website_building_profile_names_only_meaningful_tools() -> None:
@@ -408,7 +483,7 @@ def test_the_website_building_prompt_gates_a_visual_claim_on_a_screenshot() -> N
     """The child's result is what the parent repeats to the member, so the same gate has to hold in
     the profile prompt: the skill file only binds a child that read it."""
     prompt = WEBSITE_BUILDING_PROFILE.prompt
-    assert "connects to it over CDP" in prompt
+    assert "connects to Chromium over CDP" in prompt
     assert "exit_code: 0" in prompt
     assert "visual verification was skipped" in prompt
 
@@ -458,6 +533,25 @@ async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path)
                 user_description=TOOL_NARRATION, command="python3 app.py", project_path="/workspace"
             ),
         )
+
+
+async def test_start_server_serves_a_static_folder_without_a_command(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+
+    result = await start_server(
+        ctx,
+        StartServerInput(
+            user_description=TOOL_NARRATION,
+            project_path="/workspace/site",
+            port=5173,
+        ),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["url"] == "http://localhost:5173"
+    launch = next(command for command in sandbox.commands if "nohup" in command)
+    assert "nohup python3 -m http.server 5173 --bind 0.0.0.0" in launch
 
 
 async def test_the_failure_log_tail_states_its_own_budget(tmp_path: Path) -> None:

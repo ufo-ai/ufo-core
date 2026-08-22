@@ -45,6 +45,8 @@ from evals.suites.ufo_app_bench import (
     INFORMATION_FACT_COUNTS,
     INTERACTION_MIN_CONTROLS,
     INTERACTION_MIN_SUCCESSES,
+    MAX_BROWSER_QA_CALLS,
+    MAX_PREVIEW_SERVER_CALLS,
     MEASURED_VIEWS,
     MEMBER_QUERIES,
     NARROW_HEIGHT,
@@ -54,8 +56,10 @@ from evals.suites.ufo_app_bench import (
     AppBenchWorkspaceProbe,
     _AppBenchProbe,
     _declarations,
+    _direct_application_build_scorer,
     _interaction_screen,
     _measured_screen,
+    _qa_efficiency_scorer,
 )
 from evals.suites.ufo_app_bench import CASES as BENCH_CASES
 from evals.suites.ufo_app_bench import (
@@ -570,11 +574,99 @@ def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
         "Built the app.",
         (
             ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+            ToolInvocation("start_server", {}, "started", has_result=True),
+            ToolInvocation("js_repl", {}, "checked", has_result=True),
+            ToolInvocation("js_repl", {}, "reviewed", has_result=True),
             ToolInvocation("deploy_website", {}, "deployed", has_result=True),
             ToolInvocation("set_homepage", {}, "bound", has_result=True),
         ),
         artifacts=tuple(SharedArtifact(name, content) for name, content in files.items()),
     )
+
+
+async def test_ufo_app_bench_rejects_a_second_whole_site_build() -> None:
+    base = _built_screen({})
+    delegated = replace(
+        base,
+        calls=(
+            base.calls[0],
+            ToolInvocation("build_website", {}, "built and deployed", has_result=True),
+            *base.calls[1:],
+        ),
+    )
+
+    direct = await _direct_application_build_scorer()(_built_screen({}))
+    repeated = await _direct_application_build_scorer()(delegated)
+
+    assert direct.passed, direct.reason
+    assert not repeated.passed
+    assert "build the application directly" in repeated.reason
+
+
+async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
+    grader = _qa_efficiency_scorer()
+    clean = await grader(_built_screen({}))
+    assert clean.passed, clean.reason
+
+    repeated_server = replace(
+        _built_screen({}),
+        calls=(
+            *_built_screen({}).calls,
+            ToolInvocation("start_server", {}, "started again", has_result=True),
+        ),
+    )
+    too_many_starts = await grader(repeated_server)
+    assert not too_many_starts.passed
+    assert f"needs {MAX_PREVIEW_SERVER_CALLS}" in too_many_starts.reason
+
+    repeated_browser = replace(
+        _built_screen({}),
+        calls=(
+            *_built_screen({}).calls,
+            *(
+                ToolInvocation("js_repl", {}, "extra check", has_result=True)
+                for _ in range(MAX_BROWSER_QA_CALLS - 1)
+            ),
+        ),
+    )
+    too_many_batches = await grader(repeated_browser)
+    assert not too_many_batches.passed
+    assert f"at most {MAX_BROWSER_QA_CALLS}" in too_many_batches.reason
+
+    failed_browser = replace(
+        _built_screen({}),
+        calls=(
+            *_built_screen({}).calls,
+            ToolInvocation("js_repl", {}, "timed out", has_result=False),
+        ),
+    )
+    failed_batch = await grader(failed_browser)
+    assert not failed_batch.passed
+    assert "final browser QA batch failed" in failed_batch.reason
+
+    base = _built_screen({})
+    recovered_browser = replace(
+        base,
+        calls=(
+            *base.calls[:4],
+            ToolInvocation("js_repl", {}, "found a defect", has_result=False),
+            ToolInvocation("js_repl", {}, "repair passed", has_result=True),
+            *base.calls[4:],
+        ),
+    )
+    recovered_batch = await grader(recovered_browser)
+    assert recovered_batch.passed, recovered_batch.reason
+
+    browser_after_deploy = replace(
+        _built_screen({}),
+        calls=(
+            *_built_screen({}).calls,
+            ToolInvocation("js_repl", {}, "late check", has_result=True),
+        ),
+    )
+    wrong_order = await grader(browser_after_deploy)
+    assert not wrong_order.passed
+    assert "before deploy_website" in wrong_order.reason
 
 
 async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:

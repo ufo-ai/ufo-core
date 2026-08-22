@@ -33,6 +33,10 @@ from ufo.skills.runtime import (
 
 HOUSE_STYLE = "ufo-style"
 HOUSE_STYLE_TOKENS = "references/tokens.css"
+HOUSE_STYLE_FONT_FILES = (
+    "assets/fonts/Inter-VariableFont_wght.woff2",
+    "assets/fonts/RobotoMono-VariableFont_wght.ttf",
+)
 
 
 def _write_nested_child(
@@ -88,7 +92,12 @@ def test_creating_an_application_pulls_the_house_style_with_its_tokens() -> None
     assert closure == ["create-application", HOUSE_STYLE]
     house = CORE_SKILL_REGISTRY.named(HOUSE_STYLE)
     assert HOUSE_STYLE_TOKENS in dict(house.files)
-    assert "--accent-primary" in dict(house.files)[HOUSE_STYLE_TOKENS].decode()
+    files = dict(house.files)
+    tokens = files[HOUSE_STYLE_TOKENS].decode()
+    assert "--accent-primary" in tokens
+    assert all(path in files for path in HOUSE_STYLE_FONT_FILES)
+    assert all(Path(path).name in tokens for path in HOUSE_STYLE_FONT_FILES)
+    assert "fonts.googleapis.com" not in tokens
 
 
 def test_the_house_style_cites_only_paths_its_own_load_mounts() -> None:
@@ -96,7 +105,14 @@ def test_the_house_style_cites_only_paths_its_own_load_mounts() -> None:
     document skills, so it may name no other skill's mounted file: half its loads would put that
     path nowhere. Another skill is named by name, and its own file by path."""
     house = CORE_SKILL_REGISTRY.named(HOUSE_STYLE)
-    sources = (house.raw_skill_md, *(content.decode() for _, content in house.files))
+    sources = (
+        house.raw_skill_md,
+        *(
+            content.decode()
+            for path, content in house.files
+            if Path(path).suffix in {".css", ".md"}
+        ),
+    )
     cited = {path for text in sources for path in re.findall(r"\.skills/[\w./-]+", text)}
     assert cited == {f".skills/{HOUSE_STYLE}/"}
 

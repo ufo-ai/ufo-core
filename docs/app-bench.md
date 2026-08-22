@@ -9,8 +9,8 @@ creation flow. A phase passes only when its gate has recorded evidence. The stat
 | Phase | Goal | Status | Gate evidence |
 |---|---|---|---|
 | 1. House system | Give pages of ours one exact visual system. | Passed | `ufo-style` tokens, dependent skills, routing checks, and theme tests. |
-| 2. App bench | Measure three clear apps and make every result inspectable. | Active | Run `be059bfd` passes 2/3 interactive homepage cases. |
-| 3. Instructions | Add only skill or tool text that the bench proves useful. | Active | The website skill carries the application homepage and complete browser QA workflow; run `be059bfd` is the first result. |
+| 2. App bench | Measure three clear apps and make every result inspectable. | Active | Run `be059bfd` passes 2/3 interactive homepage cases; timeout cases retain completed durable model and tool steps. |
+| 3. Instructions | Add only skill or tool text that the bench proves useful. | Active | Matched runs `76d66a43` and `7d93c1f3` make the first browser result observable and pass the board four-call gate with lower time, tokens, and cost. |
 | 4. App agents | Test dedicated profiles and models on matched work. | Queued | Quality, time, token, and cost comparison. |
 | 5. Build pipeline | Split independent build work behind explicit artifacts. | Queued | Matched monolith and pipeline comparison. |
 | 6. Creation flow | Drive intent, approval, build, preview, and publication from chat. | Queued | Realistic request to durable, usable application. |
@@ -55,9 +55,10 @@ case set or build architecture becomes complex.
 
 | Gate | Status | Evidence |
 |---|---|---|
-| A. Harness integrity | Passed | Run `47ecdee1`: all three probe-owned HTML snapshots, audits, and light/dark screenshots are report-visible. |
+| A. Harness integrity | Passed | Run `47ecdee1`: all three probe-owned HTML snapshots, audits, and light/dark screenshots are report-visible. A timeout regression proves that completed model rounds, tool calls, results, and named timing remain report-visible after cancellation. |
 | B. Three-app baseline | Passed | Runs `6fec0e22`, `6cf2def1`, and `2f7f5ee5` pass 9/9 presentation cases. |
 | C. Interaction | Active | Run `be059bfd`: notes and brief pass with 10 and 9 browser-proved state changes; their saved apps also pass the stricter accessible-name and page-state audit. Board reaches the 900-second bound without a terminal reply. |
+| D. Efficient proof | Active | Run `c9f726bc` uses one preview start and three successful browser calls. The app misses one contrast check, so the quality gate remains open. |
 
 ### First three apps
 
@@ -159,6 +160,72 @@ Use the levers in this order:
 | Skill content | Did the loaded material direct information structure, density, implementation, and browser proof? Does deleting a section remove a distraction or reduce cost without a quality loss? | Matched app quality improves, or cost and latency fall with no quality loss. |
 | Blocks or templates | Does a repeated implementation step remain expensive or unreliable after routing and skill-content treatments? | A reached-for block improves the named layer on matched runs; an unused or neutral block does not ship. |
 
+### Compact application QA
+
+The `call-notes` match uses the same natural query, model, server tool, graders, and 900-second
+bound. The compact arm reads only the application QA reference. The comparison arm reads the full
+Playwright reference and the application reference.
+
+| Measure | Compact `c9f726bc` | Full `d4729087` | Change |
+|---|---:|---:|---:|
+| Wall time | 550.8s | 711.0s | -22.5% |
+| Model time | 403.7s | 421.7s | -4.3% |
+| Tool time | 133.0s | 278.6s | -52.3% |
+| Model rounds | 21 | 30 | -30.0% |
+| Tokens | 1.59M | 2.63M | -39.5% |
+| Cost | $2.22 | $2.89 | -23.0% |
+| Browser QA | 3 successful calls | 2 failed calls | Compact proof passes. |
+
+Both artifacts fail the whole case. The compact artifact has one small light-mode button at 4.2:1
+instead of 4.5:1. The full-guide artifact clears the independent page audit but its agent browser
+proof fails. Keep the phase active until matched repeats show the latency gain with no quality
+loss.
+
+### Self-directed efficiency loops
+
+The unchanged board case keeps the quality checks and a four-browser-call limit.
+
+| Run | Treatment | Wall | Model | Tool | Rounds | Tokens | Cost | Result |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `88e64bf1` | Three-app control | 576s | 125s | 439s | 20 | 1.96M | $2.79 | Board delegates a second complete build and uses seven browser calls. |
+| `4cec4574` | One build owner | 559s | 452s | 98s | 22 | 1.91M | $2.70 | The 402-second child build is gone. A guessed selector waits 30 seconds; one replay fails; five browser calls. |
+| `7b94e2b1` | Bounded, isolated browser calls | 654s | 590s | 54s | 26 | 2.31M | $3.19 | No browser call fails or waits 30 seconds. The first result is not printed and is repeated; a final hover repair makes five calls. |
+| `76d66a43` | Matched control | 497s | 415s | 71s | 24 | 2.07M | $3.11 | Six browser calls; the first fails on an ambiguous accessible name and the second returns empty stdout. |
+| `7d93c1f3` | Observable result and repair budget | 435s | 372s | 51s | 18 | 1.43M | $2.54 | Passes 7/7 semantic criteria with three successful browser calls and 11 visible state changes. |
+| `efdcae3e` | Batched-write control | 482s | 425s | 46s | 26 | 2.16M | $2.71 | Passes with separate initial writes. |
+| `bafca005` | Batched initial writes | 608s | 547s | 51s | 23 | 2.08M | $3.02 | Groups all three writes in one round and passes, but later setup fragments and total time and cost regress. |
+| `189c71f9` | Font-flow rollback | 623s | 548s | 64s | 31 | 2.81M | $3.30 | Passes, but infers the visible font assets, reconstructs their setup, and fragments browser QA. |
+| `3c6afb81` | Copy-ready local house fonts | 574s | 518s | 45s | 21 | 1.78M | $2.49 | Passes with the approved local faces, three browser calls, and no font-network repair. |
+| `3943467d` | Structured-result schema, current Skill | 900s | 582s | 303s | 29 | — | — | Excluded timeout with five browser calls. |
+| `cd26f70d` | Structured-result schema and Skill | 900s | 624s | 265s | 25 | — | — | Excluded timeout. The field returns later batches, but selector and browser failures produce eight calls. |
+| `2c931442` | Old JavaScript contract | 873s | 558s | 304s | 37 | 3.55M | $3.85 | Completes but fails the four-call gate with seven browser calls. |
+| `20da5079` | Kept branch, all three apps | 391–509s | 337–446s | 44–53s | 23–25 | 1.92–2.01M | $2.17–$2.68 | Passes 3/3 with four browser calls per app and 8–10 proved state changes. |
+
+Keep the observable result and repair-budget treatment. Its one matched board sample reduces wall
+time 12.5%, rounds 25.0%, tokens 30.9%, and cost 18.3% without weakening browser proof. A speed
+distribution still needs matched repeats on all three cases.
+
+Keep the local-font treatment. Against its matched rollback, it reduces wall time 7.9%, rounds
+32.3%, tokens 36.6%, and cost 24.5%. Both arms pass. The rollback still sees the mounted asset
+names, but it has no copy-ready relative layout and uses ten shell calls and standalone browser
+scripts. The treatment copies the approved portal faces with the token stylesheet and makes no
+font request to the network.
+
+The next build-architecture comparison has three arms: the compact monolith, one model round that
+emits all disjoint initial writes, and a typed three-piece fan-out with disjoint file ownership.
+Do not use the current whole-site subagent profile for the fan-out. It shares files, ports,
+Chromium, deployment, and homepage binding, so parallel children race instead of composing.
+
+| Arm | Build shape |
+|---|---|
+| A | Compact monolith. |
+| B | One model round emits all disjoint initial writes. |
+| C | The parent writes one app contract. Markup, style, and behavior profiles write disjoint files in parallel. The parent alone integrates, serves, checks, deploys, and binds. |
+
+Run all three unchanged app cases three times. Keep a new shape only when it has no lower pass count
+or new timeout, every case is faster, median wall time falls at least 20%, and tokens and cost rise
+no more than 25%. If B matches C, keep B and delete the profiles.
+
 One loop changes one lever:
 
 1. Group failures by routing, planning, implementation, visual finish, browser behavior, and
@@ -189,6 +256,13 @@ One loop changes one lever:
 | Bounded REPL replication | `bc660790` | 2/3. Notes and brief pass; board uses the raw attention accent as text and fails AA at 2.78:1. |
 | AA-safe accent roles | `2b9383ae`, `6fec0e22`, `6cf2def1`, `2f7f5ee5` | Board passes 7/7. Three full runs pass 9/9 cases in 16–26 rounds. |
 | Interactive homepage control | `be059bfd` | 2/3. Notes and brief deploy, bind, and prove 10 and 9 state changes. Board reaches 900 seconds without a terminal reply. |
+| Direct application ownership | `88e64bf1`, `4cec4574` | The board stops delegating a second complete build. Wall time falls 3%; model work replaces most of the removed child time. |
+| Bounded browser failure rules | `7b94e2b1` | All browser calls succeed and the prior 30-second wait and replay error disappear. The case still fails at five calls and is slower, so no efficiency claim ships. |
+| Observable browser result and repair budget | `76d66a43`, `7d93c1f3` | The matched board treatment passes with three browser calls versus control failure at six. Wall time falls 12.5%, rounds 25.0%, tokens 30.9%, and cost 18.3%. |
+| Batched initial writes | `efdcae3e`, `bafca005` | Rejected. The three writes share one model round and total rounds fall by three, but wall time rises 26.2% and cost rises 11.4% after later setup fragments. |
+| Local house fonts | `189c71f9`, `3c6afb81` | Both arms pass. Copy-ready local fonts reduce wall time 7.9%, rounds 32.3%, tokens 36.6%, and cost 24.5%; the rollback infers the mounted assets but fragments setup and browser QA. |
+| JavaScript structured result | `3943467d`, `cd26f70d`, `2c931442` | Rejected and reverted. Both new-contract arms reach 900 seconds; the old contract completes in 873 seconds but fails at seven browser calls. The field returns successful batches, but it does not prevent selector errors or browser loss. |
+| Full kept-branch gate | `20da5079` | Passes 3/3. Every app uses one preview server and four browser batches, passes 7/7 semantic criteria, and proves 8–10 visible state changes. Wall time is 391–509 seconds in 23–25 rounds. |
 
 The body control uses 38–53 seconds, 4–5 rounds, 0.21–0.26 million model tokens, and
 $0.22–$0.27 per case because it stops before the build. The compact candidate uses 517–714 seconds,
