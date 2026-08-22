@@ -154,6 +154,28 @@ async def test_pipedream_broker_proxies_a_workspace_owned_account(
     assert response.status_code == 200
 
 
+async def test_proxy_drops_an_upstream_cookie_before_the_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    owner = _owner(workspace_id)
+    calls = 0
+
+    def upstream(target: str, request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert "x-pd-proxy-cookie" not in request.headers
+        headers = {"set-cookie": "uploadsSig=value; Path=/"} if calls == 1 else {}
+        return httpx.Response(200, headers=headers, json={"history": []})
+
+    _install(monkeypatch, owner, upstream)
+    credential = await PipedreamBroker().credential(workspace_id, "gmail", ACCOUNT)
+    async with httpx.AsyncClient(base_url=GMAIL_BASE, transport=credential.transport) as http:
+        await http.get(HISTORY_PATH)
+        await http.get(HISTORY_PATH)
+    assert calls == 2
+
+
 async def test_proxy_passes_an_upstream_404_through_verbatim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

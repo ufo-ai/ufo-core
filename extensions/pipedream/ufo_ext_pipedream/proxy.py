@@ -29,6 +29,7 @@ _SKIP_REQUEST_HEADERS = frozenset(
         "authorization",
         "accept-encoding",
         "connection",
+        "cookie",
         "user-agent",
         "transfer-encoding",
         "te",
