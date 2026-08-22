@@ -174,6 +174,27 @@ test("words in the last row are an answer, and they take the place of a choice",
   expect(posts[0].body).toBe("neither");
 });
 
+/** The row is submitted by the name it takes once it holds words, and by nothing else. A row the
+ *  form has disowned reads as filled and submits nothing: Gecko keeps an element out of its
+ *  ancestor form for good once a `form` attribute has stood on it, so the member's words never
+ *  reach the answer and Continue moves nowhere. */
+test("the row the member types into is never taken out of the form", async () => {
+  asking({ title: "Pick one", questions: [ASKED] });
+
+  const written = (await screen.findByRole("textbox", { name: "Which?" })) as HTMLInputElement;
+  const form = document.querySelector("form[data-slot=questionnaire]") as HTMLFormElement;
+  expect(written.hasAttribute("form")).toBe(false);
+  expect(written.form).toBe(form);
+  expect(written.getAttribute("name")).toBeNull();
+  expect([...new FormData(form).keys()]).toEqual([]);
+
+  await userEvent.type(written, "neither");
+
+  expect(written.hasAttribute("form")).toBe(false);
+  expect(written.form).toBe(form);
+  expect(new FormData(form).getAll("0")).toEqual(["neither"]);
+});
+
 test("an answer already settled opens the form on it", async () => {
   const posts = asking({ title: "Pick one", questions: [{ ...ASKED, chosen: "right" }] });
 

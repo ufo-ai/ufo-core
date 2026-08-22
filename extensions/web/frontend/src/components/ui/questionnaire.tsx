@@ -171,7 +171,12 @@ export function QuestionnaireChoiceDescription({ className, ...props }: Componen
 
 /** The answer the options do not hold, drawn as the last of them: a row with its own key that the
  *  member types into. Words here are an answer like any other — filling the row settles the
- *  question the way pressing a choice does, and the row states that as the choices state it. */
+ *  question the way pressing a choice does, and the row states that as the choices state it.
+ *
+ *  The name the row carries once it holds words is the whole of what submits it, so the `form=""`
+ *  the primitive also hangs on an empty row never reaches the DOM: Gecko does not return an element
+ *  to its ancestor form when that attribute is removed, so the words the member typed would sit in
+ *  no form at all and Continue would submit an empty answer they never see refused. */
 export function QuestionnaireInput({
   shortcut,
   className,
@@ -206,6 +211,7 @@ export function QuestionnaireInput({
           className,
         )}
         {...props}
+        render={(rendered) => <input {...rendered} form={undefined} />}
       />
     </label>
   );
