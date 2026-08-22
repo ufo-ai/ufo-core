@@ -16,7 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core.core_schema import ValidationInfo
 from sqlalchemy.exc import IntegrityError
 
-from ufo.contracts import check_declared_schema
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.models.interface import AUTO_MODEL
@@ -45,6 +44,7 @@ from ufo.schema.records import (
     auto_agent_icon,
 )
 from ufo.tools.context import ToolContext
+from ufo.turns.contracts import check_declared_schema
 from ufo.workspace import ws_current
 
 AGENT_KIND = "agent"

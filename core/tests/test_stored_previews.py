@@ -15,17 +15,17 @@ from uuid import uuid4
 
 from PIL import Image
 
-from ufo.artifact_url import (
+from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
+from ufo.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
     mint_image_preview_url,
     verify_artifact_url,
 )
-from ufo.audience import conversation_audience
-from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
-from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES, ImagePreviewGrant
+from ufo.media.image_previews import IMAGE_PREVIEW_MAX_BYTES, ImagePreviewGrant
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 SHOT_PATH = "/workspace/.tool-output/preview-8000.png"

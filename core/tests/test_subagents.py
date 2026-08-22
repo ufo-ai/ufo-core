@@ -9,17 +9,9 @@ import sqlalchemy as sa
 from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
-from ufo.audience import (
-    SHARED_AUDIENCE,
-    Audience,
-    conversation_audience,
-    foreign_room_audience,
-    room_audience,
-)
-from ufo.balance import BalanceExhausted, credit, set_reserve
+from ufo.billing.balance import BalanceExhausted, credit, set_reserve
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.durability import replay_safe_client
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.ext.surface import conversation_name
@@ -49,6 +41,14 @@ from ufo.tools.context import (
     UnknownSubagentProfile,
     UntrustedContentError,
 )
+from ufo.turns.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
+from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
 
 
 class _Task(BaseModel):

@@ -14,6 +14,7 @@ from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
 
+from ufo.access.credentials import CredentialValueInvalid
 from ufo.config import (
     DEFAULT_BACKGROUND_JOBS_MODEL,
     BlobConfig,
@@ -21,7 +22,6 @@ from ufo.config import (
     DatabaseConfig,
     ModelsConfig,
 )
-from ufo.credentials import CredentialValueInvalid
 from ufo.ext.manifest import Manifest
 from ufo.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
 from ufo.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES

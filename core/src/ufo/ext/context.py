@@ -25,31 +25,22 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.accounting import (
-    UsageExport,
-    ack_usage_exports,
-    mint_usage_exports,
-    read_pending_usage_exports,
-    workspace_owns_the_key,
-)
-from ufo.agent_scope import agent, agent_current
-from ufo.artifact_url import mint_image_preview_url
-from ufo.audience import (
-    SHARED_AUDIENCE,
-    Audience,
-    conversation_audience,
-    parse_audience,
-    readable_audiences,
-)
-from ufo.blob import BlobNotFound, WorkspaceBlobStore
-from ufo.candidates import WorkspaceCandidates, owner_candidates
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialSource,
     CredentialStore,
     installed_credential_requests,
     seal_installation,
     slot_secret,
 )
+from ufo.agent_scope import agent, agent_current
+from ufo.billing.accounting import (
+    UsageExport,
+    ack_usage_exports,
+    mint_usage_exports,
+    read_pending_usage_exports,
+    workspace_owns_the_key,
+)
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
     OPERATOR_EMAIL_DOMAIN,
@@ -59,9 +50,10 @@ from ufo.ext.surface import (
     retitle_conversation,
     summarize_conversation_title,
 )
-from ufo.governance import Governance, prompt_digest
 from ufo.hub import LiveFrame
 from ufo.indexing import EmbedClient, IndexBackend
+from ufo.kinds.governance import Governance, prompt_digest
+from ufo.media.artifact_url import mint_image_preview_url
 from ufo.models.interface import (
     Message,
     ModelClient,
@@ -77,6 +69,7 @@ from ufo.models.interface import (
 )
 from ufo.models.pricing import Pricing
 from ufo.o11y import BACKGROUND_PROFILE, emit_histogram, emit_metric, log
+from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
 from ufo.schema import tables
@@ -91,8 +84,15 @@ from ufo.schema.records import (
 )
 from ufo.seats import workspace_domain
 from ufo.sources.sync import PageFeed, SourceRowConfig, source_row_id
-from ufo.subjects import SHARED_SUBJECT
-from ufo.transcript import TranscriptDecodeError, decode, transcript_key
+from ufo.turns.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    parse_audience,
+    readable_audiences,
+)
+from ufo.turns.subjects import SHARED_SUBJECT
+from ufo.turns.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.workspace import ws_current
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]

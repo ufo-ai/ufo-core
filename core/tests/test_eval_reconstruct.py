@@ -18,7 +18,7 @@ from ufo.db import workspace_tx
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import Message, ToolResultBlock, ToolUseBlock
 from ufo.schema import tables
-from ufo.transcript import (
+from ufo.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,

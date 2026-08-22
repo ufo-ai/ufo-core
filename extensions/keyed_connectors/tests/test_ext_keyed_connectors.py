@@ -11,17 +11,17 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_keyed_connectors import KEYED_PROVIDERS, KeyedSecret, manifest
 
-from ufo.credential_kind import CREDENTIAL_KIND
-from ufo.credentials import CredentialStore, HostChoice
-from ufo.db import workspace_tx
-from ufo.egress_rules import (
+from ufo.access.credentials import CredentialStore, HostChoice
+from ufo.access.egress_rules import (
     InjectionRule,
     MeterRule,
     ScopeRule,
     derive_credential_rules,
 )
+from ufo.db import workspace_tx
 from ufo.ext.loader import core_object_kinds, injecting_slots
 from ufo.ext.manifest import Manifest
+from ufo.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.schema import tables
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws

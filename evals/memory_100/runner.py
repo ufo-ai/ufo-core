@@ -21,7 +21,7 @@ from evals.harness.registry import EvalTask, capability_task
 from evals.memory_100.models import Corpus, SnapshotCase
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import CorpusReadiness
-from ufo.subjects import SHARED_SUBJECT
+from ufo.turns.subjects import SHARED_SUBJECT
 
 MEMORY_100_GRADER_REVISION = "page-evidence-coverage-1"
 MEMORY_JUDGE_MODEL = "gpt-5.4"

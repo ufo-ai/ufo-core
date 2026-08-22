@@ -29,10 +29,10 @@ from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
 from ufo_ext_openrouter import GenerateImageInput, GenerateVideoInput
 
-from ufo.accounting import IMAGES_DIMENSION, VIDEOS_DIMENSION
+from ufo.access.credentials import CredentialStore
+from ufo.billing.accounting import IMAGES_DIMENSION, VIDEOS_DIMENSION
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.models.interface import (

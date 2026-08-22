@@ -19,7 +19,10 @@ import sqlalchemy as sa
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 
-from ufo.artifact_url import (
+from ufo.auth.bearer import LOGIN_PATH, SESSION_COOKIE, verified_claims
+from ufo.blob import WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
     ARTIFACT_URL_TTL_SECONDS,
     ArtifactClaims,
@@ -29,10 +32,7 @@ from ufo.artifact_url import (
     mint_artifact_url,
     verify_artifact_url,
 )
-from ufo.bearer import LOGIN_PATH, SESSION_COOKIE, verified_claims
-from ufo.blob import WorkspaceBlobStore
-from ufo.db import workspace_tx
-from ufo.image_previews import InvalidImagePreview, validated_image_preview
+from ufo.media.image_previews import InvalidImagePreview, validated_image_preview
 from ufo.schema import tables
 from ufo.workspace import ws
 

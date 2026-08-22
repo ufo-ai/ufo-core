@@ -41,16 +41,16 @@ from evals.issue_recall.corpus import (
     rendered_pages,
 )
 from evals.issue_recall.state import CorpusAttestor, CorpusReadiness
+from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
-from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.indexing import EmbedClient, IndexBackend, TextChunker
-from ufo.jobs import PageChangeRunner
 from ufo.models.registry import ModelRegistry, model_registry
+from ufo.runtime.jobs import PageChangeRunner
 from ufo.schema import tables
 from ufo.sources.sync import (
     FOLDER_BACKEND,
@@ -61,7 +61,7 @@ from ufo.sources.sync import (
     register_sources,
     source_row_id,
 )
-from ufo.subjects import SHARED_SUBJECT
+from ufo.turns.subjects import SHARED_SUBJECT
 from ufo.workspace import init_workspace_credentials, ws, ws_current
 
 PAGE_CONSUMERS = frozenset({("memory", "index_pages"), ("memory", "derive_facts")})

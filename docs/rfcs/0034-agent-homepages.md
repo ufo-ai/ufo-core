@@ -20,7 +20,7 @@ date: 2026-08-16
 |---|---|---|
 | Agents page | one table (agents + subagent profiles merged) with a List \| Graph toggle (`views/Agents.tsx`); per-agent detail is a drawer over the list (`views/AgentPane.tsx:33`) | no per-agent place that says what the agent is doing |
 | Agent-authored pages | `deploy_website`/`publish_website` host a sandbox port at a permanent link (`extensions/sites/ufo_ext_sites/tools.py`) | site identity is `(conversation, name)` (`store.py:46`) — nothing names one site as *the agent's* |
-| Site liveness | on e2b, idle pauses unbilled and the ingress `dial` is a `connect` that resumes in ~110–360ms with the server still running (`extensions/e2b/ufo_ext_e2b.py:110`); a sandbox the provider lost answers 503 (`core/src/ufo/ingress_serve.py`) | acceptable: the dash's frame pays a sub-second resume, and 503 is the rare lost-sandbox case (and single-shape dev carriers) |
+| Site liveness | on e2b, idle pauses unbilled and the ingress `dial` is a `connect` that resumes in ~110–360ms with the server still running (`extensions/e2b/ufo_ext_e2b.py:110`); a sandbox the provider lost answers 503 (`core/src/ufo/sandbox/ingress_serve.py`) | acceptable: the dash's frame pays a sub-second resume, and 503 is the rare lost-sandbox case (and single-shape dev carriers) |
 | Rewrites | any member request in chat; a re-deploy of the same name updates behind the same link | a rewrite from another conversation is a *different site* — the binding must be movable |
 
 ## The homepage is a hosted site

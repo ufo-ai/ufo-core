@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 
 TITLE_KEYS = ("title", "name", "full_name", "login", "subject")
 MAIL_BACKFILL_WINDOW_DAYS = 30

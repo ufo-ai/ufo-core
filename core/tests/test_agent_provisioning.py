@@ -17,23 +17,23 @@ import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from ufo_ext_sample import PROVISIONED_AGENT_NAME, PROVISIONED_AGENT_PROMPT
 
-from ufo.agent_setup import (
+from ufo.access.credentials import CredentialStore
+from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext
+from ufo.ext.manifest import SETUP_TOOLS, AgentProvision, JobSpec, Manifest
+from ufo.kinds.agent_setup import (
     SETUP_SKILL_NAME,
     AgentSetup,
     pending_setup,
     setup_skill,
 )
-from ufo.agents import AgentSpec
-from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.credentials import CredentialStore
-from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext
-from ufo.ext.manifest import SETUP_TOOLS, AgentProvision, JobSpec, Manifest
-from ufo.jobs import JobRunner, bindings_from
+from ufo.kinds.agents import AgentSpec
+from ufo.kinds.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
 from ufo.loop.queue import _agent_tools, _apply_provisions, _provisioned_workspaces
 from ufo.object_name import validate_object_name
-from ufo.onboarding import Onboarding
-from ufo.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
+from ufo.onboard.onboarding import Onboarding
+from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.schema import tables
 from ufo.schema.records import (
     AGENT_ICONS,

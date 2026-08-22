@@ -41,7 +41,6 @@ from ufo_ext_monitors.monitors import (
 from ufo_ext_monitors.monitors import monitor as monitor_table
 
 from ufo.agent_scope import agent
-from ufo.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
@@ -55,7 +54,8 @@ from ufo.schema.records import Agent, Turn
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
-from ufo.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
+from ufo.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
+from ufo.turns.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
 from ufo.workspace import ws
 
 TOOL_NARRATION = "watching the run"

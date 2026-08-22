@@ -22,7 +22,7 @@ from typing import Any, ClassVar
 
 import httpx
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sources.connector import (
     Connector,
     PaginationStrategy,

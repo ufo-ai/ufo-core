@@ -147,11 +147,10 @@ from evals.wandr.runner import (
 from evals.wandr.runner import (
     load_boundary as load_wandr_boundary,
 )
+from ufo.access.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.agent_scope import agent
-from ufo.agent_setup import setup_skill
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
-from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.context import context_for
@@ -162,7 +161,8 @@ from ufo.ext.loader import (
     skill_registry,
     turn_subagents,
 )
-from ufo.governance import prompt_digest
+from ufo.kinds.agent_setup import setup_skill
+from ufo.kinds.governance import prompt_digest
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.spawn_catalog import spawn_catalog_skill

@@ -3,7 +3,7 @@ can pin, and their facts, cannot drift from what the runtime actually routes, pr
 against (both-ends applied to documentation). Rendered from the same `ModelSpec`s every seam reads,
 never hand-written. See RFC 0018."""
 
-from ufo.accounting import MICRO_USD_PER_USD
+from ufo.billing.accounting import MICRO_USD_PER_USD
 from ufo.models.registry import ModelRegistry
 from ufo.skills.runtime import RuntimeSkill
 

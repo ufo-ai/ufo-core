@@ -11,13 +11,11 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.agent_scope import agent
-from ufo.connectors import CliCredential, ForwardedResponse
-from ufo.credentials import CredentialStore
-from ufo.db import workspace_tx
-from ufo.egress_control import EgressControl, rule_json
-from ufo.egress_resolver import PerAgentRules
-from ufo.egress_rules import (
+from ufo.access.connectors import CliCredential, ForwardedResponse
+from ufo.access.credentials import CredentialStore
+from ufo.access.egress_control import EgressControl, rule_json
+from ufo.access.egress_resolver import PerAgentRules
+from ufo.access.egress_rules import (
     ForwardRule,
     InjectionRule,
     InternetRule,
@@ -25,8 +23,10 @@ from ufo.egress_rules import (
     ScopeRule,
     ServiceRule,
 )
+from ufo.access.grants import GrantStore, grant_sentinel
+from ufo.agent_scope import agent
+from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
-from ufo.grants import GrantStore, grant_sentinel
 from ufo.models.catalog import CORE_PRICING
 from ufo.sandbox.cache import CACHE_HOST
 from ufo.sandbox.preview import PREVIEW_HOST
@@ -430,7 +430,7 @@ async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: 
     async def _capture(_connection, _ws, _turn, model, usage, _pricing):
         captured[model] = usage
 
-    monkeypatch.setattr("ufo.egress_control.record_sandbox_tokens", _capture)
+    monkeypatch.setattr("ufo.access.egress_control.record_sandbox_tokens", _capture)
     usage = {
         "input_tokens": 1000,
         "output_tokens": 500,
@@ -473,7 +473,7 @@ async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: 
 async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(monkeypatch) -> None:
     calls: list[tuple[str, int, str, str]] = []
     monkeypatch.setattr(
-        "ufo.egress_control.emit_metric",
+        "ufo.access.egress_control.emit_metric",
         lambda name, amount, **dims: calls.append((name, amount, dims["host"], dims["dimension"])),
     )
     resolver = PerAgentRules(base=(), grants=None)

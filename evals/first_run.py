@@ -16,9 +16,9 @@ from evals.harness.capability import (
     Grader,
 )
 from evals.harness.memory_fence import forget_workspace_memory
-from ufo.agents import AGENT_KIND
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
+from ufo.kinds.agents import AGENT_KIND
 from ufo.objects import ENVELOPE_KEYS
 from ufo.schema import tables
 

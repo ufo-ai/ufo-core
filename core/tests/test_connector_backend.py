@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sources import backend as backend_module
 from ufo.sources.backend import BACKFILL_KEY, ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.connector import Connector, StreamPage, StreamSpec

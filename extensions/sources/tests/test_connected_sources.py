@@ -25,21 +25,21 @@ from cryptography.fernet import Fernet
 from ufo_ext_sources import manifest as sources_manifest
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
 
+from ufo.access.credentials import CredentialStore
+from ufo.access.grants import ConnectFlow, GrantStore, OAuthAccount
 from ufo.agent_scope import agent
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import connection_hooks, turn_tools
-from ufo.grants import ConnectFlow, GrantStore, OAuthAccount
-from ufo.jobs import JobRunner, bindings_from
+from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.sources import ConnectorSourceConfig, binding_name
 from ufo.sdk.tools import ToolContext
-from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.registry import ToolDef
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 ASANA = "asana"

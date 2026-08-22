@@ -50,8 +50,7 @@ from ufo_ext_memory.store import (
     memory_source,
 )
 
-from ufo.accounting import Pricing
-from ufo.audience import conversation_audience
+from ufo.billing.accounting import Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
@@ -69,7 +68,6 @@ from ufo.ext.manifest import (
     Manifest,
 )
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, EmbedClient, Hit, IndexScope, TextChunker
-from ufo.jobs import PageChangeRunner, TurnDispatcher, core_jobs
 from ufo.loop.delivery import DeliverySweep
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
@@ -83,12 +81,14 @@ from ufo.models.interface import (
     ToolCallStart,
 )
 from ufo.models.registry import ModelRegistry
+from ufo.runtime.jobs import PageChangeRunner, TurnDispatcher, core_jobs
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.sources.sync import CorePageFeed, FolderSource, PageChange, SyncDriver
-from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.context import ToolContext
+from ufo.turns.audience import conversation_audience
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)

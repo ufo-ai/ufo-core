@@ -10,7 +10,6 @@ from uuid import UUID, uuid4
 import pytest
 
 import ufo.tools.tasks as tasks_module
-from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.sandbox.local import LocalCarrier
@@ -39,6 +38,7 @@ from ufo.tools.tasks import (
     EXEC_TIMEOUT_VITALS_CMD,
     TASK_PROBE,
 )
+from ufo.turns.audience import conversation_audience
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
 PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")

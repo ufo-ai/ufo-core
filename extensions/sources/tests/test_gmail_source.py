@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 import httpx
 from ufo_ext_sources.gmail import GmailConnector
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sdk.sources import MAIL_BACKFILL_WINDOW_DAYS, ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.sync import CursorExpired, SourceAuth, StreamSkipped
 

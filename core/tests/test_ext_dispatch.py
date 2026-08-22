@@ -9,10 +9,9 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
-from ufo.audience import conversation_audience
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore, context_for
 from ufo.ext.loader import HookChain, turn_tools, validate_ext_tools
@@ -38,6 +37,7 @@ from ufo.schema.records import Agent, Turn, Usage
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 EXTENSION = "sample"

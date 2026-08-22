@@ -26,10 +26,8 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from ufo_ext_docker import DockerCarrier
 
-from ufo.artifact_url import ARTIFACT_KEY_PREFIX, ArtifactClaims, verify_artifact_url
-from ufo.audience import conversation_audience
+from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
-from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
 from ufo.hub import InProcessHub
@@ -43,6 +41,7 @@ from ufo.loop.engine import (
 )
 from ufo.loop.prompts.render import rendered_prompt
 from ufo.loop.transcript import Transcript
+from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, ArtifactClaims, verify_artifact_url
 from ufo.models.interface import ModelEvent, ModelRequest, ToolResultBlock, ToolUseBlock
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
@@ -63,6 +62,7 @@ from ufo.tools.context import (
     ToolResult,
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 TOOL_NARRATION = "working through their files"

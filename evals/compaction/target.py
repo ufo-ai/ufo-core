@@ -15,7 +15,7 @@ from ufo.loop.compaction import (
     Compaction,
 )
 from ufo.models.interface import Message, ModelClient
-from ufo.transcript import Conversation, encode, transcript_key
+from ufo.turns.transcript import Conversation, encode, transcript_key
 
 WORKSPACE_PREFIX = "/workspace/"
 

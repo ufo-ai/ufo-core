@@ -77,8 +77,7 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
-from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
@@ -87,7 +86,8 @@ from ufo.ext.context import context_for
 from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.ext.loader import member_object_registry, turn_tools
 from ufo.hub import InProcessHub
-from ufo.image_previews import ImagePreviewGrant
+from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
+from ufo.media.image_previews import ImagePreviewGrant
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.ingress_token import (

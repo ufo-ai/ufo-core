@@ -30,10 +30,9 @@ from ufo_ext_sweep.manifest import (
     manifest,
 )
 
+from ufo.access.credentials import CredentialStore
 from ufo.agent_scope import agent
-from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import skill_registry, turn_hooks, turn_tools
@@ -42,6 +41,7 @@ from ufo.schema.records import Agent as AgentRecord
 from ufo.schema.records import Turn
 from ufo.sdk.manifest import PreToolUse
 from ufo.search import FetchedPage
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 

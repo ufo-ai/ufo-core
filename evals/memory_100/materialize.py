@@ -19,16 +19,16 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from evals.memory_100.models import Snapshot
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import AudienceBinding, CorpusAttestor, CorpusReadiness
+from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
-from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import embed_backend, index_backend, load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.indexing import EmbedClient, IndexBackend, TextChunker
-from ufo.jobs import PageChangeRunner
-from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.runtime.jobs import PageChangeRunner
 from ufo.sandbox.containment import (
     ContainmentError,
     contained_file,
@@ -45,7 +45,7 @@ from ufo.sources.sync import (
     register_sources,
     source_row_id,
 )
-from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import init_workspace_credentials, ws
 
 index_default = import_module("ufo_ext_index_default")

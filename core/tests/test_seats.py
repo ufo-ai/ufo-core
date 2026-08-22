@@ -18,7 +18,7 @@ from dbos import EnqueueOptions
 from ufo.db import MIGRATIONS_DIR, owner_tx, workspace_tx
 from ufo.ext.loader import migration_locations
 from ufo.hub import Parked
-from ufo.jobs import TurnDispatcher
+from ufo.runtime.jobs import TurnDispatcher
 from ufo.schema import tables
 from ufo.schema.records import INTERNAL_ADMISSION, MEMBER_ADMISSION, SCHEDULED_ADMISSION
 from ufo.seats import (

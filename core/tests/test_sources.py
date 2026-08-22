@@ -20,7 +20,6 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
 
 from ufo import o11y
-from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
@@ -40,7 +39,9 @@ from ufo.ext.manifest import (
     PageChangeBatch,
 )
 from ufo.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
-from ufo.jobs import (
+from ufo.loop.delivery import DeliverySweep
+from ufo.loop.subagents import SubagentRegistry
+from ufo.runtime.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_JOB,
     RESULT_DELIVERY_JOB,
@@ -52,8 +53,6 @@ from ufo.jobs import (
     bindings_from,
     core_jobs,
 )
-from ufo.loop.delivery import DeliverySweep
-from ufo.loop.subagents import SubagentRegistry
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sources import rest, sync
@@ -79,8 +78,9 @@ from ufo.sources.sync import (
     register_sources,
     source_row_id,
 )
-from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.turns.audience import conversation_audience
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws, ws_current
 
 TOOL_NARRATION = "looking through what they synced"

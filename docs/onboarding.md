@@ -154,7 +154,7 @@ which is no waitlist object, so it carries no number. Its `--business` and `--go
 options carry what the intake form collected — what their company does, and what they want an agent
 to do; they are given together or not at all,
 and they open the main agent's prompt in the workspace that grant creates. They arrive through
-`ufo.untrusted.wall`, attributed to the form and never as instructions: the form is public, whoever
+`ufo.turns.untrusted.wall`, attributed to the form and never as instructions: the form is public, whoever
 filled it proved nothing, and the employee who later signs in never typed a word of it — so the
 prompt states that the member is believed over it wherever the two differ. A grant minted without
 them leaves a workspace reading exactly as one `ufoctl init` seats. The flow burns the domain's

@@ -10,11 +10,10 @@ import sqlalchemy as sa
 import yaml
 from dbos import EnqueueOptions
 
-from ufo.audience import Audience, conversation_audience, foreign_room_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_tools
-from ufo.members import ADD_MEMBER_TOOL, MEMBER_KIND
+from ufo.kinds.members import ADD_MEMBER_TOOL, MEMBER_KIND
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
@@ -23,6 +22,7 @@ from ufo.seats import SEAT_REFUSAL_MESSAGE, create_member
 from ufo.surfaces.admission import Admission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
+from ufo.turns.audience import Audience, conversation_audience, foreign_room_audience
 from ufo.workspace import ws
 
 LOCK_OBSERVE_TIMEOUT_SECONDS = 5

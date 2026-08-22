@@ -15,8 +15,8 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from ufo.accounting import record_workspace_usage
-from ufo.credentials import CredentialSlotUnset, CredentialStore, deploy_env
+from ufo.access.credentials import CredentialSlotUnset, CredentialStore, deploy_env
+from ufo.billing.accounting import record_workspace_usage
 from ufo.db import current_workspace, workspace_tx
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing

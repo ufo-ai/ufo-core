@@ -32,7 +32,7 @@ from ufo.blob import BlobNotFound, BlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
-from ufo.transcript import (
+from ufo.turns.transcript import (
     Conversation,
     TranscriptDecodeError,
     decode,

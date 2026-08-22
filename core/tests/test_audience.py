@@ -2,7 +2,7 @@ from uuid import uuid4
 
 import pytest
 
-from ufo.audience import (
+from ufo.turns.audience import (
     SHARED_AUDIENCE,
     audience_member,
     audience_subjects,

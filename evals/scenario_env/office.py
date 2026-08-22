@@ -24,9 +24,9 @@ from ufo_ext_eval_env.manifest import (
 
 from evals.driver import EVAL_SURFACE
 from evals.harness.scenario import ScenarioOutcome
+from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.db import workspace_tx
-from ufo.grants import GrantStore
 from ufo.schema import tables
 
 MEMBER = "member@evalco.test"

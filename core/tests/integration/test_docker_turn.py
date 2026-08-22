@@ -18,9 +18,8 @@ import pytest
 import sqlalchemy as sa
 from ufo_ext_docker import DockerCarrier
 
-from ufo.audience import conversation_audience
+from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
 from ufo.hub import InProcessHub
@@ -43,6 +42,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult
 from ufo.tools.registry import ToolRegistry
+from ufo.turns.audience import conversation_audience
 
 pytestmark = pytest.mark.docker
 

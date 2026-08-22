@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import httpx
 from ufo_ext_sources.googledrive import GoogleDriveConnector
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.sync import SourceAuth, StreamSkipped
 

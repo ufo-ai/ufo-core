@@ -18,7 +18,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.candidates import WorkspaceCandidates, owner_candidates
+from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.schema import tables
 
 SEAT_REFUSAL_MESSAGE = (

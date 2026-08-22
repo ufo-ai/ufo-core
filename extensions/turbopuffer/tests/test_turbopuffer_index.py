@@ -17,7 +17,7 @@ import sqlalchemy as sa
 import ufo_ext_turbopuffer as tpuf
 from cryptography.fernet import Fernet
 
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.indexing import Chunk, IndexScope

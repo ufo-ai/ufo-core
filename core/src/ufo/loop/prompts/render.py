@@ -20,7 +20,7 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
-from ufo.delivery_register import DELIVERY_REGISTER_BLOCK
+from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
 
 PROMPT_VAR_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 BLANK_RUN_RE = re.compile(r"\n{3,}")

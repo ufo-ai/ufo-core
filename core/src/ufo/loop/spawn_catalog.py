@@ -9,13 +9,13 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from ufo.contracts import TaskInput
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry
 from ufo.schema import tables
 from ufo.seats import member_is_admin
 from ufo.skills.runtime import RuntimeSkill
+from ufo.turns.contracts import TaskInput
 from ufo.workspace import ws_current
 
 SPAWN_CATALOG_SKILL_NAME = "spawn-catalog"

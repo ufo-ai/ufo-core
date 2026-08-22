@@ -14,15 +14,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from ufo.connectors import CliCredential
-from ufo.credentials import (
+from ufo.access.connectors import CliCredential
+from ufo.access.credentials import (
     CredentialStore,
     HostChoice,
     credential_host,
     slot_is_set,
 )
+from ufo.access.grants import GrantStore, grant_sentinel
 from ufo.ext.manifest import CredentialSlot
-from ufo.grants import GrantStore, grant_sentinel
 from ufo.o11y import log, warn
 from ufo.workspace import ws_current
 

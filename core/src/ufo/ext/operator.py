@@ -24,7 +24,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid5
 import sqlalchemy as sa
 from pydantic import BaseModel, field_validator
 
-from ufo.bearer import LOGIN_PATH, verified_claims
+from ufo.auth.bearer import LOGIN_PATH, verified_claims
 from ufo.db import owner_tx, workspace_tx
 from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN, SurfaceAuth, SurfaceContext
 from ufo.schema import tables

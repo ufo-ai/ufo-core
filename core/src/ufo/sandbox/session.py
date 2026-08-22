@@ -15,8 +15,8 @@ from pathlib import PurePosixPath
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
-from ufo.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.token_signing import SignedTokenError, sign_token, verify_token
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.auth.token_signing import SignedTokenError, sign_token, verify_token
 
 WORKSPACE_DIR = "/workspace"
 WORKSPACE_WRITE_MODE = 0o644

@@ -20,12 +20,12 @@ flowchart TD
 | Layer | Question | Mechanism | Home |
 |---|---|---|---|
 | Tenancy | which workspace | `ws()` / `agent()` contextvars + Postgres RLS + blob key prefix | `core/src/ufo/workspace.py`, `db.py`, `blob.py`, `control/src/rls.rs` |
-| Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/ext/surface.py`, `core/src/ufo/bearer.py` |
+| Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/ext/surface.py`, `core/src/ufo/auth/bearer.py` |
 | Admission | may this turn start | membership, agent-binding assertion, seat gate, spend preflight | `core/src/ufo/surfaces/admission.py`, `core/src/ufo/seats.py` |
 | Authority | who does this act speak for | `speaker_member_id` per message, `on_behalf_of_member_id` for background work, `requested_by` per tool call | `core/src/ufo/loop/engine.py`, `tools/context.py` |
-| Grants | which external capability | `connector_grant`, `source_grant`, `credential`, web-audience grant, agent tool set | `core/src/ufo/grants.py`, `credentials.py` |
+| Grants | which external capability | `connector_grant`, `source_grant`, `credential`, web-audience grant, agent tool set | `core/src/ufo/access/grants.py`, `credentials.py` |
 | Wire | what leaves the sandbox | egress proxy rules derived from manifests and grants, keyed by a signed run token | `core/src/ufo/sandbox/proxy/` |
-| Reads | who may see it | the conversation `Audience` atom, per-kind gates | `core/src/ufo/audience.py`, `objects.py` |
+| Reads | who may see it | the conversation `Audience` atom, per-kind gates | `core/src/ufo/turns/audience.py`, `objects.py` |
 
 ## Principals
 
@@ -149,7 +149,7 @@ through the lane while chat admits only the main agent changing a prompt.
 ## Audience — who may read
 
 A conversation's persisted `Audience` atom is set at creation, narrows as its surface learns
-more, and is carried unchanged into every turn (`core/src/ufo/audience.py`):
+more, and is carried unchanged into every turn (`core/src/ufo/turns/audience.py`):
 
 | Atom | Assigned to | Content readable by |
 |---|---|---|

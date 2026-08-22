@@ -19,8 +19,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from evals.harness.capability import CapabilityOutput, CapabilityVerdict, DescribedGrader
 from evals.harness.memory_fence import forget_workspace_memory
 from evals.harness.scenario import EvalSeed, ScenarioCase, ScenarioOutcome, ScenarioUser
-from ufo.agents import AGENT_KIND
 from ufo.db import workspace_tx
+from ufo.kinds.agents import AGENT_KIND
 from ufo.models.interface import AUTO_MODEL
 from ufo.objects import ENVELOPE_KEYS
 from ufo.schema import tables

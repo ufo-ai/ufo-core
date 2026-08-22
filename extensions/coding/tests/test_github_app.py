@@ -20,7 +20,7 @@ from ufo_ext_coding.github_app import (
     GitHubAppTokens,
 )
 
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialMintFailed,
     CredentialRequestInvalid,
     CredentialRequests,
@@ -29,8 +29,8 @@ from ufo.credentials import (
     install_credential_requests,
     seal_installation,
 )
+from ufo.access.egress_rules import InjectionRule, ScopeRule, derive_credential_rules
 from ufo.db import workspace_tx
-from ufo.egress_rules import InjectionRule, ScopeRule, derive_credential_rules
 from ufo.ext.context import CredentialAccess
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.sandbox.exec_env import ProbeEnv

@@ -5,19 +5,19 @@ durable surface, its two-phase writeback) and types its handlers against the pri
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py` (the gate bans
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
-from ufo.ambient_reply import (
-    AmbientMessage as AmbientMessage,
-)
-from ufo.blob import BlobStore as BlobStore
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialRequestInvalid as CredentialRequestInvalid,
 )
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialRequestState as CredentialRequestState,
 )
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
+from ufo.access.grants import (
+    ConnectRequestInvalid as ConnectRequestInvalid,
+)
+from ufo.blob import BlobStore as BlobStore
 from ufo.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT as AMBIENT_CONTEXT_ELEMENT,
 )
@@ -147,9 +147,6 @@ from ufo.ext.surface import (
 from ufo.ext.surface import (
     record_transcript_access as record_transcript_access,
 )
-from ufo.grants import (
-    ConnectRequestInvalid as ConnectRequestInvalid,
-)
 from ufo.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES as WORKSPACE_WRITE_MAX_BYTES,
 )
@@ -192,15 +189,18 @@ from ufo.schema.records import (
 from ufo.schema.records import (
     TurnContext as TurnContext,
 )
-from ufo.transcript import (
+from ufo.turns.ambient_reply import (
+    AmbientMessage as AmbientMessage,
+)
+from ufo.turns.transcript import (
     CompactionRecord as CompactionRecord,
 )
-from ufo.transcript import (
+from ufo.turns.transcript import (
     CompactionSummary as CompactionSummary,
 )
-from ufo.transcript import (
+from ufo.turns.transcript import (
     Conversation as Conversation,
 )
-from ufo.transcript import (
+from ufo.turns.transcript import (
     TranscriptDecodeError as TranscriptDecodeError,
 )

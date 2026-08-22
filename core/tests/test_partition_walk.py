@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sources import backend as backend_module
 from ufo.sources import connector as connector_module
 from ufo.sources.backend import ConnectorBackend, ConnectorSourceConfig

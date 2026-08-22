@@ -45,7 +45,6 @@ from evals.issue_recall.corpus import (
 from evals.issue_recall.materialize import Materializer
 from evals.issue_recall.runner import load_issue_recall
 from evals.issue_recall.state import CorpusAttestor
-from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import ModelsConfig
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -57,7 +56,8 @@ from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import page_id_for
-from ufo.subjects import SHARED_SUBJECT
+from ufo.turns.audience import conversation_audience
+from ufo.turns.subjects import SHARED_SUBJECT
 from ufo.workspace import ws
 
 AUTO_MODEL = "claude-opus-4-8"

@@ -53,10 +53,10 @@ from ufo_testsupport.surfaces import (
 from ufo_testsupport.tables import reset_workspace_data
 from ufo_testsupport.workflows import drain_workflows
 
-from ufo.bearer import mint_token
+from ufo.access.connectors import ConnectorRegistry
+from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, DatabaseConfig
-from ufo.connectors import ConnectorRegistry
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry

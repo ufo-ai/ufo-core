@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
+from ufo.access.credentials import CredentialStore
 from ufo.cli import (
     CORE_VERSIONS_DIR,
     DEFAULT_CONFIG,
@@ -24,7 +25,6 @@ from ufo.cli import (
     portal,
 )
 from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.credentials import CredentialStore
 from ufo.db import core_migration_head
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import Manifest

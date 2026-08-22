@@ -20,7 +20,7 @@ import httpx
 import pytest
 from ufo_ext_sources.github import GitHubConnector
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from ufo.sources import backend as backend_module
 from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult

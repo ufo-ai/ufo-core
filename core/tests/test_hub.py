@@ -4,7 +4,6 @@ import threading
 from collections.abc import AsyncIterator
 from uuid import UUID, uuid4
 
-from ufo.activity import tool_activity
 from ufo.hub import (
     ACTIVITY_PEEK_FRAMES,
     SUBSCRIBER_QUEUE_FRAMES,
@@ -19,6 +18,7 @@ from ufo.hub import (
 )
 from ufo.models.interface import TextDelta, ToolUseBlock
 from ufo.schema.records import TerminalFrame
+from ufo.turns.activity import tool_activity
 
 
 async def _pending_first(

@@ -12,7 +12,6 @@ from ufo_ext_research.observations import (
 )
 from ufo_ext_research.tools import RESEARCH_TOOLS
 
-from ufo.audience import SHARED_AUDIENCE
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
@@ -22,6 +21,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.search import FetchedPage, FetchRequest, SearchHit, SearchQuery, SearchResults
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.turns.audience import SHARED_AUDIENCE
 from ufo.workspace import ws
 
 NOW = datetime(2026, 8, 6, tzinfo=UTC)

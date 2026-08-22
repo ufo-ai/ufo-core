@@ -1,6 +1,6 @@
 import pytest
 
-from ufo.token_signing import SignedTokenError, sign_token, verify_token
+from ufo.auth.token_signing import SignedTokenError, sign_token, verify_token
 
 
 def test_signed_token_round_trip_rejects_tampering_and_malformed_input() -> None:

@@ -47,7 +47,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.transcript import decode
+from ufo.turns.transcript import decode
 
 TRIGGER_MARGIN_TOKENS = 2_000
 DEFAULT_TARGET_TOKENS = (

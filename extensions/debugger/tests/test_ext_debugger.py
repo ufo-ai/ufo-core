@@ -45,7 +45,7 @@ from ufo.schema import tables
 from ufo.schema.records import SUBAGENT_SURFACE, TerminalFrame
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
-from ufo.transcript import (
+from ufo.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,

@@ -16,12 +16,12 @@ from opentelemetry.sdk.metrics.export import (
 )
 
 from ufo import o11y
+from ufo.access.connectors import CliCredential, ForwardedResponse
+from ufo.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.access.grants import GrantStore, grant_sentinel
 from ufo.agent_scope import agent
-from ufo.audience import SHARED_AUDIENCE, conversation_audience
-from ufo.balance import credit
+from ufo.billing.balance import credit
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import CliCredential, ForwardedResponse
-from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
     PROBE_TIMEOUT_MAX_SECONDS,
@@ -43,7 +43,6 @@ from ufo.ext.surface import (
     UndeclaredSurface,
     retitle_conversation,
 )
-from ufo.grants import GrantStore, grant_sentinel
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
     PROVIDER_ANTHROPIC,
@@ -71,7 +70,8 @@ from ufo.sandbox.terminal import TerminalGone
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed
-from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.turns.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import WorkspaceUnbound, init_workspace_credentials, ws
 
 MODEL = "claude-opus-4-8"

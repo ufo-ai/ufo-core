@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.balance import (
+from ufo.billing.balance import (
     balance_absent,
     balance_refusal_message,
     billing_screen_url,

@@ -28,17 +28,15 @@ from evals.harness.scorers import exact_scorer
 from evals.harness.target import InProcessTarget
 from evals.harness.timing import UNNAMED_TOOL
 from ufo import o11y
-from ufo.audience import conversation_audience
+from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
-from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
 from ufo.hub import CostTick, Hub, InProcessHub, Parked, SubagentActivity, Terminal
-from ufo.jobs import TurnDispatcher
 from ufo.loop import queue as loop_queue
 from ufo.loop.engine import (
     EMPTY_RESPONSE_NUDGE,
@@ -58,6 +56,7 @@ from ufo.models.interface import (
     ToolResultBlock,
 )
 from ufo.models.registry import ModelRegistry
+from ufo.runtime.jobs import TurnDispatcher
 from ufo.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
     UNSIGNED_RUN_TOKEN,
@@ -71,9 +70,10 @@ from ufo.surfaces import hub_tail
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
-from ufo.transcript import Conversation
+from ufo.turns.audience import conversation_audience
+from ufo.turns.transcript import Conversation
+from ufo.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
 from ufo.workspace import ws
-from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges
 
 STREAM_TIMEOUT_SECONDS = 30
 TRUNCATION_MESSAGE = (

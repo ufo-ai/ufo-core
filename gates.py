@@ -21,7 +21,7 @@ ENGINE_TOKENS = ("create_async_engine", "async_sessionmaker", ".begin(")
 SDK_EXEMPT_PART = "sdk"
 SESSION_COOKIE_FACTORY = CORE_SRC / "sdk" / "http.py"
 COMPOSITION_ROOTS = (CORE_SRC / "serve.py", CORE_SRC / "proxy_serve.py")
-ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.jobs")
+ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.runtime.jobs")
 BLOB_MODULE = CORE_SRC / "blob.py"
 RAW_BLOB_CONSTRUCTORS = frozenset({"FilesystemBlobStore", "S3BlobStore"})
 RAW_BLOB_BOOT_MODULES = frozenset(
@@ -214,7 +214,7 @@ LEXICAL_CHECK_METHODS = frozenset({"is_absolute", "normpath"})
 SANDBOX_PROGRAM_SUFFIX = "_PROG"
 PROGRAM_FILESYSTEM_TOKENS = ("open(", "os.", "Path(", "shutil.")
 DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
-    (CORE_SRC / "artifact_url.py", "verify_artifact_url"): (
+    (CORE_SRC / "media" / "artifact_url.py", "verify_artifact_url"): (
         "the claim is a blob key, not a host path: the store contains keys at its own root"
     ),
     (CORE_SRC / "blob.py", "_walk"): (

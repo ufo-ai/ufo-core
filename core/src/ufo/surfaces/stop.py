@@ -9,12 +9,12 @@ from uuid import UUID
 import sqlalchemy as sa
 from dbos import DBOSClient
 
-from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.surface import Stopped
 from ufo.hub import Absorbed, Hub, Terminal
 from ufo.schema import tables
 from ufo.surfaces.admission import Admission
+from ufo.turns.cancellation import cancel_one_turn
 
 
 @dataclass(frozen=True)

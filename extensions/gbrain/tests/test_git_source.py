@@ -23,7 +23,7 @@ from ufo_ext_gbrain.git import (
     GbrainGitSource,
 )
 
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
 from ufo.sdk.context import CredentialAccess

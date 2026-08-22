@@ -22,13 +22,12 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 
+from ufo.access.connectors import CliCredential, ForwardedResponse
+from ufo.access.credentials import CredentialStore, HostChoice
+from ufo.access.grants import GrantStore, grant_sentinel
 from ufo.agent_scope import agent
-from ufo.audience import SHARED_AUDIENCE
-from ufo.connectors import CliCredential, ForwardedResponse
-from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
-from ufo.grants import GrantStore, grant_sentinel
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.queue import (
     SandboxAuthorizer,
@@ -65,6 +64,7 @@ from ufo.sandbox.session import (
 from ufo.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
 from ufo.schema import tables
 from ufo.schema.records import Turn
+from ufo.turns.audience import SHARED_AUDIENCE
 from ufo.workspace import ws
 
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")

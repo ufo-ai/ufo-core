@@ -37,7 +37,7 @@ from ufo_ext_connectors.tools import (
     search_connector_tools,
 )
 
-from ufo.connectors import (
+from ufo.access.connectors import (
     BrokerFile,
     BrokerSearch,
     BrokerTool,
@@ -45,9 +45,9 @@ from ufo.connectors import (
     ConnectorRegistry,
     StagedUpload,
 )
+from ufo.access.grants import Grant, GrantStore
 from ufo.ext.context import JsonValue
 from ufo.ext.loader import turn_tools
-from ufo.grants import Grant, GrantStore
 from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (

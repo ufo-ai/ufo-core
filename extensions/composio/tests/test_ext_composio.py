@@ -44,21 +44,21 @@ from ufo_ext_connectors.tools import (
     search_connector_tools,
 )
 
-from ufo.agent_scope import agent
-from ufo.config import Config
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialStore
-from ufo.db import workspace_tx
-from ufo.egress_rules import connector_transfer_hosts
-from ufo.ext.context import context_for
-from ufo.ext.loader import turn_tools
-from ufo.ext.manifest import open_connector_namespace
-from ufo.grants import (
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialStore
+from ufo.access.egress_rules import connector_transfer_hosts
+from ufo.access.grants import (
     ConnectHandoff,
     GrantStore,
     UnknownProvider,
     install_connect_flow,
 )
+from ufo.agent_scope import agent
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.ext.context import context_for
+from ufo.ext.loader import turn_tools
+from ufo.ext.manifest import open_connector_namespace
 from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn

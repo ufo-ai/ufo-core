@@ -18,12 +18,7 @@ from ufo_ext_connectors.objects import (
     ConnectorGrantSpec,
 )
 
-from ufo.agent_scope import agent
-from ufo.agents import AGENT_KIND
-from ufo.blob import FilesystemBlobStore
-from ufo.db import workspace_tx
-from ufo.ext.loader import turn_tools
-from ufo.grants import (
+from ufo.access.grants import (
     ConnectionPermissionDenied,
     GrantStore,
     account_object_name,
@@ -31,6 +26,11 @@ from ufo.grants import (
     grant_summaries,
     workspace_grant_summaries,
 )
+from ufo.agent_scope import agent
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.ext.loader import turn_tools
+from ufo.kinds.agents import AGENT_KIND
 from ufo.object_name import OBJECT_NAME_MAX_LENGTH, ObjectRef
 from ufo.objects import (
     AdminRequired,

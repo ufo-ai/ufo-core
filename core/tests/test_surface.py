@@ -26,23 +26,16 @@ from ufo_testsupport.surfaces import (
 )
 
 import ufo.ext.surface as surface_module
-from ufo.ambient_reply import AmbientMessage, AmbientReplyClassifier, MeteredModel
-from ufo.audience import (
-    SHARED_AUDIENCE,
-    conversation_audience,
-    foreign_room_audience,
-    room_audience,
-)
-from ufo.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.connectors import DIRECT_ACCOUNT, ConnectorRegistry
-from ufo.credentials import (
+from ufo.access.connectors import DIRECT_ACCOUNT, ConnectorRegistry
+from ufo.access.credentials import (
     CredentialRequestInvalid,
     CredentialRequestState,
     CredentialStore,
     DeclaredSlot,
     seal_credential_request,
 )
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
     CONVERSATION_TITLE_CHARS,
@@ -101,10 +94,17 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.sources.backend import binding_name
-from ufo.subjects import SHARED_SUBJECT
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
-from ufo.transcript import (
+from ufo.turns.ambient_reply import AmbientMessage, AmbientReplyClassifier, MeteredModel
+from ufo.turns.audience import (
+    SHARED_AUDIENCE,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
+from ufo.turns.subjects import SHARED_SUBJECT
+from ufo.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,

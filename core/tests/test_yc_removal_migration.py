@@ -17,7 +17,7 @@ from alembic import command
 from alembic.config import Config
 
 from ufo.db import MIGRATIONS_DIR
-from ufo.subjects import SHARED_SUBJECT
+from ufo.turns.subjects import SHARED_SUBJECT
 
 NOW = datetime(2026, 8, 3, tzinfo=UTC)
 

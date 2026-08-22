@@ -31,20 +31,20 @@ from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
 from ufo_ext_sources.tools import SourceObjects, SourceSpec
 
-from ufo.agent_scope import agent
-from ufo.blob import FilesystemBlobStore
-from ufo.config import Config
-from ufo.connectors import (
+from ufo.access.connectors import (
     DIRECT_ACCOUNT,
     AuthProxy,
     ConnectorEntry,
     ConnectorRegistry,
     SourceCredentialResolver,
 )
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
+from ufo.access.grants import GrantStore
+from ufo.agent_scope import agent
+from ufo.blob import FilesystemBlobStore
+from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
-from ufo.grants import GrantStore
 from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn

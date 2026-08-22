@@ -12,7 +12,11 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
-from ufo.artifact_url import (
+from ufo.auth.bearer import LOGIN_PATH, SESSION_COOKIE, UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.auth.token_signing import sign_detached
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
     ARTIFACT_MEDIA_TYPES,
     ArtifactUrlError,
@@ -21,14 +25,10 @@ from ufo.artifact_url import (
     mint_artifact_url,
     verify_artifact_url,
 )
-from ufo.bearer import LOGIN_PATH, SESSION_COOKIE, UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.db import workspace_tx
-from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES, ImagePreviewGrant
+from ufo.media.image_previews import IMAGE_PREVIEW_MAX_BYTES, ImagePreviewGrant
 from ufo.schema import tables
 from ufo.surfaces.artifacts import EXPIRED_DETAIL
 from ufo.surfaces.artifacts import router as artifacts_router
-from ufo.token_signing import sign_detached
 from ufo.workspace import ws
 
 SECRET = "artifact-signing-secret"

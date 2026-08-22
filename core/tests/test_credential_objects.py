@@ -14,19 +14,19 @@ import ufo_ext_sample as sample
 import yaml
 from cryptography.fernet import Fernet
 
-from ufo.audience import conversation_audience
+from ufo.access.credentials import CredentialStore, HostChoice
 from ufo.blob import FilesystemBlobStore
-from ufo.credential_kind import CREDENTIAL_KIND
-from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.loader import load_manifests, turn_tools
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
+from ufo.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.objects import AdminRequired, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 TOOL_NARRATION = "checking their saved keys"

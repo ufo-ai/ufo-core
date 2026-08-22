@@ -21,7 +21,6 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
-from ufo.audience import FOREIGN_AUDIENCE_PREFIX
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.objects import (
@@ -36,6 +35,7 @@ from ufo.objects import (
 from ufo.schema import tables
 from ufo.seats import SeatEntry, Seats
 from ufo.tools.context import ToolContext
+from ufo.turns.audience import FOREIGN_AUDIENCE_PREFIX
 from ufo.workspace import ws_current
 
 WORKSPACE_KIND = "workspace"

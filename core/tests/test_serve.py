@@ -15,7 +15,9 @@ from sqlalchemy.engine import make_url
 
 import ufo.db
 from ufo import serve
-from ufo.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.access.credentials import CredentialStore
+from ufo.access.egress_rules import InjectionRule, ScopeRule
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import (
     DEFAULT_BACKGROUND_JOBS_MODEL,
@@ -24,9 +26,7 @@ from ufo.config import (
     DatabaseConfig,
     SandboxConfig,
 )
-from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.egress_rules import InjectionRule, ScopeRule
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.ext.surface import SurfaceSpec
 from ufo.models.catalog import CORE_PRICING

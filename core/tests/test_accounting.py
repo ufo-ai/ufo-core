@@ -6,8 +6,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo import accounting
-from ufo.accounting import (
+from ufo.billing import accounting
+from ufo.billing.accounting import (
     IMAGES_DIMENSION,
     MEMBER_SCOPE,
     SANDBOX_TOKENS_ATTEMPT,
@@ -25,7 +25,7 @@ from ufo.accounting import (
     record_video_usage,
     record_workspace_usage,
 )
-from ufo.balance import credit
+from ufo.billing.balance import credit
 from ufo.db import workspace_tx
 from ufo.loop import queue as loop_queue
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICES, CORE_PRICING, PRICE_DIGEST

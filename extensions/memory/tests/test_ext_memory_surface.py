@@ -36,7 +36,7 @@ from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
-from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 
 SECRET = "memory-token-secret"
 BASE_TIME = datetime(2026, 7, 1, tzinfo=UTC)

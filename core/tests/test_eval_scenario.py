@@ -38,7 +38,7 @@ from ufo.ext.context import ExtensionContext, context_for
 from ufo.loop.transcript import Transcript
 from ufo.schema import tables
 from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
-from ufo.transcript import Conversation
+from ufo.turns.transcript import Conversation
 from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"

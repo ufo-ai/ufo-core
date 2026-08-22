@@ -34,9 +34,9 @@ from evals.connector_refs import (
     token,
 )
 from evals.harness.harness import JsonObject
-from ufo.connectors import ConnectorEntry, ConnectorRegistry, UnknownBrokerTool
+from ufo.access.connectors import ConnectorEntry, ConnectorRegistry, UnknownBrokerTool
+from ufo.access.grants import Grant, GrantStore
 from ufo.db import workspace_tx
-from ufo.grants import Grant, GrantStore
 from ufo.loop.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn

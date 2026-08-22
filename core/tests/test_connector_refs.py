@@ -15,10 +15,10 @@ from ufo_ext_eval_env.manifest import CODE_FIXTURE_PREFIX, CODE_PROVIDER, NAME
 
 from evals import connector_refs
 from evals.harness.capability import CapabilityOutput, ToolInvocation
+from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.grants import GrantStore
 from ufo.loop.engine import OFFLOAD_NOTICE, TOOL_OUTPUT_DIR
 from ufo.schema import tables
 from ufo.sdk.context import ScopedStore

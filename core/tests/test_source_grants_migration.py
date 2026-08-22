@@ -21,7 +21,7 @@ from alembic.config import Config
 
 from ufo.db import MIGRATIONS_DIR, dispose_db, init_db
 from ufo.ext.context import SourceReader, context_for
-from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 

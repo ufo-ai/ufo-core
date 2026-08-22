@@ -53,7 +53,7 @@ from ufo.indexing import (
 from ufo.schema import tables
 from ufo.sdk.audience import conversation_audience
 from ufo.sources.sync import PageChange
-from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 PAGE_DIGEST = "sha256:page"

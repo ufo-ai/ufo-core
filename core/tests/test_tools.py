@@ -13,13 +13,6 @@ import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel, ValidationError
 
-from ufo.audience import (
-    SHARED_AUDIENCE,
-    Audience,
-    conversation_audience,
-    foreign_room_audience,
-    room_audience,
-)
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SubagentProfile
@@ -35,7 +28,6 @@ from ufo.sandbox.session import (
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillCard, SkillRegistry
-from ufo.subjects import member_subject
 from ufo.tools.builtins import (
     BUILTIN_TOOLS,
     FILE_TOOL_RESULT_MAX_CHARS,
@@ -51,6 +43,14 @@ from ufo.tools.context import (
     ToolResult,
 )
 from ufo.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
+from ufo.turns.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
+from ufo.turns.subjects import member_subject
 from ufo.workspace import ws
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)

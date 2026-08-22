@@ -1,12 +1,12 @@
 """The conversation's one durable transcript writer: monotonic seq guard over the shared blob
-contract in `ufo.transcript`. Only the run that ends a turn — or the repair flow republishing its
-committed terminal — writes at that turn's seq, so the first write at a seq is authoritative."""
+contract in `ufo.turns.transcript`. Only the run that ends a turn — or the repair flow republishing
+its committed terminal — writes at that turn's seq, so the first write at a seq is authoritative."""
 
 from dataclasses import dataclass
 from uuid import UUID
 
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
-from ufo.transcript import Conversation, decode, encode, transcript_key
+from ufo.turns.transcript import Conversation, decode, encode, transcript_key
 
 
 @dataclass(frozen=True)

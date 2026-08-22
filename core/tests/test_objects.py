@@ -33,10 +33,16 @@ from ufo_ext_skill_create.manifest import SKILL_OBJECT
 from ufo_ext_sources.pages import PAGE_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
-import ufo.artifacts as artifacts
-import ufo.conversations as conversations
+import ufo.kinds.artifacts as artifacts
+import ufo.kinds.conversations as conversations
+from ufo.access.credentials import CredentialStore
 from ufo.agent_scope import agent
-from ufo.agents import (
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, JsonValue, context_for
+from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
+from ufo.ext.manifest import Manifest
+from ufo.kinds.agents import (
     AGENT_CREATE_GATE,
     AGENT_EDIT_GATE,
     AGENT_KIND,
@@ -46,30 +52,17 @@ from ufo.agents import (
     AgentObjects,
     AgentSpec,
 )
-from ufo.artifact_url import verify_artifact_url
-from ufo.artifacts import (
+from ufo.kinds.artifacts import (
     ARTIFACT_KIND,
     ARTIFACT_OBJECT,
     ArtifactObjects,
     artifact_object_names,
 )
-from ufo.audience import (
-    SHARED_AUDIENCE,
-    Audience,
-    conversation_audience,
-    foreign_room_audience,
-    room_audience,
-)
-from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
-from ufo.credential_kind import CredentialObjects
-from ufo.credentials import CredentialStore
-from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, JsonValue, context_for
-from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
-from ufo.ext.manifest import Manifest
+from ufo.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
+from ufo.kinds.credential_kind import CredentialObjects
+from ufo.kinds.members import MEMBER_OBJECT
 from ufo.loop.transcript import Transcript
-from ufo.members import MEMBER_OBJECT
+from ufo.media.artifact_url import verify_artifact_url
 from ufo.models.catalog import core_model_specs
 from ufo.models.interface import Message, TextBlock, ToolUseBlock
 from ufo.models.spec import ModelSpec, ReasoningSupport
@@ -115,7 +108,14 @@ from ufo.schema.records import MAIN_AGENT_ICON, Agent, Turn
 from ufo.sdk.objects import AgentTargetVerb
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
-from ufo.transcript import Conversation, transcript_key
+from ufo.turns.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
+from ufo.turns.transcript import Conversation, transcript_key
 from ufo.workspace import ws
 
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"

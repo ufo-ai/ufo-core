@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from ufo.artifact_url import ARTIFACT_KEY_PREFIX
-from ufo.audience import conversation_audience
 from ufo.blob import S3BlobStore, WorkspaceBlobStore
+from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.tools import builtins
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 

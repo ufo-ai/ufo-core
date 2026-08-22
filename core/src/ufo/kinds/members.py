@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.agent_scope import agent_current
-from ufo.audience import FOREIGN_AUDIENCE_PREFIX
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
 from ufo.objects import (
@@ -33,6 +32,7 @@ from ufo.schema import tables
 from ufo.seats import Seats, create_member, email_domain, member_is_admin
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
+from ufo.turns.audience import FOREIGN_AUDIENCE_PREFIX
 from ufo.workspace import ws_current
 
 MEMBER_KIND = "member"

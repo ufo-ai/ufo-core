@@ -9,9 +9,9 @@ and never gates a member grant (`connect_account`). Its input and output are the
 task/result contract an agent target defaults to. Every
 other profile is extension-provided through the manifest; this is the floor."""
 
-from ufo.contracts import ResultOutput, TaskInput
 from ufo.loop.prompts.render import SKILL_INDEX_SLOT
 from ufo.loop.subagents import SubagentProfile
+from ufo.turns.contracts import ResultOutput, TaskInput
 
 GENERAL_PURPOSE = "general_purpose"
 

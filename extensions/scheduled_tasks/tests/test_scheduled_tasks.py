@@ -58,9 +58,9 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.ext.loader import skill_registry, turn_tools
-from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.queue import _load_turn
 from ufo.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSupported
+from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
 from ufo.sdk.audience import (

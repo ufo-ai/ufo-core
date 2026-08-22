@@ -24,8 +24,8 @@ from ufo_ext_slack.attribution import addressing_mention, mention_attributed
 from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
 from ufo_ext_slack.manifest import manifest as slack_manifest
 
+from ufo.access.credentials import CredentialStore
 from ufo.blob import BlobStore, FilesystemBlobStore, WorkspaceBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
 from ufo.ext.loader import BoundHook, HookChain, HookResolution, turn_hooks

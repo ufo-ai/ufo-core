@@ -7,9 +7,9 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 
-from ufo import runtime_instance
 from ufo.db import workspace_tx
-from ufo.runtime_instance import (
+from ufo.runtime import runtime_instance
+from ufo.runtime.runtime_instance import (
     STALE_AFTER_SECONDS,
     STRANDED_TURN_GRACE_SECONDS,
     CancelReconciler,

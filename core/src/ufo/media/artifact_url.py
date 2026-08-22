@@ -24,14 +24,14 @@ from typing import cast
 from urllib.parse import quote
 from uuid import UUID
 
-from ufo.image_previews import (
+from ufo.auth.token_signing import sign_detached, verify_detached
+from ufo.media.image_previews import (
     IMAGE_PREVIEW_MAX_BYTES,
     RASTER_IMAGE_SUFFIXES,
     ImagePreviewGrant,
     RasterImageMediaType,
     raster_image_media_type,
 )
-from ufo.token_signing import sign_detached, verify_detached
 
 ARTIFACT_KEY_PREFIX = "artifacts/"
 ARTIFACT_URL_TTL_SECONDS = 3600

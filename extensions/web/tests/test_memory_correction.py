@@ -37,11 +37,11 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.bearer import mint_token
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialStore
+from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.context import ScopedStore, context_for
@@ -59,7 +59,7 @@ from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.serve import _mount_shared_surfaces
-from ufo.subjects import member_subject
+from ufo.turns.subjects import member_subject
 from ufo.workspace import ws
 
 TOKEN_SECRET = "web-token-secret"

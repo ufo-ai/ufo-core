@@ -10,11 +10,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ufo.audience import Audience
 from ufo.ext.context import ExtensionContext
-from ufo.image_previews import RasterImageMediaType
+from ufo.media.image_previews import RasterImageMediaType
 from ufo.models.interface import Message
-from ufo.workspace_changes import WorkspaceChanges
+from ufo.turns.audience import Audience
+from ufo.turns.workspace_changes import WorkspaceChanges
 
 CONVERSATION_ARTIFACT_FILENAME_MAX_CHARS = 500
 CONVERSATION_ARTIFACT_SUBJECT_MAX_CHARS = 2_000

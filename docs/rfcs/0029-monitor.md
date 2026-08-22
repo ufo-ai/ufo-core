@@ -46,7 +46,7 @@ What does exist, and what this design rides:
 
 | Machinery | Where | What it gives a monitor |
 |---|---|---|
-| Durable row + per-minute lease-claimed job + `invoke` with deterministic idempotency key | `runner.py`, `core/src/ufo/jobs.py` | the fire vehicle — the shipped pattern for every "background thing → turn" (`@pause`, PR review routing, source-subscription alerts) |
+| Durable row + per-minute lease-claimed job + `invoke` with deterministic idempotency key | `runner.py`, `core/src/ufo/runtime/jobs.py` | the fire vehicle — the shipped pattern for every "background thing → turn" (`@pause`, PR review routing, source-subscription alerts) |
 | Arrival folding | `admission.py:446`, `engine.py:1396` | fires into a busy conversation fold into the live turn at a round boundary; into an idle one they found the next turn — coalescing for free |
 | Delivery-then-stamp ordering | `SubagentResult.deliver`, `loop/subagents.py:591` | crash-safe exactly-once fire: invoke under a deterministic key, then retire the row; a re-post admits nothing |
 | Fan-out collapse + cooldown | `loop/delivery.py:37` | the precedent for producer-side batching (60s per-conversation cooldown) |

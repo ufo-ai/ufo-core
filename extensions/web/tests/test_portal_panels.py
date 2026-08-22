@@ -45,11 +45,10 @@ from ufo_ext_web.panels import FIRST_RUN_PROVIDERS, TOOLING_PREFIX, _tools_recor
 from ufo_ext_web.surface import MEMORY_RECENT_LIMIT
 from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY
 
+from ufo.access.credentials import CredentialStore
 from ufo.agent_scope import agent as bind_agent
-from ufo.audience import conversation_audience
-from ufo.bearer import mint_token
+from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import (
@@ -68,7 +67,8 @@ from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
 from ufo.sdk.manifest import Manifest
 from ufo.serve import _mount_shared_surfaces
 from ufo.skills.runtime import RuntimeSkill
-from ufo.subjects import member_subject
+from ufo.turns.audience import conversation_audience
+from ufo.turns.subjects import member_subject
 from ufo.workspace import ws
 
 TOKEN_SECRET = "web-token-secret"

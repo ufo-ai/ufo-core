@@ -28,20 +28,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from ufo.agents import AGENT_OBJECT
-from ufo.artifacts import ARTIFACT_OBJECT
-from ufo.audience import SHARED_AUDIENCE, Audience
+from ufo.access.connectors import CliCredential
+from ufo.access.credentials import CredentialStore, HostChoice
+from ufo.access.grants import ConnectionRecorded
 from ufo.blob import WorkspaceBlobStore
-from ufo.connectors import CliCredential
-from ufo.conversations import CONVERSATION_OBJECT
-from ufo.credential_kind import (
-    CREDENTIAL_DESCRIPTION,
-    CREDENTIAL_GUIDANCE,
-    CREDENTIAL_KIND,
-    CredentialObjects,
-    CredentialSpec,
-)
-from ufo.credentials import CredentialStore, HostChoice
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.extension_kind import (
     EXTENSION_DESCRIPTION,
@@ -72,9 +62,19 @@ from ufo.ext.manifest import (
     declared_slots,
 )
 from ufo.ext.surface import TurnTailer
-from ufo.grants import ConnectionRecorded
 from ufo.indexing import EmbedClient, IndexBackend
-from ufo.members import MEMBER_OBJECT
+from ufo.kinds.agents import AGENT_OBJECT
+from ufo.kinds.artifacts import ARTIFACT_OBJECT
+from ufo.kinds.conversations import CONVERSATION_OBJECT
+from ufo.kinds.credential_kind import (
+    CREDENTIAL_DESCRIPTION,
+    CREDENTIAL_GUIDANCE,
+    CREDENTIAL_KIND,
+    CredentialObjects,
+    CredentialSpec,
+)
+from ufo.kinds.members import MEMBER_OBJECT
+from ufo.kinds.workspace_kind import WORKSPACE_OBJECT
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.o11y import log
 from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
@@ -89,7 +89,7 @@ from ufo.skills.runtime import (
 )
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.registry import ToolDef, ToolRegistry
-from ufo.workspace_kind import WORKSPACE_OBJECT
+from ufo.turns.audience import SHARED_AUDIENCE, Audience
 
 CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=AGENT_OBJECT, extension=None, context=None),

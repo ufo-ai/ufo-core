@@ -31,9 +31,11 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
+from ufo.access.connectors import UnknownBrokerTool
+from ufo.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
-from ufo.audience import audience_subjects, conversation_audience
-from ufo.bearer import mint_token
+from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import (
     BlobConfig,
@@ -46,8 +48,6 @@ from ufo.config import (
     SandboxConfig,
     TerminalConfig,
 )
-from ufo.connectors import UnknownBrokerTool
-from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
     ConversationProbes,
@@ -73,18 +73,17 @@ from ufo.ext.loader import (
 )
 from ufo.ext.manifest import AuthProxySpec, CarrierSpec, Manifest
 from ufo.ext.surface import WRITEBACK_DELIVERED
-from ufo.governance import prompt_digest
-from ufo.grants import GrantStore
 from ufo.hub import InProcessHub
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, TextChunker
-from ufo.jobs import JobRunner, bindings_from
+from ufo.kinds.governance import prompt_digest
 from ufo.listings import ListingCursor
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import Message, ModelRequest, TextDelta
 from ufo.models.registry import model_registry
-from ufo.onboarding import run_onboarding_steps
+from ufo.onboard.onboarding import run_onboarding_steps
+from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import ProbeEnv
 from ufo.sandbox.local import LocalCarrier
@@ -115,9 +114,10 @@ from ufo.serve import (
 )
 from ufo.skills.runtime import mount_skill
 from ufo.sources.sync import CorePageFeed, SyncDriver
-from ufo.subjects import SHARED_SUBJECT
 from ufo.tools.context import SpawnResult, ToolContext
-from ufo.transcript import Conversation, transcript_key
+from ufo.turns.audience import audience_subjects, conversation_audience
+from ufo.turns.subjects import SHARED_SUBJECT
+from ufo.turns.transcript import Conversation, transcript_key
 from ufo.workspace import ws
 
 SANDBOX_UNTOUCHED = "the sample tool records through its store and must not reach the sandbox"

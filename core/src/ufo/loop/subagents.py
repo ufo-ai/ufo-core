@@ -30,13 +30,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.accounting import REJECT, BalanceGate
-from ufo.audience import Audience, audience_member
-from ufo.balance import BalanceExhausted
-from ufo.cancellation import cancel_one_turn
-from ufo.contracts import Contract, input_contract, output_contract
+from ufo.billing.accounting import REJECT, BalanceGate
+from ufo.billing.balance import BalanceExhausted
 from ufo.db import workspace_tx
-from ufo.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.ext.context import TurnInvoker
 from ufo.ext.manifest import SubagentProfile
 from ufo.ext.surface import conversation_name
@@ -75,7 +71,11 @@ from ufo.tools.context import (
     UnknownSubagentProfile,
     UntrustedContentError,
 )
-from ufo.untrusted import wall
+from ufo.turns.audience import Audience, audience_member
+from ufo.turns.cancellation import cancel_one_turn
+from ufo.turns.contracts import Contract, input_contract, output_contract
+from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
+from ufo.turns.untrusted import wall
 
 SUBAGENT_POLL_SECONDS = 0.1
 PROFILE_TARGET_KIND = "profile"

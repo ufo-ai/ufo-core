@@ -9,8 +9,8 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
-from ufo.connectors import CliCredential
-from ufo.credentials import (
+from ufo.access.connectors import CliCredential
+from ufo.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_TTL_SECONDS,
     INSTALLATION_BINDING_PURPOSE,
@@ -29,13 +29,13 @@ from ufo.credentials import (
     slot_is_set,
     slot_secret,
 )
-from ufo.db import workspace_tx
-from ufo.egress_rules import (
+from ufo.access.egress_rules import (
     InjectionRule,
     MeterRule,
     ScopeRule,
     derive_credential_rules,
 )
+from ufo.db import workspace_tx
 from ufo.ext.loader import injecting_slots
 from ufo.ext.manifest import (
     ConnectorProvider,

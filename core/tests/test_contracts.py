@@ -3,7 +3,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from ufo.contracts import (
+from ufo.turns.contracts import (
     DECLARED_SCHEMA_MAX_CHARS,
     JsonContract,
     ResultOutput,

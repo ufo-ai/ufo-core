@@ -53,8 +53,8 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import turn_tools
-from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.objects import ObjectListQuery
+from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ProxyEndpoint,

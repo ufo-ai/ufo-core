@@ -28,14 +28,14 @@ from ufo_ext_sources.asana import AsanaConnector
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.github import GitHubConnector
 
-from ufo.blob import FilesystemBlobStore
-from ufo.connectors import (
+from ufo.access.connectors import (
     DIRECT_ACCOUNT,
     ConnectorRegistry,
     Credential,
     SourceCredentialResolver,
 )
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
+from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, SourceReader, context_for
 from ufo.indexing import TextChunker
@@ -52,7 +52,7 @@ from ufo.sdk.sources import (
 )
 from ufo.sources import rest
 from ufo.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
-from ufo.subjects import SHARED_SUBJECT
+from ufo.turns.subjects import SHARED_SUBJECT
 from ufo.workspace import init_workspace_credentials, ws
 
 ACCOUNT = "acct-1"

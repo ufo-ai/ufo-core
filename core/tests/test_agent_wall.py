@@ -18,10 +18,9 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.audience import conversation_audience
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SubagentProfile
 from ufo.ext.surface import SurfaceContext
@@ -34,6 +33,7 @@ from ufo.schema import tables
 from ufo.schema.records import Turn
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 

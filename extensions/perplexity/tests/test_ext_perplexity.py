@@ -8,7 +8,7 @@ import sqlalchemy as sa
 import ufo_ext_perplexity as perplexity
 from cryptography.fernet import Fernet
 
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.schema import tables

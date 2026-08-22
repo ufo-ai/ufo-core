@@ -13,10 +13,10 @@ import sqlalchemy as sa
 
 from ufo.blob import S3BlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.jobs import RENDER_PREVIEWS_JOB, core_jobs
 from ufo.loop.delivery import DeliverySweep
 from ufo.loop.subagents import SubagentRegistry
-from ufo.preview_renderer import PreviewRenderer
+from ufo.media.preview_renderer import PreviewRenderer
+from ufo.runtime.jobs import RENDER_PREVIEWS_JOB, core_jobs
 from ufo.schema import tables
 from ufo.sources.sync import FolderSource, SyncDriver
 from ufo.workspace import ws
@@ -124,7 +124,7 @@ async def _preview_columns(workspace_id, blob_key: str) -> sa.Row:
 
 
 def _service(handler, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ufo import preview_renderer
+    from ufo.media import preview_renderer
 
     real = httpx.AsyncClient
 
@@ -216,13 +216,13 @@ async def test_render_previews_skips_a_stale_row(
 
 
 def _dispatcher():
-    from ufo.jobs import TurnDispatcher
+    from ufo.runtime.jobs import TurnDispatcher
 
     return TurnDispatcher(client=None)
 
 
 def _runner():
-    from ufo.jobs import PageChangeRunner
+    from ufo.runtime.jobs import PageChangeRunner
 
     return PageChangeRunner(
         manifests=(),

@@ -7,11 +7,11 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from ufo import o11y
-from ufo.cancellation import cancel_one_turn
 from ufo.db import owner_tx, workspace_tx
 from ufo.object_name import ObjectRef
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
+from ufo.turns.cancellation import cancel_one_turn
 from ufo.workspace import ws
 
 

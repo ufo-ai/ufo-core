@@ -19,7 +19,7 @@ from ufo.ext.loader import (
     write_lockfile,
 )
 from ufo.ext.store import Catalog, CatalogEntry, ExtensionStore, ufo_version
-from ufo.jobs import JobRunner, bindings_from
+from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.schema import tables
 from ufo.workspace import ws
 

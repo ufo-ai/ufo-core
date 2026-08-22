@@ -54,7 +54,7 @@ from ufo.sdk.models import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.transcript import (
+from ufo.turns.transcript import (
     CompactionRecord,
     TranscriptDecodeError,
     decode,

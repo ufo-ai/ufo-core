@@ -26,14 +26,14 @@ from evals.memory_100.models import (
 )
 from evals.memory_100.snapshot import content_digest, load_snapshot, write_snapshot
 from evals.memory_100.state import CorpusAttestor
-from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.context import ScopedStore, SourceReader, context_for
 from ufo.sandbox.containment import ContainmentError
 from ufo.schema import tables
 from ufo.sources.sync import page_id_for
-from ufo.subjects import member_subject
+from ufo.turns.audience import conversation_audience
+from ufo.turns.subjects import member_subject
 from ufo.workspace import ws
 
 PAGE_REF_SCALE = 12_500

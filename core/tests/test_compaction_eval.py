@@ -37,7 +37,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.schema.records import Usage
-from ufo.transcript import CompactionSummary, Conversation, decode, encode, transcript_key
+from ufo.turns.transcript import CompactionSummary, Conversation, decode, encode, transcript_key
 
 TEST_TARGET_TOKENS = 9_000
 TEST_TRIGGER_TOKENS = int(TEST_TARGET_TOKENS * 0.9)

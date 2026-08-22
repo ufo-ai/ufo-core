@@ -15,9 +15,9 @@ import sqlalchemy as sa
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from ufo.balance import read_balance
+from ufo.billing.balance import read_balance
 from ufo.db import owner_tx, workspace_tx
-from ufo.onboard_control import (
+from ufo.onboard.onboard_control import (
     CROSS_WORKSPACE_READ,
     SIGNUP_GRANT_MICRO_USD,
     SIGNUP_RESERVE_MICRO_USD,
@@ -26,7 +26,7 @@ from ufo.onboard_control import (
     agent_prompt,
     deterministic_workspace_id,
 )
-from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import create_member

@@ -23,13 +23,15 @@ import ufo_ext_bedrock as bedrock
 import ufo_ext_metronome as metronome
 from cryptography.fernet import Fernet
 
-from ufo.accounting import (
+from ufo.access.credentials import CredentialRequests, CredentialStore
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.billing.accounting import (
     record_egress_request,
     record_sandbox_tokens,
     record_turn_usage,
     record_workspace_usage,
 )
-from ufo.balance import (
+from ufo.billing.balance import (
     BILLING_SCREEN_FRAGMENT,
     TOPUP_GRACE_MICRO_USD,
     credit,
@@ -39,15 +41,13 @@ from ufo.balance import (
     read_headroom,
     set_reserve,
 )
-from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.credentials import CredentialRequests, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import turn_tools
-from ufo.jobs import JobRunner, bindings_from
 from ufo.models.registry import ModelRegistry, model_registry
+from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn, Usage

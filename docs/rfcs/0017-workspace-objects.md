@@ -45,9 +45,9 @@ Every durable-config surface today is a bespoke, gap-ridden island:
 | Scheduled tasks | `scheduled_task` objects over core's `ScheduleStore` | One row family through the object verbs |
 | User skills | `save_custom_skill` reads an authored directory into the extension's `user_skill` table (`extensions/skill_create/ufo_ext_skill_create/manifest.py:120-135`) | **No list, no get, no delete** — a saved skill is invisible and immortal in chat |
 | Sources | `sync_source` registers via progressive disclosure (`extensions/sources/ufo_ext_sources/tools.py:279`) | Create-only — **no list, no remove**; a wrong source syncs forever |
-| Connector grants | `connect_account` → OAuth → `grant` row (`core/src/ufo/grants.py:251`, `tables.py:228-245`) | **No tool lists or revokes a grant at all** |
-| Credentials | `request_credentials` seals BYOK values into the `credential` table via private handoff (`core/src/ufo/credentials.py:106`, `tables.py:218-226`) | **No tool shows which slots exist or are filled; no unset at all** |
-| Agent | `Governance.propose_change`/`approve_proposal`, prompt-only CAS (`core/src/ufo/governance.py:28-115`); approval is an HTTP endpoint (`core/src/ufo/surfaces/cli.py:146-164`) | `model` is not updatable at all; approval is a member action outside chat — the thing `CLAUDE.md` names as forbidden |
+| Connector grants | `connect_account` → OAuth → `grant` row (`core/src/ufo/access/grants.py:251`, `tables.py:228-245`) | **No tool lists or revokes a grant at all** |
+| Credentials | `request_credentials` seals BYOK values into the `credential` table via private handoff (`core/src/ufo/access/credentials.py:106`, `tables.py:218-226`) | **No tool shows which slots exist or are filled; no unset at all** |
+| Agent | `Governance.propose_change`/`approve_proposal`, prompt-only CAS (`core/src/ufo/kinds/governance.py:28-115`); approval is an HTTP endpoint (`core/src/ufo/surfaces/cli.py:146-164`) | `model` is not updatable at all; approval is a member action outside chat — the thing `CLAUDE.md` names as forbidden |
 
 Sixteen core builtins exist (`core/src/ufo/tools/builtins.py:689-870`); none is CRUD over durable
 workspace config — all config CRUD lives in the per-extension islands above. `spec.md:95-99`
@@ -298,7 +298,7 @@ says exactly that. Delete is admitted to the grantor or an admin, checked in the
 
 **`credential`.** The declared BYOK slots across installed extensions (the `credentials`
 Manifest point, `core/src/ufo/ext/manifest.py:41-58`) projected over core's sealed store
-(`credential` table, `tables.py:218-226`; `CredentialStore`, `core/src/ufo/credentials.py:106`).
+(`credential` table, `tables.py:218-226`; `CredentialStore`, `core/src/ufo/access/credentials.py:106`).
 Every declared slot lists, filled or not — the declaration lives in the manifest, the row only
 holds the sealed value — with names derived from the slot (`acme_api_key` → `acme-api-key`).
 Spec is the declaration: slot, description, injection host. Status is filled-or-empty and when
@@ -314,7 +314,7 @@ accept update alone, admin-gated: the main agent can update any agent, while a c
 update itself. Create and delete are refused. **Each agent field has exactly one write
 path.** The kind's spec carries `model` and `internet_access_allowed`, applied directly. `prompt`
 belongs to the existing proposal path — `Governance`'s prompt-only CAS
-(`core/src/ufo/governance.py`), the `proposal` table, `ctx.propose_change`, and the
+(`core/src/ufo/kinds/governance.py`), the `proposal` table, `ctx.propose_change`, and the
 self-improvement extension over them (RFC 0016's subject) — which **stays and runs independently
 beside the kind**. Disjoint fields mean the two surfaces cannot conflict by construction: an
 `object_apply` cannot move a prompt under a pending proposal (the spec model refuses a `prompt`

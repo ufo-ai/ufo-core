@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from ufo.credentials import CredentialValueInvalid
+from ufo.access.credentials import CredentialValueInvalid
 from ufo.models.interface import ModelClient, ToolSchema
 from ufo.models.pricing import ModelPrice
 from ufo.schema.records import ReasoningEffort

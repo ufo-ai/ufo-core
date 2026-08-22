@@ -10,11 +10,9 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from ufo.agent_scope import agent
-from ufo.connectors import CliCredential
-from ufo.credentials import CredentialStore
-from ufo.db import workspace_tx
-from ufo.egress_rules import (
+from ufo.access.connectors import CliCredential
+from ufo.access.credentials import CredentialStore
+from ufo.access.egress_rules import (
     ConnectorTransferHosts,
     InjectionRule,
     InternetRule,
@@ -24,8 +22,10 @@ from ufo.egress_rules import (
     derive_credential_rules,
     derive_grant_rules,
 )
+from ufo.access.grants import GrantStore
+from ufo.agent_scope import agent
+from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot
-from ufo.grants import GrantStore
 from ufo.sandbox.session import SENTINEL_MODEL_KEY, ProbeToken, RunToken
 from ufo.schema import tables
 from ufo.schema.records import RUNNING

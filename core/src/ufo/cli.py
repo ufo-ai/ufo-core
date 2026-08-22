@@ -25,14 +25,14 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.accounting import SpendReport, SpendRollup
-from ufo.balance import Balance, credit, read_balance, set_reserve
-from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.access.credentials import CredentialStore
+from ufo.access.grants import GrantSummary, workspace_grant_summaries
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.billing.accounting import SpendReport, SpendRollup
+from ufo.billing.balance import Balance, credit, read_balance, set_reserve
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.bundle import Bundle, wheel_name
-from ufo.cancellation import cancel_one_turn
 from ufo.config import Config, config_path, load_config
-from ufo.credentials import CredentialStore
 from ufo.db import (
     MIGRATIONS_DIR,
     apply_migrations,
@@ -46,17 +46,17 @@ from ufo.db import (
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
-from ufo.grants import GrantSummary, workspace_grant_summaries
-from ufo.ingress_serve import run as ingress_run
-from ufo.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
+from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
+from ufo.onboard.seed import KitchenSink
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.sandbox.containment import contained_file
+from ufo.sandbox.ingress_serve import run as ingress_run
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import email_domain
-from ufo.seed import KitchenSink
 from ufo.serve import home_surface
 from ufo.serve import run as serve_run
+from ufo.turns.cancellation import cancel_one_turn
 from ufo.workspace import ws
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"

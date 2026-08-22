@@ -15,16 +15,16 @@ from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
 from ufo import cli
-from ufo.balance import read_balance
+from ufo.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.billing.balance import read_balance
 from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext import loader
 from ufo.ext.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import CredentialSlot, Manifest, OnboardingStep
 from ufo.models.interface import AUTO_MODEL
-from ufo.onboarding import (
+from ufo.onboard.onboarding import (
     DEFAULT_AGENT_MODEL,
     DEFAULT_AGENT_PROMPT,
     AlreadyInitialized,

@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from cryptography.fernet import Fernet
 
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
 from ufo.ext.context import ExtensionContext
 from ufo.ext.loader import member_skill_listing, turn_member_skills
 from ufo.ext.manifest import Manifest, MemberSkillsSpec

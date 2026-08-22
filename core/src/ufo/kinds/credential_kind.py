@@ -20,7 +20,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialStore,
     DeclaredSlot,
     HostChoice,

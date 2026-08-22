@@ -42,11 +42,11 @@ from ufo_testsupport.surfaces import (
 from ufo_testsupport.tables import reset_workspace_data
 
 from ufo import cli
-from ufo.bearer import mint_token
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, DatabaseConfig, load_config
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry

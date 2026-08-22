@@ -37,9 +37,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from ufo.access.connectors import AuthProxy, SourceCredentialResolver
 from ufo.blob import WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry
-from ufo.connectors import AuthProxy, SourceCredentialResolver
 from ufo.db import owner_tx, workspace_tx
 from ufo.o11y import (
     SERVICE_CHECK_CRITICAL,
@@ -50,7 +50,7 @@ from ufo.o11y import (
     log_error,
 )
 from ufo.schema import tables
-from ufo.subjects import SHARED_SUBJECT
+from ufo.turns.subjects import SHARED_SUBJECT
 
 FOLDER_BACKEND = "folder"
 SOURCE_SYNC_JOB = "source_sync"

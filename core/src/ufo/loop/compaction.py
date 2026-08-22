@@ -45,7 +45,7 @@ from ufo.o11y import emit_metric, log, warn
 from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.skills.runtime import LoadedSkills
-from ufo.transcript import (
+from ufo.turns.transcript import (
     Anchor,
     AnchorKind,
     CompactionRecord,

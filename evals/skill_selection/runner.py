@@ -22,8 +22,8 @@ from evals.harness.registry import EvalTask
 from evals.harness.target import CapabilityTarget
 from evals.skill_loading.runner import fixtures_digest
 from evals.skill_selection.queries import CORPORA, QUERIES
+from ufo.access.credentials import CredentialStore
 from ufo.config import load_config
-from ufo.credentials import CredentialStore
 from ufo.ext.loader import embed_backend, load_manifests
 from ufo.indexing import EmbedClient
 from ufo.skills.runtime import SkillCard

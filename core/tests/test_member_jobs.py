@@ -9,11 +9,11 @@ from ufo_ext_memory.store import memory_item
 from ufo_ext_objectives.store import objective, objective_event, objective_step
 
 from ufo.agent_scope import agent
-from ufo.audience import conversation_audience, foreign_room_audience
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import _member_blob_text, context_for
 from ufo.schema import tables
+from ufo.turns.audience import conversation_audience, foreign_room_audience
 from ufo.workspace import ws
 
 

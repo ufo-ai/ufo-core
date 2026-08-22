@@ -16,7 +16,7 @@ import ufo_ext_coding.connect as connect
 from cryptography.fernet import Fernet
 from starlette.datastructures import QueryParams
 
-from ufo.credentials import (
+from ufo.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_TTL_SECONDS,
     INSTALLATION_BINDING_PURPOSE,

@@ -28,9 +28,8 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput, SetEnqueueOptions
 from dbos import error as dbos_error
 
-from ufo.accounting import ALLOW, BalanceGate, SpendEvaluator
+from ufo.billing.accounting import ALLOW, BalanceGate, SpendEvaluator
 from ufo.blob import WorkspaceBlobStore
-from ufo.candidates import WorkspaceCandidates
 from ufo.db import owner_tx, workspace_tx
 from ufo.ext.context import ConversationProbes, ExtensionContext, TurnInvoker, context_for
 from ufo.ext.manifest import (
@@ -42,10 +41,11 @@ from ufo.ext.manifest import (
     PageChangeBatch,
 )
 from ufo.indexing import EmbedClient, IndexBackend
+from ufo.kinds.provisioning import AgentProvisioning
+from ufo.media.preview_renderer import PreviewRenderer
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import emit_metric, formatted_stack, log, log_error, warn
-from ufo.preview_renderer import PreviewRenderer
-from ufo.provisioning import AgentProvisioning
+from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.schema import tables
 from ufo.schema.records import (

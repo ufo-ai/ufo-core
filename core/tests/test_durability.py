@@ -1,3 +1,4 @@
+import base64
 import sys
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -90,3 +91,9 @@ def test_values_that_are_not_models_round_trip_unchanged() -> None:
 
 def test_the_name_is_not_the_default_serializers() -> None:
     assert SERIALIZER.name() not in ("py_pickle", "portable_json", "custom_serializer")
+
+
+def test_recordings_reference_rebuild_at_its_permanent_address() -> None:
+    raw = base64.b64decode(SERIALIZER.serialize(RECORDED_SHAPE(id=7)))
+    assert b"ufo.durability" in raw
+    assert b"_rebuild" in raw

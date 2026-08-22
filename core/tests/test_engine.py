@@ -29,17 +29,24 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo import o11y
-from ufo.accounting import record_turn_usage
-from ufo.audience import Audience, audience_subjects, conversation_audience
-from ufo.balance import credit, debit, set_reserve
-from ufo.blob import FilesystemBlobStore
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import (
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequests,
     CredentialStore,
     open_credential_request,
 )
+from ufo.access.grants import (
+    ConnectFlow,
+    ConnectHandoff,
+    ConnectRequestInvalid,
+    GrantStore,
+    OAuthAccount,
+    install_connect_flow,
+)
+from ufo.billing.accounting import record_turn_usage
+from ufo.billing.balance import credit, debit, set_reserve
+from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import SourceReader, context_for
 from ufo.ext.loader import BoundHook, HookChain
@@ -50,14 +57,6 @@ from ufo.ext.manifest import (
     HookSpec,
     InjectContext,
     UserPromptSubmit,
-)
-from ufo.grants import (
-    ConnectFlow,
-    ConnectHandoff,
-    ConnectRequestInvalid,
-    GrantStore,
-    OAuthAccount,
-    install_connect_flow,
 )
 from ufo.hub import Absorbed, InProcessHub, LiveFrame, Resumed, SkillLoad, ToolCall
 from ufo.loop.compaction import (
@@ -182,15 +181,20 @@ from ufo.tools.context import (
     UntrustedContentError,
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
-from ufo.transcript import CompactionSummary, Conversation
-from ufo.untrusted import (
+from ufo.turns.audience import Audience, audience_subjects, conversation_audience
+from ufo.turns.transcript import CompactionSummary, Conversation
+from ufo.turns.untrusted import (
     UNTRUSTED_CLOSE,
     UNTRUSTED_CLOSE_ESCAPE,
     UNTRUSTED_NOTICE,
     UNTRUSTED_OPEN,
 )
+from ufo.turns.workspace_changes import (
+    WorkspaceChange,
+    WorkspaceChanges,
+    recorded_workspace_changes,
+)
 from ufo.workspace import init_workspace_credentials, ws
-from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges, recorded_workspace_changes
 
 HISTORY_PAD = "y" * 600
 

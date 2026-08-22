@@ -23,8 +23,8 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import Json, JsonObject
 from evals.harness.registry import EvalTask, capability_task, rewrapped
+from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore
-from ufo.credentials import CredentialStore
 from ufo.ext.manifest import Manifest
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.workspace import ws_current

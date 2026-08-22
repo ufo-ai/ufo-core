@@ -46,9 +46,8 @@ from evals.onboarding_help import (
     slack_rotated_secret_scorer,
     slack_setup_scorer,
 )
-from ufo.activity import SKILL_LOAD_TOOL
+from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL
@@ -60,6 +59,7 @@ from ufo.sdk.context import (
     SurfaceInstallationAccess,
 )
 from ufo.tools.context import ToolContext
+from ufo.turns.activity import SKILL_LOAD_TOOL
 from ufo.workspace import init_workspace_credentials, ws
 
 GETTING_STARTED = "getting-started.md"

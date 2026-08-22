@@ -7,7 +7,7 @@ code in any `__init__.py`), so the public surface lives in named modules like th
 interpreter reaches it here, so a command that outgrows the caller's budget keeps running and is
 reported by the same handles under the same names whichever tool asked."""
 
-from ufo.grants import (
+from ufo.access.grants import (
     ConnectUnavailable as ConnectUnavailable,
 )
 from ufo.tools.context import (

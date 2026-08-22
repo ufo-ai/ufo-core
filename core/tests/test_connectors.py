@@ -22,10 +22,7 @@ import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from httpx import AsyncBaseTransport, AsyncClient, Request, Response
 
-from ufo.agent_scope import agent
-from ufo.audience import conversation_audience
-from ufo.config import Config
-from ufo.connectors import (
+from ufo.access.connectors import (
     CatalogEntry,
     CatalogPage,
     ConnectorEntry,
@@ -33,9 +30,11 @@ from ufo.connectors import (
     Credential,
     SourceCredentialResolver,
 )
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
+from ufo.access.grants import GrantStore, install_connect_flow
+from ufo.agent_scope import agent
+from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.grants import GrantStore, install_connect_flow
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.serve import (
@@ -45,6 +44,7 @@ from ufo.serve import (
     _connector_entries,
 )
 from ufo.tools.context import ToolContext
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 PUBLIC_BASE_URL = "https://ufo.example.com"

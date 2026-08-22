@@ -20,9 +20,9 @@ from uuid import UUID, uuid4
 import httpx
 import sqlalchemy as sa
 
-from ufo.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
+from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.tools.builtins import (

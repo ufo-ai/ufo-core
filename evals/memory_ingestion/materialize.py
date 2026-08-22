@@ -16,9 +16,9 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
 from evals.memory_ingestion.models import IngestionSnapshot, load_snapshot
+from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
-from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import embed_backend, index_backend, load_manifests
@@ -30,9 +30,9 @@ from ufo.indexing import (
     IndexBackend,
     TextChunker,
 )
-from ufo.jobs import PageChangeRunner
 from ufo.models.registry import ModelRegistry, model_registry
-from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.runtime.jobs import PageChangeRunner
 from ufo.sandbox.containment import (
     ContainmentError,
     contained_file,

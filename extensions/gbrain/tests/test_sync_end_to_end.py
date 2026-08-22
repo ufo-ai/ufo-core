@@ -26,7 +26,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, ExtensionContext, SourceReader, context_for
 from ufo.ext.manifest import JobSpec
 from ufo.indexing import TextChunker
-from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
+from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.schema import tables
 from ufo.sources.sync import (
     SOURCE_SYNC_JOB,
@@ -35,7 +35,7 @@ from ufo.sources.sync import (
     page_id_for,
     register_sources,
 )
-from ufo.subjects import SHARED_SUBJECT
+from ufo.turns.subjects import SHARED_SUBJECT
 from ufo.workspace import ws
 
 VECTOR = tuple([1.0] + [0.0] * (EMBED_DIM - 1))

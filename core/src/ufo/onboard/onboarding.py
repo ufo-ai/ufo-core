@@ -13,15 +13,15 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
+from ufo.access.credentials import CredentialStore, deploy_env
 from ufo.config import Config
-from ufo.credentials import CredentialStore, deploy_env
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.manifest import Manifest
+from ufo.kinds.provisioning import AgentProvisioning
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.registry import model_registry
 from ufo.o11y import log
-from ufo.provisioning import AgentProvisioning
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, MAIN_AGENT_ICON
 from ufo.seats import create_member

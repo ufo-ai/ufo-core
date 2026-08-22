@@ -12,12 +12,6 @@ declaring extension's own ScopedStore, `{prefix}:{handler name}`. An extension t
 consumer back over pages it already drained clears that key rather than spelling core's format
 itself."""
 
-from ufo.candidates import (
-    WorkspaceCandidates as WorkspaceCandidates,
-)
-from ufo.candidates import (
-    owner_candidates as owner_candidates,
-)
 from ufo.ext.context import (
     connection_workspaces as connection_workspaces,
 )
@@ -35,4 +29,10 @@ from ufo.ext.manifest import (
 )
 from ufo.ext.manifest import (
     JobSpec as JobSpec,
+)
+from ufo.runtime.candidates import (
+    WorkspaceCandidates as WorkspaceCandidates,
+)
+from ufo.runtime.candidates import (
+    owner_candidates as owner_candidates,
 )

@@ -32,13 +32,13 @@ from ufo_ext_slack.surface import (
 )
 from ufo_ext_slack.tools import SLACK_SECRET_SLOTS
 
-from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.credentials import (
+from ufo.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequests,
     CredentialStore,
     open_credential_request,
 )
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
 from ufo.ext.loader import skill_registry, turn_tools

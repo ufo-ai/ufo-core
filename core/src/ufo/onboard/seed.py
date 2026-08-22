@@ -26,7 +26,7 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
 )
-from ufo.transcript import Conversation, encode, transcript_key
+from ufo.turns.transcript import Conversation, encode, transcript_key
 
 KITCHEN_SINK_TITLE = "Kitchen sink"
 

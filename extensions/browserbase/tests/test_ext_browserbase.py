@@ -16,7 +16,7 @@ import sqlalchemy as sa
 import ufo_ext_browserbase as browserbase
 from cryptography.fernet import Fernet
 
-from ufo.credentials import CredentialSlotUnset, CredentialStore
+from ufo.access.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.sandbox.session import SandboxHandle, SandboxSession

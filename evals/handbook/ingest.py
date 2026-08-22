@@ -50,7 +50,7 @@ from ufo.indexing import (
     IndexBackend,
     IndexScope,
 )
-from ufo.jobs import PAGE_CHANGE_CURSOR_KEY, PageChangeRunner
+from ufo.runtime.jobs import PAGE_CHANGE_CURSOR_KEY, PageChangeRunner
 from ufo.schema import tables
 from ufo.sources.sync import (
     FOLDER_BACKEND,

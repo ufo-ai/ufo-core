@@ -20,13 +20,13 @@ import httpx
 import pytest
 from ufo_ext_sources.slack import SlackConnector
 
-from ufo.blob import FilesystemBlobStore
-from ufo.connectors import (
+from ufo.access.connectors import (
     DIRECT_ACCOUNT,
     ConnectorRegistry,
     Credential,
     SourceCredentialResolver,
 )
+from ufo.blob import FilesystemBlobStore
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from ufo.sources import backend as backend_module
 from ufo.sources.sync import ClaimedSource, SourceAuth, StreamSkipped, SyncDriver, SyncResult

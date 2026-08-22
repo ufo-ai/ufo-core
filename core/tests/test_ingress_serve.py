@@ -21,11 +21,12 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.typing import Origin, Subprotocol
 
-from ufo import ingress_serve
-from ufo.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import dispose_db, workspace_tx
-from ufo.ingress_serve import (
+from ufo.sandbox import ingress_serve
+from ufo.sandbox.ingress_host import site_label
+from ufo.sandbox.ingress_serve import (
     CACHE_DIRECTIVE_HEADERS,
     CONTENT_SECURITY_POLICY,
     FOREIGN_ORIGIN,
@@ -45,7 +46,6 @@ from ufo.ingress_serve import (
     ingress_frame_ancestor,
     upstream_client,
 )
-from ufo.sandbox.ingress_host import site_label
 from ufo.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,

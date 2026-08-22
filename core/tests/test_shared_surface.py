@@ -16,7 +16,7 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import blob_store_for
 from ufo.config import BlobConfig
 from ufo.db import current_workspace, workspace_tx

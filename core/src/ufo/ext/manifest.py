@@ -19,14 +19,11 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.agent_setup import AgentSetup
-from ufo.agents import AgentSpec
-from ufo.audience import SHARED_AUDIENCE, Audience
+from ufo.access.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
+from ufo.access.credentials import CredentialSource, DeclaredSlot, HostChoice
+from ufo.access.grants import ConnectionRecorded, OAuthProvider, OAuthProviderResolver
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
-from ufo.candidates import WorkspaceCandidates
-from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
-from ufo.credentials import CredentialSource, DeclaredSlot, HostChoice
 from ufo.ext.context import CredentialAccess, ExtensionContext
 from ufo.ext.conversation_slots import (
     PORTAL_ICONS,
@@ -34,12 +31,14 @@ from ufo.ext.conversation_slots import (
     ConversationSlotProvider,
 )
 from ufo.ext.surface import SurfaceSpec
-from ufo.grants import ConnectionRecorded, OAuthProvider, OAuthProviderResolver
 from ufo.hub import Hub
 from ufo.indexing import EmbedClient, IndexBackend
+from ufo.kinds.agent_setup import AgentSetup
+from ufo.kinds.agents import AgentSpec
 from ufo.memory import MemorySearchProvider
 from ufo.models.spec import ModelSpec
 from ufo.objects import ObjectKind
+from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.sandbox.session import Carrier
 from ufo.sandbox.terminal import TerminalTransport
 from ufo.schema.records import Agent, Turn
@@ -47,6 +46,7 @@ from ufo.search import SearchProvider
 from ufo.skills.runtime import RuntimeSkill, SkillCard
 from ufo.sources.sync import PageChange, SourceBackend
 from ufo.tools.registry import ToolDef
+from ufo.turns.audience import SHARED_AUDIENCE, Audience
 
 
 @dataclass(frozen=True)

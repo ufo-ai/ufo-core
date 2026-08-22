@@ -49,7 +49,10 @@ from evals.harness.harness import (
 from evals.harness.judge import ModelJudge
 from evals.harness.registry import EvalTask
 from evals.harness.target import CapabilityTarget
-from ufo.ambient_reply import (
+from ufo.config import DEFAULT_AMBIENT_REPLY_MODEL
+from ufo.db import workspace_tx
+from ufo.schema import tables
+from ufo.turns.ambient_reply import (
     AMBIENT_HISTORY_MESSAGES,
     AMBIENT_REPLY_MAX_TOKENS,
     AMBIENT_REPLY_REASONING,
@@ -60,9 +63,6 @@ from ufo.ambient_reply import (
     AmbientMessage,
     AmbientReplyClassifier,
 )
-from ufo.config import DEFAULT_AMBIENT_REPLY_MODEL
-from ufo.db import workspace_tx
-from ufo.schema import tables
 
 BOT_USER_ID = "U0BG8632NDS"
 ALEX = "U0BBYEHCT8F"

@@ -26,9 +26,9 @@ from dbos import DBOS, EnqueueOptions
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.invoker import invoker_factory
 
+from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.connectors import ConnectorRegistry
 from ufo.db import init_db, workspace_tx
 from ufo.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.ext.loader import skill_registry
@@ -45,7 +45,7 @@ from ufo.models.interface import (
     ToolResultBlock,
 )
 from ufo.models.registry import ModelRegistry
-from ufo.runtime_instance import ExecutorRecovery, Heartbeat
+from ufo.runtime.runtime_instance import ExecutorRecovery, Heartbeat
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec

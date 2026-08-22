@@ -22,9 +22,9 @@ date: 2026-07-28
   (`core/src/ufo/surfaces/artifacts.py:25`): token-gated single-file download, TTL 1h. No
   multi-request browsing, no viewer identity, no visibility.
 - Creation context is already modeled: `conversation.audience`
-  (`core/src/ufo/audience.py`) is `member:<id>` (DM/CLI/web), `room:<surface>:<room>` (channel),
+  (`core/src/ufo/turns/audience.py`) is `member:<id>` (DM/CLI/web), `room:<surface>:<room>` (channel),
   `foreign:<surface>:<room>` (Slack Connect), or `shared`.
-- Viewer identity is already modeled: the HMAC bearer `{ws, email, exp}` (`core/src/ufo/bearer.py`),
+- Viewer identity is already modeled: the HMAC bearer `{ws, email, exp}` (`core/src/ufo/auth/bearer.py`),
   minted by the gateway after an emailed code, carried by the web surface's `ufo_session` cookie;
   `SurfaceContext.linked_member(email)` resolves it to a member.
 - The sandbox is reachable from the host: `Carrier.dial(handle, port)`
@@ -82,7 +82,7 @@ is its first minter.
 - `core/src/ufo/sandbox/ingress_token.py`: `mint_ingress_token(claims, kind)` /
   `verify_ingress_token(token, now, kind)` over `token_signing`, claims
   `{kind, ws, conversation_id, port, exp}`. The deploy secret is resolved inside core exactly as
-  `ufo.bearer` resolves it, so neither end takes it as a parameter and no caller holds it. The two
+  `ufo.auth.bearer` resolves it, so neither end takes it as a parameter and no caller holds it. The two
   hops of a visit are two kinds — `view` for the link the frame opens, `session` for the cookie the
   ingress binds — named at the mint and at the verify, so neither passes where the other is
   expected: a cookie replayed at the view path mints no successor, and a view token pasted into a
@@ -161,9 +161,9 @@ argument: one deploy has one answer for how long a link may sit in a frame.
 
 The permanent site link needs the workspace resolvable from the URL alone (a public viewer has no
 cookie; `SurfaceSpec.identify` must return the workspace before any DB binding).
-`core/src/ufo/surface_token.py` + `ufo.sdk.surface_token`: `mint_surface_token(surface, payload)` /
+`core/src/ufo/auth/surface_token.py` + `ufo.sdk.surface_token`: `mint_surface_token(surface, payload)` /
 `verify_surface_token(surface, token)`, HMAC over `UFO_TOKEN_SECRET` resolved inside core exactly
-as `ufo.bearer` does, namespaced by surface so one surface's token never replays at another. The
+as `ufo.auth.bearer` does, namespaced by surface so one surface's token never replays at another. The
 site link is `{public_base_url}/surface/sites/{site_token}` with payload `{ws, conversation, name}` —
 the site's own identity, so the link is derivable wherever a site is registered and a re-deploy
 reproduces it exactly. It is an address, not an authorization: it never expires, and every request
@@ -278,7 +278,7 @@ permanent link again succeeds.
   a speaking member and still exclude a scheduled fire, but nothing in the extension seam sees the
   root, so the rule is the turn's own speaker and the child hands a rename back.
 - **The idle reaper (being moved to the docker extension in a separate change).** Today
-  `SandboxReaper` (`core/src/ufo/jobs.py:280`) destroys idle sandboxes on *any* backend at 30
+  `SandboxReaper` (`core/src/ufo/runtime/jobs.py:280`) destroys idle sandboxes on *any* backend at 30
   minutes and clears `sandbox_handle` — which kills a hosted site. Until that change lands, a
   hosted site dies at first idle reap; after it, e2b pauses instead and the site's continuity rests
   on resume-on-dial, which is measured (below). Related latent bug for that thread:

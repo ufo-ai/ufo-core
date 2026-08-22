@@ -32,7 +32,7 @@ from httpx import AsyncClient, HTTPError
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from evals.harness.viewer import load_runs, write_viewer
-from ufo.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.config import Config, ConnectConfig, DatabaseConfig, O11yConfig
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.sandbox.session import (

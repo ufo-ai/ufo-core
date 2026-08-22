@@ -24,10 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from evals.harness.capability import UndeliveredRound, WorkspaceFile
 from evals.harness.timing import TurnStep
 from ufo.blob import BlobNotFound, BlobStore
-from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
-from ufo.governance import prompt_digest
+from ufo.kinds.governance import prompt_digest
 from ufo.loop.engine import DispatchResult, StreamResult
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
@@ -36,7 +35,8 @@ from ufo.schema import tables
 from ufo.schema.records import PENDING, ReasoningEffort, TurnContext, Usage
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.surfaces.admission import Admission, MemberAdmission
-from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
+from ufo.turns.cancellation import cancel_one_turn
+from ufo.turns.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
 from ufo.workspace import ws
 
 EVAL_SURFACE = "eval"

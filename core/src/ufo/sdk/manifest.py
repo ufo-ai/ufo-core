@@ -3,16 +3,10 @@
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py` (the gate bans
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
-from ufo.agent_setup import (
-    AgentSetup as AgentSetup,
-)
-from ufo.agents import (
-    AgentSpec as AgentSpec,
-)
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialSource as CredentialSource,
 )
-from ufo.credentials import (
+from ufo.access.credentials import (
     HostChoice as HostChoice,
 )
 from ufo.ext.conversation_slots import (
@@ -216,30 +210,36 @@ from ufo.ext.manifest import (
 from ufo.ext.manifest import (
     UserPromptSubmit as UserPromptSubmit,
 )
-from ufo.image_previews import (
+from ufo.kinds.agent_setup import (
+    AgentSetup as AgentSetup,
+)
+from ufo.kinds.agents import (
+    AgentSpec as AgentSpec,
+)
+from ufo.media.image_previews import (
     IMAGE_PREVIEW_MAX_BYTES as IMAGE_PREVIEW_MAX_BYTES,
 )
-from ufo.image_previews import (
+from ufo.media.image_previews import (
     ImagePreviewGrant as ImagePreviewGrant,
 )
-from ufo.image_previews import (
+from ufo.media.image_previews import (
     InvalidImagePreview as InvalidImagePreview,
 )
-from ufo.image_previews import (
+from ufo.media.image_previews import (
     raster_image_media_type as raster_image_media_type,
 )
-from ufo.image_previews import (
+from ufo.media.image_previews import (
     validated_image_preview as validated_image_preview,
 )
-from ufo.workspace_changes import (
+from ufo.turns.workspace_changes import (
     WORKSPACE_CHANGE_PATCH_MAX_CHARS as WORKSPACE_CHANGE_PATCH_MAX_CHARS,
 )
-from ufo.workspace_changes import (
+from ufo.turns.workspace_changes import (
     WORKSPACE_CHANGES_MAX as WORKSPACE_CHANGES_MAX,
 )
-from ufo.workspace_changes import (
+from ufo.turns.workspace_changes import (
     WorkspaceChange as WorkspaceChange,
 )
-from ufo.workspace_changes import (
+from ufo.turns.workspace_changes import (
     WorkspaceChanges as WorkspaceChanges,
 )

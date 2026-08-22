@@ -14,13 +14,10 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from ufo.agent_scope import AgentUnbound, agent
-from ufo.audience import conversation_audience
-from ufo.connectors import CliCredential, ForwardedResponse
-from ufo.credentials import CredentialStore
-from ufo.db import workspace_tx
-from ufo.egress_resolver import PerAgentRules
-from ufo.egress_rules import (
+from ufo.access.connectors import CliCredential, ForwardedResponse
+from ufo.access.credentials import CredentialStore
+from ufo.access.egress_resolver import PerAgentRules
+from ufo.access.egress_rules import (
     REQUEST_METER_DIMENSION,
     ConnectorTransferHosts,
     ForwardRule,
@@ -30,9 +27,7 @@ from ufo.egress_rules import (
     ScopeRule,
     derive_grant_rules,
 )
-from ufo.ext.loader import connection_hooks
-from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
-from ufo.grants import (
+from ufo.access.grants import (
     CONNECT_MEMO_SECONDS,
     ConnectFlow,
     ConnectHandoff,
@@ -50,6 +45,10 @@ from ufo.grants import (
     grant_summaries,
     install_connect_flow,
 )
+from ufo.agent_scope import AgentUnbound, agent
+from ufo.db import workspace_tx
+from ufo.ext.loader import connection_hooks
+from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
 from ufo.sandbox.session import RunToken
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
@@ -64,6 +63,7 @@ from ufo.surfaces.admission import Admission, ConnectResume
 from ufo.surfaces.cli import CONNECT_LOGO_CACHE, CONNECT_LOGO_FILE, callback_router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 GRANTED_HOST = "api.granted.test"

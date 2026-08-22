@@ -33,12 +33,12 @@ from ufo_ext_self_improvement.model import ModelAccessLeg
 from ufo_ext_self_improvement.proposer import PromptProposer
 from ufo_ext_self_improvement.replay import ReplayEvaluation, replay_head
 
-from ufo.accounting import TOKENS_DIMENSION, Pricing
+from ufo.billing.accounting import TOKENS_DIMENSION, Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ModelAccess, Trajectory, context_for
 from ufo.ext.loader import load_manifests
-from ufo.governance import prompt_digest
+from ufo.kinds.governance import prompt_digest
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
@@ -60,7 +60,7 @@ from ufo.models.interface import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.transcript import Conversation
+from ufo.turns.transcript import Conversation
 from ufo.workspace import ws
 
 SEED_PROMPT = "You are a helpful assistant."

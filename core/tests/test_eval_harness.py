@@ -175,8 +175,15 @@ from evals.response_register import (
     written_report_scorer,
 )
 from evals.ufo_app_bench import WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
-from ufo.accounting import Pricing
-from ufo.agents import AGENT_KIND
+from ufo.access.credentials import (
+    CredentialRequests,
+    CredentialSlotUnset,
+    CredentialStore,
+    install_credential_requests,
+    open_installation,
+    seal_installation,
+)
+from ufo.billing.accounting import Pricing
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import (
     DEFAULT_AMBIENT_REPLY_MODEL,
@@ -184,14 +191,6 @@ from ufo.config import (
     BlobConfig,
     Config,
     DatabaseConfig,
-)
-from ufo.credentials import (
-    CredentialRequests,
-    CredentialSlotUnset,
-    CredentialStore,
-    install_credential_requests,
-    open_installation,
-    seal_installation,
 )
 from ufo.db import workspace_tx
 from ufo.ext.context import (
@@ -202,7 +201,8 @@ from ufo.ext.context import (
     context_for,
 )
 from ufo.ext.loader import load_manifests, skill_registry
-from ufo.governance import Governance, prompt_digest
+from ufo.kinds.agents import AGENT_KIND
+from ufo.kinds.governance import Governance, prompt_digest
 from ufo.loop.engine import StreamResult
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
@@ -228,7 +228,7 @@ from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef, validate_object_name
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, TurnStatus, Usage
-from ufo.transcript import (
+from ufo.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,

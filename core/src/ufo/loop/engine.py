@@ -30,7 +30,10 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.accounting import (
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialRequests
+from ufo.access.grants import GrantStore
+from ufo.billing.accounting import (
     ALLOW,
     TOKENS_DIMENSION,
     BalanceGate,
@@ -40,14 +43,9 @@ from ufo.accounting import (
     read_turn_cost,
     record_turn_usage,
 )
-from ufo.activity import SKILL_LOAD_TOOL, tool_activity
-from ufo.audience import Audience, audience_member, audience_subjects
-from ufo.balance import balance_absent
+from ufo.billing.balance import balance_absent
 from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
-from ufo.connectors import ConnectorRegistry
-from ufo.contracts import Contract
-from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, SourceReader
 from ufo.ext.loader import HookChain
@@ -58,7 +56,6 @@ from ufo.ext.manifest import (
     Stop,
     UserPromptSubmit,
 )
-from ufo.grants import GrantStore
 from ufo.hub import (
     Absorbed,
     CostTick,
@@ -154,9 +151,12 @@ from ufo.tools.context import (
     UntrustedContentError,
 )
 from ufo.tools.registry import REQUESTED_BY, ToolRegistry
-from ufo.transcript import Conversation
-from ufo.untrusted import wall
-from ufo.workspace_changes import WorkspaceChangeRecorder, change_targets
+from ufo.turns.activity import SKILL_LOAD_TOOL, tool_activity
+from ufo.turns.audience import Audience, audience_member, audience_subjects
+from ufo.turns.contracts import Contract
+from ufo.turns.transcript import Conversation
+from ufo.turns.untrusted import wall
+from ufo.turns.workspace_changes import WorkspaceChangeRecorder, change_targets
 
 MAX_OUTPUT_TOKENS = 32_768
 FIND_MAX_TOKENS = 8_192

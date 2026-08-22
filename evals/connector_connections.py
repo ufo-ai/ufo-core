@@ -15,10 +15,10 @@ from evals.harness.capability import (
     DescribedGrader,
     ToolInvocation,
 )
+from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.grants import GrantStore
 from ufo.schema import tables
 from ufo.workspace import ws_current
 

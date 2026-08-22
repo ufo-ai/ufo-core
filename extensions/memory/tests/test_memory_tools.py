@@ -50,8 +50,8 @@ from ufo.sdk.audience import (
     room_audience,
 )
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
-from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 TOOL_NARRATION = "remembering what they told me"

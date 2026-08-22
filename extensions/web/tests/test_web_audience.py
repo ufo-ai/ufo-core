@@ -25,8 +25,8 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
+from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.surface import SurfaceContext

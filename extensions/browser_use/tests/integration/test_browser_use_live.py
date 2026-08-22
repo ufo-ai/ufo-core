@@ -19,8 +19,8 @@ import ufo_ext_browser_use as browser_use
 from cryptography.fernet import Fernet
 from ufo_ext_browser_use import BrowserTaskInput
 
+from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.sandbox.session import ExecResult

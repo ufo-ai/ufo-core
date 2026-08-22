@@ -13,11 +13,10 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.agents import AGENT_KIND
-from ufo.audience import audience_subjects, conversation_audience
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
+from ufo.kinds.agents import AGENT_KIND
 from ufo.models.interface import TextBlock
 from ufo.object_name import ObjectRef
 from ufo.object_scope import object_agent_id
@@ -36,7 +35,8 @@ from ufo.objects import (
 )
 from ufo.schema import tables
 from ufo.tools.context import ToolContext
-from ufo.transcript import TranscriptDecodeError, decode, transcript_key
+from ufo.turns.audience import audience_subjects, conversation_audience
+from ufo.turns.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.workspace import ws_current
 
 CONVERSATION_KIND = "conversation"

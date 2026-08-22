@@ -4,16 +4,16 @@ internals.
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py` (the gate bans
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
-from ufo.agents import (
+from ufo.kinds.agents import (
     AGENT_KIND as AGENT_KIND,
 )
-from ufo.agents import (
+from ufo.kinds.agents import (
     AgentSpec as AgentSpec,
 )
-from ufo.conversations import (
+from ufo.kinds.conversations import (
     CONVERSATION_KIND as CONVERSATION_KIND,
 )
-from ufo.credential_kind import (
+from ufo.kinds.credential_kind import (
     CREDENTIAL_KIND as CREDENTIAL_KIND,
 )
 from ufo.object_name import (

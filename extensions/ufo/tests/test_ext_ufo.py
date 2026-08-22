@@ -41,19 +41,18 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.artifact_url import verify_artifact_url
-from ufo.blob import FilesystemBlobStore
-from ufo.config import Config
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import (
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import (
     CredentialRequestState,
     CredentialStore,
     seal_credential_request,
 )
+from ufo.access.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
+from ufo.blob import FilesystemBlobStore
+from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
-from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import (
     Absorbed,
     CostTick,
@@ -67,6 +66,7 @@ from ufo.hub import (
 )
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
+from ufo.media.artifact_url import verify_artifact_url
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
@@ -1987,7 +1987,7 @@ async def test_an_op_error_reply_fails_the_op_with_the_terminals_words(
 
 def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> None:
     from ufo.models.interface import Message, TextBlock
-    from ufo.transcript import Conversation
+    from ufo.turns.transcript import Conversation
 
     marker = "00aabbcc"
     fenced = f"<member_message_{marker}>\nwhat is up\n</member_message_{marker}>"
@@ -2010,7 +2010,7 @@ def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> 
 
 def test_history_strips_the_prompt_envelope_from_member_lines() -> None:
     from ufo.models.interface import Message, TextBlock
-    from ufo.transcript import Conversation
+    from ufo.turns.transcript import Conversation
 
     composed = (
         "<context>\n"
@@ -2041,7 +2041,7 @@ def test_history_strips_the_prompt_envelope_from_member_lines() -> None:
 
 def test_history_states_a_turns_steps_over_the_reply_they_produced() -> None:
     from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
-    from ufo.transcript import Conversation
+    from ufo.turns.transcript import Conversation
 
     marker = "00aabbcc"
     fenced = f"<member_message_{marker}>\nwhen is the meeting\n</member_message_{marker}>"
@@ -2079,7 +2079,7 @@ def test_history_states_a_turns_steps_over_the_reply_they_produced() -> None:
 
 def test_history_says_no_words_for_a_turn_cut_after_its_narration() -> None:
     from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
-    from ufo.transcript import Conversation
+    from ufo.turns.transcript import Conversation
 
     conversation = Conversation(
         seq=1,
@@ -2109,7 +2109,7 @@ def test_history_says_no_words_for_a_turn_cut_after_its_narration() -> None:
 
 def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
     from ufo.models.interface import Message, TextBlock, ToolUseBlock
-    from ufo.transcript import Conversation
+    from ufo.turns.transcript import Conversation
 
     conversation = Conversation(
         seq=1,
@@ -2137,7 +2137,7 @@ def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
 
 def test_history_budget_keeps_the_newest_messages() -> None:
     from ufo.models.interface import Message
-    from ufo.transcript import Conversation
+    from ufo.turns.transcript import Conversation
 
     old = Message(role="user", content="a" * 30_000)
     new = Message(role="user", content="the recent one")
@@ -2151,7 +2151,7 @@ async def test_a_fresh_resume_replays_history_and_a_poll_does_not(
     runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     from ufo.models.interface import Message, TextBlock
-    from ufo.transcript import Conversation, encode, transcript_key
+    from ufo.turns.transcript import Conversation, encode, transcript_key
 
     client, workspace_id = ufo
     _config, _hub, blob, _sandboxes = runtime

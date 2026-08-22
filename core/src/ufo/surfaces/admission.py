@@ -50,7 +50,7 @@ import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
 from opentelemetry.trace import SpanKind
 
-from ufo.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
+from ufo.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
 from ufo.db import workspace_tx
 from ufo.ext.surface import Admitted, conversation_name
 from ufo.o11y import current_traceparent, log, span

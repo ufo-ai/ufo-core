@@ -11,8 +11,8 @@ from test_spend_caps import (
     _status,
 )
 
-from ufo.accounting import ALLOW, BalanceGate, record_image_usage, record_turn_usage
-from ufo.balance import (
+from ufo.billing.accounting import ALLOW, BalanceGate, record_image_usage, record_turn_usage
+from ufo.billing.balance import (
     TOPUP_GRACE_MICRO_USD,
     balance_refusal_message,
     credit,

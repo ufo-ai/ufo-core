@@ -3,7 +3,7 @@
 from typing import NewType
 from uuid import UUID
 
-from ufo.subjects import MEMBER_SUBJECT_PREFIX, SHARED_SUBJECT
+from ufo.turns.subjects import MEMBER_SUBJECT_PREFIX, SHARED_SUBJECT
 
 Audience = NewType("Audience", str)
 SHARED_AUDIENCE = Audience(SHARED_SUBJECT)

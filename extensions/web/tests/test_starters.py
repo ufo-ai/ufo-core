@@ -49,7 +49,7 @@ from ufo.models.interface import (
 from ufo.models.pricing import Pricing
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.subjects import member_subject
+from ufo.turns.subjects import member_subject
 from ufo.workspace import ws
 
 AUTO_MODEL = "claude-opus-5"

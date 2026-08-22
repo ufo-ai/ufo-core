@@ -10,20 +10,17 @@ from uuid import UUID
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
-from ufo.accounting import workspace_owns_the_key
-from ufo.activity import SKILL_LOAD_TOOL, SKILL_SEARCH_TOOL
-from ufo.agent_scope import agent
-from ufo.agent_setup import setup_skill
-from ufo.audience import Audience, parse_audience
-from ufo.blob import WorkspaceBlobStore
-from ufo.browser import CdpProvider
-from ufo.config import Config
-from ufo.connectors import CliCredential, ConnectorRegistry
-from ufo.contracts import Contract, output_contract
-from ufo.credentials import (
+from ufo.access.connectors import CliCredential, ConnectorRegistry
+from ufo.access.credentials import (
     CredentialRequests,
     CredentialStore,
 )
+from ufo.access.grants import GrantStore
+from ufo.agent_scope import agent
+from ufo.billing.accounting import workspace_owns_the_key
+from ufo.blob import WorkspaceBlobStore
+from ufo.browser import CdpProvider
+from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.context import TurnInvoker
 from ufo.ext.loader import (
@@ -35,9 +32,10 @@ from ufo.ext.loader import (
 )
 from ufo.ext.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.ext.surface import TurnTailer
-from ufo.grants import GrantStore
 from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
+from ufo.kinds.agent_setup import setup_skill
+from ufo.kinds.provisioning import AgentProvisioning
 from ufo.loop.compaction import Compaction
 from ufo.loop.engine import (
     ADOPTED_CLAIM,
@@ -72,7 +70,6 @@ from ufo.o11y import (
     turn_span,
 )
 from ufo.object_name import ObjectRef
-from ufo.provisioning import AgentProvisioning
 from ufo.sandbox.cache import cache_git_config
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.exec_env import (
@@ -121,6 +118,9 @@ from ufo.skills.selection import (
 )
 from ufo.tools.context import Spawn, UnknownSubagentProfile
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.turns.activity import SKILL_LOAD_TOOL, SKILL_SEARCH_TOOL
+from ufo.turns.audience import Audience, parse_audience
+from ufo.turns.contracts import Contract, output_contract
 from ufo.workspace import ws
 
 TURN_QUEUE_POLL_SECONDS = 0.1

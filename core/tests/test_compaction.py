@@ -44,7 +44,7 @@ from ufo.models.interface import (
 from ufo.models.spec import ReasoningSupport
 from ufo.schema.records import Agent, Usage
 from ufo.skills.runtime import LoadedSkills, RuntimeSkill, SkillRegistry
-from ufo.transcript import Anchor, CompactionSummary, FileRef
+from ufo.turns.transcript import Anchor, CompactionSummary, FileRef
 
 HEAD_FACT = "the deploy key is rotated every 30 days HEADSECRET"
 TAIL_FACT = "the customer prefers Tuesday demos TAILSECRET"

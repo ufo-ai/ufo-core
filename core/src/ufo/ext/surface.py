@@ -52,35 +52,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.accounting import (
-    ALLOW,
-    AgentSpendReport,
-    BalanceGate,
-    MemberSpendReport,
-    SpendEvaluator,
-    SpendReport,
-    SpendRollup,
-)
-from ufo.agent_scope import agent as bind_agent
-from ufo.agent_setup import AgentSetup, pending_setup
-from ufo.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
-from ufo.artifact_url import (
-    ARTIFACT_URL_TTL_SECONDS,
-    mint_artifact_url,
-    mint_image_preview_url,
-)
-from ufo.audience import (
-    Audience,
-    audience_member,
-    conversation_audience,
-    narrow_audience,
-    parse_audience,
-    readable_audiences,
-)
-from ufo.blob import BlobNotFound, FleetBlobStore, WorkspaceBlobStore
-from ufo.candidates import WorkspaceCandidates, owner_candidates
-from ufo.connectors import DIRECT_ACCOUNT, CatalogPage, ConnectorRegistry
-from ufo.credentials import (
+from ufo.access.connectors import DIRECT_ACCOUNT, CatalogPage, ConnectorRegistry
+from ufo.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequestInvalid,
     CredentialRequestState,
@@ -89,20 +62,38 @@ from ufo.credentials import (
     named_slots,
     open_credential_request,
 )
-from ufo.db import owner_tx, workspace_tx
-from ufo.governance import prompt_digest
-from ufo.grants import (
+from ufo.access.grants import (
     ConnectHandoff,
     ConnectRequestInvalid,
     ConnectUnavailable,
     account_object_name,
     installed_connect_flow,
 )
+from ufo.agent_scope import agent as bind_agent
+from ufo.billing.accounting import (
+    ALLOW,
+    AgentSpendReport,
+    BalanceGate,
+    MemberSpendReport,
+    SpendEvaluator,
+    SpendReport,
+    SpendRollup,
+)
+from ufo.blob import BlobNotFound, FleetBlobStore, WorkspaceBlobStore
+from ufo.db import owner_tx, workspace_tx
 from ufo.hub import LiveFrame, SkillLoad, ToolCall
-from ufo.image_previews import raster_image_media_type
+from ufo.kinds.agent_setup import AgentSetup, pending_setup
+from ufo.kinds.governance import prompt_digest
 from ufo.listings import page_of, page_query
+from ufo.media.artifact_url import (
+    ARTIFACT_URL_TTL_SECONDS,
+    mint_artifact_url,
+    mint_image_preview_url,
+)
+from ufo.media.image_previews import raster_image_media_type
 from ufo.models.interface import Message, ModelRequest
 from ufo.o11y import emit_metric, log, warn
+from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.sandbox.containment import contained_leaf
 from ufo.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES,
@@ -143,8 +134,17 @@ from ufo.schema.records import (
 from ufo.seats import SeatEntry, Seats, create_member, email_domain, workspace_domain
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 from ufo.sources.backend import ConnectorSourceConfig, binding_name
-from ufo.subjects import SHARED_SUBJECT
-from ufo.transcript import (
+from ufo.turns.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
+from ufo.turns.audience import (
+    Audience,
+    audience_member,
+    conversation_audience,
+    narrow_audience,
+    parse_audience,
+    readable_audiences,
+)
+from ufo.turns.subjects import SHARED_SUBJECT
+from ufo.turns.transcript import (
     CompactionRecord,
     Conversation,
     decode,
@@ -152,12 +152,12 @@ from ufo.transcript import (
     read_compaction_record,
     transcript_key,
 )
-from ufo.workspace import ws, ws_current
-from ufo.workspace_changes import (
+from ufo.turns.workspace_changes import (
     NOTHING_CHANGED,
     WorkspaceChanges,
     recorded_workspace_changes,
 )
+from ufo.workspace import ws, ws_current
 
 if TYPE_CHECKING:
     from ufo.ext.context import SourceReader

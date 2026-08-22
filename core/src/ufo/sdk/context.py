@@ -1,10 +1,10 @@
 """Public re-export: scoped context and identity available to extension handlers."""
 
+from ufo.access.credentials import (
+    CredentialSlotUnset as CredentialSlotUnset,
+)
 from ufo.agent_scope import (
     agent_current as agent_current,
-)
-from ufo.credentials import (
-    CredentialSlotUnset as CredentialSlotUnset,
 )
 from ufo.ext.context import (
     ConversationFacts as ConversationFacts,

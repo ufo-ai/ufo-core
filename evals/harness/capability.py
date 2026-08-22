@@ -40,7 +40,7 @@ from evals.harness.timing import CaseTiming
 from ufo.blob import WorkspaceBlobStore
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import ImageBlock, ImageSource, Message
-from ufo.transcript import CompactionSummary
+from ufo.turns.transcript import CompactionSummary
 
 PAGE_IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 PAGE_IMAGE_SUFFIXES = tuple(PAGE_IMAGE_MEDIA_TYPES)

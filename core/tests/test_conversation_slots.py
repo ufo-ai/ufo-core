@@ -17,8 +17,8 @@ from ufo.ext.conversation_slots import (
     TasksSlotPayload,
 )
 from ufo.ext.manifest import Manifest, conversation_slot_declarations
-from ufo.image_previews import raster_image_media_type
-from ufo.workspace_changes import WORKSPACE_CHANGES_MAX, WorkspaceChange, WorkspaceChanges
+from ufo.media.image_previews import raster_image_media_type
+from ufo.turns.workspace_changes import WORKSPACE_CHANGES_MAX, WorkspaceChange, WorkspaceChanges
 
 
 async def _summary(_ctx: ConversationSlotContext) -> int:

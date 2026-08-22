@@ -27,10 +27,9 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
 import ufo.ext.loader as loader
-from ufo.audience import SHARED_AUDIENCE, Audience, conversation_audience
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ScopedStore, context_for
 from ufo.ext.loader import BoundHook, HookChain, load_manifests, turn_hooks, turn_tools
@@ -73,7 +72,8 @@ from ufo.surfaces.hub_tail import HubTailer
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult
 from ufo.tools.registry import ToolRegistry
-from ufo.transcript import CompactionSummary
+from ufo.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
+from ufo.turns.transcript import CompactionSummary
 from ufo.workspace import ws
 
 REWRITTEN_COMMAND = "echo modified"

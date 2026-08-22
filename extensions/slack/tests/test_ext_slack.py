@@ -45,15 +45,20 @@ from ufo_testsupport.surfaces import (
 )
 
 import ufo.surfaces.hub_tail as hub_tail
-from ufo.ambient_reply import AmbientReplyClassifier
-from ufo.artifact_url import verify_artifact_url
-from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
     seal_credential_request,
 )
+from ufo.access.grants import (
+    ConnectFlow,
+    ConnectionRecorded,
+    GrantStore,
+    OAuthAccount,
+    install_connect_flow,
+)
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import current_workspace, workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_hooks, turn_tools
@@ -67,13 +72,6 @@ from ufo.ext.surface import (
     fence_member_message,
     member_message_text,
     mint_marker,
-)
-from ufo.grants import (
-    ConnectFlow,
-    ConnectionRecorded,
-    GrantStore,
-    OAuthAccount,
-    install_connect_flow,
 )
 from ufo.hub import (
     Absorbed,
@@ -89,6 +87,7 @@ from ufo.hub import (
     ToolCall,
 )
 from ufo.loop.queue import _load_turn
+from ufo.media.artifact_url import verify_artifact_url
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import Message, ModelEvent, ModelRequest, TextBlock, Usage
 from ufo.models.registry import ModelRegistry
@@ -120,7 +119,8 @@ from ufo.sdk.callback_page import CONNECT_LOGO_PATH
 from ufo.sdk.jobs import untitled_conversation_workspaces
 from ufo.seats import UNRESOLVED_SPEAKER_MESSAGE
 from ufo.serve import _mount_shared_surfaces
-from ufo.transcript import Conversation, encode, transcript_key
+from ufo.turns.ambient_reply import AmbientReplyClassifier
+from ufo.turns.transcript import Conversation, encode, transcript_key
 from ufo.workspace import init_workspace_credentials, ws
 
 TEAM_ID = "T0000001"

@@ -19,7 +19,7 @@ superseded_by: 0017
 > export. The same machinery carries member edits, pack installs, system upgrades, agent
 > self-improvement, and (via a new `message_agent` builtin) persistent agents addressing each
 > other. Extends `spec.md` §Workspace model, §Extension system, §Packs; supersedes the
-> prompt-only governance in `core/src/ufo/governance.py`.
+> prompt-only governance in `core/src/ufo/kinds/governance.py`.
 
 ## Evidence (why this shape)
 
@@ -36,8 +36,8 @@ Four inputs, audited 2026-07-13:
 
 | Concern | Today | Gap |
 |---|---|---|
-| Agent definition | `agent(id, workspace_id, name, prompt, model)` — `core/src/ufo/schema/tables.py:57-68`; created only by `ufoctl init` (`core/src/ufo/onboarding.py:150-160`); runtime record `Agent{prompt, model}` (`core/src/ufo/schema/records.py:138`) | Not the spec's promised bundle; no CRUD after init; one agent per workspace in practice |
-| Governance | `propose_change`/`approve_proposal` CAS on `prompt_digest` (`core/src/ufo/governance.py:28-115`); `proposal` table (`tables.py:219-234`); `ctx.propose_change` (`core/src/ufo/ext/context.py:441-447`) | Prompt-only (`AgentChange`, `records.py:206`); approval is a bespoke HTTP endpoint (`core/src/ufo/surfaces/cli.py:146-164`) — a member action outside chat |
+| Agent definition | `agent(id, workspace_id, name, prompt, model)` — `core/src/ufo/schema/tables.py:57-68`; created only by `ufoctl init` (`core/src/ufo/onboard/onboarding.py:150-160`); runtime record `Agent{prompt, model}` (`core/src/ufo/schema/records.py:138`) | Not the spec's promised bundle; no CRUD after init; one agent per workspace in practice |
+| Governance | `propose_change`/`approve_proposal` CAS on `prompt_digest` (`core/src/ufo/kinds/governance.py:28-115`); `proposal` table (`tables.py:219-234`); `ctx.propose_change` (`core/src/ufo/ext/context.py:441-447`) | Prompt-only (`AgentChange`, `records.py:206`); approval is a bespoke HTTP endpoint (`core/src/ufo/surfaces/cli.py:146-164`) — a member action outside chat |
 | History / audit | `proposal` rows, `grant` audit fields (`tables.py:200-217`), `updated_at` | No revision history of anything; no answer to "what changed, who approved, what did they see" |
 | Behavior config | `ufo.toml` frozen at boot (`core/src/ufo/config.py`); `ext_store` per-extension KV (`tables.py:275`) | No typed, explorable, governed runtime config; Slack behavior has no knobs |
 | Subagents | Static `SubagentRegistry` from manifests (`core/src/ufo/loop/subagents.py:58`; profile shape `core/src/ufo/ext/manifest.py:447-464`); child reuses parent `agent_id` (`subagents.py:307`); named profiles only (`builtins.py:180-191`) | No durable, member-authored agent identities; no runtime authoring path |

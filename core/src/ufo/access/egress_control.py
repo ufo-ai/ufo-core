@@ -22,16 +22,10 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from ufo.accounting import (
-    record_egress_request,
-    record_probe_egress_request,
-    record_sandbox_tokens,
-)
-from ufo.connectors import CliCredential
-from ufo.credentials import credential_host, slot_is_set, slot_secret
-from ufo.db import workspace_tx
-from ufo.egress_resolver import PerAgentRules
-from ufo.egress_rules import (
+from ufo.access.connectors import CliCredential
+from ufo.access.credentials import credential_host, slot_is_set, slot_secret
+from ufo.access.egress_resolver import PerAgentRules
+from ufo.access.egress_rules import (
     ForwardRule,
     InjectionRule,
     InternetRule,
@@ -40,6 +34,12 @@ from ufo.egress_rules import (
     ScopeRule,
     ServiceRule,
 )
+from ufo.billing.accounting import (
+    record_egress_request,
+    record_probe_egress_request,
+    record_sandbox_tokens,
+)
+from ufo.db import workspace_tx
 from ufo.models.pricing import Pricing
 from ufo.o11y import emit_metric, warn
 from ufo.sandbox.session import ProbeToken, ProbeTokenCodec, RunToken, RunTokenCodec

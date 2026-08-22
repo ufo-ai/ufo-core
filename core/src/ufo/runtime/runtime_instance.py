@@ -21,11 +21,11 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient
 from dbos import error as dbos_error
 
-from ufo.cancellation import cancel_one_turn
 from ufo.db import owner_tx
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, RUNNING
+from ufo.turns.cancellation import cancel_one_turn
 from ufo.workspace import ws
 
 HEARTBEAT_INTERVAL_SECONDS = 2

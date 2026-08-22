@@ -14,7 +14,7 @@ import httpx
 import pytest
 from ufo_ext_sources.outlook import CONVERSATIONS, MESSAGES, OutlookConnector
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sdk.sources import MAIL_BACKFILL_WINDOW_DAYS, ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.sync import SourceAuth, StreamSkipped
 

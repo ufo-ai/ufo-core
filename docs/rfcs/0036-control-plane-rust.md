@@ -28,9 +28,9 @@ Two things make it more than an HTTP server.
 
 | Site | Imports |
 |---|---|
-| `gateway_shared.py:10-17` | `ufo.balance.credit`/`set_reserve`, `ufo.db.workspace_tx`, `ufo.onboarding` defaults, `ufo.schema.tables`, `ufo.schema.records.DEFAULT_AGENT_NAME`, `ufo.seats.create_member`/`email_domain`, `ufo.untrusted.wall`, `ufo.workspace.ws` |
+| `gateway_shared.py:10-17` | `ufo.billing.balance.credit`/`set_reserve`, `ufo.db.workspace_tx`, `ufo.onboard.onboarding` defaults, `ufo.schema.tables`, `ufo.schema.records.DEFAULT_AGENT_NAME`, `ufo.seats.create_member`/`email_domain`, `ufo.turns.untrusted.wall`, `ufo.workspace.ws` |
 | `gateway.py:24-26` | `ufo.db.init_db`/`dispose_db`/`workspace_tx`, `ufo.ext.surface.OPERATOR_EMAIL_DOMAIN`, `ufo.sdk.http.set_session_cookie` |
-| `gateway_token.py:7` | `ufo.bearer.mint_token` |
+| `gateway_token.py:7` | `ufo.auth.bearer.mint_token` |
 
 This is why `control/Dockerfile` is `FROM ${UFO_IMAGE}` — the control image exists only as a layer on
 the full Python runtime distribution.
@@ -57,7 +57,7 @@ Core already runs both halves this RFC needs.
 
 | Existing path | Cited |
 |---|---|
-| An internal RPC router behind a bearer control token | `core/src/ufo/egress_control.py:170`, with a second router on its own token at line 180 |
+| An internal RPC router behind a bearer control token | `core/src/ufo/access/egress_control.py:170`, with a second router on its own token at line 180 |
 | The RLS-bypassing cross-workspace read | `owner_tx` (`core/src/ufo/db.py:357`), opened from `UFO_OWNER_DSN` by `serve` (`serve.py:412`, `compose.yaml:116`) and named at `db.py:11` as the one exception — "the RLS-bypassing read the cross-workspace background sweeps" use |
 
 ## Proposal
@@ -133,8 +133,8 @@ selected candidate's id for a join. The `uuid` crate's `Uuid::new_v5` is the sam
 
 `_ensure`, `agent_prompt`, `_inert`, `SIGNUP_PROMPT`, `INTAKE_SOURCE`, `INTAKE_FIELDS`,
 `SIGNUP_GRANT_MICRO_USD`, `SIGNUP_RESERVE_MICRO_USD`, and `EnsuredWorkspace` move from
-`gateway_shared.py` to `core/src/ufo/onboarding.py`, beside the `DEFAULT_AGENT_*` values they
-already use, keeping their names. `core/src/ufo/onboard_control.py` is the router over them, shaped
+`gateway_shared.py` to `core/src/ufo/onboard/onboarding.py`, beside the `DEFAULT_AGENT_*` values they
+already use, keeping their names. `core/src/ufo/onboard/onboard_control.py` is the router over them, shaped
 like `egress_control.py`.
 
 **The blast radius.** Control can no longer read a core table at all. The cross-workspace membership
@@ -178,7 +178,7 @@ Neither needs a vendor SDK, because neither meaningfully uses one today.
 
 ### The bearer codec
 
-`core/src/ufo/bearer.py` is a 115-line self-contained HMAC codec whose wire format its own docstring
+`core/src/ufo/auth/bearer.py` is a 115-line self-contained HMAC codec whose wire format its own docstring
 spells out. Rust mints it; core keeps the verify half every surface uses. Golden vectors —
 `(secret, workspace_id, email, exp) → token` — are asserted from both sides, the shape
 `egress/tests/contract.rs` and `rule_contract.json` already established.
@@ -263,6 +263,6 @@ the connection was unverified before and is verified now.
 
 | Item | Why |
 |---|---|
-| The seat write landed in a new `core/src/ufo/onboard_control.py`, not `onboarding.py` | `onboarding.py` is the `ufoctl init` first-run flow. The router and its four workflows read top to bottom in one file, beside their only caller. |
+| The seat write landed in a new `core/src/ufo/onboard/onboard_control.py`, not `onboarding.py` | `onboarding.py` is the `ufoctl init` first-run flow. The router and its four workflows read top to bottom in one file, beside their only caller. |
 | `ufo-control serve-dsn` is a sixth verb | `dev/entrypoint.sh` derived the serve DSN by importing `ufo_control.rls`. The derivation keeps one home rather than being respelled in shell. |
 | The gateway pod's pool is lazy | `deadpool` opens no connection until one is taken, where `asyncpg.create_pool(min_size=1)` opened one per replica at boot. The boot-race the Python pool-budget test guarded cannot occur; the steady-state ceiling is unchanged at four. |

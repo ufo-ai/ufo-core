@@ -29,7 +29,6 @@ from ufo_ext_scheduled_tasks.tools import (
 )
 
 from ufo.agent_scope import agent
-from ufo.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import turn_tools
@@ -39,6 +38,7 @@ from ufo.schema.records import Agent, TerminalFrame, Turn
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
+from ufo.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.workspace import ws
 
 TOOL_NARRATION = "waiting on the approval"

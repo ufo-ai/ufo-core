@@ -96,18 +96,25 @@ from ufo_testsupport.surfaces import (
 )
 
 import ufo.db
-from ufo.accounting import record_egress_request, record_turn_usage
-from ufo.agent_scope import agent as bind_agent
-from ufo.bearer import mint_token
-from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
-from ufo.config import Config
-from ufo.connectors import CatalogEntry, CatalogPage, ConnectorEntry, ConnectorRegistry
-from ufo.credentials import (
+from ufo.access.connectors import CatalogEntry, CatalogPage, ConnectorEntry, ConnectorRegistry
+from ufo.access.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
     seal_credential_request,
 )
+from ufo.access.grants import (
+    ConnectFlow,
+    GrantStore,
+    OAuthAccount,
+    account_object_name,
+    install_connect_flow,
+)
+from ufo.agent_scope import agent as bind_agent
+from ufo.auth.bearer import mint_token
+from ufo.billing.accounting import record_egress_request, record_turn_usage
+from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
+from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.context import ScopedStore, context_for
@@ -119,13 +126,6 @@ from ufo.ext.surface import (
     fence_member_message,
     member_message_text,
     mint_marker,
-)
-from ufo.grants import (
-    ConnectFlow,
-    GrantStore,
-    OAuthAccount,
-    account_object_name,
-    install_connect_flow,
 )
 from ufo.hub import (
     Absorbed,
@@ -140,12 +140,12 @@ from ufo.hub import (
     Terminal,
     ToolCall,
 )
-from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES
+from ufo.kinds.members import ADD_MEMBER_GATE
 from ufo.loop import queue as loop_queue
 from ufo.loop.engine import FINISH_PROMPT
 from ufo.loop.subagents import SubagentRegistry
 from ufo.loop.transcript import Transcript
-from ufo.members import ADD_MEMBER_GATE
+from ufo.media.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import (
     Message,
@@ -181,15 +181,15 @@ from ufo.sdk.jobs import unseeded_agent_workspaces, untitled_conversation_worksp
 from ufo.sdk.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
-from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.tools.context import ToolContext
-from ufo.transcript import CompactionSummary, CompactionWindow, Conversation, compaction_key
-from ufo.untrusted import wall
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.turns.transcript import CompactionSummary, CompactionWindow, Conversation, compaction_key
+from ufo.turns.untrusted import wall
+from ufo.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
 from ufo.workspace import ws
-from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges
 
 SECRET = "artifact-signing-secret"
 

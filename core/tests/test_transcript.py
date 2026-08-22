@@ -15,7 +15,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.transcript import (
+from ufo.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,

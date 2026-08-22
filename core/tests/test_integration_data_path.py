@@ -22,8 +22,7 @@ from ufo_ext_memory.store import (
     recall_subjects,
 )
 
-from ufo.accounting import SpendEvaluator, record_sandbox_tokens
-from ufo.audience import conversation_audience
+from ufo.billing.accounting import SpendEvaluator, record_sandbox_tokens
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
@@ -38,7 +37,8 @@ from ufo.sources.sync import (
     SyncDriver,
     register_sources,
 )
-from ufo.subjects import SHARED_SUBJECT, member_subject
+from ufo.turns.audience import conversation_audience
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 pytestmark = pytest.mark.integration

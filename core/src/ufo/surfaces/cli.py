@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
-from ufo.grants import (
+from ufo.access.grants import (
     ConnectStateInvalid,
     ConnectUnavailable,
     UnknownProvider,

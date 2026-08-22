@@ -29,12 +29,11 @@ from ufo_ext_sources.registry import SOURCE_KIND
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
 from ufo.agent_scope import agent
-from ufo.agents import AGENT_KIND, AGENT_OBJECT
-from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
-from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
+from ufo.kinds.agents import AGENT_KIND, AGENT_OBJECT
+from ufo.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.models.interface import Message, ToolUseBlock
 from ufo.object_name import ObjectRef
 from ufo.objects import (
@@ -50,9 +49,10 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.sources import binding_name
 from ufo.sources.sync import PageChange
-from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
+from ufo.turns.audience import conversation_audience
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 MEMORY_TOOLS = {tool.name: tool for tool in memory_manifest().tools}

@@ -1,8 +1,8 @@
 """What a shipped agent still needs from a member, and the skill that asks for it.
 
-It lives apart from `ufo.agents` because three subsystems read it — the turn loop, the portal's
-agent projection, and the Manifest declaration — and `ufo.agents` reaches the extension context,
-which the portal surface is itself part of.
+It lives apart from `ufo.kinds.agents` because three subsystems read it — the turn loop, the
+portal's agent projection, and the Manifest declaration — and `ufo.kinds.agents` reaches the
+extension context, which the portal surface is itself part of.
 """
 
 from uuid import UUID

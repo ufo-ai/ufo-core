@@ -67,11 +67,9 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.ambient_reply import AmbientReplyClassifier
-from ufo.audience import conversation_audience
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.surface import (
@@ -99,6 +97,8 @@ from ufo.schema.records import (
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.tools.context import ToolContext
+from ufo.turns.ambient_reply import AmbientReplyClassifier
+from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 CLAIM_CODE = "ABC234"

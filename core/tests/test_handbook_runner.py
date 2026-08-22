@@ -52,8 +52,8 @@ from evals.handbook.runner import (
     load_handbook,
 )
 from evals.harness.capability import CapabilityOutput
+from ufo.access.credentials import CredentialStore
 from ufo.blob import BlobStore
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.manifest import PAGE_CHANGE_CURSOR_KEY

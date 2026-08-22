@@ -21,9 +21,9 @@ from ufo_ext_gbrain.git import GIT_BACKEND, GITHUB_TOKEN_SLOT
 from ufo_ext_gbrain.manifest import NAME, manifest
 from ufo_ext_gbrain.objects import GBRAIN_KIND, gbrain_source_name
 
+from ufo.access.credentials import CredentialStore
 from ufo.agent_scope import agent
 from ufo.config import SourceConfig, SourceEntry
-from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
@@ -34,8 +34,8 @@ from ufo.sdk.audience import conversation_audience
 from ufo.sdk.objects import VerbNotSupported
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import register_sources
-from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.registry import ToolDef
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 TOOL_NARRATION = "setting up the gbrain source"

@@ -13,7 +13,7 @@ import httpx
 import pytest
 from ufo_ext_sources.googledocs import GoogleDocsConnector
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.sync import SourceAuth, StreamSkipped
 

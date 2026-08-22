@@ -32,7 +32,7 @@ from ufo_ext_sources.googlesheets import (
     _quoted_sheet_range,
 )
 
-from ufo.connectors import Credential
+from ufo.access.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamPage
 from ufo.sources import backend as connector_backend
 from ufo.sources.backend import BACKFILL_KEY

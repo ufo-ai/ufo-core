@@ -19,7 +19,7 @@ from httpx import AsyncClient, HTTPError
 from pydantic import BaseModel, ConfigDict, Field
 
 from evals.handbook.corpus import HandbookTask, UpstreamPin
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
 
 BASE_IMAGE = "handbook_base"
 CONTAINER_PREFIX = "ufo-handbook-"

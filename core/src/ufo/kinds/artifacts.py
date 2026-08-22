@@ -26,12 +26,11 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.artifact_url import ARTIFACT_URL_TTL_SECONDS, mint_artifact_url
-from ufo.audience import audience_subjects, conversation_audience
 from ufo.blob import BlobNotFound
-from ufo.conversations import CONVERSATION_KIND
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
+from ufo.kinds.conversations import CONVERSATION_KIND
+from ufo.media.artifact_url import ARTIFACT_URL_TTL_SECONDS, mint_artifact_url
 from ufo.object_name import ObjectRef
 from ufo.object_scope import object_agent_id
 from ufo.objects import (
@@ -49,6 +48,7 @@ from ufo.objects import (
 )
 from ufo.schema import tables
 from ufo.tools.context import ToolContext
+from ufo.turns.audience import audience_subjects, conversation_audience
 from ufo.workspace import ws_current
 
 ARTIFACT_KIND = "artifact"

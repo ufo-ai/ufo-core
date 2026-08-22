@@ -22,8 +22,8 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from ufo.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.token_signing import SignedTokenError, sign_token, verify_token
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.auth.token_signing import SignedTokenError, sign_token, verify_token
 
 IngressTokenKind = Literal["sandbox-ingress-view", "sandbox-ingress-session"]
 INGRESS_VIEW_KIND: IngressTokenKind = "sandbox-ingress-view"

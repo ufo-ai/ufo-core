@@ -37,15 +37,15 @@ from ufo_ext_sources.tools import (
 )
 from ufo_ext_sources.triggers import SourceTrigger, SourceTriggerStore
 
+from ufo.access.credentials import CredentialStore, credential_object_name, named_slots
+from ufo.access.grants import GrantStore, account_object_name
 from ufo.agent_scope import agent
-from ufo.credential_kind import CREDENTIAL_KIND
-from ufo.credentials import CredentialStore, credential_object_name, named_slots
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue, context_for
 from ufo.ext.loader import turn_tools
 from ufo.ext.manifest import declared_slots
 from ufo.ext.surface import _binding_fields
-from ufo.grants import GrantStore, account_object_name
+from ufo.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.objects import UnknownObject
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
@@ -60,9 +60,9 @@ from ufo.sdk.objects import AdminRequired, ObjectListQuery, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import SyncDriver
-from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.registry import ToolDef
+from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 TOOL_NARRATION = "setting up the connection"

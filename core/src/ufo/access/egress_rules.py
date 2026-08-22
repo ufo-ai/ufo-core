@@ -10,15 +10,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
-from ufo.blob import FilesystemBlobStore, S3BlobStore
-from ufo.connectors import CliCredential, RequestForwarder
-from ufo.credentials import (
+from ufo.access.connectors import CliCredential, RequestForwarder
+from ufo.access.credentials import (
     CredentialStore,
     credential_host,
     slot_secret,
 )
+from ufo.access.grants import Grant, grant_sentinel
+from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.ext.manifest import CredentialSlot, Manifest, open_connector_namespace
-from ufo.grants import Grant, grant_sentinel
 from ufo.o11y import warn
 from ufo.sandbox.session import SENTINEL_MODEL_KEY
 

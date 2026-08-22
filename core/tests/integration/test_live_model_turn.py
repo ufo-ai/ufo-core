@@ -20,9 +20,9 @@ import pytest
 import sqlalchemy as sa
 from ufo_testsupport.invoker import invoker_factory
 
+from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
-from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry

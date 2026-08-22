@@ -4,9 +4,9 @@ any workspace is bound.
 A surface route reached by link alone has no cookie to scope by — the shared fleet's
 `SurfaceSpec.identify` must name the workspace from the URL itself, before a single row is read.
 This is that carrier: an HMAC over the deploy's `UFO_TOKEN_SECRET`, resolved here exactly as
-`ufo.bearer` resolves it, so a surface hands over claims and gets claims back without ever holding
-the key. The signed body carries the minting surface's own name and `verify_surface_token` demands
-it match, so one surface's token yields nothing at another's route.
+`ufo.auth.bearer` resolves it, so a surface hands over claims and gets claims back without ever
+holding the key. The signed body carries the minting surface's own name and `verify_surface_token`
+demands it match, so one surface's token yields nothing at another's route.
 
 It is an **address, not an authorization**: nothing expires, and every request it opens still passes
 its route's own gate. A claim value is always a string — the payload crosses a URL."""
@@ -15,8 +15,8 @@ import json
 import os
 from collections.abc import Mapping
 
-from ufo.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.token_signing import SignedTokenError, sign_token, verify_token
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.auth.token_signing import SignedTokenError, sign_token, verify_token
 
 SURFACE_CLAIM = "surface"
 

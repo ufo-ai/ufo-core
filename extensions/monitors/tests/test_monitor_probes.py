@@ -25,7 +25,6 @@ from ufo_ext_monitors.monitors import Monitor, MonitorStore, due_monitor_workspa
 from ufo_ext_monitors.monitors import monitor as monitor_table
 
 from ufo.agent_scope import agent
-from ufo.audience import SHARED_AUDIENCE
 from ufo.db import workspace_tx
 from ufo.ext.context import ConversationProbes, ExtensionContext, context_for
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -36,7 +35,8 @@ from ufo.sandbox.terminal import CLIENT_BACKEND
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.untrusted import UNTRUSTED_OPEN
+from ufo.turns.audience import SHARED_AUDIENCE
+from ufo.turns.untrusted import UNTRUSTED_OPEN
 from ufo.workspace import ws
 
 TOOL_NARRATION = "watching the run"

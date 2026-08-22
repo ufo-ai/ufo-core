@@ -28,7 +28,7 @@ from fastmcp.server.dependencies import get_http_headers
 from mcp.types import TextContent
 from mcp.types import Tool as McpTool
 
-from ufo.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore
 from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import turn_tools
 from ufo.loop.engine import MAX_TOOL_RESULT_CHARS

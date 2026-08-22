@@ -10,16 +10,16 @@ from ufo_ext_coding.github_app import GIT_SLOT
 from evals.driver import EVAL_SURFACE
 from evals.harness.capability import CapabilityCase, CapabilitySeed
 from evals.harness.scorers import attempted_tools_scorer, combine, skill_scorer
-from ufo.agent_scope import agent
-from ufo.blob import BlobStore
-from ufo.credentials import (
+from ufo.access.credentials import (
     CredentialRequestInvalid,
     CredentialSlotUnset,
     installed_credential_requests,
     open_installation,
 )
+from ufo.access.grants import GrantStore
+from ufo.agent_scope import agent
+from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.grants import GrantStore
 from ufo.schema import tables
 from ufo.sdk.context import CredentialAccess
 from ufo.workspace import ws_current

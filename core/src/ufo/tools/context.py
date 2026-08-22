@@ -38,17 +38,15 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
-from ufo.accounting import record_image_usage, record_video_usage
-from ufo.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
-from ufo.audience import SHARED_AUDIENCE, Audience, audience_subjects, conversation_audience
+from ufo.access.connectors import ConnectorRegistry
+from ufo.access.credentials import CredentialRequests
+from ufo.access.grants import ConnectUnavailable, Grant, GrantStore
+from ufo.billing.accounting import record_image_usage, record_video_usage
 from ufo.blob import S3BlobStore, WorkspaceBlobStore
 from ufo.browser import CdpProvider, FindCompleter
-from ufo.connectors import ConnectorRegistry
-from ufo.contracts import ValidatedJson
-from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, SourceReader
-from ufo.grants import ConnectUnavailable, Grant, GrantStore
+from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.spec import ModelSpec
 from ufo.o11y import log
@@ -58,7 +56,9 @@ from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
 from ufo.search import SearchProvider
 from ufo.seats import member_is_admin
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
-from ufo.subjects import member_subject
+from ufo.turns.audience import SHARED_AUDIENCE, Audience, audience_subjects, conversation_audience
+from ufo.turns.contracts import ValidatedJson
+from ufo.turns.subjects import member_subject
 
 SHARED_BYTES_LIMIT = 256 * 1024
 PREVIEW_SIZE_TIMEOUT_SECONDS = 30

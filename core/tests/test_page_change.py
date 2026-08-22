@@ -40,7 +40,13 @@ from ufo.ext.manifest import (
     Manifest,
     PageChangeBatch,
 )
-from ufo.jobs import (
+from ufo.loop.delivery import DeliverySweep
+from ufo.loop.subagents import SubagentRegistry
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.models.interface import Message, ModelEvent, ModelRequest, TextDelta
+from ufo.models.registry import ModelRegistry
+from ufo.o11y import BACKGROUND_PROFILE
+from ufo.runtime.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_BATCH,
     PAGE_CHANGE_JOB,
@@ -49,12 +55,6 @@ from ufo.jobs import (
     bindings_from,
     core_jobs,
 )
-from ufo.loop.delivery import DeliverySweep
-from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import Message, ModelEvent, ModelRequest, TextDelta
-from ufo.models.registry import ModelRegistry
-from ufo.o11y import BACKGROUND_PROFILE
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import (
@@ -65,7 +65,7 @@ from ufo.sources.sync import (
     SyncDriver,
     page_cursor,
 )
-from ufo.subjects import SHARED_SUBJECT
+from ufo.turns.subjects import SHARED_SUBJECT
 from ufo.workspace import ws
 
 BACKGROUND_MODEL = "gpt-5.6-luna"

@@ -7,8 +7,8 @@ until an agent pinned to that backend actually runs. See RFC 0018."""
 
 from dataclasses import dataclass
 
+from ufo.access.credentials import CredentialSlotUnset, CredentialValueInvalid
 from ufo.config import Config
-from ufo.credentials import CredentialSlotUnset, CredentialValueInvalid
 from ufo.ext.manifest import Manifest
 from ufo.models.catalog import core_model_specs
 from ufo.models.interface import AUTO_MODEL, PROVIDER_ANTHROPIC, PROVIDER_OPENAI, ModelClient

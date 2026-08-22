@@ -31,14 +31,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.dialects.postgresql import insert
 
-from ufo.balance import credit, set_reserve
+from ufo.billing.balance import credit, set_reserve
 from ufo.db import owner_tx, workspace_tx
 from ufo.o11y import warn
-from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import create_member, email_domain
-from ufo.untrusted import wall
+from ufo.turns.untrusted import wall
 from ufo.workspace import ws
 
 ONBOARD_CONTROL_TOKEN_ENV = "UFO_ONBOARD_CONTROL_TOKEN"
