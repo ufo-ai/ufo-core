@@ -33,7 +33,7 @@ from ufo_ext_scheduled_tasks.schedules import ScheduleStore
 
 from evals.harness.arc import ArcCase, ArcObservation, ArcPerturbation, ArcVerdict
 from evals.harness.capability import WorkspaceFile
-from evals.objective_record import recorded_objective
+from evals.suites.objective_record import recorded_objective
 from ufo.ext.context import context_for
 
 LIMITS_FILE = "svc/limits.py"

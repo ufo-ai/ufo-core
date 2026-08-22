@@ -37,7 +37,7 @@ from evals.harness.scorers import (
     shared_artifact_scorer,
     site_archive_scorer,
 )
-from evals.ufo_app_bench import (
+from evals.suites.ufo_app_bench import (
     AUDIT_CONTENT,
     DESKTOP_HEIGHT,
     DESKTOP_WIDTH,
@@ -57,8 +57,8 @@ from evals.ufo_app_bench import (
     _interaction_screen,
     _measured_screen,
 )
-from evals.ufo_app_bench import CASES as BENCH_CASES
-from evals.ufo_app_bench import (
+from evals.suites.ufo_app_bench import CASES as BENCH_CASES
+from evals.suites.ufo_app_bench import (
     WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS,
 )
 from ufo.skills.runtime import CORE_SKILLS_BY_NAME

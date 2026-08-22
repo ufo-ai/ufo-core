@@ -19,7 +19,7 @@ import sqlalchemy as sa
 
 from evals.harness.harness import EvalReport
 from evals.harness.judge import ModelJudge
-from evals.slack_silence import (
+from evals.suites.slack_silence import (
     ALEX,
     ARXIV_SENTENCE,
     BOT_USER_ID,

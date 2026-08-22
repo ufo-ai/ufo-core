@@ -27,7 +27,7 @@ from ufo_ext_slack.surface import (
 from ufo_ext_slack.tools import SlackConnectInput, slack_connect_handler
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation, grading_statement
-from evals.onboarding_help import (
+from evals.suites.onboarding_help import (
     CASES,
     CORPUS_SKILL,
     ONBOARDING_HELP_PACKS,

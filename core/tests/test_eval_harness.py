@@ -34,7 +34,6 @@ from httpx import AsyncClient
 import evals.harness.capability as harness_capability
 import evals.harness.mounts as mounts
 import evals.harness.target as harness_target
-from evals import coding_subagent, github_connections, low_stakes_default
 from evals.__main__ import (
     EVAL_SHARE_BUCKET_ENV,
     _task_reports,
@@ -43,15 +42,7 @@ from evals.__main__ import (
 )
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
-from evals.browser_nav import CASES as BROWSER_CASES
-from evals.closing_message import CASES as CLOSING_CASES
-from evals.closing_message import (
-    brief_scorer,
-    inlined_scorer,
-    no_backreference_scorer,
-)
 from evals.compaction.target import CompactionTarget
-from evals.document_visual import WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WAIT_SECONDS
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
     WorkspaceDriver,
@@ -61,7 +52,6 @@ from evals.driver import (
 from evals.driver import (
     WORKFLOW_WAIT_SECONDS as DEFAULT_WORKFLOW_WAIT_SECONDS,
 )
-from evals.first_run import FIRST_RUN_PACKS, FIRST_RUN_SKILL
 from evals.harness.capability import (
     MAX_LINKED_ARTIFACT_BYTES,
     MAX_LINKED_TOTAL_BYTES,
@@ -148,7 +138,6 @@ from evals.harness.viewer import (
     record_run,
     render_viewer,
 )
-from evals.new_application import _interviews
 from evals.registry import (
     SCENARIO_SIMULATOR_MODEL,
     SEMANTIC_JUDGE_MODEL,
@@ -156,10 +145,21 @@ from evals.registry import (
     VISUAL_JUDGE_MODEL,
     selected_run_tasks,
 )
-from evals.response_formatting import CASES as FORMATTING_CASES
-from evals.response_formatting import structured_answer_scorer
-from evals.response_register import CASES as REGISTER_CASES
-from evals.response_register import (
+from evals.suites import coding_subagent, github_connections, low_stakes_default
+from evals.suites.browser_nav import CASES as BROWSER_CASES
+from evals.suites.closing_message import CASES as CLOSING_CASES
+from evals.suites.closing_message import (
+    brief_scorer,
+    inlined_scorer,
+    no_backreference_scorer,
+)
+from evals.suites.document_visual import WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WAIT_SECONDS
+from evals.suites.first_run import FIRST_RUN_PACKS, FIRST_RUN_SKILL
+from evals.suites.new_application import _interviews
+from evals.suites.response_formatting import CASES as FORMATTING_CASES
+from evals.suites.response_formatting import structured_answer_scorer
+from evals.suites.response_register import CASES as REGISTER_CASES
+from evals.suites.response_register import (
     CHANGE_NOTE,
     DEDUP_EVIDENCE,
     DELEGATED_CASES,
@@ -174,7 +174,7 @@ from evals.response_register import (
     unwritten_reply_scorer,
     written_report_scorer,
 )
-from evals.ufo_app_bench import WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
+from evals.suites.ufo_app_bench import WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
 from ufo.access.credentials import (
     CredentialRequests,
     CredentialSlotUnset,

@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 
-from evals import new_application
+from evals.suites import new_application
 from ufo.db import workspace_tx
 from ufo.models.interface import AUTO_MODEL
 from ufo.schema import tables

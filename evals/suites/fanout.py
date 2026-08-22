@@ -23,7 +23,7 @@ from itertools import pairwise
 
 from evals.harness.arc import ArcCase, ArcObservation, ArcVerdict
 from evals.harness.capability import WorkspaceFile
-from evals.objective_record import recorded_objective
+from evals.suites.objective_record import recorded_objective
 
 SOURCES = {
     "inputs/alpha.txt": "NONCE-ALPHA-7c31",

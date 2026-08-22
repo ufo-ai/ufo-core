@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
-from evals import (
+from evals.harness.registry import (
+    EvalTask,
+    arc_task,
+    capability_task,
+    scenario_task,
+    selected_tasks,
+)
+from evals.scenario_env import frontier, lookups, multistep, restraint, writes
+from evals.skill_authoring.catalog import CASES as SKILL_AUTHORING_CASES
+from evals.skill_authoring.runner import skill_authoring_task
+from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
+from evals.skill_loading.catalog import SKILL_LOADING_PACKS
+from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
+from evals.skill_loading.runner import skill_loading_task
+from evals.skill_selection.runner import skill_selection_task
+from evals.suites import (
     ab_reversal,
     app_builder,
     authority_handoff,
@@ -39,25 +54,10 @@ from evals import (
     web_research,
     writing_subagent,
 )
-from evals.asd_writing import asd_writing_task
-from evals.harness.registry import (
-    EvalTask,
-    arc_task,
-    capability_task,
-    scenario_task,
-    selected_tasks,
-)
-from evals.scenario_env import frontier, lookups, multistep, restraint, writes
-from evals.skill_authoring.catalog import CASES as SKILL_AUTHORING_CASES
-from evals.skill_authoring.runner import skill_authoring_task
-from evals.skill_gtm import CASES as SKILL_GTM_CASES
-from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
-from evals.skill_loading.catalog import SKILL_LOADING_PACKS
-from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
-from evals.skill_loading.runner import skill_loading_task
-from evals.skill_selection.runner import skill_selection_task
-from evals.slack_silence import CASES as SLACK_SILENCE_CASES
-from evals.slack_silence import slack_silence_task
+from evals.suites.asd_writing import asd_writing_task
+from evals.suites.skill_gtm import CASES as SKILL_GTM_CASES
+from evals.suites.slack_silence import CASES as SLACK_SILENCE_CASES
+from evals.suites.slack_silence import slack_silence_task
 
 SEMANTIC_JUDGE_MODEL = "gpt-5.4-mini"
 SCENARIO_SIMULATOR_MODEL = "claude-haiku-4-5"

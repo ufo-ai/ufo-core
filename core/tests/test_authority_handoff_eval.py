@@ -2,8 +2,8 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
-from evals import authority_handoff
 from evals.harness.capability import CapabilityOutput, grading_statement
+from evals.suites import authority_handoff
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables

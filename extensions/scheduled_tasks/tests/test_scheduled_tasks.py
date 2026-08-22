@@ -46,7 +46,7 @@ from ufo_ext_scheduled_tasks.tools import (
 from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
-from evals.object_tools import (
+from evals.suites.object_tools import (
     BOUNDED_INFORMATIONAL_FIRES,
     _graded_bounded_daily,
     _graded_final_fire_result_and_check_in,

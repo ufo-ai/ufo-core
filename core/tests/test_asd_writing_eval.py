@@ -1,4 +1,6 @@
-from evals.asd_writing import (
+from evals.harness.scorers import content_words, max_pairwise_overlap
+from evals.registry import SEMANTIC_JUDGE_MODEL, TASKS
+from evals.suites.asd_writing import (
     CASES,
     GLANCE,
     MAX_FIELD_OVERLAP,
@@ -17,8 +19,6 @@ from evals.asd_writing import (
     unapproved_words,
     unresolved_subjects,
 )
-from evals.harness.scorers import content_words, max_pairwise_overlap
-from evals.registry import SEMANTIC_JUDGE_MODEL, TASKS
 from ufo.config import DEFAULT_BACKGROUND_JOBS_MODEL
 
 LEADS_CORRECTLY = frozenset(

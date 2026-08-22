@@ -11,7 +11,9 @@ from uuid import uuid4
 
 import pytest
 
-from evals.handback import (
+from evals.harness.arc import ArcCase, ArcObservation, ArcTurn
+from evals.harness.registry import arc_task
+from evals.suites.handback import (
     ANSWER_FILE,
     ASSIGNMENT_NONCE,
     CASES,
@@ -19,8 +21,6 @@ from evals.handback import (
     _grade_completion_handback,
     _grade_heartbeat_wake,
 )
-from evals.harness.arc import ArcCase, ArcObservation, ArcTurn
-from evals.harness.registry import arc_task
 
 
 def turn(

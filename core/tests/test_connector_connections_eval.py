@@ -2,8 +2,8 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
-from evals import connector_connections
 from evals.harness.capability import CapabilityOutput, ToolInvocation, grading_statement
+from evals.suites import connector_connections
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables

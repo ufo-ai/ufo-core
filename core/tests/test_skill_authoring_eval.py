@@ -22,7 +22,7 @@ from evals.skill_authoring.runner import (
     probe_verdict,
     skill_authoring_task,
 )
-from evals.skill_gtm import CASES as GTM_CASES
+from evals.suites.skill_gtm import CASES as GTM_CASES
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.schema.records import TurnStatus
 from ufo.skills.runtime import RuntimeSkill, parse_skill_content

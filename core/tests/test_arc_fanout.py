@@ -12,7 +12,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from evals.fanout import (
+from evals.harness.arc import ArcCase, ArcObservation, ArcTurn
+from evals.suites.fanout import (
     CASES,
     DISPATCH_TOOL,
     OUTPUTS,
@@ -21,7 +22,6 @@ from evals.fanout import (
     _grade_plain_delegation,
     _grade_workers_overlap,
 )
-from evals.harness.arc import ArcCase, ArcObservation, ArcTurn
 
 
 def turn(seq: int, admission_source: str = "internal") -> ArcTurn:

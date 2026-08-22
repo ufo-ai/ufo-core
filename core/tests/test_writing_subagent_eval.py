@@ -2,7 +2,12 @@ import pytest
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation, grading_statement
 from evals.registry import SEMANTIC_JUDGE_MODEL, TASKS
-from evals.writing_subagent import CASES, LAUNCH_CASES, LaunchThreadGrader, TweetLanguageGrader
+from evals.suites.writing_subagent import (
+    CASES,
+    LAUNCH_CASES,
+    LaunchThreadGrader,
+    TweetLanguageGrader,
+)
 
 GOOD_TWEETS = (
     "1. CSV export shipped today for Pro workspaces. Pull up to 100,000 rows when you need them.\n"

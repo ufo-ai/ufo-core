@@ -42,9 +42,6 @@ from evals.coding_repo.runner import (
 )
 from evals.compaction.runner import CompactionRun, load_compaction
 from evals.compaction.target import CompactionTarget
-from evals.document_visual import (
-    WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS,
-)
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
     WORKFLOW_WAIT_SECONDS,
@@ -111,6 +108,18 @@ from evals.skill_loading.catalog import SKILL_LOADING_PACKS
 from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
 from evals.skill_loading.runner import SUITE as SKILL_LOADING_SUITE
 from evals.skill_loading.runner import skill_loading_task
+from evals.suites.document_visual import (
+    WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS,
+)
+from evals.suites.ufo_app_bench import (
+    SUPPORTED_BACKENDS as UFO_APP_BENCH_BACKENDS,
+)
+from evals.suites.ufo_app_bench import (
+    WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS,
+)
+from evals.suites.ufo_app_bench import (
+    AppBenchWorkspaceProbe,
+)
 from evals.swebench.runner import (
     SNAPSHOT_ROOT as SWEBENCH_SNAPSHOT_ROOT,
 )
@@ -123,15 +132,6 @@ from evals.swebench.runner import (
     WORKFLOW_WAIT_SECONDS as SWEBENCH_WORKFLOW_WAIT_SECONDS,
 )
 from evals.turn_logs import TurnLogCollector
-from evals.ufo_app_bench import (
-    SUPPORTED_BACKENDS as UFO_APP_BENCH_BACKENDS,
-)
-from evals.ufo_app_bench import (
-    WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS,
-)
-from evals.ufo_app_bench import (
-    AppBenchWorkspaceProbe,
-)
 from evals.wandr.runner import (
     SUBMISSIONS_ROOT as WANDR_SUBMISSIONS_ROOT,
 )

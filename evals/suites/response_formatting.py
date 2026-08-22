@@ -38,7 +38,7 @@ from evals.harness.capability import (
     DescribedGrader,
     Grader,
 )
-from evals.response_register import conversational_scorer, measure
+from evals.suites.response_register import conversational_scorer, measure
 
 
 def structured_answer_scorer(

@@ -17,7 +17,7 @@ import asyncio
 from ufo_ext_slack.surface import AMBIENT_CHANNEL_NOTE, AMBIENT_THREAD_NOTE
 
 from evals.harness.capability import CapabilityOutput
-from evals.slack_message_block import (
+from evals.suites.slack_message_block import (
     CASES,
     MARKER,
     NO_INVENTED_TURN,

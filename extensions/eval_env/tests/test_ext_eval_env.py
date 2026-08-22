@@ -21,7 +21,8 @@ from ufo_ext_connectors.tools import (
     describe_external_tools,
 )
 
-from evals.connector_refs import (
+from evals.harness.harness import JsonObject
+from evals.suites.connector_refs import (
     FLEET,
     KERNEL,
     LEDGER,
@@ -33,7 +34,6 @@ from evals.connector_refs import (
     TELEMETRY,
     token,
 )
-from evals.harness.harness import JsonObject
 from ufo.access.connectors import ConnectorEntry, ConnectorRegistry, UnknownBrokerTool
 from ufo.access.grants import Grant, GrantStore
 from ufo.db import workspace_tx

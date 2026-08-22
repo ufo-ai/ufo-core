@@ -13,8 +13,8 @@ import sqlalchemy as sa
 from ufo_ext_connectors.tools import DEDUPE_REFERENCE_KEY
 from ufo_ext_eval_env.manifest import CODE_FIXTURE_PREFIX, CODE_PROVIDER, NAME
 
-from evals import connector_refs
 from evals.harness.capability import CapabilityOutput, ToolInvocation
+from evals.suites import connector_refs
 from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore

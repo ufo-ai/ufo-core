@@ -16,7 +16,8 @@ run one sample.
 
 import asyncio
 
-from evals.credential_handoff import (
+from evals.harness.capability import CapabilityOutput, Grader, ToolInvocation
+from evals.suites.credential_handoff import (
     CASES,
     CONNECT_ACCOUNT,
     DATADOG_API_KEY_SLOT,
@@ -26,7 +27,6 @@ from evals.credential_handoff import (
     no_propagation_scorer,
     private_prompt_scorer,
 )
-from evals.harness.capability import CapabilityOutput, Grader, ToolInvocation
 
 COLLECTION_CASES = (
     "keyed-provider-api-key",

@@ -1,6 +1,6 @@
 """Daily Brief behavior eval criteria."""
 
-from evals.daily_brief import CASES, _valid_sections
+from evals.suites.daily_brief import CASES, _valid_sections
 
 
 def test_daily_brief_eval_requires_only_present_sections_in_order() -> None:
