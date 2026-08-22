@@ -30,7 +30,15 @@ from sqlalchemy.exc import IntegrityError
 from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
+from ufo_ext_sites.share_card import (
+    CARD_EXTENSION,
+    CARD_HEIGHT,
+    CARD_MEDIA_TYPE,
+    CARD_NAME,
+    CARD_WIDTH,
+)
 from ufo_ext_sites.store import (
+    HostedSite,
     HostedSites,
     NotTheSiteCreator,
     UnhostNeedsASpeaker,
@@ -44,9 +52,12 @@ from ufo_ext_sites.surface import (
     SHARE_CARD_ALT,
     SHARE_CARD_URL,
     SHARE_DESCRIPTION,
+    SITE_CARD_ALT,
+    SITE_CARD_CACHE,
     UNCONFIGURED_BODY,
     VISIBILITY_BADGES,
     SiteHostingUnconfigured,
+    site_card_url,
     site_token,
     site_url,
 )
@@ -132,6 +143,9 @@ class FakeSandbox:
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
+    async def write_file(self, path: str, content: bytes) -> None:
+        return None
+
 
 def _png(color: str) -> bytes:
     buffer = BytesIO()
@@ -140,19 +154,25 @@ def _png(color: str) -> bytes:
 
 
 PAGE_PNG = _png("white")
+CARD_DIGEST = "5f2c" * 16
+REDRAWN_DIGEST = "a91b" * 16
 
 
 @dataclass
 class ShootingSandbox:
     """Stands in for the member's container on a deploy whose page really is photographed: every
-    command succeeds and answers the shot's byte count, and reading the shot back hands over one
-    real PNG.
+    command succeeds and answers the shot's byte count, every in-sandbox program answers the digest
+    the card's encode step prints, and reading a shot back hands over one real PNG.
 
     It answers the same thing to every command, so it records and asserts nothing about what the
-    tools said. What the deploy did with the bytes is the contract: the row it wrote and the picture
-    the store now holds."""
+    tools said. What the deploy did with the bytes is the contract: the rows it wrote, the picture
+    the store now holds, and the card the frame's head then names. An empty `digest` is a container
+    that
+    photographs the page and composes no card — which is what every site deployed before cards
+    existed has."""
 
     png: bytes = PAGE_PNG
+    digest: str = CARD_DIGEST
     handle: SandboxHandle = field(
         default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
     )
@@ -161,7 +181,10 @@ class ShootingSandbox:
         return ExecResult(stdout=str(len(self.png)), stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
-        return ExecResult(stdout="", stderr="", exit_code=0)
+        return ExecResult(stdout=self.digest, stderr="", exit_code=0)
+
+    async def write_file(self, path: str, content: bytes) -> None:
+        return None
 
     def read_file(self, path: str) -> AsyncIterator[bytes]:
         async def bytes_of() -> AsyncIterator[bytes]:
@@ -242,7 +265,7 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
             app,
             manifests,
             None,
-            FilesystemBlobStore(root=tmp_path),
+            WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
             sandboxes,
             InProcessHub(),
             dbos_client,
@@ -1466,6 +1489,254 @@ async def test_the_portal_index_carries_the_site_s_picture(
     )
 
 
+async def test_a_public_site_unfurls_as_its_own_card_over_the_anonymous_route(
+    deployment: Deployment, tmp_path: Path
+) -> None:
+    """The whole card path for the one site kind that may have one published: the deploy composes
+    the card and writes it onto the row, the head names its address, and that address answers an
+    unfurler that carries nothing.
+
+    The response is asserted header by header because each one is a rule: `image/jpeg` because the
+    card is what is served, no `set-cookie` and no redirect because the URL is public and must never
+    be a credential, and `max-age=600` without `immutable` because a site that stops being public
+    has to stop being previewed within minutes."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    hosted = await _deploy(
+        workspace,
+        conversation_id,
+        audience,
+        creator_id,
+        visibility="public",
+        sandbox=ShootingSandbox(),
+        blob=blob,
+    )
+    link = str(hosted["site_url"])
+    token = link.rsplit("/", 1)[-1]
+
+    (row,) = await _stored(workspace)
+    assert row.share_card_blob_key.startswith(ARTIFACT_KEY_PREFIX)
+    assert row.share_card_blob_key.endswith(f"/{CARD_NAME}.{CARD_EXTENSION}")
+    assert row.share_card_hash == CARD_DIGEST
+
+    head = _head_tags((await client.get(link)).text)
+    card = f"{PUBLIC_BASE_URL}{FRAME_PATH}/share/site/{token}/{CARD_DIGEST}.jpg"
+    assert head["og:image"] == card
+    assert head["twitter:image"] == card
+    assert head["og:image:width"] == str(CARD_WIDTH)
+    assert head["og:image:height"] == str(CARD_HEIGHT)
+    assert head["og:image:type"] == CARD_MEDIA_TYPE
+    assert head["og:image:alt"] == SITE_CARD_ALT.format(name=SITE)
+
+    served = await client.get(card)
+
+    assert served.status_code == 200
+    assert served.headers["content-type"] == CARD_MEDIA_TYPE
+    assert served.headers["cache-control"] == SITE_CARD_CACHE
+    assert "immutable" not in served.headers["cache-control"]
+    assert "set-cookie" not in served.headers
+    assert "location" not in served.headers
+    with ws(workspace.id):
+        assert served.content == await blob.get(row.share_card_blob_key)
+
+
+async def test_a_card_is_published_for_no_site_but_a_public_one(
+    deployment: Deployment, tmp_path: Path
+) -> None:
+    """A card is a picture of the site's own page, so it answers the visibility rule harder than the
+    name does: a workspace-visible site and a private one each have a card on the row and publish
+    neither the address nor the bytes, and a site narrowed after the fact stops answering at the
+    address that already worked.
+
+    The narrowing case is the one a cached URL cannot be recalled from, which is why the route reads
+    the row per request instead of trusting the level the deploy drew under."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+
+    for level in ("private", "workspace"):
+        hosted = await _deploy(
+            workspace,
+            conversation_id,
+            audience,
+            creator_id,
+            site=f"{level}-site",
+            visibility=level,
+            sandbox=ShootingSandbox(),
+            blob=blob,
+        )
+        link = str(hosted["site_url"])
+        gated = await _sites_row(workspace, conversation_id, f"{level}-site")
+        assert gated.share_card_hash == CARD_DIGEST
+        card = str(site_card_url(PUBLIC_BASE_URL, link.rsplit("/", 1)[-1], CARD_DIGEST))
+        head = _head_tags((await client.get(link, headers=_cookie(creator_token))).text)
+        assert head["og:image"] == SHARE_CARD_URL
+        assert head["og:image:alt"] == SHARE_CARD_ALT
+        assert (await client.get(card)).status_code == 404
+
+    hosted = await _deploy(
+        workspace,
+        conversation_id,
+        audience,
+        creator_id,
+        site="open-site",
+        visibility="public",
+        sandbox=ShootingSandbox(),
+        blob=blob,
+    )
+    link = str(hosted["site_url"])
+    card = str(site_card_url(PUBLIC_BASE_URL, link.rsplit("/", 1)[-1], CARD_DIGEST))
+    assert (await client.get(card)).status_code == 200
+
+    frame = await client.get(link, headers=_cookie(creator_token))
+    narrowed = await client.post(
+        f"{link}/visibility",
+        data={"visibility": "workspace", "csrf": _csrf(frame.text)},
+        headers=_cookie(creator_token),
+    )
+
+    assert narrowed.status_code == 303
+    assert (await client.get(card)).status_code == 404
+    assert _head_tags((await client.get(link)).text)["og:image"] == SHARE_CARD_URL
+
+
+async def test_a_homepage_bound_site_unfurls_as_the_generic_card(
+    deployment: Deployment, tmp_path: Path
+) -> None:
+    """A homepage's viewers follow the agent, so the site's own `public` says nothing about who may
+    see it and its card is neither named nor served — the same rule that keeps its name out of the
+    head."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    hosted = await _deploy(
+        workspace,
+        conversation_id,
+        audience,
+        creator_id,
+        visibility="public",
+        sandbox=ShootingSandbox(),
+        blob=blob,
+    )
+    link = str(hosted["site_url"])
+    card = str(site_card_url(PUBLIC_BASE_URL, link.rsplit("/", 1)[-1], CARD_DIGEST))
+    assert (await client.get(card)).status_code == 200
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+
+    with ws(workspace.id):
+        await _dispatch(
+            tool,
+            _bind(ctx, workspace, conversation_id, creator_id),
+            site=site_object_name(conversation_id, SITE),
+        )
+
+    assert (await client.get(card)).status_code == 404
+    assert _head_tags((await client.get(link)).text)["og:image"] == SHARE_CARD_URL
+
+
+async def test_a_redeploy_moves_the_card_to_a_new_address(
+    deployment: Deployment, tmp_path: Path
+) -> None:
+    """The card's address carries the digest of its own bytes, so a redeploy publishes a new address
+    rather than new pixels behind the old one: nothing cached has to be invalidated, and the address
+    a crawler kept stops answering."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    hosted = await _deploy(
+        workspace,
+        conversation_id,
+        audience,
+        creator_id,
+        visibility="public",
+        sandbox=ShootingSandbox(),
+        blob=blob,
+    )
+    link = str(hosted["site_url"])
+    first = str(site_card_url(PUBLIC_BASE_URL, link.rsplit("/", 1)[-1], CARD_DIGEST))
+
+    await _deploy(
+        workspace,
+        conversation_id,
+        audience,
+        creator_id,
+        visibility="public",
+        sandbox=ShootingSandbox(digest=REDRAWN_DIGEST),
+        blob=blob,
+    )
+
+    redrawn = _head_tags((await client.get(link)).text)["og:image"]
+    assert redrawn == site_card_url(PUBLIC_BASE_URL, link.rsplit("/", 1)[-1], REDRAWN_DIGEST)
+    assert redrawn != first
+    assert (await client.get(redrawn)).status_code == 200
+    assert (await client.get(first)).status_code == 404
+
+
+async def test_making_a_site_public_composes_a_card_from_the_shot_it_already_had(
+    deployment: Deployment, tmp_path: Path
+) -> None:
+    """A site deployed before cards existed has a picture of its page and no card, and its card is
+    composed from that picture on the act that publishes it — so a member does not have to redeploy
+    to get a real unfurl. The stand-in that photographs the page and composes no card is exactly
+    that site."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    hosted = await _deploy(
+        workspace,
+        conversation_id,
+        audience,
+        creator_id,
+        visibility="workspace",
+        sandbox=ShootingSandbox(digest=""),
+        blob=blob,
+    )
+    link = str(hosted["site_url"])
+    cardless = await _sites_row(workspace, conversation_id, SITE)
+    assert cardless.preview_blob_key is not None
+    assert cardless.share_card_hash is None
+
+    tool, ctx = _tool("object_apply", audience, blob=blob)
+    with ws(workspace.id):
+        await _dispatch(
+            tool,
+            _bind(ctx, workspace, conversation_id, creator_id, sandbox=ShootingSandbox()),
+            manifest=yaml.safe_dump(
+                {
+                    "kind": SITE_KIND,
+                    "name": site_object_name(conversation_id, SITE),
+                    "spec": {"visibility": "public"},
+                }
+            ),
+        )
+
+    published = await _sites_row(workspace, conversation_id, SITE)
+    assert published.visibility == "public"
+    assert published.share_card_hash == CARD_DIGEST
+    card = str(site_card_url(PUBLIC_BASE_URL, link.rsplit("/", 1)[-1], CARD_DIGEST))
+    assert _head_tags((await client.get(link)).text)["og:image"] == card
+    assert (await client.get(card)).status_code == 200
+
+
+async def _sites_row(workspace: Workspace, conversation_id: UUID, name: str) -> HostedSite:
+    """One site's row, read through the registry the tools and the frame share."""
+    with ws(workspace.id):
+        site = await HostedSites(workspace.id, workspace_tx).read(conversation_id, name)
+    assert site is not None
+    return site
+
+
 async def test_the_site_kind_refuses_create_naming_the_deploy(db: None) -> None:
     workspace = await _seed_workspace()
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
@@ -1779,7 +2050,7 @@ class StoppedShotSandbox:
     )
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
-        if "--screenshot" in command:
+        if "--remote-debugging-pipe" in command:
             raise RuntimeError("the turn ended while the page was drawing")
         return ExecResult(stdout="", stderr="", exit_code=0)
 

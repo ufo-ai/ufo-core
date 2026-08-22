@@ -28,11 +28,18 @@ scripts reach neither the selector, the session cookie, nor any app route, and t
 keeps them from navigating the member's tab away; the visibility `POST` still carries a CSRF token
 bound to the viewer's own session, so a cross-site form cannot flip a site the creator owns.
 
-The head carries the brand's share card, so a link pasted into a chat unfurls as a picture rather
-than one bare line. The site's own name reaches that head only when the site is public: the crawler
-that reads these tags carries no session and passes no gate, so a name in them is published to
-whoever holds the link. Every other level gets a generic title naming neither the site nor its
-workspace."""
+The head carries a share card, so a link pasted into a chat unfurls as a picture rather than one
+bare line. The site's own name reaches that head only when the site is public: the crawler that
+reads these tags carries no session and passes no gate, so a name in them is published to whoever
+holds the link. Every other level gets a generic title naming neither the site nor its workspace.
+
+The picture obeys that same rule, harder. A public site's card is the site's own front page beside
+the brandmark, composed at deploy time (`share_card.py`) and served by the one anonymous route here:
+`share/site/<site token>/<digest>.jpg`. That route re-reads the row on every request and serves the
+card only while the site is still public and not homepage-bound, because a level is mutable and a
+URL in a head tag cannot be recalled. It carries no session, sets no cookie, mints no grant, and
+answers `public, max-age=600` rather than `immutable`, so a site that stops being public stops
+being previewed within minutes. Every other site keeps the brand's generic card, naming nothing."""
 
 import hashlib
 import html
@@ -50,6 +57,7 @@ from ufo.sdk.http import (
 from ufo.sdk.seats import Seats
 from ufo.sdk.surface_token import mint_surface_token, verify_surface_token
 from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
+from ufo_ext_sites.share_card import CARD_EXTENSION, CARD_HEIGHT, CARD_MEDIA_TYPE, CARD_WIDTH
 from ufo_ext_sites.store import HostedSite, HostedSites, Visibility, visibility_level
 
 SURFACE_SITES = "sites"
@@ -61,6 +69,7 @@ NAME_CLAIM = "name"
 CSRF_CLAIM = "csrf"
 TOKEN_PARAM = "site_token"
 PATH_PARAM = "site_path"
+CARD_HASH_PARAM = "card_hash"
 VISIBILITY_FIELD = "visibility"
 CSRF_FIELD = "csrf"
 HOSTING_UNCONFIGURED = (
@@ -80,12 +89,19 @@ IFRAME_SANDBOX = (
     "allow-pointer-lock"
 )
 SHARE_CARD_URL = "https://ufo.ai/share/og-site.jpg"
-SHARE_CARD_WIDTH = "1200"
-SHARE_CARD_HEIGHT = "630"
+SHARE_CARD_WIDTH = str(CARD_WIDTH)
+SHARE_CARD_HEIGHT = str(CARD_HEIGHT)
 SHARE_CARD_ALT = (
     "Made with — the words in white above the UFO wordmark, three ember dots beside it, "
     "on a black field."
 )
+SITE_CARD_SEGMENT = "share/site"
+SITE_CARD_PATH = f"{FRAME_PATH}/{SITE_CARD_SEGMENT}"
+SITE_CARD_CACHE = "public, max-age=600"
+"""Cacheable, and never `immutable`: a site that stops being public must stop being previewed within
+minutes, and the digest in the URL already covers the redeploy case."""
+SITE_CARD_HEADERS = {"cache-control": SITE_CARD_CACHE, "x-content-type-options": "nosniff"}
+SITE_CARD_ALT = "The front page of {name}, drawn beside the UFO brandmark."
 GENERIC_SHARE_TITLE = "A site on UFO"
 SHARE_DESCRIPTION = "A site made with UFO."
 VISIBILITY_LABELS: dict[Visibility, str] = {
@@ -138,6 +154,18 @@ def site_url(
     return f"{public_base_url.rstrip('/')}{FRAME_PATH}/{token}"
 
 
+def site_card_url(public_base_url: str | None, token: str, digest: str) -> str | None:
+    """The public address of one site's share card: the anonymous route on the deploy's public base,
+    carrying the site's own token and the digest of the card's bytes.
+
+    The digest is what makes the address change on a redeploy, so a crawler that cached the old card
+    is asking for a URL nothing answers rather than being handed stale pixels. A deploy with no
+    `[connect] public_base_url` has no address to name and names none."""
+    if not public_base_url:
+        return None
+    return f"{public_base_url.rstrip('/')}{SITE_CARD_PATH}/{token}/{digest}.{CARD_EXTENSION}"
+
+
 def site_address(token: str) -> SiteAddress | None:
     """The address a token proves, or None when its signature, surface, or claims do not hold."""
     claims = verify_surface_token(SURFACE_SITES, token)
@@ -174,11 +202,15 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
     frame_path = f"{FRAME_PATH}/{request.path_params[TOKEN_PARAM]}"
     base = ctx.public_base_url
     # A link unfurler is unauthenticated, so whatever the head says is public by definition: the
-    # site's own name goes in the card only when the site itself is public. A homepage follows its
-    # agent, whose levels stop at `workspace`, so it is never named either.
+    # site's own name and its own picture go in the card only when the site itself is public. A
+    # homepage follows its agent, whose levels stop at `workspace`, so it is never named or drawn.
+    published = site.homepage_agent_id is None and site.visibility == "public"
     share = _share_tags(
-        site.name if site.homepage_agent_id is None and site.visibility == "public" else None,
+        site.name if published else None,
         f"{base.rstrip('/')}{frame_path}" if base else None,
+        site_card_url(base, request.path_params[TOKEN_PARAM], site.share_card_hash)
+        if published and site.share_card_hash is not None
+        else None,
     )
     viewer = await _viewer(ctx, request)
     if site.homepage_agent_id is not None:
@@ -216,6 +248,46 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
         _frame_page(
             site, embedded, frame_path, csrf, share, bare=site.homepage_agent_id is not None
         )
+    )
+
+
+async def share_card(ctx: SurfaceContext, request: Request) -> Response:
+    """Serve one public site's share card to whoever asks, and nothing else.
+
+    This is the one anonymous route in the module, because a link unfurler carries no session and
+    follows one absolute URL. So it holds four rules of its own:
+
+    **Public only.** The site row is read and its `visibility` decides, here, on this request — not
+    at the deploy that drew the card. A level is mutable, and a site that stops being public must
+    stop being previewed, so a card written while the site was public answers 404 the moment it is
+    not. A homepage-bound site follows its agent and has no level of its own to publish, so it is
+    refused outright. Every refusal is the frame's own 404 body, so the route is no oracle for which
+    sites exist.
+
+    **No session, no grant.** The URL is public by construction — it goes in a head tag that anyone
+    may read — so it must never be a credential. Nothing here reads a cookie, sets one, mints a view
+    token, or redirects to a signed artifact link.
+
+    **Cacheable but drainable.** `max-age=600` and not `immutable`: a card must fall out of caches
+    within minutes of a site being narrowed, and the digest in the URL already keeps a redeploy from
+    being served from a stale cache.
+
+    **Bytes only.** The key served is the one the row carries. The URL's digest is compared against
+    the row's and never used to address anything, so no path in the artifact namespace is reachable
+    through here and there is nothing to list."""
+    site = await _resolve(ctx, request)
+    if (
+        site is None
+        or site.homepage_agent_id is not None
+        or site.visibility != "public"
+        or site.share_card_blob_key is None
+        or site.share_card_hash != request.path_params[CARD_HASH_PARAM]
+    ):
+        return _not_found()
+    return Response(
+        await ctx.blob.get(site.share_card_blob_key),
+        media_type=CARD_MEDIA_TYPE,
+        headers=SITE_CARD_HEADERS,
     )
 
 
@@ -299,33 +371,40 @@ def _page(title: str, style: str, body: str, share: str) -> str:
     )
 
 
-def _share_tags(name: str | None, canonical: str | None) -> str:
-    """What a link unfurler draws for this site: the brand's card, and a title that names the site
-    only when `name` is given — the caller decides that from the site's visibility, never from the
-    viewer's session, because the crawler reading these tags carries none and may republish whatever
-    it reads. The card is the gateway's own asset on the apex, which is the one origin here that
-    answers an anonymous image request and caches it: a site's own bytes are `private, no-store`
-    behind a session, so they can never be an `og:image`. A deploy with no `[connect]
+def _share_tags(name: str | None, canonical: str | None, card: str | None) -> str:
+    """What a link unfurler draws for this site: a card, and a title that names the site only when
+    `name` is given — the caller decides both from the site's visibility, never from the viewer's
+    session, because the crawler reading these tags carries none and republishes what it reads.
+
+    `card` is this site's own composed card, which only a public site has one of and only a public
+    site may be shown. Without one the tags name the brand's generic card, the gateway's own asset
+    on the apex: a site's own bytes are `private, no-store` behind a session, so the page itself can
+    never be an `og:image`, and a site with no card yet — one deployed before cards existed, or one
+    whose render failed — unfurls exactly as it did before. A deploy with no `[connect]
     public_base_url` has no canonical link to name, and omits `og:url` rather than guessing one."""
     url = ""
     if canonical:
         url = f'<meta property=og:url content="{html.escape(canonical, quote=True)}">'
     title = html.escape(name or GENERIC_SHARE_TITLE, quote=True)
+    image = html.escape(card or SHARE_CARD_URL, quote=True)
+    alt = html.escape(
+        SHARE_CARD_ALT if card is None else SITE_CARD_ALT.format(name=name), quote=True
+    )
     return (
         "<meta property=og:type content=website>"
         "<meta property=og:site_name content=UFO>"
         f"{url}"
         f'<meta property=og:title content="{title}">'
         f'<meta property=og:description content="{SHARE_DESCRIPTION}">'
-        f'<meta property=og:image content="{SHARE_CARD_URL}">'
+        f'<meta property=og:image content="{image}">'
         f"<meta property=og:image:width content={SHARE_CARD_WIDTH}>"
         f"<meta property=og:image:height content={SHARE_CARD_HEIGHT}>"
-        "<meta property=og:image:type content=image/jpeg>"
-        f'<meta property=og:image:alt content="{SHARE_CARD_ALT}">'
+        f"<meta property=og:image:type content={CARD_MEDIA_TYPE}>"
+        f'<meta property=og:image:alt content="{alt}">'
         "<meta name=twitter:card content=summary_large_image>"
         f'<meta name=twitter:title content="{title}">'
         f'<meta name=twitter:description content="{SHARE_DESCRIPTION}">'
-        f'<meta name=twitter:image content="{SHARE_CARD_URL}">'
+        f'<meta name=twitter:image content="{image}">'
     )
 
 
@@ -411,6 +490,13 @@ _FRAME_STYLE = (
 SITES_SURFACE = SurfaceSpec(
     name=SURFACE_SITES,
     routes=(
+        # The card's route is declared before the deep-link route, because a deep link matches any
+        # path under a token and would otherwise swallow this one as a site path.
+        SurfaceRoute(
+            method="GET",
+            path=f"{SITE_CARD_SEGMENT}/{{{TOKEN_PARAM}}}/{{{CARD_HASH_PARAM}}}.{CARD_EXTENSION}",
+            handler=share_card,
+        ),
         SurfaceRoute(method="GET", path=f"{{{TOKEN_PARAM}}}", handler=frame),
         SurfaceRoute(method="POST", path=f"{{{TOKEN_PARAM}}}/visibility", handler=set_visibility),
         SurfaceRoute(method="GET", path=f"{{{TOKEN_PARAM}}}/{{{PATH_PARAM}:path}}", handler=frame),

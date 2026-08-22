@@ -47,6 +47,7 @@ from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.objects import site_object_name
+from ufo_ext_sites.share_card import draw_from_page, shot_command
 from ufo_ext_sites.store import HostedSites, Visibility, site_name
 from ufo_ext_sites.surface import site_url
 
@@ -72,24 +73,10 @@ PREVIEW_WIDTH = 1200
 PREVIEW_HEIGHT = 900
 PREVIEW_TIMEOUT_SECONDS = 90
 PREVIEW_DETAIL_CHARS = 500
-BROWSER_COMMANDS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
-PREVIEW_SHOT_CMD = (
-    "for browser in " + " ".join(BROWSER_COMMANDS) + "; do\n"
-    '  command -v "$browser" >/dev/null 2>&1 || continue\n'
-    '  exec "$browser" --headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu \\\n'
-    "    --hide-scrollbars --virtual-time-budget={budget} "
-    "--window-size={width},{height} \\\n"
-    "    --user-data-dir={profile} --screenshot={shot} {url}\n"
-    "done\n"
-    'printf %s "no chromium in this sandbox" >&2; exit 1'
-)
 PREVIEW_PROFILE_DIR = "/tmp/ufo-site-preview"
 """Outside the workspace and outside the persistent browser's own profile: a one-shot chromium takes
 the profile lock for its run, and sharing the directory the sandbox's standing DevTools browser
 holds would fail whichever started second."""
-PREVIEW_TIME_BUDGET_MS = 5000
-"""How much page time the shot lets run before it draws: a page whose scripts never settle would
-otherwise hold the shot open to its own deadline."""
 LOG_CLEAR_PROG = """
 import sys
 from containment import ContainmentError, contained_file
@@ -290,14 +277,18 @@ async def _serve(
 
 
 async def _illustrate(ctx: ToolContext, name: str, port: int) -> None:
-    """Photograph the page the registration just published, and write the picture onto its row.
+    """Photograph the page the registration just published, write the picture onto its row, and
+    compose the site's share card from a second shot taken for the card's own box.
 
     The renderer and the bytes are both local at this one moment: the site answers on the sandbox's
     own loopback and the sandbox image carries chromium, so one headless run draws the page and core
     takes the PNG from there into the artifact namespace. A picture the member never asked for is
-    not worth a deploy, so a sandbox with no chromium, a page that will not draw, a shot path that
-    cannot be cleared, and a store that cannot take the bytes each leave the site hosted with the
-    picture it already had and say why in the log.
+    not worth a deploy, so a sandbox with no chromium, a page that draws nothing but one flat
+    colour, a shot path that cannot be cleared, and a store that cannot take the bytes each leave
+    the site hosted with the picture it already had and say why in the log. The card answers the
+    same way, and it is drawn after the picture rather than instead of it: the portal's card is the
+    picture and the share card is what a link unfurls as, so a deploy that draws one and not the
+    other moves what it can.
 
     This runs after `_host`, not between the serve and it. The shot is a long, failure-capable step
     — `PREVIEW_TIMEOUT_SECONDS` of chromium — and `register` is the only thing that retires the site
@@ -305,9 +296,9 @@ async def _illustrate(ctx: ToolContext, name: str, port: int) -> None:
     already moved. The picture therefore lands in a write of its own, which touches nothing but the
     preview columns.
 
-    The shot's name is emptied through the containment guard first, exactly as a server log is: it
-    sits in a directory the agent writes, and chromium's own create would follow a link planted
-    there."""
+    The shot's name is emptied through the containment guard first, exactly as a server log is, and
+    the picture is written back through the guard as well: the name sits in a directory the agent
+    writes."""
     if ctx.ext is None:
         raise RuntimeError("the website tools dispatched without their ExtensionContext")
     shot = PREVIEW_SHOT.format(port=port)
@@ -317,13 +308,14 @@ async def _illustrate(ctx: ToolContext, name: str, port: int) -> None:
         log("site_preview.undrawn", site=name, detail=str(refused)[:PREVIEW_DETAIL_CHARS])
         return
     drawn = await ctx.sandbox.bash(
-        PREVIEW_SHOT_CMD.format(
-            budget=PREVIEW_TIME_BUDGET_MS,
+        shot_command(
+            url=f"http://127.0.0.1:{port}",
             width=PREVIEW_WIDTH,
             height=PREVIEW_HEIGHT,
-            profile=shlex.quote(PREVIEW_PROFILE_DIR),
-            shot=shlex.quote(shot),
-            url=shlex.quote(f"http://127.0.0.1:{port}"),
+            scale=1,
+            shot=shot,
+            profile=PREVIEW_PROFILE_DIR,
+            root=WORKSPACE_DIR,
         ),
         timeout_s=PREVIEW_TIMEOUT_SECONDS,
     )
@@ -334,12 +326,12 @@ async def _illustrate(ctx: ToolContext, name: str, port: int) -> None:
             detail=(drawn.stderr.strip() or drawn.stdout.strip())[:PREVIEW_DETAIL_CHARS],
         )
         return
+    sites = HostedSites(ctx.ext.store.workspace_id, ctx.ext.transaction)
+    conversation_id = ctx.sandbox.handle.conversation_id
     preview = await ctx.store_preview(shot, name)
-    if preview is None:
-        return
-    await HostedSites(ctx.ext.store.workspace_id, ctx.ext.transaction).set_preview(
-        ctx.sandbox.handle.conversation_id, name, preview
-    )
+    if preview is not None:
+        await sites.set_preview(conversation_id, name, preview)
+    await draw_from_page(ctx, sites, conversation_id, name, port)
 
 
 async def _refuse_before_serving(

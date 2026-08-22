@@ -112,6 +112,18 @@ async def test_a_rendered_picture_lands_in_the_artifact_namespace(tmp_path: Path
     assert stored.size_bytes == len(PAGE_PNG)
 
 
+async def test_a_picture_that_is_not_a_png_is_keyed_by_the_type_it_is(tmp_path: Path) -> None:
+    """The key's own suffix is what every reader of it types the bytes by, so a render that is a
+    JPEG lands under one — a hosted site's share card is composed as the JPEG an unfurler draws."""
+    ctx = _ctx(WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)), _ShotSandbox())
+
+    with ws(ctx.turn.workspace_id):
+        stored = await ctx.store_preview(SHOT_PATH, "share_card", extension="jpg")
+
+    assert stored is not None
+    assert stored.blob_key.endswith("/share_card.jpg")
+
+
 async def test_an_s3_store_takes_the_bytes_on_a_presigned_put(s3_store: S3BlobStore) -> None:
     sandbox = _ShotSandbox()
     ctx = _ctx(WorkspaceBlobStore(backend=s3_store), sandbox)

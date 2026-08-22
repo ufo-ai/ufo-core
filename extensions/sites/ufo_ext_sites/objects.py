@@ -35,6 +35,7 @@ from ufo.sdk.objects import (
     owner_emails,
 )
 from ufo.sdk.tools import ToolContext
+from ufo_ext_sites.share_card import draw_from_stored_shot
 from ufo_ext_sites.store import (
     SITE_VISIBILITY_GATE,
     HostedSite,
@@ -263,6 +264,15 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
         old: SiteSpec | None,
         owner: GeneratedObjectOwner | None,
     ) -> None:
+        """Move the site to the level the spec names, and give a site becoming public the card its
+        link will unfurl as.
+
+        A site deployed before cards existed has a picture of its page and no card, and a card is
+        only ever published for a public site — so making one public is exactly where that card is
+        composed. It is composed from the picture already stored, in the container this turn holds,
+        and only the site's creator reaches this path with `public` (an admin may only narrow), so
+        the page a card draws is the actor's own. A card that will not draw leaves the site public
+        with the generic one, which is what the head already said."""
         if old is None or owner is None:
             raise VerbNotSupported(SITES_ARE_DEPLOYED)
         site = await self._find(ctx.ext, name)
@@ -273,7 +283,16 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
             return
         if site.homepage_agent_id is not None:
             raise ValueError(HOMEPAGE_FOLLOWS_AGENT)
-        await _sites(ctx.ext).set_visibility(site.conversation_id, site.name, spec.visibility)
+        sites = _sites(ctx.ext)
+        await sites.set_visibility(site.conversation_id, site.name, spec.visibility)
+        if (
+            spec.visibility == "public"
+            and site.share_card_hash is None
+            and site.preview_blob_key is not None
+        ):
+            await draw_from_stored_shot(
+                ctx, sites, site.conversation_id, site.name, site.preview_blob_key
+            )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
         site = await self._find(ctx.ext, name)

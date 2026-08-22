@@ -332,12 +332,16 @@ class ToolContext:
             return subjects
         return subjects | {member_subject(acting)}
 
-    async def store_preview(self, sandbox_path: str, name: str) -> StoredPreview | None:
+    async def store_preview(
+        self, sandbox_path: str, name: str, *, extension: str = "png"
+    ) -> StoredPreview | None:
         """Store a picture a tool rendered inside the sandbox as a preview blob, and answer the key
         and size the tool's own row records. None when there is nothing readable at that path.
 
         The key is core's to name: the signed preview route serves the artifact namespace alone, so
-        a picture addressable through it is one core placed there. The bytes go straight from the
+        a picture addressable through it is one core placed there. `extension` is the raster type
+        the render actually is, because the key's own suffix is what every reader of it types the
+        bytes by. The bytes go straight from the
         sandbox to the store — an S3 store takes them on a presigned PUT core mints for this one
         key, curled from inside the container, and a filesystem dev store takes the same file as a
         stream — so a render never crosses this process. The size is measured in the sandbox before
@@ -356,7 +360,7 @@ class ToolContext:
                 detail=(sized.stderr.strip() or measured)[:PREVIEW_DETAIL_CHARS],
             )
             return None
-        key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{name}.png"
+        key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{name}.{extension}"
         match self.blob.backend:
             case S3BlobStore():
                 put_url = await self.blob.presigned_put_unmeasured(key, PREVIEW_PUT_TTL_SECONDS)

@@ -1,5 +1,6 @@
 import json
 import re
+import shlex
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,17 +11,40 @@ from pydantic import ValidationError
 from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 from ufo_ext_sites import manifest as sites_manifest
+from ufo_ext_sites import share_card
 from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
 from ufo_ext_sites.objects import (
     CONVERSATION_DIGEST_HEX,
     site_name_from_object,
     site_object_name,
 )
+from ufo_ext_sites.share_card import (
+    BROWSER_COMMANDS,
+    CARD_HEIGHT,
+    CARD_SHOT_DRAWN,
+    CARD_TIMEOUT_SECONDS,
+    CARD_WIDTH,
+    FONT_ASSET,
+    FRAME_SECONDS,
+    LOAD_WALL_SECONDS,
+    LOGO_ASSET,
+    PANEL_WIDTH,
+    SETTLE_WALL_SECONDS,
+    SHOT_DEADLINE_SECONDS,
+    SHOT_TOKEN,
+    SHOT_WIDTH,
+    STORED_SHOT_DRAWN,
+    UNATTENDED_FLAGS,
+    card_page,
+    shot_command,
+)
 from ufo_ext_sites.store import SITE_NAME_MAX, InvalidSiteName, site_name
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
     LOG_CLEAR_PROG,
     LOG_TAIL_TIMEOUT_SECONDS,
+    PREVIEW_HEIGHT,
+    PREVIEW_WIDTH,
     READINESS_TIMEOUT_SECONDS,
     SITES_TOOL_NAMES,
     StartServerInput,
@@ -33,7 +57,11 @@ from ufo.blob import FilesystemBlobStore
 from ufo.ext.loader import skill_registry
 from ufo.loop.subagents import subagent_system_prompt
 from ufo.object_name import OBJECT_NAME_MAX_LENGTH
-from ufo.sandbox.session import ExecResult
+from ufo.sandbox.session import (
+    SANDBOX_MODULE_BOOTSTRAP,
+    SANDBOX_PYTHON_FLAG,
+    ExecResult,
+)
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.skills.runtime import mount_skill
@@ -587,6 +615,127 @@ def test_site_name_slugs_bounds_and_refuses_a_nameless_site() -> None:
     for nameless in ("---", "   ", "🌱🌱", "!!!"):
         with pytest.raises(InvalidSiteName, match="letters or digits"):
             site_name(nameless)
+
+
+def test_the_card_page_carries_the_approved_composition() -> None:
+    """The card's measurements live in one page, so they are read back off it: the 1200x630 board,
+    the 456px panel and the 744px the site's page fills, the kicker above the lockup, and the name
+    at the foot clamped to two lines. The brand files ride inside the page rather than being
+    fetched, because the sandbox that draws it has no checkout and no route to the portal.
+
+    The name is the member's own text landing in markup, so the escape is asserted here too."""
+    page = card_page("Marketing <script>alert(1)</script>", CARD_SHOT_DRAWN)
+
+    assert CARD_WIDTH == PANEL_WIDTH + SHOT_WIDTH
+    assert f"width:{CARD_WIDTH}px; height:{CARD_HEIGHT}px" in page
+    assert f"width:{PANEL_WIDTH}px" in page
+    assert f"width:{SHOT_WIDTH}px" in page
+    assert ">Made with<" in page
+    assert "font-size:26px" in page and "letter-spacing:0.15em" in page
+    assert "font-size:34px" in page and "line-height:1.28" in page
+    assert "-webkit-line-clamp:2" in page
+    assert "<svg" in page and "<?xml" not in page
+    assert "data:font/woff2;base64," in page
+    assert SHOT_TOKEN in page
+    assert "<script>" not in page
+    assert "&lt;script&gt;" in page
+    # The shot is sized two ways and fitted neither: halved for a shot taken at the card's own
+    # width, at its own size for a stored page picture the box then crops.
+    assert f"width:{SHOT_WIDTH}px;height:{CARD_HEIGHT}px" in page
+    assert "width:auto;height:auto" in card_page("marketing", STORED_SHOT_DRAWN)
+
+
+def test_the_cards_brand_files_are_the_portals_own() -> None:
+    """The panel is drawn inside the sandbox, so the lockup and the face are copied into this
+    package rather than read from the portal's source tree. A copy is only honest while it stays
+    identical, so both are held byte for byte — the rule the gateway's own mark is held to."""
+    portal = Path("extensions/web/frontend/src/assets")
+    assets = Path(share_card.__file__).parent / "assets"
+
+    assert (assets / LOGO_ASSET).read_bytes() == (portal / "ufo-logo.svg").read_bytes()
+    assert (assets / FONT_ASSET).read_bytes() == (portal / "fonts" / FONT_ASSET).read_bytes()
+
+
+def test_the_shot_is_drawn_by_the_image_own_browser_under_its_own_wall() -> None:
+    """Both shots a card costs are taken by the browser the sandbox image and the CI runner already
+    carry, which is the one the site's page shot is taken with, so a card costs no renderer that
+    either of them has to install separately.
+
+    The wall is asserted with it, because nothing on the browser's command line ends a run: the run
+    is walled from outside, and the shot on disk rather than the browser's status is what says the
+    picture was drawn. `--virtual-time-budget` is asserted absent, because the capture waits for
+    that budget and virtual time stands still while any fetch is pending, so a browser carrying it
+    draws nothing at all wherever a background service holds one open.
+
+    The unattended flags ride in every run for the same reason: a runner has no keyring, no keychain
+    and no crash server, and a browser that waits on one of those spends the whole wall and draws
+    nothing."""
+    shot = "/workspace/.tool-output/share-card-shot-marketing.png"
+    command = shot_command(
+        url="http://127.0.0.1:8000",
+        width=SHOT_WIDTH,
+        height=CARD_HEIGHT,
+        scale=2,
+        shot=shot,
+        profile="/tmp/ufo-share-card",
+        root="/workspace",
+    )
+
+    for browser in BROWSER_COMMANDS:
+        assert browser in command
+    assert "playwright" not in command
+    assert "--virtual-time-budget" not in command
+    for flag in UNATTENDED_FLAGS.split():
+        assert flag in command
+    assert "--password-store=basic" in command
+    assert "--use-mock-keychain" in command
+    assert "--disable-component-extensions-with-background-pages" in command
+    assert f"timeout --signal=KILL {SHOT_DEADLINE_SECONDS}s" in command
+    assert SHOT_DEADLINE_SECONDS < CARD_TIMEOUT_SECONDS
+    assert f"test -s {shlex.quote(shot)}" in command
+
+
+def test_the_shot_is_driven_to_a_settle_point_inside_its_wall() -> None:
+    """The browser is driven rather than one-shot, because the load event is the only settle point a
+    one-shot chromium offers and it is too early: a page that reveals its content with an entrance
+    animation, or writes its DOM after load, is photographed blank there — and a blank shot is a
+    white PNG, which is not an empty file, so the size check accepts it as a picture.
+
+    So the run carries the driver: it speaks the DevTools protocol over the browser's own pipe,
+    waits for the load event and then for a frame that repeats with no request in flight, and
+    refuses a shot that is one flat colour. Every wait it takes is walled, and the two walls
+    together sit inside the kill wall, so a page that never goes idle is photographed rather than
+    waited on — the failure `--virtual-time-budget` had, which is why it is asserted absent
+    above."""
+    shot = "/workspace/.tool-output/preview-8000.png"
+    command = shot_command(
+        url="http://127.0.0.1:8000",
+        width=PREVIEW_WIDTH,
+        height=PREVIEW_HEIGHT,
+        scale=1,
+        shot=shot,
+        profile="/tmp/ufo-site-preview",
+        root="/workspace",
+    )
+
+    assert "--screenshot=" not in command
+    assert "--remote-debugging-pipe" in command
+    assert "Page.loadEventFired" in command
+    assert "Network.enable" in command
+    assert "Page.captureScreenshot" in command
+    assert "Emulation.setDeviceMetricsOverride" in command
+    assert "flat colour" in command
+    # The driver runs isolated with the baked guard on its path, and writes the shot through the
+    # guard rather than letting the browser create a name the agent's own directory holds.
+    assert f"python3 {SANDBOX_PYTHON_FLAG} -" in command
+    assert SANDBOX_MODULE_BOOTSTRAP in command
+    assert "contained_file" in command
+    assert LOAD_WALL_SECONDS + SETTLE_WALL_SECONDS < SHOT_DEADLINE_SECONDS
+    assert f"LOAD_WALL = {LOAD_WALL_SECONDS}" in command
+    assert f"SETTLE_WALL = {SETTLE_WALL_SECONDS}" in command
+    assert f"FRAME = {FRAME_SECONDS}" in command
+    for argument in (shlex.quote(shot), shlex.quote("/tmp/ufo-site-preview"), "/workspace"):
+        assert argument in command
 
 
 def test_start_server_rejects_an_out_of_range_port() -> None:

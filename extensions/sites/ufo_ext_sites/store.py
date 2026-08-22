@@ -58,6 +58,8 @@ hosted_site = sa.Table(
     sa.Column("homepage_agent_id", sa.Uuid, nullable=True),
     sa.Column("preview_blob_key", sa.Text, nullable=True),
     sa.Column("preview_size_bytes", sa.Integer, nullable=True),
+    sa.Column("share_card_blob_key", sa.Text, nullable=True),
+    sa.Column("share_card_hash", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
@@ -127,8 +129,9 @@ def visibility_level(value: str) -> Visibility:
 @dataclass(frozen=True)
 class HostedSite:
     """One registered site: its conversation-scoped identity, the sandbox port serving it, who
-    created it, the visibility its frame gates every viewer on, and the picture of the page its last
-    deploy captured — the blob key and exact size a signed preview link is minted over."""
+    created it, the visibility its frame gates every viewer on, the picture of the page its last
+    deploy captured — the blob key and exact size a signed preview link is minted over — and the
+    share card composed from that page, whose digest is the only part of it a public URL carries."""
 
     conversation_id: UUID
     name: str
@@ -139,6 +142,8 @@ class HostedSite:
     homepage_agent_id: UUID | None
     preview_blob_key: str | None
     preview_size_bytes: int | None
+    share_card_blob_key: str | None
+    share_card_hash: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -238,6 +243,32 @@ class HostedSites:
                 .values(
                     preview_blob_key=preview.blob_key,
                     preview_size_bytes=preview.size_bytes,
+                    updated_at=sa.func.now(),
+                )
+            )
+
+    async def set_share_card(
+        self, conversation_id: UUID, name: str, blob_key: str, digest: str
+    ) -> None:
+        """Write the share card composed from the site's page onto its row, with the digest of the
+        card's own bytes.
+
+        The digest is what the card's public URL carries, so a redeploy addresses a new URL and no
+        crawler's cache has to be invalidated, and a URL naming a digest the row no longer holds is
+        a 404. Its own write, after the registration and the picture, matching nothing for a site
+        unhosted or renamed off the port while the card was drawing: that site keeps the card it
+        had, which is what a failed render leaves too."""
+        async with self.transaction() as connection:
+            await connection.execute(
+                sa.update(hosted_site)
+                .where(
+                    hosted_site.c.workspace_id == self.workspace_id,
+                    hosted_site.c.conversation_id == conversation_id,
+                    hosted_site.c.name == name,
+                )
+                .values(
+                    share_card_blob_key=blob_key,
+                    share_card_hash=digest,
                     updated_at=sa.func.now(),
                 )
             )
@@ -460,6 +491,8 @@ class HostedSites:
             hosted_site.c.homepage_agent_id,
             hosted_site.c.preview_blob_key,
             hosted_site.c.preview_size_bytes,
+            hosted_site.c.share_card_blob_key,
+            hosted_site.c.share_card_hash,
             hosted_site.c.created_at,
             hosted_site.c.updated_at,
         )
@@ -482,6 +515,8 @@ def _site(row: sa.Row) -> HostedSite:
         homepage_agent_id=row.homepage_agent_id,
         preview_blob_key=row.preview_blob_key,
         preview_size_bytes=row.preview_size_bytes,
+        share_card_blob_key=row.share_card_blob_key,
+        share_card_hash=row.share_card_hash,
         created_at=_aware(row.created_at),
         updated_at=_aware(row.updated_at),
     )
