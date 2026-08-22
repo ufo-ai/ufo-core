@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import tomllib
 from pathlib import Path
@@ -6,15 +7,22 @@ from pathlib import Path
 import pytest
 import tomli_w
 
+from evals import ablate
 from evals.ablate import (
+    LOGS_DIR,
+    RUNS_DIR,
+    STACK_LOG,
+    STACK_RUNS_DIR,
     WORKTREES_DIR,
     Ablation,
+    ArmResult,
     ArmSpec,
     CaseCount,
     ExperimentSpec,
     collect_counts,
     ingestion_suites,
     load_experiment,
+    record_gaps,
     render_report,
     verdict,
 )
@@ -351,8 +359,6 @@ def test_verdict_holds_off_when_the_arm_ran_fewer_samples() -> None:
 
 
 def test_render_report_names_the_moved_cases(tmp_path: Path) -> None:
-    from evals.ablate import ArmResult
-
     spec = ExperimentSpec(
         name="exp",
         base="origin/main",
@@ -392,4 +398,168 @@ def test_an_arm_missing_its_repo_path_is_recorded_as_a_failed_arm(tmp_path: Path
     result = asyncio.run(ablation._arm(spec.arm[0], base, asyncio.Semaphore(1)))
     assert result.error is not None
     assert "gone.py" in result.error
+    assert result.kept_worktree is None
     assert not (repo / WORKTREES_DIR / "exp" / "knockout").exists()
+
+
+def _spec(**updates: object) -> ExperimentSpec:
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("closing_message", "response_register"),
+        repeats=2,
+        budget_usd=50.0,
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(ArmSpec(name="knockout", files={}),),
+    )
+    return spec.model_copy(update=updates)
+
+
+def _stack_record(index: int, suites: tuple[str, ...]) -> dict:
+    return {
+        "label": f"ablate-knockout-{index}",
+        "reports": [{"name": suite, "cases": []} for suite in suites],
+    }
+
+
+def test_an_arm_installs_no_dev_group_and_the_failure_names_the_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dev group is the repo's lint, type and test tooling, which no arm runs, and a package in
+    it that builds by downloading a release binary fails wherever that download is closed."""
+    commands = []
+
+    def failing_sync(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess:
+        commands.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 1, "", "error: Failed to build `actionlint-py==1.7.12.24`"
+        )
+
+    monkeypatch.setattr(ablate.subprocess, "run", failing_sync)
+    ablation = Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")
+
+    with pytest.raises(RuntimeError, match="actionlint-py"):
+        ablation._sync(tmp_path / "worktree")
+
+    assert commands == [("uv", "sync", "--no-dev")]
+
+
+def test_the_stack_runs_the_arm_environment_without_the_dev_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`uv run` syncs before it runs, so the environment the arm built only survives when the run
+    refuses the dev group too. The whole output comes back, because it is what gets archived."""
+    seen: dict[str, tuple[str, ...]] = {}
+    output = ("stack chatter\n" * 500).encode()
+
+    class Fake:
+        returncode = 3
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return output, b""
+
+    async def fake_exec(*argv: str, **kwargs: object) -> Fake:
+        seen["argv"] = argv
+        return Fake()
+
+    monkeypatch.setattr(ablate.asyncio, "create_subprocess_exec", fake_exec)
+    spec = _spec()
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    exit_code, text = asyncio.run(ablation._stack(spec.arm[0], tmp_path / "worktree"))
+
+    assert seen["argv"][:3] == ("uv", "run", "--no-dev")
+    assert exit_code == 3
+    assert text == output.decode()
+
+
+def test_record_gaps_name_the_repeat_and_the_suite_that_recorded_nothing() -> None:
+    """A stack that paid for a suite and archived no report for it is invisible to the pass counts:
+    `collect_counts` reads what landed."""
+    spec = _spec()
+    complete = [_stack_record(0, spec.suites), _stack_record(1, spec.suites)]
+
+    assert record_gaps(spec, "knockout", complete) == ()
+    assert record_gaps(spec, "knockout", [complete[0]]) == ("ablate-knockout-1: no record",)
+    assert record_gaps(spec, "knockout", [complete[0], _stack_record(1, ("closing_message",))]) == (
+        "ablate-knockout-1: no report for response_register",
+    )
+
+
+def test_the_report_names_every_record_gap_and_the_worktree_kept_for_it(tmp_path: Path) -> None:
+    kept = tmp_path / ".local/ablate/exp/knockout"
+    results = (
+        ArmResult("control", {"routing": CaseCount(1, 2, ())}, 1.0),
+        ArmResult(
+            "knockout",
+            {"routing": CaseCount(1, 1, ())},
+            1.0,
+            gaps=("ablate-knockout-1: no report for response_register",),
+            kept_worktree=kept,
+        ),
+    )
+
+    report = render_report(_spec(), results)
+
+    assert "record gap: ablate-knockout-1: no report for response_register" in report
+    assert f"worktree kept for diagnosis: {kept}" in report
+
+
+def _archived_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, records: list[dict]
+) -> tuple[ArmResult, Path]:
+    """One arm over a worktree the fake materialization fills, so the archive and the retention
+    rule are exercised without a stack."""
+    spec = _spec()
+    root = tmp_path / WORKTREES_DIR / spec.name / spec.arm[0].name
+
+    def materialize(self: Ablation, arm: ArmSpec, base: str, target: Path) -> None:
+        (target / RUNS_DIR).mkdir(parents=True)
+        for index, record in enumerate(records):
+            (target / RUNS_DIR / f"{index}.json").write_text(json.dumps(record))
+            logs = target / STACK_RUNS_DIR / "20260821-224424" / record["label"]
+            logs.mkdir(parents=True)
+            (logs / "serve.log").write_text("serve booted")
+
+    async def stack(self: Ablation, arm: ArmSpec, target: Path) -> tuple[int, str]:
+        return 1, "one case failed"
+
+    monkeypatch.setattr(Ablation, "_materialize", materialize)
+    monkeypatch.setattr(Ablation, "_stack", stack)
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    result = asyncio.run(ablation._arm(spec.arm[0], "base", asyncio.Semaphore(1)))
+    return result, root
+
+
+def test_a_complete_arm_archives_its_logs_and_gives_the_worktree_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = _spec()
+    result, root = _archived_arm(
+        tmp_path, monkeypatch, [_stack_record(0, spec.suites), _stack_record(1, spec.suites)]
+    )
+    archive = tmp_path / "out" / "runs" / "knockout"
+
+    assert result.gaps == ()
+    assert result.kept_worktree is None
+    assert not root.exists()
+    assert (archive / STACK_LOG).read_text() == "one case failed"
+    assert (archive / LOGS_DIR / "ablate-knockout-1" / "serve.log").read_text() == "serve booted"
+    assert sorted(path.name for path in archive.glob("*.json")) == ["0.json", "1.json"]
+
+
+def test_an_arm_that_lost_a_suite_keeps_its_worktree_and_says_which(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stack had already paid for the cases, so its logs and its database are the only account
+    of what the money bought."""
+    result, root = _archived_arm(tmp_path, monkeypatch, [_stack_record(0, ("closing_message",))])
+
+    assert result.gaps == (
+        "ablate-knockout-0: no report for response_register",
+        "ablate-knockout-1: no record",
+    )
+    assert result.kept_worktree == root
+    assert (root / RUNS_DIR / "0.json").is_file()
+    assert (tmp_path / "out" / "runs" / "knockout" / STACK_LOG).is_file()

@@ -253,6 +253,27 @@ async def test_exec_rewrites_the_logical_workspace_path(tmp_path: Path) -> None:
     assert (workspace / "w.txt").read_text() == "x"
 
 
+async def test_a_logical_path_inside_a_file_a_command_reads_is_not_rewritten(
+    tmp_path: Path,
+) -> None:
+    """Argv is the whole of the rewrite, so a `/workspace` path the agent wrote into a script or a
+    REPL cell resolves against the host's own filesystem. That is why a path a command carries in
+    its own text has to be workspace-relative under this carrier, and why a mounted skill's script
+    is unreachable here by the logical path a load prints for it."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    (workspace / "probe.py").write_text(
+        "from pathlib import Path\n"
+        "print(Path('/workspace/probe.py').resolve() == Path('probe.py').resolve())\n"
+    )
+
+    result = await carrier.exec(handle, ("python3", "/workspace/probe.py"), 30)
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "False"
+
+
 async def test_exec_carries_the_egress_environment(tmp_path: Path) -> None:
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(tmp_path / "workspace"))

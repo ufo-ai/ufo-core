@@ -97,9 +97,11 @@ experiment file names the base revision, the suites and cases, repeats, a budget
 refuses to exceed, the stack's template config, and `[[arm]]` blocks mapping repo paths to variant
 files. Verdicts compare sample-level pass counts per case and call a move only past a two-sample
 gap at equal sample counts (or a total collapse or fix); a failing case is data — a stack's
-nonzero exit is fatal only when it wrote no record. Reports and every arm's records land under
-`eval-reports/experiments/<name>/`. Judge and simulator variance is real: compare arms from the
-same experiment, never across runs.
+nonzero exit is fatal only when it wrote no record. Reports, every arm's records, and each arm's
+stack logs land under `eval-reports/experiments/<name>/`; an arm that owed a record and wrote none
+names the gap in the report and keeps its worktree, so the stack that spent the money can still be
+read. Judge and simulator variance is real: compare arms from the same experiment, never across
+runs.
 
 ```toml
 name = "customers-section-clauses"

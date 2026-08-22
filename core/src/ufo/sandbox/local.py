@@ -161,6 +161,13 @@ class LocalCarrier:
         pass are logical, so each argv element is rewritten to the host workspace directory before
         the subprocess sees it, and the command inherits the turn's egress environment.
 
+        Argv is the whole of the rewrite. A logical path inside a file the command reads — a script
+        the agent wrote, a REPL cell — resolves against the host's own filesystem, where
+        `/workspace` is a different directory or none, so a mounted skill's own script is
+        unreachable by its logical path under this carrier. A carrier whose sandbox holds
+        `/workspace` itself (docker, e2b) has no such seam. A path a command carries in its own text
+        has to be workspace-relative, the way the REPL prelude keeps its emit path.
+
         The command leads its own process group, and an exec that ends without the command's
         consent — its timeout, or a cancelled turn — kills that group rather than the shell alone.
         A signal to the direct child leaves its descendants running, reparented to init and holding

@@ -9,6 +9,11 @@ is an isolated stack with its own database and serve. Results compare sample-lev
 per case against the control, and the report calls a case moved only when the gap is wide enough
 to survive the suite's own noise.
 
+Each arm's records, its stacks' own logs and the orchestrator's whole view of the run are archived
+under `runs/<arm>/` before the worktree goes. An arm that owed a record and never wrote one keeps
+its worktree and says so in the report: the stack had already paid for those cases, and its logs
+and database are the only account of what the money bought.
+
 The experiment file:
 
     name = "customers-section-clauses"
@@ -65,6 +70,10 @@ EGRESS_BINARY = Path("egress/target/debug/ufo-egress")
 RUNS_DIR = Path("eval-reports/runs")
 EXPERIMENTS_DIR = Path("eval-reports/experiments")
 WORKTREES_DIR = Path(".local/ablate")
+STACK_RUNS_DIR = Path(".local/evals")
+STACK_LOG = "stack.log"
+LOGS_DIR = "logs"
+TAIL_CHARS = 1500
 SIGNAL_GAP = 2
 SIGNAL_FLOOR = 3
 
@@ -172,6 +181,8 @@ class ArmResult:
     counts: dict[str, CaseCount]
     cost_usd: float
     error: str | None = None
+    gaps: tuple[str, ...] = ()
+    kept_worktree: Path | None = None
 
 
 def collect_counts(records: list[dict]) -> tuple[dict[str, CaseCount], float]:
@@ -215,6 +226,27 @@ def collect_counts(records: list[dict]) -> tuple[dict[str, CaseCount], float]:
     return counts, cost / 1e6
 
 
+def record_gaps(spec: ExperimentSpec, arm: str, records: list[dict]) -> tuple[str, ...]:
+    """The records and suite reports this arm's stacks owed and never wrote. A stack pays for a
+    suite before it records it, so a repeat that archived nothing — or a record that carries only
+    some of the suites it ran — is spend with no evidence, and every verdict read against it is
+    void. Naming the gap keeps it out of the arithmetic's blind spot: `collect_counts` reads what
+    landed and cannot tell a suite that never ran from one whose report was lost."""
+    by_label = {record.get("label"): record for record in records}
+    gaps = []
+    for index in range(spec.repeats):
+        label = f"{ARM_LABEL_PREFIX}-{arm}-{index}"
+        record = by_label.get(label)
+        if record is None:
+            gaps.append(f"{label}: no record")
+            continue
+        landed = {report["name"] for report in record["reports"]}
+        absent = [name for name in spec.suites if name not in landed]
+        if absent:
+            gaps.append(f"{label}: no report for {', '.join(absent)}")
+    return tuple(gaps)
+
+
 def verdict(control: CaseCount, arm: CaseCount) -> str:
     """One case's movement between the control and an arm, at sample level. A pass-count gap only
     means something when both sides ran the same number of samples, so an arm that lost a repeat
@@ -237,6 +269,15 @@ def verdict(control: CaseCount, arm: CaseCount) -> str:
     return "needs-samples"
 
 
+def _diagnostics(result: ArmResult) -> list[str]:
+    """What the arm owes and where the evidence for it is, in the report rather than only in the
+    console the run scrolled past."""
+    lines = [f"- record gap: {gap}" for gap in result.gaps]
+    if result.kept_worktree is not None:
+        lines.append(f"- worktree kept for diagnosis: {result.kept_worktree}")
+    return lines
+
+
 def render_report(spec: ExperimentSpec, results: tuple[ArmResult, ...]) -> str:
     control = next(result for result in results if result.name == CONTROL_ARM)
     lines = [f"# Ablation: {spec.name}", ""]
@@ -245,16 +286,18 @@ def render_report(spec: ExperimentSpec, results: tuple[ArmResult, ...]) -> str:
     lines.append(f"Total case cost ${total:.2f}.")
     for result in results:
         if result.error:
-            lines += ["", f"## {result.name}: FAILED — {result.error}"]
+            lines += ["", f"## {result.name}: FAILED — {result.error}", *_diagnostics(result)]
             continue
         if result.name == CONTROL_ARM:
             lines += ["", f"## control (${result.cost_usd:.2f})", ""]
+            lines += _diagnostics(result)
             for name in sorted(control.counts):
                 count = control.counts[name]
                 lines.append(f"- {name}: {count.passes}/{count.samples}")
             continue
         moved = []
         lines += ["", f"## {result.name} (${result.cost_usd:.2f})", ""]
+        lines += _diagnostics(result)
         for name in sorted(control.counts):
             base = control.counts[name]
             arm = result.counts.get(name)
@@ -298,6 +341,13 @@ class Ablation:
             json.dumps(self.spec.model_dump(mode="json"), indent=2) + "\n"
         )
         print(report)
+        incomplete = [result.name for result in results if result.gaps]
+        if incomplete:
+            print(
+                f"records incomplete, worktrees kept: {', '.join(incomplete)} — the report names "
+                f"each gap, and each arm's logs are under {(self.out / 'runs').resolve()}",
+                file=sys.stderr,
+            )
         failed = [result.name for result in results if result.error]
         if failed:
             print(f"arms failed: {', '.join(failed)}", file=sys.stderr)
@@ -356,33 +406,70 @@ class Ablation:
         ).stdout
 
     async def _arm(self, arm: ArmSpec, base: str, slots: asyncio.Semaphore) -> ArmResult:
+        """One arm end to end. The worktree is removed only once the arm archived every record it
+        owed: a stack pays before it records, so a lost record is the one moment the worktree's
+        stack logs and databases are the only evidence of what the money bought, and the run that
+        threw them away could not be diagnosed at all. A materialization that never reached a
+        stack spent nothing and keeps no worktree."""
         async with slots:
             root = self.repo / WORKTREES_DIR / self.spec.name / arm.name
+            archive = self.out / "runs" / arm.name
+            keep = False
             print(f"[{arm.name}] materializing", flush=True)
             try:
                 await asyncio.to_thread(self._materialize, arm, base, root)
+                keep = True
                 print(f"[{arm.name}] stack running", flush=True)
-                exit_code, tail = await self._stack(arm, root)
+                exit_code, output = await self._stack(arm, root)
+                await asyncio.to_thread(self._archive, root, archive, output)
                 records = [
                     json.loads(path.read_text())
                     for path in sorted((root / RUNS_DIR).glob("*.json"))
                 ]
+                gaps = record_gaps(self.spec, arm.name, records)
+                keep = bool(gaps)
+                kept = root if keep else None
                 if not records:
+                    tail = output[-TAIL_CHARS:]
                     return ArmResult(
-                        arm.name, {}, 0.0, error=f"stack exited {exit_code}, no record: {tail}"
+                        arm.name,
+                        {},
+                        0.0,
+                        error=f"stack exited {exit_code}, no record: {tail}",
+                        gaps=gaps,
+                        kept_worktree=kept,
                     )
                 counts, cost = collect_counts(records)
-                archive = self.out / "runs" / arm.name
-                archive.mkdir(parents=True, exist_ok=True)
-                for path in (root / RUNS_DIR).glob("*.json"):
-                    shutil.copy(path, archive / path.name)
                 print(f"[{arm.name}] done (${cost:.2f})", flush=True)
-                return ArmResult(arm.name, counts, cost)
+                return ArmResult(arm.name, counts, cost, gaps=gaps, kept_worktree=kept)
             except Exception as error:
                 print(f"[{arm.name}] FAILED: {type(error).__name__}: {error}", flush=True)
-                return ArmResult(arm.name, {}, 0.0, error=f"{type(error).__name__}: {error}")
+                return ArmResult(
+                    arm.name,
+                    {},
+                    0.0,
+                    error=f"{type(error).__name__}: {error}",
+                    kept_worktree=root if keep else None,
+                )
             finally:
-                await asyncio.to_thread(self._remove_worktree, root)
+                if keep:
+                    print(f"[{arm.name}] worktree kept at {root}", flush=True)
+                else:
+                    await asyncio.to_thread(self._remove_worktree, root)
+
+    def _archive(self, root: Path, archive: Path, output: str) -> None:
+        """Everything the arm produced that has to outlive its worktree: its records, this
+        orchestrator's whole view of the stack run, and each stack's own `seed`, `serve`, `egress`
+        and `eval` logs. Written before any verdict is read, because a record that never landed is
+        only explainable from the logs of the stack that owed it."""
+        archive.mkdir(parents=True, exist_ok=True)
+        (archive / STACK_LOG).write_text(output)
+        for path in (root / RUNS_DIR).glob("*.json"):
+            shutil.copy(path, archive / path.name)
+        for path in sorted((root / STACK_RUNS_DIR).glob("*/*/*.log")):
+            logs = archive / LOGS_DIR / path.parent.name
+            logs.mkdir(parents=True, exist_ok=True)
+            shutil.copy(path, logs / path.name)
 
     def _materialize(self, arm: ArmSpec, base: str, root: Path) -> None:
         if root.exists():
@@ -394,7 +481,7 @@ class Ablation:
             if not target.is_file():
                 raise RuntimeError(f"arm {arm.name!r}: {repo_path} is not a file at {base}")
             shutil.copy(variant, target)
-        subprocess.run(("uv", "sync"), cwd=root, check=True, capture_output=True)
+        self._sync(root)
         binary = root / EGRESS_BINARY
         binary.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(self.repo / EGRESS_BINARY, binary)
@@ -402,6 +489,20 @@ class Ablation:
         config = root / "ablate-template.toml"
         config.write_text(tomli_w.dumps(self.spec.template))
         (root / "ablate-matrix.toml").write_text(tomli_w.dumps(self.matrix(arm, config)))
+
+    def _sync(self, root: Path) -> None:
+        """Only what the arm runs: `evals.stack`, its serve and its eval children, never the repo's
+        lint, type and test tooling. A bare `uv sync` installs the dev group too, and a dev package
+        that builds by downloading a release binary fails wherever that download is closed — which
+        materializes no arm at all, for a group no arm needs.
+
+        `uv sync` reports the failing package on stderr and `CalledProcessError` carries none of it,
+        so the tail rides the raised error instead."""
+        done = subprocess.run(
+            ("uv", "sync", "--no-dev"), cwd=root, check=False, capture_output=True, text=True
+        )
+        if done.returncode != 0:
+            raise RuntimeError(f"uv sync --no-dev failed in {root}: {done.stderr[-TAIL_CHARS:]}")
 
     def matrix(self, arm: ArmSpec, config: Path) -> dict[str, list[dict[str, object]]]:
         """One arm's `evals.stack` matrix: a run block per repeat, each an isolated stack.
@@ -433,6 +534,7 @@ class Ablation:
         process = await asyncio.create_subprocess_exec(
             "uv",
             "run",
+            "--no-dev",
             "--project",
             str(root),
             "python",
@@ -444,7 +546,7 @@ class Ablation:
             stderr=asyncio.subprocess.STDOUT,
         )
         output, _ = await process.communicate()
-        return process.returncode or 0, output.decode(errors="replace")[-1500:]
+        return process.returncode or 0, output.decode(errors="replace")
 
     def _remove_worktree(self, root: Path) -> None:
         if not root.exists():
