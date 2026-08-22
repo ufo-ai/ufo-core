@@ -60,7 +60,7 @@ def test_fails_loud_without_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:
         verify_surface_token("sites", "anything")
 
 
-BEARER_CONTRACT = Path(__file__).parents[2] / "control" / "tests" / "bearer_contract.json"
+BEARER_CONTRACT = Path(__file__).parents[3] / "control" / "tests" / "bearer_contract.json"
 
 
 def test_the_rust_contract_vectors_are_this_codec() -> None:

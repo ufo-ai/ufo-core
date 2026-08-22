@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 import urllib3
 
-SBX_PATH = Path(__file__).parents[1] / "src" / "ufo" / "sandbox" / "image" / "sbx"
+SBX_PATH = Path(__file__).parents[2] / "src" / "ufo" / "sandbox" / "image" / "sbx"
 
 
 def _sbx() -> dict[str, object]:

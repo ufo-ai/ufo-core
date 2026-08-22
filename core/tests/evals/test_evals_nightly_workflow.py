@@ -18,7 +18,7 @@ from evals.memory_ingestion.materialize import (
 from evals.registry import TASKS
 from evals.stack import Matrix
 
-ROOT = Path(__file__).parents[2]
+ROOT = Path(__file__).parents[3]
 WORKFLOW = ROOT / ".github" / "workflows" / "evals-nightly.yml"
 SCRIPTS = ROOT / ".github" / "scripts"
 # GitHub stops any job on a hosted runner at six hours, whatever `timeout-minutes` names.

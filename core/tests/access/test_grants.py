@@ -1055,7 +1055,7 @@ def test_the_connect_mark_is_the_portals_own_file_byte_for_byte() -> None:
     Nothing about a rendered glyph fails a size assertion, so this compares the bytes instead — and
     it is also what keeps the two copies from drifting apart as the brand changes."""
     portal = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[3]
         / "extensions"
         / "web"
         / "frontend"

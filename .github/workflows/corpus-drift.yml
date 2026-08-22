@@ -78,8 +78,8 @@ jobs:
                the new claim can be pinned by a pattern, add a `Claim` row to
                `core/tests/test_onboarding_corpus_claims.py` so the next change to that mechanism
                fails CI instead of reaching a customer. Run
-               `uv run pytest core/tests/test_onboarding_corpus_claims.py core/tests/test_packs.py
-               core/tests/test_skills.py core/tests/test_onboarding_help_eval.py`,
+               `uv run pytest core/tests/test_onboarding_corpus_claims.py core/tests/ext/test_packs.py
+               core/tests/skills/test_skills.py core/tests/evals/test_onboarding_help_eval.py`,
                `uv run ruff check`, `uv run ruff format --check`, and `uv run python gates.py`.
                Open one PR naming each corrected claim and the code that proves it, ending
                `Fingerprint: corpus-drift/<slug>`.

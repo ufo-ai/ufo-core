@@ -27,7 +27,7 @@ def test_the_preview_host_matches_the_proxys_own_constant() -> None:
     """The proxy picks which daemon a service rule relays to by comparing the rule's host against
     its own copy of this constant, so a drift between the two would relay every render at the cache
     daemon instead — and the cache would answer none of them."""
-    server_rs = Path(__file__).resolve().parents[2] / "egress" / "src" / "server.rs"
+    server_rs = Path(__file__).resolve().parents[3] / "egress" / "src" / "server.rs"
     declared = re.search(r'PREVIEW_HOST: &str = "([^"]+)";', server_rs.read_text())
     assert declared is not None, "PREVIEW_HOST not found in egress/src/server.rs"
     assert declared.group(1) == PREVIEW_HOST

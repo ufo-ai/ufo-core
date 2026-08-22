@@ -801,7 +801,7 @@ async def test_slack_channels_needs_the_bot_token(db: None, tmp_path: Path) -> N
 @dataclass(frozen=True)
 class _PortalCtx:
     """Stands in for the surface context's one collaborator this rendering reads. `home_url`'s own
-    format is proved against the real context in `core/tests/test_surface.py`; what is asserted
+    format is proved against the real context in `core/tests/ext/test_surface.py`; what is asserted
     here is what Slack does with the address it is handed, and what it says without one."""
 
     base: str | None

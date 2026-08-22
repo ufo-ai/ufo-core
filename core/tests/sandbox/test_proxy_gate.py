@@ -203,7 +203,7 @@ def test_main_passes_the_required_environment_to_the_gate(
 
 
 def test_deploy_runs_the_live_proxy_gate_after_apply() -> None:
-    workflow = (Path(__file__).parents[2] / ".github" / "workflows" / "deploy.yml").read_text()
+    workflow = (Path(__file__).parents[3] / ".github" / "workflows" / "deploy.yml").read_text()
     assert "Gate sandbox egress proxy TLS" in workflow
     assert "sandbox/proxy_gate.py" in workflow
     assert "sandbox_proxy_ca_cert" in workflow

@@ -16,7 +16,7 @@ import yaml
 from infra.testing_secrets import SECRET_INPUTS
 from ufo.sources.sync import SOURCE_SYNC_CHECK
 
-ROOT = Path(__file__).parents[2]
+ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
 # Terraform template `if`/`endif` directive lines, stripped before a template parses as YAML.
 TEMPLATE_DIRECTIVE = (

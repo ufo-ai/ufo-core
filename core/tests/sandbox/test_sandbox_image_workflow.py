@@ -13,7 +13,7 @@ import yaml
 
 from sandbox.build_template import DOCKER_BASE_IMAGE, pod_dockerfile
 
-ROOT = Path(__file__).parents[2]
+ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
 IMAGE_KEY_SCRIPT = ROOT / ".github" / "scripts" / "sandbox_image_key.sh"
 REUSE_STEP = "Reuse the published sandbox image"

@@ -9,7 +9,7 @@ from types import ModuleType
 
 import pytest
 
-SANDBOX_DIR = Path(__file__).parents[1] / "src" / "ufo" / "sandbox"
+SANDBOX_DIR = Path(__file__).parents[2] / "src" / "ufo" / "sandbox"
 SBXFS_PATH = SANDBOX_DIR / "image" / "sbxfs"
 CONTAINMENT_PATH = SANDBOX_DIR / "containment.py"
 

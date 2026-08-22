@@ -378,7 +378,7 @@ def test_the_workspace_derivation_matches_the_rust_contract() -> None:
     import json
     from pathlib import Path
 
-    contract = Path(__file__).parents[2] / "control" / "tests" / "onboard_contract.json"
+    contract = Path(__file__).parents[3] / "control" / "tests" / "onboard_contract.json"
     vectors: dict[str, str] = json.loads(contract.read_text())
     assert len(vectors) >= 4
     for domain, expected in vectors.items():
