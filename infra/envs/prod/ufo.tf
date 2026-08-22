@@ -340,13 +340,11 @@ resource "kubectl_manifest" "ufo" {
   for_each  = local.ufo_workload_manifests
   yaml_body = each.value
 
-  # The ufo-egress and ufo-preview images are pushed by the testing deploy of this commit, into the
-  # account-level ECR repositories testing owns — so their tags already exist by the time a promotion
-  # reaches this apply. The wait stays off on those two Deployments because only `Require tested
-  # images` verifies tags, and it verifies the bundle and gateway ones: a promotion whose egress or
-  # preview image never landed should fail the workflow's own `kubectl rollout status` below rather
-  # than deadlock this apply. maxUnavailable=0 keeps the old pods serving until the new ones are ready.
-  wait_for_rollout = !strcontains(each.key, "deployments/ufo-sandbox-proxy") && !strcontains(each.key, "deployments/ufo-preview")
+  # The workflow's `kubectl rollout status --timeout=15m` is the one rollout gate. An in-apply wait
+  # is bounded by the provider's 10m update timeout, and a drain-held roll legitimately runs up to
+  # terminationGracePeriodSeconds (700s) plus pod start — so waiting here fails healthy rolls.
+  # maxUnavailable=0 keeps the old pods serving until the new ones are ready.
+  wait_for_rollout = false
 
   depends_on = [kubectl_manifest.ufo_migrate, module.platform]
 }
