@@ -15,16 +15,21 @@ import {
   AGENT,
   AGENT_ID,
   CONVO_ID,
+  FRESH,
   MEMBER,
   SECOND_ID,
   SETTINGS,
   StreamFake,
+  TASK_KIND,
   TURN_ID,
   agentIndex,
   atPhoneWidth,
   json,
+  objectIndex,
   openAgentRow,
   openAgentSettings,
+  openRow,
+  owned,
   saying,
   useStreamFake,
   wire,
@@ -633,6 +638,77 @@ test("a mark named for what every object answers still leads the picker as the a
   expect((marks[0] as HTMLInputElement).checked).toBe(true);
 });
 
+test("a slot the settings dialog raises stands inside it, beside what raised it", async () => {
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const dialog = await openAgentSettings("Assistant", "Connectors");
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Add connector" }));
+
+  const form = await screen.findByRole("region", { name: "Add connector" });
+  expect(dialog.contains(form)).toBe(true);
+  const cover = form.closest("[data-slot=slot-track]");
+  expect(cover?.className).toContain("absolute");
+  expect(cover?.contains(within(dialog).getByRole("tabpanel"))).toBe(false);
+});
+
+/** The dialog holds no address, so it holds the one track its Scheduled tab walks. The index there
+ *  is the root like any other: a second row takes the first record's place, and the dialog reopens
+ *  on the first tab with nothing standing. */
+test("a second row of the dialog's Scheduled tab takes the first record's place", async () => {
+  const task = (name: string, prompt: string) =>
+    json({
+      ...TASK_KIND,
+      name,
+      summary: "0 9 * * * — " + prompt,
+      spec: { schedule: "0 9 * * *", prompt, paused: false },
+      status: { next_run_at: "2026-08-15T09:00:00+00:00", paused: false },
+      links: [],
+      created_at: "2026-08-01T09:00:00Z",
+      updated_at: "2026-08-01T09:00:00Z",
+    });
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/objects/scheduled_task/daily-brief": () => task("daily-brief", "write the daily brief"),
+    "/objects/scheduled_task/weekly-roll": () => task("weekly-roll", "roll up the week"),
+    "/objects/scheduled_task": () =>
+      objectIndex(TASK_KIND, [
+        owned({ name: "daily-brief", summary: "0 9 * * * — daily brief", paused: false }),
+        owned({ name: "weekly-roll", summary: "0 9 * * 1 — weekly roll-up", paused: false }),
+      ]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const dialog = await openAgentSettings("Assistant", "Scheduled");
+  const standing = () =>
+    within(dialog)
+      .queryAllByRole("region")
+      .map((slot) => slot.getAttribute("aria-label"));
+
+  await openRow("daily-brief");
+  expect(await within(dialog).findByRole("region", { name: "daily-brief" })).toBeTruthy();
+
+  await openRow("weekly-roll");
+
+  expect(await within(dialog).findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+  await waitFor(() => expect(standing()).toEqual(["weekly-roll"]));
+
+  await userEvent.click(within(dialog).getByRole("tab", { name: "Settings" }));
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+  const reopened = await openAgentSettings("Assistant", "Scheduled");
+  expect(await within(reopened).findByText("daily-brief")).toBeTruthy();
+  expect(within(reopened).queryAllByRole("region")).toEqual([]);
+});
+
 /** The workspace's own mark is reserved: the picker offers it to no app, and the main agent is the
  *  row that holds it. It appears there once and only as that row's own mark — led, checked and drawn
  *  as the brand's own mark — the way any mark from outside the offered set appears. */
@@ -970,10 +1046,10 @@ test("the settings dialog reads the drawn name and the intent it posts carries t
   expect(posted[0].name).toBe("code reviewer");
 });
 
-/** Starting a conversation with the open app is an act of its own header, standing with the acts
- *  at the far end rather than inside the switcher: it makes a conversation instead of choosing
- *  among the ones there are. It founds it where the pane stands, with the app the pane shows, so
- *  the screen is not left for the chat. */
+/** Starting a conversation with the open app is an act of its own band, standing with the acts at
+ *  the far end: past the name the band leads with, and before the settings act that ends the row.
+ *  It founds the conversation where the pane stands, with the app the pane shows, so the screen is
+ *  not left for the chat. */
 test("the app pane's header starts a chat with the app it shows, standing with the acts at the far end", async () => {
   const sent: string[] = [];
   location.hash = "#/agents/" + SECOND_ID;
@@ -989,14 +1065,14 @@ test("the app pane's header starts a chat with the app it shows, standing with t
 
   const pane = within(await screen.findByRole("region", { name: "Research" }));
   const act = pane.getByRole("button", { name: "New" });
-  const switcher = pane.getByRole("button", { name: /New conversation/ });
+  const named = pane.getByRole("heading", { level: 2, name: FRESH });
   const settings = pane.getByRole("button", { name: "Settings for Research" });
-  expect(switcher.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(named.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(settings.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
 
   await userEvent.click(act);
 
-  expect(location.hash).toBe("#/agents/" + SECOND_ID);
+  expect(location.hash).toBe("#/agents/" + SECOND_ID + "?open=new");
   await userEvent.type(await pane.findByLabelText("Message the app"), "hello");
   await userEvent.click(pane.getByRole("button", { name: "Send" }));
 

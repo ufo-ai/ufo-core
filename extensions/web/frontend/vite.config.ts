@@ -124,7 +124,7 @@ export default defineConfig({
       // this server exists to bypass. `tests/viteconfig.test.ts` holds that and the rest of this
       // rule; `dev-routing.ts` owns which requests stay here.
       "^/(surface/web|ext/)": {
-        target: "http://localhost:8710",
+        target: process.env.UFO_SERVE_ORIGIN ?? "http://localhost:8710",
         changeOrigin: false,
         bypass: (req) => devLocalPath(req.method ?? "GET", req.url ?? ""),
       },

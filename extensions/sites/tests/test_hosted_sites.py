@@ -2329,6 +2329,29 @@ async def test_a_redeploy_keeps_the_binding(db: None) -> None:
         assert redeployed.homepage_agent_id == workspace.agent_id
 
 
+async def test_a_redeploy_of_a_bound_site_reports_the_agents_visibility(db: None) -> None:
+    """A bound site has no level of its own to report: the rebuild that keeps an app's homepage up
+    answers with the level the frame gates it on — the agent's — rather than the column lying
+    dormant underneath, which would tell the member their app's page is private."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    hosted = await _deploy(workspace, conversation_id, audience, member_id)
+    assert hosted["visibility"] == "private"
+    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
+    with ws(workspace.id):
+        await _dispatch(
+            tool, _bind(ctx, workspace, conversation_id, member_id), site=str(hosted["site"])
+        )
+
+    rebuilt = await _deploy(workspace, conversation_id, audience, member_id)
+
+    assert rebuilt["visibility"] == "workspace"
+    (row,) = await _stored(workspace)
+    assert (row.visibility, row.homepage_agent_id) == ("private", workspace.agent_id)
+
+
 async def test_unhost_clears_the_binding(db: None) -> None:
     """The binding is held by the row itself, so unregistering the bound site leaves no dangling
     pointer — and a fresh site binds cleanly afterwards."""
@@ -2533,25 +2556,46 @@ async def test_binding_a_private_agent_reports_private(db: None) -> None:
     assert row.visibility == "private"
 
 
-async def test_a_bound_sites_object_row_follows_the_agent(db: None) -> None:
-    """The listing, the spec, and the apply gate all answer the agent's level for a bound row:
-    another member lists a private-column site once its agent is workspace-visible, the displayed
-    visibility is the agent's, and an apply naming another level refuses toward the agent
-    object."""
+async def test_a_bound_site_leaves_the_shared_listing_and_answers_by_name(db: None) -> None:
+    """A homepage is the agent's page, not a site the workspace shares: binding takes the row out
+    of every browse — its creator's as well as another member's — and out of another member's
+    reach entirely, while an ordinary workspace site beside it goes on standing in both. The row
+    stays addressable for its creator, who reads the agent's level rather than the dormant column,
+    a read naming the binding still answers it, and an apply naming another level refuses toward
+    the agent object."""
     workspace = await _seed_workspace()
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     other_id, _other_token = await _seed_member(workspace, TEAMMATE_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    shared_conversation = await _seed_conversation(workspace, audience, creator_id)
     hosted = await _deploy(workspace, conversation_id, audience, creator_id)
+    await _deploy(
+        workspace,
+        shared_conversation,
+        audience,
+        creator_id,
+        site="handbook",
+        visibility="workspace",
+    )
     name = str(hosted["site"])
     tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
 
     with ws(workspace.id):
-        hidden = await _verb("object_list", workspace, conversation_id, other_id, kind=SITE_KIND)
         await _dispatch(tool, _bind(ctx, workspace, conversation_id, creator_id), site=name)
         listed = await _verb("object_list", workspace, conversation_id, other_id, kind=SITE_KIND)
-        fetched = await _get(workspace, conversation_id, other_id, name)
+        browsed = await _verb("object_list", workspace, conversation_id, creator_id, kind=SITE_KIND)
+        bound = await _verb(
+            "object_list",
+            workspace,
+            conversation_id,
+            creator_id,
+            kind=SITE_KIND,
+            filters={"homepage_agent": str(workspace.agent_id)},
+        )
+        fetched = await _get(workspace, conversation_id, creator_id, name)
+        with pytest.raises(UnknownObject):
+            await _get(workspace, conversation_id, other_id, name)
         with pytest.raises(ValueError, match="follows the agent"):
             await _verb(
                 "object_apply",
@@ -2563,13 +2607,16 @@ async def test_a_bound_sites_object_row_follows_the_agent(db: None) -> None:
                 ),
             )
 
-    assert hidden["objects"] == []
-    (row,) = listed["objects"]
+    handbook = site_object_name(shared_conversation, "handbook")
+    assert [row["name"] for row in listed["objects"]] == [handbook]
+    assert [row["name"] for row in browsed["objects"]] == [handbook]
+    (row,) = bound["objects"]
+    assert row["name"] == name
     assert row["visibility"] == "workspace"
     assert row["homepage_agent"] == str(workspace.agent_id)
     assert fetched["spec"] == {"visibility": "workspace"}
-    (stored,) = await _stored(workspace)
-    assert stored.visibility == "private"
+    stored = {site.name: site for site in await _stored(workspace)}
+    assert stored[SITE].visibility == "private"
 
 
 async def test_a_private_site_opens_for_a_workspace_admin(deployment: Deployment) -> None:
@@ -2637,7 +2684,8 @@ async def test_a_homepage_frame_follows_the_agent_and_renders_bare(
 
 async def test_site_rows_carry_homepage_agent(db: None) -> None:
     """The kind row carries `homepage_agent` only on the bound site — the declared field the portal
-    reads and filters the binding through — and every other site lacks it."""
+    reads and filters the binding through — so a browse holds every other site and nothing else,
+    and the filtered read holds the bound one alone."""
     workspace = await _seed_workspace()
     member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(member_id)
@@ -2659,7 +2707,9 @@ async def test_site_rows_carry_homepage_agent(db: None) -> None:
             filters={"homepage_agent": str(workspace.agent_id)},
         )
 
-    rows = {row["name"]: row for row in listed["objects"]}
-    assert rows[str(bound["site"])]["homepage_agent"] == str(workspace.agent_id)
-    assert "homepage_agent" not in rows[site_object_name(first, SITE)]
-    assert [row["name"] for row in filtered["objects"]] == [str(bound["site"])]
+    (row,) = listed["objects"]
+    assert row["name"] == site_object_name(first, SITE)
+    assert "homepage_agent" not in row
+    (only,) = filtered["objects"]
+    assert only["name"] == str(bound["site"])
+    assert only["homepage_agent"] == str(workspace.agent_id)

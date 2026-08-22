@@ -39,7 +39,7 @@ import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
 import { Agents, AppsIndex } from "@/views/Agents";
-import { ChatPane } from "@/views/ChatPane";
+import { ChatPane, ConversationSlot } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { FirstRun } from "@/views/FirstRun";
@@ -61,7 +61,8 @@ import {
   useViewer,
 } from "@/lib/audience";
 import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
-import { COLUMN, Pane, PaneHeader } from "@/kernel/pane";
+import { COLUMN, Header, Pane } from "@/kernel/pane";
+import { heldTrack, holdTrack, type TrackScreen } from "@/lib/tracks";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { MainAgentProvider } from "@/lib/mainAgent";
@@ -100,7 +101,6 @@ import {
   AGENTS_HASH,
   BUILDER_HASH,
   HOME_HASH,
-  WORKSPACE_TABS,
   agentHash,
   artifactTarget,
   bootRoute,
@@ -109,6 +109,7 @@ import {
   newChatHash,
   parseHash,
   sectionHash,
+  WORKSPACE_TABS,
   workspaceHash,
   type PlaceStep,
   type Route,
@@ -132,8 +133,91 @@ type Sought =
   | { kind: "signed-out" }
   | { kind: "failed"; message: string };
 
+/** A screen a track can stand on: the screen's own name in the store, the track its address states,
+ *  and what that screen becomes once a track is written back onto it. Three route kinds carry a
+ *  place; a route carrying none carries no track either. */
+type Standing = {
+  screen: TrackScreen;
+  opens: string[] | undefined;
+  land: (held: string[]) => { route: Route; hash: string };
+};
+
+function standingOn(route: Route | null): Standing | null {
+  if (route === null) return null;
+  if (route.kind === "agent") {
+    return {
+      screen: `agent:${route.agentId}`,
+      opens: route.place.opens,
+      land: (held) => {
+        const place = { ...route.place, opens: held };
+        return {
+          route: { kind: "agent", agentId: route.agentId, place },
+          hash: agentHash(route.agentId, place),
+        };
+      },
+    };
+  }
+  if (route.kind === "workspace") {
+    return {
+      screen: `workspace:${route.view}`,
+      opens: route.place.opens,
+      land: (held) => {
+        const place = { ...route.place, opens: held };
+        return {
+          route: { kind: "workspace", view: route.view, place },
+          hash: workspaceHash(route.view, place),
+        };
+      },
+    };
+  }
+  if (route.kind === "section") {
+    return {
+      screen: `section:${route.section}`,
+      opens: route.place.opens,
+      land: (held) => {
+        const place = { ...route.place, opens: held };
+        return {
+          route: { kind: "section", section: route.section, place },
+          hash: sectionHash(route.section, place),
+        };
+      },
+    };
+  }
+  return null;
+}
+
+/** Which of the address and the store owns a screen's track, decided once for every way a member
+ *  reaches a screen — boot, a hash the browser moved, and every act that moves the page.
+ *
+ *  An address stating a track states it on purpose: a link a member was sent, a bookmark, a step
+ *  back onto one. It wins, and the store is written to match. An address stating none is the member
+ *  arriving from somewhere else — a sidebar row, a pinned row, a spotlight hit, all of which name a
+ *  screen and nothing on it — so the store hands back the track the screen was left holding and the
+ *  address is written to match in the same tick, leaving the two no frame to stand apart in. Coming
+ *  back to a screen is not a new place, so that address is replaced: pushed, Back would walk the
+ *  member through their own arrivals instead of out of the screen.
+ *
+ *  Standing on the screen already, the address owns whatever it says, an empty track included —
+ *  that is the member closing the last slot, and a store answering over it would reopen what they
+ *  had just shut. */
+function arrive(next: Route, before: Route | null): Route {
+  const standing = standingOn(next);
+  if (!standing) return next;
+  if (standing.opens || standing.screen === standingOn(before)?.screen) {
+    holdTrack(standing.screen, standing.opens ?? []);
+    return next;
+  }
+  const kept = heldTrack(standing.screen);
+  if (!kept.length) return next;
+  const landed = standing.land(kept);
+  history.replaceState(null, "", landed.hash);
+  return landed.route;
+}
+
 export function App({ agents, member, onAgents }: AppProps) {
-  const [route, setRoute] = useState<Route>(() => bootRoute(location.hash, location.search));
+  const [route, setRoute] = useState<Route>(() =>
+    arrive(bootRoute(location.hash, location.search), null),
+  );
   useEffect(() => {
     const target = artifactTarget(location.search);
     if (target) location.replace(target);
@@ -158,7 +242,11 @@ export function App({ agents, member, onAgents }: AppProps) {
   const [menu, setMenu] = useState(false);
   const shutMenu = useCallback(() => setMenu(false), []);
   const narrow = useNarrow();
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebar") === "collapsed");
+  useScrollMark();
+  /** The shell opens on the rail. The sidebar is a place a member goes to find a conversation by
+   *  name, not the screen they came for, so the width it takes belongs to the screen until they ask
+   *  for it — and once they have asked, that choice is theirs on every load after. */
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebar") !== "expanded");
   const setSidebarCollapsed = useCallback((next: boolean) => {
     setCollapsed(next);
     localStorage.setItem("sidebar", next ? "collapsed" : "expanded");
@@ -194,7 +282,7 @@ export function App({ agents, member, onAgents }: AppProps) {
     if (!location.hash && booted.kind === "chat") {
       history.replaceState(null, "", chatHash(booted.conversationId));
     }
-    const onHash = () => setRoute(parseHash(location.hash));
+    const onHash = () => setRoute(arrive(parseHash(location.hash), routeRef.current));
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -226,7 +314,7 @@ export function App({ agents, member, onAgents }: AppProps) {
    *  shut here too — whether the member picked a destination, a conversation, or an app. */
   const go = useCallback((hash: string, next: Route) => {
     if (location.hash !== hash) location.hash = hash;
-    setRoute(next);
+    setRoute(arrive(next, routeRef.current));
     setMenu(false);
   }, []);
 
@@ -304,7 +392,7 @@ export function App({ agents, member, onAgents }: AppProps) {
       if (!target) return;
       if (step === "replace") {
         history.replaceState(null, "", target.hash);
-        setRoute(target.route);
+        setRoute(arrive(target.route, routeRef.current));
         return;
       }
       go(target.hash, target.route);
@@ -509,7 +597,6 @@ export function App({ agents, member, onAgents }: AppProps) {
                 onActivity={activity}
                 onOpenAgent={openAgent}
                 onOpenAgentPlace={openAgentPlace}
-                onNewChat={openNewChat}
                 onOpenSlot={openSlot}
                 onPlaceWorkspace={placeWorkspace}
                 onPlaceSection={placeSection}
@@ -607,7 +694,7 @@ function NavDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
             </DialogPrimitive.Title>
             <DialogPrimitive.Close asChild>
               <Button size="icon" className="ml-auto" aria-label="Close">
-                <IconX className="size-icon" aria-hidden />
+                <IconX aria-hidden />
               </Button>
             </DialogPrimitive.Close>
           </header>
@@ -712,9 +799,6 @@ const APPLICATION_SECTIONS: Section[] = ["wiki", "artifacts", "radar", "tasks"];
 /** The destinations a section's own name moves between: the group the sidebar files it under. An
  *  application switches to the other applications; a section the sidebar stands on its own stands
  *  on its own here too, and its name is a name rather than a control. */
-function siblingSections(section: Section): Section[] {
-  return APPLICATION_SECTIONS.includes(section) ? APPLICATION_SECTIONS : [section];
-}
 
 const FLYOUT_ID = "applications-flyout";
 
@@ -1234,7 +1318,6 @@ function RoutedPane({
   onActivity,
   onOpenAgent,
   onOpenAgentPlace,
-  onNewChat,
   onOpenSlot,
   onPlaceWorkspace,
   onPlaceSection,
@@ -1255,7 +1338,6 @@ function RoutedPane({
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string) => void;
   onOpenAgentPlace: (agentId: string, place: WorkspacePlace) => void;
-  onNewChat: (agentId: string) => void;
   onOpenSlot: (conversationId: string, slot: string | null) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
@@ -1264,7 +1346,7 @@ function RoutedPane({
   linked: Readonly<Record<string, OwnedConversation>>;
 }) {
   if (route.kind === "admin") return <Admin />;
-  if (route.kind === "bad-link") return <PaneNote>This conversation link is not valid.</PaneNote>;
+  if (route.kind === "bad-link") return <PaneNote>This link is not valid.</PaneNote>;
   if (route.kind === "workspace") {
     return (
       <TabbedPane
@@ -1281,7 +1363,7 @@ function RoutedPane({
     return (
       <TabbedPane
         group="section"
-        tabs={siblingSections(route.section)}
+        tabs={[route.section]}
         views={SECTION_VIEWS}
         view={route.section}
         place={route.place}
@@ -1295,7 +1377,16 @@ function RoutedPane({
     if (route.kind === "agent" && !selected) return <PaneNote>No such app.</PaneNote>;
     const shown = selected ?? mainAgent;
     return (
-      <Pane>
+      <Pane
+        opens={route.kind === "agent" ? (route.place.opens ?? []) : []}
+        onMove={(opens) =>
+          route.kind === "agent"
+            ? onPlaceAgent({ ...route.place, opens }, "replace")
+            : shown
+              ? onOpenAgentPlace(shown.id, { opens })
+              : undefined
+        }
+      >
         <Agents
           member={member}
           selected={selected}
@@ -1305,8 +1396,8 @@ function RoutedPane({
           place={route.kind === "agent" ? route.place : {}}
           /* The bare apps hash shows the main agent without having navigated to it, so a place set
              from that screen has no agent in the address to hang on: it names the agent it is
-             about and lands on that agent's own address. Answering nothing would make the pane's
-             conversation switcher dead on the one screen the flyout's own exit opens. */
+             about and lands on that agent's own address. Answering nothing would leave the pane
+             unable to open anything on the one screen the flyout's own exit opens. */
           onPlace={(place, step) =>
             route.kind === "agent"
               ? onPlaceAgent(place, step)
@@ -1398,8 +1489,8 @@ function RoutedPane({
       ? agents.find((entry) => entry.id === route.agentId)
       : (mainAgent ?? undefined);
   if (!agent) return <PaneNote>No such app.</PaneNote>;
-  // One start screen, whichever agent it names. The picker in its own composer renames the agent the
-  // first message reaches, and a key carrying that agent would remount the box on every pick — a
+  // One start screen, whichever agent it names. A route naming another agent renames the one this
+  // screen stands for, and a key carrying that agent would remount the box on every rename — a
   // fresh box holds the draft again but not the member's place in it, and the cursor lands back at
   // the first character. The chat state and the draft are keyed by the agent inside it instead, and
   // its composer takes a pending ask on the agent it is renamed to, because no mount comes to read
@@ -1412,8 +1503,6 @@ function RoutedPane({
       conversationId={null}
       onCreated={(conversationId, title) => onCreated(agent, conversationId, title)}
       onActivity={onActivity}
-      agents={agents}
-      onPickAgent={onNewChat}
     />
   );
 }
@@ -1440,53 +1529,44 @@ function LinkedPane({
   const readable = conversation.readable || disclosed;
   return (
     <Pane>
-      <div
-        className={cn(
-          "relative grid min-h-0 flex-1 grid-cols-1",
-          readable && slot && "grid-cols-(--grid-slot) max-narrow:grid-cols-1",
-        )}
-      >
-        <div
-          className={cn("flex min-h-0 min-w-0 flex-col", readable && slot && "max-narrow:invisible")}
-        >
-          <PaneHeader
-            parent={{ label: agentName(agent.name), onGo: () => onOpenAgent(agent.id) }}
-            current={subject(conversation, viewer)}
-            actions={<SurfaceMark conversation={conversation} />}
-          />
-          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-            {readable ? (
-              <>
-                <ConversationDetail
-                  agent={agent}
-                  conversation={conversation}
-                  headed
-                  onOpenArtifacts={() => onSelectSlot("artifacts")}
-                />
-                <p className="max-w-hint text-ink-soft">
-                  This conversation is read-only here. Reply in {surfaceWord(conversation.surface)}{" "}
-                  to continue it.
-                </p>
-              </>
-            ) : (
-              <Disclose
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <Header
+          parent={{ label: agentName(agent.name), onGo: () => onOpenAgent(agent.id) }}
+          title={subject(conversation, viewer)}
+          acts={<SurfaceMark conversation={conversation} />}
+          pinned
+        />
+        <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
+          {readable ? (
+            <>
+              <ConversationDetail
                 agent={agent}
                 conversation={conversation}
-                onOpened={() => setDisclosed(true)}
+                headed
+                onOpenArtifacts={() => onSelectSlot("artifacts")}
               />
-            )}
-          </div>
+              <p className="max-w-hint text-ink-soft">
+                This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
+                continue it.
+              </p>
+            </>
+          ) : (
+            <Disclose
+              agent={agent}
+              conversation={conversation}
+              onOpened={() => setDisclosed(true)}
+            />
+          )}
         </div>
-        {readable && slot ? (
-          <ConversationSlotPane
-            agent={agent}
-            conversationId={conversation.id}
-            slot={slot}
-            embedded
-            onClose={() => onSelectSlot(null)}
-          />
-        ) : null}
       </div>
+      {readable && slot ? (
+        <ConversationSlot
+          agent={agent}
+          conversationId={conversation.id}
+          slot={slot}
+          onClose={() => onSelectSlot(null)}
+        />
+      ) : null}
     </Pane>
   );
 }
@@ -1661,6 +1741,47 @@ function useNarrow(): boolean {
     return () => query.removeEventListener("change", answer);
   }, []);
   return narrow;
+}
+
+export const SCROLL_MARK = "data-scrolling";
+
+/** How long a stopped pane keeps its thumb. It covers the pause between two wheel notches and the
+ *  pause in the middle of a drag, so one gesture draws one bar rather than a blinking one, and it
+ *  is short enough that a pane the member has left alone is quiet before their eye comes back. */
+export const SCROLL_QUIET_MS = 600;
+
+/** Writes `theme.css`'s scroll mark on whatever is moving, so the thumb is drawn while the member
+ *  scrolls and at no other time. `scroll` does not bubble but it does capture, so one listener at
+ *  the document reaches every scroller the portal draws, including one mounted after this ran.
+ *  Each element carries its own quiet timer — a pane still moving keeps its bar while a pane that
+ *  has stopped loses one — and the mark is written once per gesture rather than once per event,
+ *  since a scroll fires every frame and the attribute already says what the next frame would. */
+function useScrollMark(): void {
+  useEffect(() => {
+    const quiet = new Map<Element, number>();
+    const mark = (event: Event) => {
+      const element = event.target;
+      if (!(element instanceof Element)) return;
+      const held = quiet.get(element);
+      if (held === undefined) element.setAttribute(SCROLL_MARK, "");
+      else clearTimeout(held);
+      quiet.set(
+        element,
+        window.setTimeout(() => {
+          quiet.delete(element);
+          element.removeAttribute(SCROLL_MARK);
+        }, SCROLL_QUIET_MS),
+      );
+    };
+    document.addEventListener("scroll", mark, { capture: true, passive: true });
+    return () => {
+      document.removeEventListener("scroll", mark, { capture: true });
+      for (const [element, held] of quiet) {
+        clearTimeout(held);
+        element.removeAttribute(SCROLL_MARK);
+      }
+    };
+  }, []);
 }
 
 function RailList({

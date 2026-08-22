@@ -27,12 +27,41 @@ import {
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 const BRAND = join(import.meta.dirname, "..", "..", "..", "..", "assets", "brand");
 
-const builtStyles = () => {
+/** The built sheet, read once for the whole file. Every assertion here reads the same bytes off
+ *  the same build, so re-reading them per test buys nothing and costs two disk reads of a sheet
+ *  this size each time — enough, across the assertions below, to run one of them out of its
+ *  budget on a loaded machine. */
+let sheet: string | null = null;
+let packed: string | null = null;
+
+const builtStyles = (): string => {
+  if (sheet !== null) return sheet;
   const page = readFileSync(join(STATIC, "index.html"), "utf8");
   const asset = /href="\/surface\/web\/static\/(assets\/[^"]+\.css)"/.exec(page);
   if (!asset) throw new Error("the built page references no stylesheet");
-  return readFileSync(join(STATIC, asset[1]), "utf8");
+  sheet = readFileSync(join(STATIC, asset[1]), "utf8");
+  return sheet;
 };
+
+/** The same sheet with its whitespace out, so a rule can be matched as one string. Held beside the
+ *  raw one because most assertions here want this form and stripping a sheet this size is not
+ *  free. */
+const packedStyles = (): string => {
+  if (packed !== null) return packed;
+  packed = builtStyles().replace(/\s+/g, "");
+  return packed;
+};
+
+/** Every rule in the sheet as the selector it is written under and the body it declares. The sheet
+ *  is walked once: a pattern asked to find a selector and its body in one match retraces the whole
+ *  sheet from every place it could start, which on a sheet this size costs seconds. */
+const rules = () =>
+  packedStyles()
+    .split("}")
+    .map((chunk) => {
+      const brace = chunk.lastIndexOf("{");
+      return { selector: chunk.slice(0, brace), body: chunk.slice(brace + 1) };
+    });
 
 const HUELESS = /#0000\b/g;
 
@@ -112,7 +141,7 @@ test("every colour the portal paints resolves through the palette's seven steps"
 });
 
 test("color-scheme carries the scheme, and the appearance class pins it", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
 
   // A member who has pinned nothing leaves the choice with the browser; the two classes the
   // appearance control writes are the only thing that overrides it, and `light-dark()` reads them.
@@ -127,11 +156,11 @@ test("color-scheme carries the scheme, and the appearance class pins it", () => 
 });
 
 test("the drawer fills a narrow viewport rather than overflowing it", () => {
-  expect(builtStyles().replace(/\s+/g, "")).toContain("min(520px,100vw)");
+  expect(packedStyles()).toContain("min(520px,100vw)");
 });
 
 test("the page height tracks the visible viewport and respects device insets", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain(".h-dvh{height:100dvh}");
   expect(css).toContain("box-sizing:border-box;height:100dvh;padding-top:env(safe-area-inset-top)");
   expect(css).toContain("env(safe-area-inset-bottom)");
@@ -140,7 +169,7 @@ test("the page height tracks the visible viewport and respects device insets", (
 });
 
 test("reply headings carry an emitted scale, not just declared tokens", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain(":where(h2){font-size:var(--text-subtitle)");
   expect(css).toContain(":where(h4,h5,h6){font-size:var(--text-ui)");
 });
@@ -150,7 +179,7 @@ test("a reply flows on the typeset register alone, and a code block sits snug in
   // wrappers, a typeset margin on the pre inside a stripped wrapper); stacked on the typeset flow
   // it opens a well of blank space over every code block. One register governs: the wrappers take
   // the typeset flow and the pre sits flush in the wrapper that places it.
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain(".typeset>:where(:not(:last-child)){margin-block-end:0}");
   // Streamdown's `space-y-4` zeroes margin-block-start on the same children from the utilities
   // layer, so the register's start margins must be restated with unlayered strength at the root:
@@ -181,7 +210,7 @@ test("a reply flows on the typeset register alone, and a code block sits snug in
 test("a quoted passage is dimmed by a token the theme declares", () => {
   // A name the theme never defines makes the declaration invalid, and the browser drops it — so
   // the quote renders at full weight and nothing says why.
-  expect(builtStyles().replace(/\s+/g, "")).toContain("opacity:var(--opacity-muted-soft)");
+  expect(packedStyles()).toContain("opacity:var(--opacity-muted-soft)");
 });
 
 test("a table scrolls its own overflow instead of squeezing the page", () => {
@@ -214,7 +243,7 @@ test("a table keeps its height inside a scrolling panel instead of collapsing", 
   // The frame scrolls on both axes, so its automatic minimum size is zero and a
   // fixed-height flex panel would otherwise shrink it away instead of scrolling.
   expect(screen.getByRole("table").parentElement?.className).toContain("shrink-0");
-  expect(builtStyles().replace(/\s+/g, "")).toContain(".shrink-0{flex-shrink:0}");
+  expect(packedStyles()).toContain(".shrink-0{flex-shrink:0}");
 });
 
 test("a transcript bubble wraps an unbreakable string instead of widening the pane", () => {
@@ -235,11 +264,11 @@ test("a transcript bubble wraps an unbreakable string instead of widening the pa
   }
   // `anywhere` rather than `break-word`: only `anywhere` lowers the intrinsic minimum width, so a
   // shrink-to-fit bubble resolves to the pane instead of to its 70ch maximum and overflowing it.
-  expect(builtStyles().replace(/\s+/g, "")).toContain(".wrap-anywhere{overflow-wrap:anywhere}");
+  expect(packedStyles()).toContain(".wrap-anywhere{overflow-wrap:anywhere}");
 });
 
 test("the working pulse yields to reduced motion in the built sheet", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
 });
 
@@ -264,14 +293,14 @@ test("a vendored mark carries nothing the theme or the surface refuses", () => {
 });
 
 test("every mark the portal claims is one the built sheet can draw", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   const declared = new Set([...css.matchAll(/--brand-([a-z_]+):url\(/g)].map((hit) => hit[1]));
   expect([...BRAND_MARKS].filter((mark) => !declared.has(mark))).toEqual([]);
   expect([...declared].filter((name) => !BRAND_MARKS.has(name))).toEqual([]);
 });
 
 test("the reading plane's tokens survive into the built sheet", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain("--leading-reading:1.65");
   expect(css).toContain("--size-decode-cell:1ch");
   // Both channels are declared, and each mix resolves on the cell that carries `--f` rather than at
@@ -301,7 +330,7 @@ test("the reading plane's tokens survive into the built sheet", () => {
 });
 
 test("the bundled faces are Inter for the chrome and Roboto Mono for the code", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain('--font-sans:"Inter",system-ui,sans-serif');
   expect(/@font-face\{font-family:Inter;src:url\(\/surface\/web\/static\/assets\/Inter-[^)]+\.woff2\)/.test(css)).toBe(true);
   expect(css).toContain('--font-mono:"RobotoMono"');
@@ -309,7 +338,7 @@ test("the bundled faces are Inter for the chrome and Roboto Mono for the code", 
 });
 
 test("one sans face carries the chrome, and no rule names a second family", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain("h1,h2,h3{text-wrap:balance}");
   expect(/h1,h2,h3\{[^}]*font-family/.test(css)).toBe(false);
   expect(css).not.toContain("--font-display");
@@ -344,14 +373,64 @@ test("the shadcn contract carries the theme, and names nothing no component read
 });
 
 test("text is smoothed and wrapped, and headings balance", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain("-webkit-font-smoothing:antialiased");
   expect(css).toContain("text-wrap:pretty");
   expect(css).toContain("text-wrap:balance");
 });
 
+const LAYERS = /@layer\s+([a-z]+)\s*\{/g;
+
+/** Which cascade layer holds the rule at this offset. Tailwind emits one flat block per layer, so
+ *  the last block opened before a rule is the block it is in, and the order those blocks first
+ *  appear in is the order that ranks them — the sheet states no `@layer a, b;` of its own. */
+const layerHolding = (css: string, at: number) => {
+  const opened = [...css.matchAll(LAYERS)].filter((hit) => (hit.index ?? 0) < at);
+  return opened[opened.length - 1][1];
+};
+
+test("the scrollbar thumb is drawn by scrolling and by nothing else", () => {
+  const css = packedStyles();
+
+  // Transparent at rest, and `thin` whatever the thumb is doing: the gutter is never reclaimed, so
+  // the bar arriving reflows none of the words the member is reading.
+  expect(css).toContain(":root{scrollbar-color:transparenttransparent}");
+  expect(css).toContain("*{scrollbar-width:thin;transition:scrollbar-color.2svar(--ease-leave)}");
+  // The mark `App.tsx` writes while an element scrolls is the whole of the reveal, and it costs no
+  // duration, so the bar is there for the first pixel and the fade belongs to its removal alone.
+  expect(css).toContain(
+    "[data-scrolling]{scrollbar-color:var(--color-edge-strong)transparent;transition-duration:0s}",
+  );
+  // A pointer resting over a pane and a caret sitting inside one scroll nothing, so neither draws
+  // a bar — and neither did the member ask one to.
+  const drawn = rules().filter((rule) => rule.body.includes("scrollbar"));
+  expect(drawn.filter((rule) => rule.selector.includes(":hover"))).toEqual([]);
+  expect(drawn.filter((rule) => rule.selector.includes("focus-within"))).toEqual([]);
+  // Reduced motion collapses the fade; the quiet period `App.tsx` holds is then the whole timing.
+  expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*transition-duration:\.01ms!important/.test(css)).toBe(
+    true,
+  );
+});
+
+test("the transcript's own hush outranks the scroll mark while it scrolls itself", () => {
+  const css = builtStyles();
+  const order = [...css.matchAll(LAYERS)].map((hit) => hit[1]);
+  expect(css).not.toMatch(/@layer[^{]*;/);
+
+  const reveal = css.indexOf("[data-scrolling]{");
+  const hush = css.indexOf(".data-autoscrolling\\:scrollbar-quiet[data-autoscrolling]{");
+  expect(reveal).toBeGreaterThan(-1);
+  expect(hush).toBeGreaterThan(-1);
+
+  // A later layer wins whatever the selectors weigh, and the utility's selector outweighs the
+  // mark's besides — one class and one attribute against one attribute.
+  expect(layerHolding(css, reveal)).toBe("base");
+  expect(layerHolding(css, hush)).toBe("utilities");
+  expect(order.indexOf("utilities")).toBeGreaterThan(order.indexOf("base"));
+});
+
 test("a control answers the pointer, and reduced motion cuts the answer short", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain("active\\:scale-\\[0\\.96\\]:active{scale:.96}");
   expect(css).toContain(".bg-primary{background-color:var(--primary)}");
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*transition-duration:\.01ms!important/.test(css)).toBe(
@@ -437,7 +516,7 @@ test("the favicons use the exact light and dark brand marks", () => {
 });
 
 test("a field shows the member that it is disabled, or that they left it invalid", () => {
-  const css = builtStyles().replace(/\s+/g, "");
+  const css = packedStyles();
   expect(css).toContain("disabled\\:cursor-not-allowed:disabled{cursor:not-allowed}");
   expect(css).toContain("user-invalid\\:border-ink:user-invalid{border-color:var(--color-ink)}");
   expect(css).toContain("user-invalid\\:border-dashed:user-invalid{");
@@ -447,7 +526,7 @@ test("a field shows the member that it is disabled, or that they left it invalid
 test("a placeholder is muted rather than mistaken for a value", () => {
   // The comps draw a placeholder in the third text tone, not in dimmed ink — so it is a colour,
   // and it fades against the pane the same way in both schemes.
-  expect(builtStyles().replace(/\s+/g, "")).toContain(
+  expect(packedStyles()).toContain(
     ".placeholder\\:text-ink-faint::placeholder{color:var(--color-ink-faint)}",
   );
 });

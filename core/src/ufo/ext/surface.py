@@ -416,8 +416,13 @@ class SurfaceModel(Protocol):
 class ListedArtifact:
     """One row of the portal's artifacts view with its owner, origin, and ways back: the turn and
     conversation that shared it, its surface, and — where the opening turn reported one — the
-    thread it came in on, the same string the conversations listing links by."""
+    thread it came in on, the same string the conversations listing links by.
 
+    `id` is the row's own identity, which is what a reader names one file by: a filename is free
+    text an agent chose, so nothing read off it tells two rows apart or bounds what a link to one
+    costs to carry."""
+
+    id: UUID
     artifact: "SharedArtifact"
     created_at: datetime
     owner_email: str | None
@@ -2584,6 +2589,7 @@ class SurfaceContext:
             cursor,
             limit,
             render=lambda row: ListedArtifact(
+                id=row.id,
                 artifact=SharedArtifact(
                     blob_key=row.blob_key,
                     filename=row.filename,
@@ -2616,6 +2622,7 @@ class SurfaceContext:
         and conversation predicates and never widens to another conversation's rows."""
         query = (
             sa.select(
+                tables.shared_artifact.c.id,
                 tables.shared_artifact.c.blob_key,
                 tables.shared_artifact.c.filename,
                 tables.shared_artifact.c.subject,
@@ -2655,6 +2662,7 @@ class SurfaceContext:
         source = (await self._conversation_sources((conversation_id,))).get(conversation_id)
         return tuple(
             ListedArtifact(
+                id=row.id,
                 artifact=SharedArtifact(
                     blob_key=row.blob_key,
                     filename=row.filename,

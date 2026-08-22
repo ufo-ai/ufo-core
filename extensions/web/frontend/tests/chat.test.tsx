@@ -19,7 +19,6 @@ import {
   StreamFake,
   TURN_ID,
   json,
-  pick,
   saying,
   useStreamFake,
   wire,
@@ -979,7 +978,7 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
   const column = screen.getByTestId("log").closest("[data-slot=message-scroller]")!.parentElement!;
   expect(column.children).toHaveLength(3);
-  expect(column.parentElement?.children).toHaveLength(2);
+  expect(column.closest("[data-slot=slot-track]")?.children).toHaveLength(2);
   expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
   expect(screen.getByText("-old").className).toContain("bg-attention");
   expect(screen.getByText("+new").className).toContain("bg-affirm");
@@ -989,7 +988,9 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(screen.getByText("This diff is truncated.")).toBeTruthy();
   expect(screen.getByText("Some changes may not be shown.")).toBeTruthy();
 
-  await userEvent.click(within(screen.getByRole("main")).getByRole("button", { name: "Close slot" }));
+  await userEvent.click(
+    within(screen.getByRole("main")).getByRole("button", { name: "Close Changes" }),
+  );
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
@@ -1019,8 +1020,22 @@ test("multiple slot types coexist and sources render as external links", async (
   });
   open();
 
-  expect(await screen.findByRole("button", { name: "Changes 2" })).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Sources 1" }));
+  const changes = await screen.findByRole("button", { name: "Changes 2" });
+  const sources = screen.getByRole("button", { name: "Sources 1" });
+  const band = screen.getByRole("main").querySelector("[data-slot=header]") as HTMLElement;
+  const row = band.firstElementChild as HTMLElement;
+  expect(band.children).toHaveLength(1);
+  expect(row.children).toHaveLength(2);
+  expect(row.children[1].contains(changes)).toBe(true);
+  expect(row.children[1].contains(sources)).toBe(true);
+  expect(changes.textContent).toBe("");
+  expect(changes.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
+  expect(sources.textContent).toBe("");
+  expect(sources.querySelector('[data-slot-icon="link"]')).toBeTruthy();
+  expect(sources.getAttribute("aria-pressed")).toBe("false");
+
+  await userEvent.click(sources);
+  expect(sources.getAttribute("aria-pressed")).toBe("true");
 
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=sources");
   const source = await screen.findByRole("link", { name: "Quarterly report" });
@@ -1079,7 +1094,9 @@ test("artifacts slot renders durable shared outputs with their download metadata
   expect(artifact.getAttribute("download")).toBe("chart.png");
   expect(screen.getByText("The final chart")).toBeTruthy();
   expect(
-    document.querySelector('aside img[src="/artifacts/preview/chart.png?token=signed"]'),
+    screen
+      .getByRole("region", { name: "Artifacts" })
+      .querySelector('img[src="/artifacts/preview/chart.png?token=signed"]'),
   ).toBeTruthy();
   // The picture is already on the row, so the row offers no disclosure to open it again.
   expect(screen.queryByText("Preview")).toBeNull();
@@ -1239,16 +1256,23 @@ test("tasks slot preserves an empty truncated board's context", async () => {
   });
   open();
 
-  /* The sidebar carries a Tasks app of its own, so the slot is pressed where the slots are. */
-  const slots = within(await screen.findByLabelText("Conversation slots"));
-  await userEvent.click(await slots.findByRole("button", { name: "Tasks" }));
+  /* The sidebar carries a Tasks app of its own, and the slot's own control is the one that names
+     what it holds, so the press is aimed by that name rather than by the row it stands in. */
+  await waitFor(() =>
+    expect(document.querySelector("[data-slot=header]")?.textContent).toBeTruthy(),
+  );
+  const band = document.querySelector<HTMLElement>("[data-slot=header]")!;
+  await userEvent.click(await within(band).findByRole("button", { name: "Tasks" }));
   expect(await screen.findByRole("heading", { name: "Bounded board" })).toBeTruthy();
   expect(screen.getByText("0 of 0 completed.")).toBeTruthy();
   expect(await screen.findByText("No tasks.")).toBeTruthy();
   expect(screen.getByText("Some tasks may not be shown.")).toBeTruthy();
 });
 
-test("sites slot renders hosted links with visibility and state", async () => {
+/** A site bound as an app's homepage answers to its agent's level rather than to its own
+ *  `visibility`, so the slot's line states when the site was made and last changed and nothing
+ *  about who may read it. */
+test("sites slot renders hosted links with when they were made and last changed", async () => {
   const url = "https://ufo.example/sites/signed";
   wire({
     ["/conversations/" + CONVO_ID + "/slots/sites"]: () =>
@@ -1275,7 +1299,8 @@ test("sites slot renders hosted links with visibility and state", async () => {
 
   await userEvent.click(await screen.findByRole("button", { name: "Sites 1" }));
   expect(await screen.findByText("team-dashboard")).toBeTruthy();
-  expect(screen.getByText(/workspace · Created/)).toBeTruthy();
+  expect(screen.getByText(/^Created/)).toBeTruthy();
+  expect(screen.queryByText(/workspace/)).toBeNull();
   const link = screen.getByRole("link", { name: "Open site" });
   expect(link.getAttribute("href")).toBe(url);
   expect(link.getAttribute("target")).toBe("_blank");
@@ -2122,7 +2147,7 @@ test("an image the turn shares stands inline in the answer and opens the artifac
 
   await userEvent.click(screen.getByRole("button", { name: "portrait.jpg" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
-  expect(await screen.findByRole("complementary", { name: "Artifacts" })).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "Artifacts" })).toBeTruthy();
 });
 
 /** A markdown file is a document the artifacts sidebar draws, so its card opens there — like a
@@ -2196,7 +2221,7 @@ test("a markdown file the turn shares opens the artifacts sidebar instead of dow
 
   await userEvent.click(screen.getByRole("button", { name: "notes.md" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
-  expect(await screen.findByRole("complementary", { name: "Artifacts" })).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "Artifacts" })).toBeTruthy();
 
   cleanup();
   render(
@@ -2949,56 +2974,34 @@ test("a turn the fleet picked back up says so among its steps", async () => {
   expect(screen.getByText("bash alembic upgrade head")).toBeTruthy();
 });
 
-test("the start screen picks the agent in its own composer, and carries what was typed to it", async () => {
-  wire({ ...transcript() });
+/** Which app a new conversation reaches is settled by the route that opened the start screen, not
+ *  by a control inside the box: the composer holds the words, the files and the send, and nothing
+ *  that would rename the app under them. */
+test("a new conversation's composer offers no way to switch app", async () => {
+  wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
   location.hash = "#/";
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Message the app");
   expect(screen.queryByTestId("log")).toBeNull();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "draft this");
-  await pick("App", "Second");
+  await userEvent.type(screen.getByLabelText("Message the app"), "hello");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  expect(location.hash).toBe("#/new/" + SECOND_ID);
-  await waitFor(() =>
-    expect((screen.getByLabelText("Message the app") as HTMLTextAreaElement).value).toBe(
-      "draft this",
-    ),
-  );
-  expect(screen.getByRole("combobox", { name: "App" }).textContent).toBe("Second");
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
 });
 
-/** The composer is where a member chooses the app a new conversation goes to, so each option is
- *  drawn with that app's own mark, and the closed control keeps the mark of the one chosen. */
-test("the composer's agent picker draws each app's mark, and keeps the chosen one", async () => {
-  wire({ ...transcript() });
-  location.hash = "#/";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-
-  await screen.findByLabelText("Message the app");
-  const control = screen.getByRole("combobox", { name: "App" });
-  expect(control.querySelector(".element-icon-propylon")).toBeTruthy();
-
-  await userEvent.click(control);
-  const assistant = await screen.findByRole("option", { name: "Assistant" });
-  expect(
-    assistant.querySelector("[data-slot=avatar-fallback] .element-icon-propylon"),
-  ).toBeTruthy();
-  expect(
-    screen.getByRole("option", { name: "Second" }).querySelector(".element-icon-aten"),
-  ).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("option", { name: "Second" }));
-  await waitFor(() =>
-    expect(
-      screen.getByRole("combobox", { name: "App" }).querySelector(".element-icon-aten"),
-    ).toBeTruthy(),
-  );
-});
-
-test("picking another agent keeps the member's place in the words already typed", async () => {
+/** One pane stands for every start screen, so a route naming another agent renames the composer
+ *  already on the screen rather than mounting one beside it: the box is the same element after the
+ *  rename, and the member's place in the words is where they left it. */
+test("a route renaming the start screen keeps the same box, and the place in its words", async () => {
   wire({ ...transcript() });
   location.hash = "#/";
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
@@ -3007,15 +3010,12 @@ test("picking another agent keeps the member's place in the words already typed"
   await userEvent.type(box, "draft this");
   box.setSelectionRange(6, 6);
 
-  await pick("App", "Second");
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 
-  await waitFor(() =>
-    expect(screen.getByRole("combobox", { name: "App" }).textContent).toBe("Second"),
-  );
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
   const after = screen.getByLabelText("Message the app") as HTMLTextAreaElement;
   expect(after).toBe(box);
   expect(after.value).toBe("draft this");
-  expect(document.activeElement).toBe(after);
   expect(after.selectionStart).toBe(6);
   expect(after.selectionEnd).toBe(6);
 });
@@ -3332,20 +3332,4 @@ test("the starters close on a link to the connectors screen, which the press rea
   expect(location.hash).toBe("#/connectors");
   await screen.findByText("No connector is offered yet.");
   expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
-});
-
-test("a conversation that has opened fixes its agent, and the picker goes with the start screen", async () => {
-  wire({
-    ...transcript(),
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
-  });
-  location.hash = "#/";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-
-  expect(await screen.findByRole("combobox", { name: "App" })).toBeTruthy();
-  await userEvent.type(screen.getByLabelText("Message the app"), "hello");
-  await userEvent.click(screen.getByRole("button", { name: "Send" }));
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
 });

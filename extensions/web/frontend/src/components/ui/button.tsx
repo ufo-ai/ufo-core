@@ -21,6 +21,7 @@ export const buttonVariants = cva(
         outline:
           "border border-edge bg-transparent text-inherit px-lg py-xs hover:bg-fill",
         row: "border border-edge bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
+        quiet: "border border-transparent bg-transparent text-inherit px-lg py-xs hover:bg-fill",
         option: cn(
           "border border-edge-strong bg-transparent text-inherit px-lg py-xs",
           "hover:bg-fill",
@@ -31,7 +32,11 @@ export const buttonVariants = cva(
       size: {
         default: "",
         bar: "h-(--size-control) whitespace-nowrap rounded-full px-2xl py-0 text-label",
-        icon: "size-(--size-control) rounded-full p-0",
+        /* The glyph is sized by the portal's glyph token rather than by the box's own em, so an
+           icon act draws at the size of every other glyph on its line — a chevron beside a title,
+           the search's lens — instead of at whatever register the surface around it happens to be
+           set in. */
+        icon: "size-(--size-control) rounded-full p-0 [&_svg]:size-(--size-glyph)",
       },
     },
     defaultVariants: { variant: "outline", size: "default" },

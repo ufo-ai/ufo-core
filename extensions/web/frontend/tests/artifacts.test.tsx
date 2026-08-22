@@ -1,9 +1,13 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { Viewer } from "@/lib/audience";
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { parseHash, sectionHash, type PlaceStep, type WorkspacePlace } from "@/lib/route";
+import { TabbedPane } from "@/views/TabbedPane";
+import { SECTION_VIEWS } from "@/views/registry";
 
 import {
   AGENT,
@@ -23,6 +27,11 @@ import {
 const TEXT_URL = "/dl/notes.txt";
 const DOCS_URL = "https://ufo.example/surface/sites/signed-docs";
 const DOCS_PREVIEW_URL = "/artifacts/1f0d/docs.png?preview=image%2Fpng%3A5148";
+
+/** A site's lane: the app whose namespace holds it, the kind and the name, in the one string the
+ *  address and the store both carry. */
+const DOCS_LANE = "object/" + AGENT_ID + "/site/docs-abc";
+const NOTES_LANE = "object/" + AGENT_ID + "/site/notes-def";
 
 const DOCS = {
   name: "docs-abc",
@@ -157,12 +166,12 @@ test("a text artifact opens in the viewer, reads its body, and closes back to th
 
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("hello from the file")).toBeTruthy();
-  const sheet = screen.getByRole("dialog");
-  expect(within(sheet).getByText(/^notes · member@example.com/).textContent).toBe(
+  const slot = screen.getByRole("region", { name: "notes.txt" });
+  expect(within(slot).getByText(/^notes · member@example.com/).textContent).toBe(
     "notes · member@example.com · text/plain · 12 B · Jul 31 2026",
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close notes.txt" }));
   await waitFor(() => expect(screen.queryByText("hello from the file")).toBeNull());
   expect(await viewCard("notes.txt")).toBeTruthy();
 });
@@ -218,7 +227,7 @@ test("leaving the section takes the viewer with it", async () => {
   );
 
   await waitFor(() => expect(screen.queryByText("hello from the file")).toBeNull());
-  expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Close/ })).toBeNull();
 });
 
 test("the viewer bounds a long read by bytes, not characters, and cancels the rest", async () => {
@@ -327,7 +336,8 @@ test("an image whose link expired states it rather than showing an empty panel",
   );
 
   await userEvent.click(await viewCard("shot.png"));
-  const full = document.querySelector("aside img, [role='dialog'] img") as HTMLImageElement;
+  const slot = screen.getByRole("region", { name: "shot.png" });
+  const full = slot.querySelector("img") as HTMLImageElement;
   expect(full).not.toBeNull();
   full.dispatchEvent(new Event("error"));
 
@@ -455,7 +465,7 @@ test("closing the viewer discards a body still in flight", async () => {
 
   await userEvent.click(await viewCard("notes.txt"));
   await waitFor(() => expect(releaseFirst).not.toBeNull());
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close notes.txt" }));
 
   releaseFirst!(new Response("the first body"));
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -619,8 +629,8 @@ test("a csv artifact draws as its table, in the band and in the viewer", async (
   expect(cells).toEqual(["Ng, Ada", "12", "Bo", '3 "units"']);
 
   await userEvent.click(await viewCard("spend.csv"));
-  const sheet = document.querySelector("aside, [role='dialog']") as HTMLElement;
-  await waitFor(() => expect(within(sheet).getAllByRole("table").length).toBeGreaterThan(0));
+  const slot = screen.getByRole("region", { name: "spend.csv" });
+  await waitFor(() => expect(within(slot).getAllByRole("table").length).toBeGreaterThan(0));
 });
 
 test("a plain text artifact's band stays the placeholder", async () => {
@@ -660,10 +670,8 @@ test("a document's rendered page fills its band and its viewer", async () => {
   expect(band.querySelector("img")?.getAttribute("src")).toBe("/dl/report-preview.png");
 
   await userEvent.click(await viewCard("report.pdf"));
-  const full = document.querySelector(
-    "aside img[src='/dl/report-preview.png'], [role='dialog'] img[src='/dl/report-preview.png']",
-  );
-  expect(full).not.toBeNull();
+  const slot = screen.getByRole("region", { name: "report.pdf" });
+  expect(slot.querySelector("img[src='/dl/report-preview.png']")).not.toBeNull();
   expect(
     screen.queryByText("No preview for this file type. Download it to open it."),
   ).toBeNull();
@@ -714,6 +722,364 @@ function open() {
     </MainAgentProvider>,
   );
 }
+
+const SECOND_URL = "/dl/second.txt";
+const NOTES_KEY = "a1";
+const SECOND_KEY = "a2";
+const TRACK_SEPARATOR = "%7E";
+
+const ODD_URL = "/dl/odd.txt";
+const ODD_ID = "a9";
+const ODD_NAME = "~$budget~v2-" + "and-the-whole-quarter-".repeat(20) + "final.txt";
+
+function oddFile() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
+      if (url.includes("/workspace/artifacts"))
+        return json({ artifacts: [artifact({ id: ODD_ID, filename: ODD_NAME, url: ODD_URL })] });
+      return new Response("the odd body");
+    }),
+  );
+}
+
+function twoFiles() {
+  const calls: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      calls.push(url);
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
+      if (url.includes("/workspace/artifacts"))
+        return json({
+          artifacts: [
+            artifact(),
+            artifact({
+              id: "a2",
+              filename: "second.txt",
+              url: SECOND_URL,
+              created_at: "2026-07-30T09:00:00",
+            }),
+          ],
+        });
+      return new Response(url === SECOND_URL ? "the second body" : "the first body");
+    }),
+  );
+  return { calls };
+}
+
+const siteDetail = (name: string, links: unknown[]) => ({
+  ...SITE_KIND,
+  name,
+  summary: name + " · workspace",
+  spec: { visibility: "workspace" },
+  status: { visibility: "workspace", owner_email: "member@example.com" },
+  links,
+  created_at: "2026-07-01T09:00:00Z",
+  updated_at: null,
+});
+
+/** Two sites, the first of which names the second among its links — the one act on this screen
+ *  that opens a lane from inside another lane. */
+function linkedSites() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/objects/site/docs-abc"))
+        return json(
+          siteDetail("docs-abc", [
+            { relation: "reports_to", kind: "site", name: "notes-def", opens: true },
+          ]),
+        );
+      if (url.includes("/objects/site/notes-def")) return json(siteDetail("notes-def", []));
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, [DOCS, NOTES]);
+      return json({ artifacts: [] });
+    }),
+  );
+}
+
+const standing = () =>
+  screen.getAllByRole("region").map((slot) => slot.getAttribute("aria-label"));
+
+/** The screen with its own place recorder read out: the address the track would be carried on, and
+ *  the history step each press earned. A press that changes nothing has to be seen not to push, and
+ *  a place held in a test's own state says nothing about that. */
+function tracked() {
+  const steps: PlaceStep[] = [];
+  const places: WorkspacePlace[] = [];
+  function Screen() {
+    const [place, setPlace] = useState<WorkspacePlace>({});
+    return (
+      <TabbedPane
+        group="section"
+        tabs={["artifacts"] as const}
+        views={SECTION_VIEWS}
+        view="artifacts"
+        place={place}
+        onPlace={(_view, next, step) => {
+          steps.push(step);
+          places.push(next);
+          setPlace(next);
+        }}
+      />
+    );
+  }
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Screen />
+    </MainAgentProvider>,
+  );
+  return {
+    steps,
+    place: () => places.at(-1) ?? {},
+    address: () => sectionHash("artifacts", places.at(-1) ?? {}),
+  };
+}
+
+/** The band heads the pane rather than the words under it: above the scroller, at the pane's own
+ *  width, so the name sits at the pane's left edge and the rule under it reaches both edges. The
+ *  reading measure and the gutter are the content's alone. */
+test("the shelf is headed by a band at the pane's own width", async () => {
+  twoFiles();
+  open();
+
+  const named = await screen.findByRole("heading", { level: 1, name: "Artifacts" });
+  const band = named.closest("[data-slot=header]") as HTMLElement;
+  expect(band.className).not.toContain("border-b");
+  expect(band.closest(".overflow-y-auto")).toBeNull();
+  expect(band.closest(".max-w-page")).toBeNull();
+});
+
+/** A lane says the surface it was opened out of, which is the way back a member reading one lane
+ *  to a screen has instead of the shelf standing beside it. */
+test("a file's lane says the shelf it was opened from, and the crumb shuts it", async () => {
+  twoFiles();
+  open();
+
+  await userEvent.click(await viewCard("notes.txt"));
+
+  const lane = await screen.findByRole("region", { name: "notes.txt" });
+  const path = within(lane).getByRole("navigation", { name: "Breadcrumb" });
+  expect(path.textContent).toBe("Artifacts/notes.txt");
+
+  await userEvent.click(within(path).getByRole("button", { name: "Back to Artifacts" }));
+
+  await waitFor(() => expect(screen.queryAllByRole("region")).toEqual([]));
+});
+
+/** The track is a path, not a workbench: a press in the shelf shuts every lane the shelf opened
+ *  and stands the record it names in the one lane left. */
+test("a second file pressed on the shelf takes the first one's place", async () => {
+  twoFiles();
+  const { address } = tracked();
+
+  await userEvent.click(await viewCard("notes.txt"));
+  expect(await screen.findByText("the first body")).toBeTruthy();
+
+  await userEvent.click(await viewCard("second.txt"));
+  expect(await screen.findByText("the second body")).toBeTruthy();
+
+  await waitFor(() => expect(screen.queryByText("the first body")).toBeNull());
+  expect(standing()).toEqual(["second.txt"]);
+  expect(address()).toBe("#/artifacts?open=" + encodeURIComponent(SECOND_KEY));
+});
+
+/** A filename is whatever the agent sharing the file called it: the character a track is written
+ *  with is an ordinary one in a name — the `~$budget.xlsx` a spreadsheet leaves beside the file it
+ *  has open — and nothing bounds how long it runs. A lane is named by the file's own id rather than
+ *  by anything read off the name, so such a file opens and its address carries it like any other. */
+test("a file named oddly and past what a lane id holds opens, and the address carries it", async () => {
+  oddFile();
+  const { address, place } = tracked();
+
+  await userEvent.click(await viewCard(ODD_NAME));
+
+  expect(await screen.findByText("the odd body")).toBeTruthy();
+  expect(standing()).toEqual([ODD_NAME]);
+  expect(address()).toBe("#/artifacts?open=" + ODD_ID);
+  expect(parseHash(address())).toEqual({ kind: "section", section: "artifacts", place: place() });
+});
+
+test("a card pressed with the modifier down opens beside, and the address carries both", async () => {
+  twoFiles();
+  const { address } = tracked();
+  const user = userEvent.setup();
+
+  await user.click(await viewCard("notes.txt"));
+  expect(await screen.findByText("the first body")).toBeTruthy();
+
+  await user.keyboard("{Meta>}");
+  await user.click(await viewCard("second.txt"));
+  await user.keyboard("{/Meta}");
+
+  expect(await screen.findByText("the second body")).toBeTruthy();
+  expect(screen.getByText("the first body")).toBeTruthy();
+  expect(standing()).toEqual(["notes.txt", "second.txt"]);
+  expect(address()).toBe(
+    "#/artifacts?open=" +
+      encodeURIComponent(NOTES_KEY) +
+      TRACK_SEPARATOR +
+      encodeURIComponent(SECOND_KEY),
+  );
+});
+
+test("a middle press opens beside", async () => {
+  twoFiles();
+  const user = userEvent.setup();
+  open();
+
+  await user.click(await viewCard("notes.txt"));
+  expect(await screen.findByText("the first body")).toBeTruthy();
+
+  await user.pointer({ keys: "[MouseMiddle]", target: await viewCard("second.txt") });
+
+  expect(await screen.findByText("the second body")).toBeTruthy();
+  expect(standing()).toEqual(["notes.txt", "second.txt"]);
+});
+
+/** A middle press on a site's own address is that link's, and stays the browser's: the shelf opens
+ *  nothing behind the tab it lands in. */
+test("a middle press on a site's own address opens no slot", async () => {
+  shelf([DOCS], []);
+  const user = userEvent.setup();
+  open();
+
+  await user.pointer({
+    keys: "[MouseMiddle]",
+    target: await screen.findByRole("link", { name: "Open" }),
+  });
+
+  expect(screen.queryAllByRole("region")).toEqual([]);
+});
+
+test("pressing the card already standing changes nothing", async () => {
+  const { calls } = twoFiles();
+  const { steps } = tracked();
+
+  await userEvent.click(await viewCard("notes.txt"));
+  expect(await screen.findByText("the first body")).toBeTruthy();
+  await userEvent.click(await viewCard("notes.txt"));
+
+  expect(standing()).toEqual(["notes.txt"]);
+  expect(screen.getByText("the first body")).toBeTruthy();
+  /* The second press is no history entry of its own, and the body already read is not read
+     again — the slot holding it never moved. */
+  expect(steps).toEqual(["push", "replace"]);
+  expect(calls.filter((url) => url === TEXT_URL)).toHaveLength(1);
+});
+
+test("closing a lane shuts what was opened from it", async () => {
+  linkedSites();
+  open();
+
+  await userEvent.click(await viewCard("docs-abc"));
+  const record = await screen.findByRole("region", { name: "docs-abc" });
+  await userEvent.click(await within(record).findByRole("button", { name: /notes-def/ }));
+
+  await waitFor(() => expect(standing()).toEqual(["docs-abc", "notes-def"]));
+
+  await userEvent.click(screen.getByRole("button", { name: "Close docs-abc" }));
+
+  await waitFor(() => expect(screen.queryAllByRole("region")).toEqual([]));
+});
+
+/** The mark is the row's whole band and not the letters of its name, so it is read off the element
+ *  the grid and the table make a record out of: a tile's `li`, a table's `tr`. `bg-fill` is the
+ *  band the portal already lights a picked row with; `hover:bg-fill` is a different rule and is not
+ *  the mark, so the class is matched whole. */
+const banded = (band: HTMLElement) => ({
+  name: band.querySelector("[data-part=primary], td")?.textContent,
+  marked: band.getAttribute("aria-current"),
+  lit: /(?:^|\s)bg-fill(?:\s|$)/.test(band.className),
+});
+
+/** The shelf's own bands, read inside the page rather than off the whole screen: a lane standing
+ *  beside it is headed by the path it was opened along, and a crumb is a list of items too. */
+const tiles = () => within(screen.getByTestId("section")).getAllByRole("listitem").map(banded);
+const lines = () => screen.getAllByRole("row").slice(1).map(banded);
+
+/** Finder keeps the selected row lit in every column, which is what makes a press that shuts the
+ *  lanes to its right read as navigation rather than as slots leaving. */
+test("the shelf marks the whole band of the record whose document is standing", async () => {
+  twoFiles();
+  open();
+
+  await screen.findByText("notes.txt");
+  expect(tiles()).toEqual([
+    { name: "notes.txt", marked: null, lit: false },
+    { name: "second.txt", marked: null, lit: false },
+  ]);
+
+  await userEvent.click(await viewCard("notes.txt"));
+  await waitFor(() =>
+    expect(tiles()).toEqual([
+      { name: "notes.txt", marked: "true", lit: true },
+      { name: "second.txt", marked: null, lit: false },
+    ]),
+  );
+
+  await userEvent.click(await viewCard("second.txt"));
+  await waitFor(() =>
+    expect(tiles()).toEqual([
+      { name: "notes.txt", marked: null, lit: false },
+      { name: "second.txt", marked: "true", lit: true },
+    ]),
+  );
+
+  await userEvent.click(screen.getByRole("button", { name: "Close second.txt" }));
+  await waitFor(() => expect(screen.queryAllByRole("region")).toEqual([]));
+  expect(tiles()).toEqual([
+    { name: "notes.txt", marked: null, lit: false },
+    { name: "second.txt", marked: null, lit: false },
+  ]);
+});
+
+/** The two faces mark one way. A row a table lights is still the control that opens the record —
+ *  the mark rides beside `rowControl`, it does not stand in for it. */
+test("the table face marks the standing record on its row, and the row still opens", async () => {
+  twoFiles();
+  open();
+
+  await userEvent.click(await screen.findByRole("radio", { name: "Table" }));
+  await waitFor(() =>
+    expect(lines()).toEqual([
+      { name: "notes.txt", marked: null, lit: false },
+      { name: "second.txt", marked: null, lit: false },
+    ]),
+  );
+
+  await userEvent.click(screen.getAllByRole("row")[2]);
+  expect(await screen.findByText("the second body")).toBeTruthy();
+  expect(lines()).toEqual([
+    { name: "notes.txt", marked: null, lit: false },
+    { name: "second.txt", marked: "true", lit: true },
+  ]);
+
+  await userEvent.click(screen.getAllByRole("row")[1]);
+  expect(await screen.findByText("the first body")).toBeTruthy();
+  expect(standing()).toEqual(["notes.txt"]);
+  expect(lines()).toEqual([
+    { name: "notes.txt", marked: "true", lit: true },
+    { name: "second.txt", marked: null, lit: false },
+  ]);
+});
+
+/** The conversation a file came in on is another screen, not a record of this one, so it is
+ *  followed rather than opened beside the file. */
+test("the viewer's conversation link leads to that screen instead of opening a slot", async () => {
+  only([artifact({ media_type: "application/zip", filename: "bundle.zip" })]);
+  open();
+
+  await userEvent.click(await viewCard("bundle.zip"));
+  const conversation = await screen.findByRole("link", { name: "Conversation" });
+  expect(conversation.getAttribute("href")).toBe("#/c/c1");
+
+  await userEvent.click(conversation);
+
+  expect(location.hash).toBe("#/c/c1");
+  expect(standing()).toEqual(["bundle.zip"]);
+});
 
 test("a file tile binds its parts to the artifact payload", async () => {
   shelf([], [artifact({ filename: "report.txt", subject: "member@example.com" })]);
@@ -1048,11 +1414,11 @@ test("an opened site leads its record with the live page, full width and interac
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="artifacts" place={{ open: "object/site/docs-abc" }} />
+      <PlacedSection section="artifacts" place={{ opens: [DOCS_LANE] }} />
     </MainAgentProvider>,
   );
 
-  const record = await screen.findByRole("complementary", { name: "docs-abc" });
+  const record = await screen.findByRole("region", { name: "docs-abc" });
   const frame = await within(record).findByTitle("docs-abc");
   expect(frame.tagName).toBe("IFRAME");
   expect(frame.getAttribute("src")).toBe(DOCS_URL);
@@ -1077,11 +1443,35 @@ test("an opened site the frame cannot reach leads with no frame", async () => {
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="artifacts" place={{ open: "object/site/notes-def" }} />
+      <PlacedSection section="artifacts" place={{ opens: [NOTES_LANE] }} />
     </MainAgentProvider>,
   );
 
-  const record = await screen.findByRole("complementary", { name: "notes-def" });
+  const record = await screen.findByRole("region", { name: "notes-def" });
   await within(record).findByText("site");
   expect(record.querySelector("iframe")).toBeNull();
+});
+
+/** The page a lane stands on is read off the sites listing, which the screen holds whatever the
+ *  shelf under it is narrowed to. A lane taking the address off the shelf's own cards would lose
+ *  the frame the moment the member narrowed to a family the site is not a member of. */
+test("a site's lane keeps its page while the shelf narrows away from it", async () => {
+  wire({
+    "/objects/site/docs-abc": () => json(DOCS_DETAIL),
+    "/objects/site": () => objectIndex(SITE_KIND, [DOCS]),
+    "/workspace/artifacts": () => json({ artifacts: [artifact()] }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" place={{ opens: [DOCS_LANE] }} />
+    </MainAgentProvider>,
+  );
+
+  const record = await screen.findByRole("region", { name: "docs-abc" });
+  expect((await within(record).findByTitle("docs-abc")).getAttribute("src")).toBe(DOCS_URL);
+
+  await narrowTo("Documents");
+  await waitFor(() => expect(tiles().map((band) => band.name)).toEqual(["notes.txt"]));
+  const narrowed = screen.getByRole("region", { name: "docs-abc" });
+  expect(within(narrowed).getByTitle("docs-abc").getAttribute("src")).toBe(DOCS_URL);
 });

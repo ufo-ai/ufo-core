@@ -4,7 +4,7 @@ import { IconRefresh } from "@tabler/icons-react";
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts, type Fact } from "@/components/ui/facts";
 import { Field, Input, Search } from "@/components/ui/field";
-import { Filter, type FilterOption } from "@/components/ui/filter";
+import { Filter } from "@/components/ui/filter";
 import {
   Select,
   SelectContent,
@@ -14,11 +14,13 @@ import {
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
 import { FormFromSchema, initialSpecValue, type SpecSchema, type SpecValue } from "@/kernel/form";
-import { useBeside } from "@/kernel/beside";
-import { PageHeader, PageToolbar, RecordPanel } from "@/kernel/pane";
+import type { Placement } from "@/kernel/pager";
+import { Header, PageToolbar, RecordPanel } from "@/kernel/pane";
+import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
 import {
   OutcomeNotice,
   Panel,
+  PanelEmpty,
   QUIET,
   Section,
   outcomeNotice,
@@ -194,62 +196,82 @@ export function creator(value: ObjectValue | undefined, viewer: string | null): 
   return ownerLabel(typeof value === "string" && value ? value : null, viewer);
 }
 
-/** Where an object page stands: one kind, and one of its objects once a row or a link is opened. */
-export type ObjectAddress = { kind: string; name: string | null };
+/** Where an object page stands: the app whose namespace holds it, one kind, and one of its
+ *  objects. The app is part of the address because two apps name their objects independently —
+ *  `scheduled_task/morning-digest` is a different record under each — and the screens a record is
+ *  reached from, the radar feed and the wiki, span every app the member reaches. */
+export type ObjectAddress = { agent: string; kind: string; name: string };
 
-/** An address inside one agent's namespace. A row opened out of a cross-agent index belongs to the
- *  agent that owns it, and so does every link the detail follows out of it. */
-type At = ObjectAddress & { agentId: string };
+const SLOT_PREFIX = "object/";
+const SLOT_SEPARATOR = "/";
 
-/** One kind's pages: its index, and one row's record opened beside it once a row or a link is
- *  pressed. `agentId` names the one agent namespace to read, or null to read across the viewer's
- *  whole audience — the same choice the index route itself offers. Closing the record remounts
- *  the index, so a row the record deleted or changed is read again rather than shown stale. */
+/** The id one object stands under wherever it is named — the lane in the track, the `open` key in
+ *  the address, the row the store holds. One id space, so a link a member sends reopens the record
+ *  the track was holding rather than one that merely looks like it.
+ *
+ *  The whole address rides in the one string, app included, so a track is a row of lanes and
+ *  nothing beside it: two apps' records stand side by side, and opening the second says nothing
+ *  about the first. `object/` leads, because that is what tells this lane from a run's permalink or
+ *  a member's page, and the app follows it, because an app id holds no separator while a name
+ *  may. */
+export function slotOf(at: ObjectAddress): string {
+  return SLOT_PREFIX + at.agent + SLOT_SEPARATOR + at.kind + SLOT_SEPARATOR + at.name;
+}
+
+/** The object a lane of the track stands on, or null where the id names something else: a track
+ *  holds whatever its screen opens, and a run's own permalink or a member's page is not a record
+ *  this pane can draw. */
+export function objectAt(id: string): ObjectAddress | null {
+  if (!id.startsWith(SLOT_PREFIX)) return null;
+  const [agent, kind, ...rest] = id.slice(SLOT_PREFIX.length).split(SLOT_SEPARATOR);
+  const name = rest.join(SLOT_SEPARATOR);
+  if (!agent || !kind || !name) return null;
+  return { agent, kind, name };
+}
+
+/** One kind's pages: its index, and the records the screen's own track stands on as rows and links
+ *  are pressed. `agentId` names the one agent namespace the index reads, or null to read across the
+ *  viewer's whole audience — the same choice the index route itself offers; a record is read in the
+ *  app its own lane names, which is how a cross-app index opens two apps' records at once. Closing
+ *  a record remounts the index, so a row that record deleted or changed is read again rather than
+ *  shown stale.
+ *
+ *  The track has one owner and it is the screen: `opens` is the path the member walked and every
+ *  press hands the next one back through `onPlace`. A pane keeping a second track of its own would
+ *  put two nodes on one id, both portalling into the one host that id names, and a row pressed in
+ *  the index would leave the address's record standing beside the one it opened.
+ *
+ *  The records are a path, not a shelf: a row of the index is the root, so pressing one leaves that
+ *  record standing alone, and a link followed out of a record shuts whatever stood to the right of
+ *  it before the target lands there. `opened`, `appended` and `closed` are the whole of that rule
+ *  and every screen takes it from the same place, so this pane cannot drift from them. */
 export function ObjectPane({
   agentId,
   kind,
   title,
   section,
-  siblings,
-  onPickSibling,
   lead,
+  opens,
+  onPlace,
 }: {
   agentId: string | null;
   kind: string;
   /** What heads this listing where it is one of several on a page the caller has already headed.
-   *  A pane given one draws a heading under the page's name rather than a page title of its own. */
+   *  A pane given one draws a heading under the page's name rather than a page title of its own,
+   *  and draws none of the track's records: the page that heads several listings holds the one
+   *  track they all open into, and two listings each drawing it would put two nodes on one id. */
   section?: string;
-  /** The kinds this page stands among, current included. Two or more make the page's own name the
-   *  control that moves between them, so a page holding several kinds needs no strip of pills under
-   *  its band saying what the name could say. */
-  siblings?: FilterOption[];
-  onPickSibling?: (value: string) => void;
   /** What a page holding more than one kind says about which one is showing. It leads the toolbar,
    *  where what family to show already stands. */
   lead?: ReactNode;
   /** The page's own name, where this pane is the page. A tab inside another page passes none —
    *  the pane it stands in is already headed. */
   title?: string;
+  /** The track the screen holds, records and everything else it opened alike. */
+  opens: string[];
+  onPlace: (place: Placement) => void;
 }) {
-  const [at, setAt] = useState<At | null>(null);
   const [generation, setGeneration] = useState(0);
-  const close = () => {
-    setAt(null);
-    setGeneration((count) => count + 1);
-  };
-  const detail = useBeside(
-    at !== null && at.name !== null ? (
-      <ObjectDetail
-        key={at.agentId + "/" + at.kind + "/" + at.name}
-        agentId={at.agentId}
-        kind={at.kind}
-        name={at.name}
-        onOpen={(next) => setAt({ ...next, agentId: at.agentId })}
-        onBack={close}
-      />
-    ) : null,
-    () => setAt(null),
-  );
   return (
     <>
       <ObjectIndex
@@ -258,14 +280,92 @@ export function ObjectPane({
         kind={kind}
         title={title}
         section={section}
-        siblings={siblings}
-        onPickSibling={onPickSibling}
         lead={lead}
-        onOpen={setAt}
+        opens={opens}
+        onOpen={(at) => onPlace({ opens: opened(opens, slotOf(at), undefined) })}
       />
-      {detail}
+      {section ? null : (
+        <HeldRecords
+          opens={opens}
+          onPlace={onPlace}
+          onShut={() => setGeneration((count) => count + 1)}
+        />
+      )}
     </>
   );
+}
+
+/** The records a screen's track stands on, drawn once for the whole screen. The screen owns them,
+ *  never a listing on it: a page holding two listings would otherwise register two nodes under one
+ *  id, both portalling into the one host that id names, and the member would read the record twice.
+ *
+ *  A link out of a record opens what it names immediately beside it and ends the path there, so the
+ *  record the member came from still stands and what was reached through the record they have just
+ *  left does not. `onShut` is how the listings above hear that a record closed, since a record the
+ *  member deleted or changed leaves a row that has to be read again rather than shown stale. */
+export function HeldRecords({
+  opens,
+  onPlace,
+  onShut,
+}: {
+  opens: string[];
+  onPlace: (place: Placement) => void;
+  onShut?: () => void;
+}) {
+  const shut = (id: string) => {
+    onPlace({ opens: closed(opens, id) });
+    onShut?.();
+  };
+  return (
+    <>
+      {opens.map((id) => {
+        const at = objectAt(id);
+        return (
+          <HeldRecord key={id} id={id} title={at?.name ?? id} onClose={() => shut(id)}>
+            {at === null ? (
+              <PanelEmpty>That item is not on this page.</PanelEmpty>
+            ) : (
+              <ObjectDetail
+                agentId={at.agent}
+                kind={at.kind}
+                name={at.name}
+                onOpen={(next, aside) =>
+                  onPlace({
+                    opens: aside
+                      ? appended(opens, slotOf(next))
+                      : opened(opens, slotOf(next), id),
+                  })
+                }
+                onBack={() => shut(id)}
+              />
+            )}
+          </HeldRecord>
+        );
+      })}
+    </>
+  );
+}
+
+/** One lane of the track. The record inside it cannot name the lane: it is drawn within the track
+ *  its own acts lie over, so a track read from in there is that one rather than the pane's. This
+ *  pane named the lane, so the lane a link was followed from is the id it gave it.
+ *
+ *  An id the pane cannot draw a record for — one naming something other than an object, or any of
+ *  them while the track names no agent to read them in — still stands as a lane and says so inside
+ *  it. Drawing nothing would leave the address carrying a record the member can neither read nor
+ *  shut, because the close belongs to the lane. */
+function HeldRecord({
+  id,
+  title,
+  onClose,
+  children,
+}: {
+  id: string;
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return useSlot(children, { id, kind: "panel", title, onClose });
 }
 
 /** The band a listing standing among others is headed by: what these records are, and the act that
@@ -296,19 +396,17 @@ function ObjectIndex({
   kind,
   title,
   section,
-  siblings,
-  onPickSibling,
   lead,
+  opens,
   onOpen,
 }: {
   agentId: string | null;
   kind: string;
   title?: string;
   section?: string;
-  siblings?: FilterOption[];
-  onPickSibling?: (value: string) => void;
   lead?: ReactNode;
-  onOpen: (at: At) => void;
+  opens: string[];
+  onOpen: (at: ObjectAddress) => void;
 }) {
   const agents = useAgents();
   const mainAgent = useMainAgent();
@@ -336,7 +434,7 @@ function ObjectIndex({
     return outcomeNotice(outcome);
   }
 
-  const beside = useBeside(
+  const slot = useSlot(
     creating?.spec_schema && owner !== null ? (
       <NewObject
         schema={creating.spec_schema}
@@ -347,7 +445,12 @@ function ObjectIndex({
         onClose={() => setCreating(null)}
       />
     ) : null,
-    () => setCreating(null),
+    {
+      id: "new-" + kind,
+      kind: "panel",
+      title: "New " + noun(kind),
+      onClose: () => setCreating(null),
+    },
   );
 
   return (
@@ -419,15 +522,10 @@ function ObjectIndex({
             {section ? (
               <SectionBand name={section} action={making} />
             ) : (
-              <PageHeader
-                title={title}
-                siblings={siblings}
-                onPick={onPickSibling}
-                search={searching}
-                action={making}
-              />
+              <Header heading={1} title={title} acts={making} />
             )}
             <PageToolbar>
+              {section ? null : searching}
               {lead}
               {flags.length ? (
                 <Filter
@@ -448,7 +546,7 @@ function ObjectIndex({
                 className="ml-auto"
                 onClick={() => setReloads((count) => count + 1)}
               >
-                <IconRefresh className="size-icon" aria-hidden />
+                <IconRefresh aria-hidden />
               </Button>
             </PageToolbar>
             <DataTable
@@ -456,8 +554,11 @@ function ObjectIndex({
                 rows={payload.objects}
                 rowKey={(row) => row.agent_id + "/" + row.name}
                 open={(row) => () =>
-                  onOpen({ agentId: row.agent_id, kind: payload.kind, name: row.name })
-                }
+                  onOpen({ agent: row.agent_id, kind: payload.kind, name: row.name })}
+                current={(row) =>
+                  opens.includes(
+                    slotOf({ agent: row.agent_id, kind: payload.kind, name: row.name }),
+                  )}
                 empty={"No " + noun(payload.kind) + " is visible to you."}
                 note={
                   narrowed === "mine" && !query
@@ -525,7 +626,7 @@ function ObjectIndex({
         );
       }}
       </Panel>
-      {beside}
+      {slot}
     </>
   );
 }
@@ -555,7 +656,6 @@ function NewObject({
       kind={kind}
       name={null}
       spec={null}
-      title={"New " + noun(kind)}
       lead={
         agents.length > 1 ? (
           <Field label="App" htmlFor={AGENT_FIELD}>
@@ -580,10 +680,10 @@ function NewObject({
   );
 }
 
-/** One object's record, beside the screen that opened it: the record-panel heading and way out
- *  every opened record wears, over the record's own groups. `lead` stands above those groups —
- *  the one thing a kind can show that its facts cannot, a site's own live page — supplied by the
- *  screen that knows the kind, so this panel stays ignorant of any one of them. */
+/** One object's record, beside the screen that opened it: the gutters and the scroll every opened
+ *  record wears, over the record's own groups. `lead` stands above those groups — the one thing a
+ *  kind can show that its facts cannot, a site's own live page — supplied by the screen that knows
+ *  the kind, so this panel stays ignorant of any one of them. */
 export function ObjectDetail({
   agentId,
   kind,
@@ -596,19 +696,21 @@ export function ObjectDetail({
   kind: string;
   name: string;
   lead?: ReactNode;
-  onOpen: (at: ObjectAddress) => void;
+  /** What a link inside the record reaches for, and whether the press asked for it beside what is
+   *  already open rather than in place of whatever stands to this record's right. */
+  onOpen: (at: ObjectAddress, aside: boolean) => void;
   onBack: () => void;
 }) {
   return (
-    <RecordPanel title={name} onClose={onBack}>
+    <RecordPanel>
       {lead}
       <ObjectRecord agentId={agentId} kind={kind} name={name} onOpen={onOpen} onBack={onBack} />
     </RecordPanel>
   );
 }
 
-/** The record's body, inside the panel so the edit form it raises opens over this record rather
- *  than displacing it from the pane's one column. */
+/** The record's body, inside the panel so the edit form it raises lies over this record rather than
+ *  taking a slot of its own beside it. */
 function ObjectRecord({
   agentId,
   kind,
@@ -619,7 +721,7 @@ function ObjectRecord({
   agentId: string;
   kind: string;
   name: string;
-  onOpen: (at: ObjectAddress) => void;
+  onOpen: (at: ObjectAddress, aside: boolean) => void;
   onBack: () => void;
 }) {
   const viewer = useViewer();
@@ -646,19 +748,23 @@ function ObjectRecord({
     setNotice(outcomeNotice(outcome));
   }
 
-  const beside = useBeside(
+  const slot = useSlot(
     editing?.spec_schema && editing.spec ? (
       <SpecPanel
         schema={editing.spec_schema}
         kind={editing.kind}
         name={editing.name}
         spec={editing.spec}
-        title={"Edit " + editing.name}
         onDone={submit}
         onClose={() => setEditing(null)}
       />
     ) : null,
-    () => setEditing(null),
+    {
+      id: "edit-" + kind + "/" + name,
+      kind: "panel",
+      title: "Edit " + name,
+      onClose: () => setEditing(null),
+    },
   );
 
   return (
@@ -695,24 +801,30 @@ function ObjectRecord({
             <Section title="Links">
               {payload.links.length ? (
                 <ul className="m-0 list-none p-0">
-                  {payload.links.map((link) => (
-                    <li key={link.relation + link.kind + link.name} className="py-2xs">
-                      {link.opens ? (
-                        <button
-                          type="button"
-                          data-part="link"
-                          onClick={() => onOpen({ kind: link.kind, name: link.name })}
-                          className="border-0 bg-transparent p-0 text-left font-strong text-inherit"
-                        >
-                          {link.relation + " " + noun(link.kind) + " " + link.name}
-                        </button>
-                      ) : (
-                        <span data-part="link">
-                          {link.relation + " " + noun(link.kind) + " " + link.name}
-                        </span>
-                      )}
-                    </li>
-                  ))}
+                  {payload.links.map((link) => {
+                    const at = { agent: agentId, kind: link.kind, name: link.name };
+                    const said = link.relation + " " + noun(link.kind) + " " + link.name;
+                    return (
+                      <li key={link.relation + link.kind + link.name} className="py-2xs">
+                        {link.opens ? (
+                          <button
+                            type="button"
+                            data-part="link"
+                            onClick={(event) => onOpen(at, beside(event))}
+                            onAuxClick={(event) => {
+                              if (!beside(event)) return;
+                              onOpen(at, true);
+                            }}
+                            className="border-0 bg-transparent p-0 text-left font-strong text-inherit"
+                          >
+                            {said}
+                          </button>
+                        ) : (
+                          <span data-part="link">{said}</span>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               ) : (
                 <p className="m-0 text-ink-soft">Nothing links out of this one.</p>
@@ -744,7 +856,7 @@ function ObjectRecord({
           </>
         )}
       </Panel>
-      {beside}
+      {slot}
     </>
   );
 }
@@ -774,11 +886,10 @@ export type SpecEnvelope = {
 };
 
 /** The one form a typed object is written through, for both the act that creates it and the act
- *  that changes it, made or changed in the same column the object itself opens in — the record
- *  panel, with the record's own heading and the record's own way out. Six schema fields under the
- *  records push the records off the screen and read as a seventh section of the page; in the column
- *  they are the act the member asked for, with the index still readable beside them and a refusal
- *  stated next to the rows it was refused against.
+ *  that changes it, made or changed in the same kind of slot the object itself opens in. Six schema
+ *  fields under the records push the records off the screen and read as a seventh section of the
+ *  page; in a slot they are the act the member asked for, with the index still readable beside them
+ *  and a refusal stated next to the rows it was refused against.
  *
  *  `lead` is for the one field the schema cannot state: which agent's namespace the new row lands
  *  in, which only a view listing across agents knows to ask. `options` is for the one facet the
@@ -789,7 +900,6 @@ export function SpecPanel({
   kind,
   name,
   spec,
-  title,
   lead,
   options,
   onDone,
@@ -799,7 +909,6 @@ export function SpecPanel({
   kind: string;
   name: string | null;
   spec: Record<string, ObjectValue> | null;
-  title: string;
   lead?: ReactNode;
   options?: Record<string, string[] | null>;
   onDone: (envelope: SpecEnvelope) => Promise<NoticeState>;
@@ -839,7 +948,7 @@ export function SpecPanel({
   }
 
   return (
-    <RecordPanel title={title} onClose={onClose}>
+    <RecordPanel>
       <OutcomeNotice state={notice} />
       <form onSubmit={send} className="flex flex-col gap-xl">
         {lead}

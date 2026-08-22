@@ -60,7 +60,7 @@ test("the artifact viewer is torn down when the member navigates to another view
   await userEvent.click(screen.getByRole("button", { name: "Radar" }));
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
-  expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Close/ })).toBeNull();
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
 });
 
@@ -75,6 +75,6 @@ test("the artifact viewer is torn down when the member returns to a conversation
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
-  expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Close/ })).toBeNull();
   expect(screen.getByLabelText("Message the app")).toBeTruthy();
 });

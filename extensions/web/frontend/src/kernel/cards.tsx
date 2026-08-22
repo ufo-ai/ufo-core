@@ -40,7 +40,14 @@ export type CardMark<Row> =
  *  `open` makes the whole record the control that reaches it, drawn the way each shape can afford.
  *  A card holds acts of its own, so it takes `rowControl` and a press on one of those acts never
  *  also opens the record. A tile holds none, so it is a button outright and the `li` around it
- *  keeps the role that makes the grid a list to a reader. */
+ *  keeps the role that makes the grid a list to a reader.
+ *
+ *  `current` names the row whose contents are standing beside the grid, and the mark is the row's
+ *  whole band — the `li` itself takes `aria-current` and the fill, so what is lit is the record
+ *  rather than the letters of its name. A card already draws a surface, so the fill replaces the
+ *  one it stands on; a tile draws none, so the fill is the band under its picture and its name,
+ *  ending on the picture's own edges and taking the same radius. Neither costs the row a pixel:
+ *  a mark that padded a tile would step the whole grid down as the member walked it. */
 export function CardGrid<Row>({
   rows,
   rowKey,
@@ -51,6 +58,7 @@ export function CardGrid<Row>({
   meta,
   action,
   open,
+  current,
   whole,
 }: {
   rows: Row[];
@@ -62,6 +70,7 @@ export function CardGrid<Row>({
   meta?: (row: Row) => ReactNode;
   action?: (row: Row) => ReactNode;
   open?: (row: Row) => (() => void) | null;
+  current?: (row: Row) => boolean;
   whole?: boolean;
 }) {
   return (
@@ -76,10 +85,15 @@ export function CardGrid<Row>({
       {rows.map((row) => {
         const press = open?.(row) ?? null;
         const control = press ? rowControl(press) : null;
+        const standing = current?.(row) ?? false;
         if (mark?.shape === "tile") {
           const out = action?.(row);
           return (
-            <li key={rowKey(row)} className="relative flex flex-col gap-sm">
+            <li
+              key={rowKey(row)}
+              aria-current={standing || undefined}
+              className={cn("relative flex flex-col gap-sm", standing && "rounded-panel bg-fill")}
+            >
               <Tile press={press}>
                 <Picture
                   src={mark.image?.(row) ?? null}
@@ -115,10 +129,12 @@ export function CardGrid<Row>({
           <li
             key={rowKey(row)}
             {...control}
+            aria-current={standing || undefined}
             className={cn(
               "flex flex-col overflow-hidden rounded-panel border border-edge bg-card text-card-foreground",
               control?.className,
               press && "hover:bg-fill",
+              standing && "bg-fill",
             )}
           >
             {mark?.shape === "band" ? (

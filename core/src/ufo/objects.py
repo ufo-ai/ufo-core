@@ -400,7 +400,7 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         rows = tuple(
             ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
             for row in await self._owned_rows(ctx)
-            if self._visible(row.owner, acting, is_admin)
+            if self._visible(row.owner, acting, is_admin) and self._listed(row, query)
         )
         return object_page(rows, query)
 
@@ -495,6 +495,16 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
 
     def _visible(self, owner: OwnerT, acting: UUID | None, is_admin: bool) -> bool:
         return owner.shared or self._owned(owner, acting) or is_admin
+
+    def _listed(self, row: OwnedRow[OwnerT], query: ObjectListQuery) -> bool:
+        """Whether a row the gate admits also stands in a listing. A kind holding rows that are
+        addressable by name but are not the workspace's to browse says which here; every other kind
+        lists everything its gate admits.
+
+        Core holds it because the query is core's: a kind builds its rows in `_owned_rows` and
+        `_member_rows`, neither of which is handed what the read asked for, so an extension has
+        nowhere of its own to weigh a row against a named filter."""
+        return True
 
     def _admin_can_apply(self, old: SpecT, spec: SpecT) -> bool:
         return False
@@ -633,7 +643,7 @@ class MemberReadableObjects[SpecT: BaseModel, OwnerT: ObjectOwner](
         rows = tuple(
             ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
             for row in await self._member_rows(ext, member_id=member_id)
-            if self._visible(row.owner, member_id, admin)
+            if self._visible(row.owner, member_id, admin) and self._listed(row, query)
         )
         return object_page(rows, query)
 

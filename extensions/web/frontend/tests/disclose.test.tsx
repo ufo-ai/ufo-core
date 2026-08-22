@@ -5,25 +5,20 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 
 import {
+  heldConversation,
+  openConversation,
   refusedNotice,
   AGENT,
   CONVO_ID,
-  FRESH,
   MEMBER,
   json,
   useStreamFake,
   wire,
 } from "./harness";
 
-async function paneButton(name: string): Promise<HTMLElement> {
-  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
-  return pane.findByRole("button", { name });
-}
-
-async function pickConversation(held: string, wanted: string): Promise<void> {
-  await userEvent.click(await paneButton(held));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: wanted }));
-}
+/** A link naming one of the app's conversations, which is what reaches the gate: the half picks
+ *  among none of them, and the address names the one it holds. */
+const standing = (id: string) => openConversation(AGENT.id, id);
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -50,13 +45,11 @@ const WALLED = {
   disclosable: false,
 };
 
-/** What the switcher calls each of them. A conversation the member may not read carries no words of
- *  its own, so one is named by whose it is and one by who may read it. */
+/** What each of them is called. A conversation the member may not read carries no words of its
+ *  own, so one is named by whose it is and one by who may read it. */
 const OWNER = "owner@example.com";
 const ROOM = "Private channel";
 
-/** What the half is called before a conversation is picked, which is where the switcher opens
- *  from. */
 const conversations = (entries: unknown[]) => ({
   "/conversations$": () => json({ conversations: entries }),
 });
@@ -66,21 +59,32 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("a disclosable conversation is offered, one shared with nobody is not", async () => {
+/** The gate is offered for a conversation the member can open by acknowledging it and for no other.
+ *  One shared with nobody they belong to is not a gate away — the intent would refuse — so the half
+ *  states that rather than offering an act that cannot be taken. */
+test("a disclosable conversation offers the acknowledgement, one shared with nobody does not", async () => {
   wire(conversations([PRIVATE, WALLED]));
+  standing(PRIVATE.id);
+  const offered = render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: "Open transcript" })).toBeTruthy();
+  expect(await heldConversation()).toBe(OWNER);
+  offered.unmount();
+
+  standing(WALLED.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await paneButton(FRESH));
-
-  expect(await screen.findByRole("menuitemradio", { name: OWNER })).toBeTruthy();
-  expect(screen.queryByRole("menuitemradio", { name: ROOM })).toBeNull();
+  expect(
+    await screen.findByText("This conversation is not shared with this account."),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
+  expect(await heldConversation()).toBe(ROOM);
 });
 
 test("the acknowledgement names the owner and what opening records, and does not read yet", async () => {
   const { calls } = wire(conversations([PRIVATE]));
+  standing(PRIVATE.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
-
-  await pickConversation(FRESH, OWNER);
 
   const warning = await screen.findByText(/private to owner@example.com/);
   expect(warning.textContent).toContain("may contain private information");
@@ -99,10 +103,10 @@ test("acknowledging posts the transcript intent and opens the conversation it na
       return json({ applied: true, message: "Recorded." });
     },
   });
+  standing(PRIVATE.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await pickConversation(FRESH, OWNER);
-  await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
 
   await waitFor(() => expect(bodies.length).toBe(1));
   expect(JSON.parse(bodies[0])).toEqual({
@@ -125,12 +129,13 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
         release = resolve;
       }),
   });
+  standing(PRIVATE.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await pickConversation(FRESH, OWNER);
-  await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
   await waitFor(() => expect(release).not.toBeNull());
-  await pickConversation(OWNER, ROOM);
+  standing(WALLED.id);
+  await waitFor(async () => expect(await heldConversation()).toBe(ROOM));
 
   release!(Response.json({ applied: true, message: "Recorded." }));
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -151,12 +156,13 @@ test("an acknowledgement in flight for one conversation never opens over another
       });
     },
   });
+  standing(PRIVATE.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await pickConversation(FRESH, OWNER);
-  await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
   await waitFor(() => expect(release).not.toBeNull());
-  await pickConversation(OWNER, ROOM);
+  standing(WALLED.id);
+  await waitFor(async () => expect(await heldConversation()).toBe(ROOM));
 
   release!(Response.json({ applied: true, message: "Recorded." }));
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -170,10 +176,10 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
     ...conversations([PRIVATE]),
     "/intents": () => json({ applied: false, message: "Only an admin may read it." }),
   });
+  standing(PRIVATE.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await pickConversation(FRESH, OWNER);
-  await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
 
   await refusedNotice("Only an admin may read it.");
   expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
@@ -229,17 +235,17 @@ test("a failed conversations read states the error rather than the composer", as
   expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 });
 
-/** The acknowledgement stands under the switcher that raised it rather than over it, so the
- *  conversation it is about is still there to leave by — and nothing is read until the member takes
- *  it. */
-test("the switcher stands over the acknowledgement, which reads nothing until it is taken", async () => {
+/** The acknowledgement stands under the band naming the conversation it is about, so the member
+ *  reads whose it is before taking it and leaves by the acts on that band — and nothing is read
+ *  until they do take it. */
+test("the band names the conversation the acknowledgement is about, and reads nothing until it is taken", async () => {
   const { calls } = wire(conversations([PRIVATE]));
+  standing(PRIVATE.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await pickConversation(FRESH, OWNER);
-
   expect(await screen.findByRole("button", { name: "Open transcript" })).toBeTruthy();
-  await userEvent.click(await paneButton(OWNER));
-  expect(await screen.findByRole("menuitemradio", { name: OWNER })).toBeTruthy();
+  expect(await heldConversation()).toBe(OWNER);
+  const pane = within(screen.getByRole("region", { name: "Assistant" }));
+  expect(pane.getByRole("button", { name: "New" })).toBeTruthy();
   expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
 });

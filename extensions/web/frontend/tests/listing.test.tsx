@@ -114,9 +114,7 @@ function disabled(name: string): boolean {
 }
 
 function cellsOf(name: string): string[] {
-  const row = screen.getByText(name).closest("tr");
-  if (!row) throw new Error("no row for " + name);
-  return [...row.querySelectorAll("td")].map((cell) => cell.textContent ?? "");
+  return [...rowOf(name).querySelectorAll("td")].map((cell) => cell.textContent ?? "");
 }
 
 test("the declaration alone proves nothing — it is the renderer that must be pinned", () => {
@@ -168,14 +166,14 @@ test("a listing with no rows states its blank, and names itself nowhere", async 
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
-test("a listing's search is the page header's box, never a second one on the records bar", async () => {
+test("a listing's search stands on the band of controls, never on the name above them", async () => {
   wire({ "/workspace/probe": () => json({ rows: ROWS }) });
   mount(spec({ search: (row: Row) => row.name }));
 
   await screen.findByText("alpha");
-  const header = screen.getByRole("heading", { level: 1, name: "Probe" }).parentElement!;
+  const header = document.querySelector<HTMLElement>('[data-slot="header"]')!;
   const box = await screen.findByRole("searchbox");
-  expect(header.contains(box)).toBe(true);
+  expect(header.contains(box)).toBe(false);
   expect(screen.getAllByRole("searchbox")).toHaveLength(1);
 });
 
@@ -478,39 +476,11 @@ test("a listing that declares no action renders no trailing column", async () =>
   expect(cellsOf("alpha").length).toBe(3);
 });
 
-test("a row opens its detail through the context and closes back to the listing", async () => {
-  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
-  mount(
-    spec({
-      columns: [
-        {
-          field: "name",
-          label: "who",
-          render: (name, row, { open }) => (
-            <button type="button" onClick={() => open(row)}>
-              {name}
-            </button>
-          ),
-        },
-        { field: "count", label: "how many" },
-        { field: "note", label: "note" },
-      ],
-      detail: (row, close) => (
-        <div>
-          <span>detail of {row.name}</span>
-          <button type="button" onClick={close}>
-            Close
-          </button>
-        </div>
-      ),
-    }),
-  );
-
-  await userEvent.click(await screen.findByRole("button", { name: "beta" }));
-  expect(screen.getByText("detail of beta")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  expect(screen.queryByText("detail of beta")).toBeNull();
-});
+function rowOf(name: string): HTMLElement {
+  const row = screen.getAllByText(name).map((node) => node.closest("tr")).find(Boolean);
+  if (!row) throw new Error("no row for " + name);
+  return row;
+}
 
 test("the sources declaration projects a binding and a bare stream into one uniform table", async () => {
   wire({
@@ -801,6 +771,7 @@ test("an outcome released after the member left never resets the view they are o
       return json({
         artifacts: [
           {
+            id: "a1",
             filename: "report.txt",
             subject: null,
             media_type: "text/plain",
@@ -1072,7 +1043,7 @@ test("a row listing renders primary and separator-joined meta, skipping empty pa
   expect(alpha?.textContent).not.toContain("·");
 });
 
-test("a row listing reads each part through its own render and keeps actions and detail", async () => {
+test("a row listing reads each part through its own render and keeps its actions", async () => {
   wire({ "/workspace/probe": () => json({ rows: ROWS }) });
   mount({
     read: "/workspace/probe",
@@ -1080,14 +1051,7 @@ test("a row listing reads each part through its own render and keeps actions and
     rowKey: (row: Row) => row.name,
     empty: "Nothing listed yet.",
     list: {
-      primary: {
-        field: "name",
-        render: (name, row, { open }) => (
-          <button type="button" onClick={() => open(row)}>
-            {name}
-          </button>
-        ),
-      },
+      primary: { field: "name", render: (name) => <span>{name}</span> },
       meta: [{ field: "note" }],
       when: { field: "count", render: (count) => "×" + String(count) },
     },
@@ -1099,20 +1063,11 @@ test("a row listing reads each part through its own render and keeps actions and
         Poke {row.name}
       </button>
     ),
-    detail: (row, close) => (
-      <div>
-        <span>detail of {row.name}</span>
-        <button type="button" onClick={close}>
-          Close
-        </button>
-      </div>
-    ),
   });
 
   expect(await screen.findByText("×5")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Poke alpha" })).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "beta" }));
-  expect(screen.getByText("detail of beta")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Poke beta" })).toBeTruthy();
 });
 
 test("the sources declaration searches and filters by access with live counts", async () => {

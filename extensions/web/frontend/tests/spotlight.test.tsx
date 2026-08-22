@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
+import { parseHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -49,6 +50,7 @@ const FOUND_CONVERSATION = {
 };
 
 const FOUND_FILE = {
+  id: "f1",
   filename: "deploy-plan.md",
   subject: null,
   media_type: "text/markdown",
@@ -213,9 +215,40 @@ test("an artifact hit opens the artifacts screen on that file", async () => {
   const found = within(await screen.findByRole("dialog"));
   await userEvent.click(await found.findByRole("option", { name: /deploy-plan.md/ }));
 
-  expect(location.hash).toContain("#/artifacts?");
-  expect(decodeURIComponent(location.hash)).toContain("q=deploy");
-  expect(decodeURIComponent(location.hash)).toContain("deploy-plan.md");
+  expect(location.hash).toBe("#/artifacts?q=deploy&open=" + FOUND_FILE.id);
+});
+
+/** A filename is whatever the agent sharing the file called it — the character a track is written
+ *  with included, and at whatever length. One such file among the answers is one hit to draw, never
+ *  a search the member reads as broken: every other kind still stands, and the file opens where
+ *  files open, because a lane is named by the file's own id. */
+const ODD_FOUND_NAME = "deploy~v2-" + "and-the-whole-quarter-".repeat(20) + "final.md";
+
+test("a found file named oddly and past what a lane id holds leaves every hit standing", async () => {
+  wire({
+    "/slots": () => json({ slots: [] }),
+    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
+    "/workspace/artifacts": () =>
+      json({ artifacts: [{ ...FOUND_FILE, id: "f2", filename: ODD_FOUND_NAME }] }),
+    "/workspace/memory": () => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }),
+    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
+    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
+    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+  });
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: new RegExp(ODD_FOUND_NAME) })).toBeTruthy();
+  expect(found.getByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  expect(found.getByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
+  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory"]);
+
+  await userEvent.click(found.getByRole("option", { name: new RegExp(ODD_FOUND_NAME) }));
+
+  expect(location.hash).toBe("#/artifacts?q=deploy&open=f2");
+  expect(parseHash(location.hash)).toMatchObject({ kind: "section", section: "artifacts" });
 });
 
 /** A site belongs to the workspace, not to an agent, so its read names one agent — as the
@@ -260,12 +293,13 @@ test("a hosted site stands once, under artifacts, and opens there", async () => 
   const opened = decodeURIComponent(location.hash);
   expect(opened).toContain("#/artifacts?");
   expect(opened).toContain("chip=Sites");
-  expect(opened).toContain("object/site/deploy-notes");
+  expect(opened).toContain("object/" + AGENT_ID + "/site/deploy-notes");
   expect(opened).not.toContain("tasks");
 });
 
 /** An object's name is unique under its own agent, not across the workspace, so two agents may
- *  each hold a `nightly-deploy`. Both stand: the search cannot contradict the index it reads. */
+ *  each hold a `nightly-deploy`. Both stand, and each hit opens the lane naming its own agent: the
+ *  search cannot contradict the index it reads. */
 test("two agents' same-named records both stand, each opening its own", async () => {
   const second = owned({ ...FOUND_TASK, mine: false }, SECOND);
   wire({
@@ -286,7 +320,9 @@ test("two agents' same-named records both stand, each opening its own", async ()
   expect(rows).toHaveLength(2);
 
   await userEvent.click(rows[1]);
-  expect(decodeURIComponent(location.hash)).toContain("agent=" + SECOND_ID);
+  expect(decodeURIComponent(location.hash)).toContain(
+    "object/" + SECOND_ID + "/" + TASK_KIND.kind + "/nightly-deploy",
+  );
 });
 
 test("a task hit opens that record on the tasks screen", async () => {
@@ -300,8 +336,7 @@ test("a task hit opens that record on the tasks screen", async () => {
   const opened = decodeURIComponent(location.hash);
   expect(opened).toContain("#/tasks?");
   expect(opened).toContain("chip=" + TASK_KIND.kind);
-  expect(opened).toContain("object/" + TASK_KIND.kind + "/nightly-deploy");
-  expect(opened).toContain("agent=" + AGENT_ID);
+  expect(opened).toContain("object/" + AGENT_ID + "/" + TASK_KIND.kind + "/nightly-deploy");
 });
 
 /** A read that refused is not a kind with no hits: the group states the refusal, so the member

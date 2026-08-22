@@ -98,7 +98,13 @@ function Act({ verb }: { verb: string | null }) {
  *  The act column is the table's own, never a caller's: every screen that drew its own trailing
  *  chevron drew it at a different width, so one table's rows ended where the next one's did not.
  *  `act` names the verb a row's own act commits, and the head above it is blank because the column
- *  holds acts rather than a fact the records share. */
+ *  holds acts rather than a fact the records share.
+ *
+ *  `current` names the row whose contents are standing in the column beside the table, and the mark
+ *  is the `tr` itself: `aria-current` on the row a reader already navigates as a row, and the same
+ *  fill the row takes under the pointer, so the band reaches the rules that divide the records
+ *  rather than stopping at a cell. The band is square-cornered because it is the whole width of the
+ *  table and because collapsed borders drop a radius on every part of one. */
 export function DataTable<Row>({
   columns,
   rows,
@@ -107,6 +113,7 @@ export function DataTable<Row>({
   note,
   sort,
   open,
+  current,
   act,
   children,
 }: {
@@ -119,6 +126,8 @@ export function DataTable<Row>({
   /** What a row opens, where the record has a page of its own — the whole row is the control that
    *  reaches it, and a row that opens nothing is handed none. */
   open?: (row: Row) => (() => void) | null;
+  /** Which row is standing in the column beside the table, or none while the track is empty. */
+  current?: (row: Row) => boolean;
   /** What the row's own act says, or null where the row carries none. */
   act?: (row: Row) => string | null;
   children: (row: Row) => ReactNode;
@@ -148,11 +157,17 @@ export function DataTable<Row>({
           rows.map((row) => {
             const press = open?.(row) ?? null;
             const control = press ? rowControl(press, true) : null;
+            const standing = current?.(row) ?? false;
             return (
               <tr
                 key={rowKey(row)}
                 {...control}
-                className={cn(control && "hover:bg-fill", control?.className)}
+                aria-current={standing || undefined}
+                className={cn(
+                  control && "hover:bg-fill",
+                  control?.className,
+                  standing && "bg-fill",
+                )}
               >
                 {children(row)}
                 {act ? (

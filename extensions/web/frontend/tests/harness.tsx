@@ -11,10 +11,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 import {
-  WORKSPACE_TABS,
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
+  WORKSPACE_TABS,
+  SECTIONS,
 } from "@/lib/route";
 
 /** The shell's own providers, so a view mounted alone draws what it draws inside the app. A tooltip
@@ -59,7 +60,7 @@ export function PlacedSection({
     <Shell>
     <TabbedPane
       group="section"
-      tabs={[section]}
+      tabs={SECTIONS}
       views={SECTION_VIEWS}
       view={section}
       place={placed.place}
@@ -72,9 +73,7 @@ export function PlacedSection({
 /** The destination's own name is the control that moves between destinations, so a test changing
  *  destination presses the name and picks out of the menu under it, exactly as a member does. */
 export async function goTo(label: string) {
-  const heading = await screen.findByRole("heading", { level: 1 });
-  await userEvent.click(within(heading).getByRole("button"));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: label }));
+  await userEvent.click(await screen.findByRole("tab", { name: label }));
 }
 
 /** The destination the shell is standing on, which its heading names. */
@@ -378,10 +377,27 @@ export function agentIndex(): Promise<HTMLElement> {
   return screen.findByRole("navigation", { name: "Apps" });
 }
 
-/** Open one agent from the index: the row is the control, named by the text it carries. */
-/** What the app pane's conversation half is headed by before a conversation names it, which is
- *  also the switcher's own control while nothing is open. */
+/** What the app pane's conversation half is headed by before a conversation names it. */
 export const FRESH = "New conversation";
+
+/** Following a link that names one of an app's conversations, which is how the app pane comes to
+ *  stand on a conversation it is not already holding: the half picks among none of them, the
+ *  address names the one it holds. */
+export function openConversation(agentId: string, conversationId: string): void {
+  location.hash = "#/agents/" + agentId + "?open=" + conversationId;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+}
+
+/** What the band over an app pane's conversation half names, which is the conversation the half is
+ *  holding — `FRESH` where it holds none yet. */
+export async function heldConversation(app = "Assistant"): Promise<string> {
+  const pane = await screen.findByRole("region", { name: app });
+  const band = pane.querySelector("[data-slot=header] h2");
+  if (!band) throw new Error("the half draws no band");
+  return String(band.textContent);
+}
+
+/** Open one agent from the index: the row is the control, named by the text it carries. */
 
 export async function openAgentRow(name: string): Promise<void> {
   const index = await agentIndex();

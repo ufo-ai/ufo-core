@@ -4,15 +4,18 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 
 import {
   destination,
   fact,
   goTo,
+  heldConversation,
   json,
   objectIndex,
   openAgentRow,
   openAgentSettings,
+  openConversation,
   opened,
   owned,
   pick,
@@ -49,7 +52,6 @@ function toggleApplications(): void {
 
 const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
 
-/** What the half is called before a conversation is picked, which is the switcher's own control. */
 function usageDetails(totalMicroUsd: number, tokens: number = 1_200) {
   return {
     selected: {
@@ -419,7 +421,7 @@ test("a detail whose kind the lane refuses offers no control and no prose about 
 
   await userEvent.click(await viewCard("docs-abc"));
 
-  expect(await screen.findByRole("heading", { name: "docs-abc" })).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "docs-abc" })).toBeTruthy();
   expect(document.querySelector('[data-part="refusal"]')).toBeNull();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
@@ -498,7 +500,7 @@ test("the agent's own section lists what is shared with it and not what is held 
   expect(screen.queryByText("notion")).toBeTruthy();
 });
 
-test("a workspace-shared conversation reads as shared, in the switcher and in its heading", async () => {
+test("a workspace-shared conversation reads as shared, in its band and in its heading", async () => {
   const shared = "5c0be3aa-0000-4000-8000-000000000003";
   wire({
     ["/conversations/" + shared + "/transcript"]: () => json({ messages: [] }),
@@ -526,14 +528,14 @@ test("a workspace-shared conversation reads as shared, in the switcher and in it
   location.hash = "#/agents/" + AGENT_ID + "?open=" + shared;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
-  const held = await pane.findByRole("button", { name: "Workspace" });
-  expect(held.textContent).not.toContain("slack");
-  expect(held.textContent).not.toContain(shared.slice(0, 8));
+  const band = await heldConversation();
+  expect(band).toBe("Workspace");
+  expect(band).not.toContain("slack");
+  expect(band).not.toContain(shared.slice(0, 8));
   expect(await screen.findByRole("heading", { name: "Slack · Workspace" })).toBeTruthy();
 });
 
-test("the switcher names a conversation by what it is about, and the keyboard opens it", async () => {
+test("a conversation the address names is opened, and named by what it is about", async () => {
   const opened = "8f2c1d40-0000-4000-8000-000000000004";
   const said = "can you take a look at the failing deploy";
   wire({
@@ -562,15 +564,11 @@ test("the switcher names a conversation by what it is about, and the keyboard op
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
-  const switcher = await pane.findByRole("button", { name: FRESH });
-  switcher.focus();
-  await userEvent.keyboard("{Enter}");
-  const item = await screen.findByRole("menuitemradio", { name: said });
-  expect(document.activeElement).toBe(item);
-  await userEvent.keyboard("{Enter}");
+  expect(await heldConversation()).toBe(FRESH);
 
-  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + opened);
+  openConversation(AGENT_ID, opened);
+
+  await waitFor(async () => expect(await heldConversation()).toBe(said));
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   expect(screen.getByRole("heading", { name: "Slack · " + said })).toBeTruthy();
 });
@@ -749,12 +747,7 @@ test("a Slack transcript heads itself with its channel, and those words are the 
     expect(within(bubble as HTMLElement).queryByRole("link")).toBeNull();
   }
 
-  await userEvent.click(
-    await screen.findByRole("button", { name: "take a look at the failing deploy" }),
-  );
-  await userEvent.click(
-    await screen.findByRole("menuitemradio", { name: "Rename the deploy job" }),
-  );
+  openConversation(AGENT_ID, portal);
 
   const portalHeading = await screen.findByRole("heading", {
     name: "Portal · Rename the deploy job",
@@ -762,7 +755,7 @@ test("a Slack transcript heads itself with its channel, and those words are the 
   expect(within(portalHeading).queryByRole("link")).toBeNull();
 });
 
-test("a conversation nobody shared offers no opener, and the half stands on the composer", async () => {
+test("a conversation nobody shared is never named, and the half stands on the composer", async () => {
   wire({
     "/conversations$": () =>
       json({
@@ -800,10 +793,7 @@ test("a conversation nobody shared offers no opener, and the half stands on the 
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
-  await userEvent.click(await pane.findByRole("button", { name: FRESH }));
-
-  expect(screen.queryAllByRole("menuitemradio")).toEqual([]);
+  expect(await heldConversation()).toBe(FRESH);
   expect(screen.queryByText("#ops")).toBeNull();
   expect(screen.queryByText("Private channel")).toBeNull();
   expect(screen.getByLabelText("Message the app")).toBeTruthy();
@@ -1001,7 +991,7 @@ test("a member who is not an admin is offered no administration control", async 
   expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
 });
 
-test("an app opens on the conversation that moved last, and the switcher names the rest", async () => {
+test("an app opens on the conversation that moved last, and an address names another", async () => {
   const older = "44444444-4444-4444-8444-444444444444";
   const listed = (id: string, description: string) => ({
     id,
@@ -1036,16 +1026,86 @@ test("an app opens on the conversation that moved last, and the switcher names t
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   // Landing writes nothing to the address: the app's own hash already means "the latest".
-  const pane = within(await screen.findByRole("region", { name: "Assistant" }));
-  const switcher = await pane.findByRole("button", { name: /Newest thread/ });
+  expect(await heldConversation()).toBe("Newest thread");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
   expect(screen.queryByRole("tab", { name: "Home" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Conversations" })).toBeNull();
 
-  await userEvent.click(switcher);
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Older thread" }));
+  openConversation(AGENT_ID, older);
+
+  await waitFor(async () => expect(await heldConversation()).toBe("Older thread"));
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + older);
+});
+
+/** The app's own conversations are a lane of the pane's track, which is the whole of what a member
+ *  holding one of several has to reach the rest by. The lane lists them, marks the one the pane is
+ *  holding, and opens the one pressed — and the address is what it writes, so the mark it draws is
+ *  read back off the same place the pane reads. */
+test("an app's conversations stand in a lane, and the pressed one opens", async () => {
+  const older = "44444444-4444-4444-8444-444444444444";
+  const walled = "66666666-6666-4666-8666-666666666666";
+  const listed = (id: string, description: string, readable = true) => ({
+    id,
+    agent: null,
+    surface: "web",
+    surface_label: null,
+    audience: "member:m1",
+    member_email: "member@example.com",
+    description,
+    source: null,
+    speakers: ["member@example.com"],
+    turn_count: 1,
+    created_at: "2026-07-30T10:00:00",
+    last_turn_at: "2026-07-30T10:00:01",
+    readable,
+    disclosable: false,
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  wire({
+    "/api/chats": () =>
+      json({
+        chats: [
+          { ...CHAT_ROW, title: "Newest thread" },
+          { ...CHAT_ROW, conversation_id: older, title: "Older thread" },
+        ],
+      }),
+    "/conversations$": () =>
+      json({
+        conversations: [
+          listed(CONVO_ID, "Newest thread"),
+          listed(older, "Older thread"),
+          listed(walled, "Someone else's room", false),
+        ],
+      }),
+    "/homepage": () => json({ state: "none" }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const lane = await screen.findByRole("region", { name: "Conversations" });
+  // A conversation this member may neither read nor acknowledge is not listed: a press on it would
+  // land the pane on the sentence that it is not shared with this account.
+  expect(within(lane).getAllByRole("button").map((row) => row.textContent)).toEqual([
+    "Newest thread",
+    "Older thread",
+  ]);
+  expect(
+    within(lane).getByRole("button", { name: "Newest thread" }).getAttribute("aria-current"),
+  ).toBe("true");
+  // The band states the lane's name and shuts it; at a lane's floor there is no room for more, so
+  // the acts on this screen stay on the app's own band.
+  const band = lane.querySelector("[data-slot=header]") as HTMLElement;
+  expect(within(band).queryAllByRole("button")).toEqual([]);
+
+  await userEvent.click(within(lane).getByRole("button", { name: "Older thread" }));
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + older);
+  await waitFor(async () => expect(await heldConversation()).toBe("Older thread"));
+  expect(
+    within(screen.getByRole("region", { name: "Conversations" }))
+      .getByRole("button", { name: "Older thread" })
+      .getAttribute("aria-current"),
+  ).toBe("true");
 });
 
 test("the app pane starts a conversation where it stands, without leaving for the chat screen", async () => {
@@ -1065,8 +1125,8 @@ test("the app pane starts a conversation where it stands, without leaving for th
 
   await userEvent.click(act);
 
-  expect(await within(pane).findByRole("button", { name: /New conversation/ })).toBeTruthy();
-  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+  await waitFor(async () => expect(await heldConversation()).toBe(FRESH));
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
 });
 
 test("New starts a fresh conversation while the address still names one", async () => {
@@ -1101,12 +1161,12 @@ test("New starts a fresh conversation while the address still names one", async 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const pane = await screen.findByRole("region", { name: "Assistant" });
-  expect(await within(pane).findByRole("button", { name: /The one already open/ })).toBeTruthy();
+  await waitFor(async () => expect(await heldConversation()).toBe("The one already open"));
 
   await userEvent.click(within(pane).getByRole("button", { name: "New" }));
 
-  expect(await within(pane).findByRole("button", { name: FRESH })).toBeTruthy();
-  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+  await waitFor(async () => expect(await heldConversation()).toBe(FRESH));
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
 });
 
 test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
@@ -1284,4 +1344,50 @@ test("every container that stacks bands states the one gap between them", async 
   expect(column?.className).toContain("gap-6xl");
   expect(column?.className).toContain("max-w-page");
   expect(column?.parentElement?.className).toContain("gap-6xl");
+});
+
+/** The lane a slot stands in already states its name over it and draws the way out, so the list
+ *  inside it states no landmark of its own: two of them reading "Artifacts", one nested in the
+ *  other, is one place a member moving by landmark arrives at twice. */
+test("a slot standing in a lane names nothing of its own", async () => {
+  wire({
+    ["/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({ type: "artifacts", artifacts: [], truncated: false }),
+  });
+  render(
+    <ConversationSlotPane
+      agent={AGENT}
+      conversationId={CONVO_ID}
+      slot="artifacts"
+      summary={{ id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifact", count: 0 }}
+      embedded
+    />,
+  );
+
+  expect(await screen.findByText("No artifacts shared in this conversation.")).toBeTruthy();
+  expect(screen.queryByRole("complementary")).toBeNull();
+  expect(screen.queryByLabelText("Artifacts")).toBeNull();
+});
+
+/** Read at an address of its own the slot is a destination, so its name is the page's one heading —
+ *  said as the last step of the crumb that leads back to the app holding it. */
+test("a slot standing on its own address is headed by its name under the app", async () => {
+  wire({
+    ["/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({ type: "artifacts", artifacts: [], truncated: false }),
+  });
+  render(
+    <ConversationSlotPane
+      agent={AGENT}
+      conversationId={CONVO_ID}
+      slot="artifacts"
+      summary={{ id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifact", count: 0 }}
+      onOpenAgent={() => {}}
+    />,
+  );
+
+  const head = await screen.findByRole("heading", { level: 1, name: "Artifacts" });
+  const path = screen.getByRole("navigation", { name: "Breadcrumb" });
+  expect(path.contains(head)).toBe(true);
+  expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
 });

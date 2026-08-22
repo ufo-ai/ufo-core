@@ -6,6 +6,7 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { ObjectPane } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
+import { Pane } from "@/kernel/pane";
 import { Viewer } from "@/lib/audience";
 import { friendlyMoment, fullMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
@@ -74,6 +75,11 @@ const LONG_URL =
 
 const SECOND_CONVO_ID = "6f1d4c2a-9b3e-4a71-8c05-2d7e6b1f0a94";
 
+/** A record's lane: the app whose namespace holds it, the kind and the name, in the one string the
+ *  address and the store both carry. */
+const TASK_LANE = "object/" + AGENT_ID + "/scheduled_task/daily-brief";
+const ROLL_LANE = "object/" + SECOND_ID + "/scheduled_task/weekly-roll";
+
 const SECOND_TASK_ROW = owned(
   {
     name: "weekly-roll",
@@ -113,7 +119,6 @@ const RUN = {
     },
   ],
 };
-
 
 const TASK_DETAIL = {
   ...TASK_KIND,
@@ -159,6 +164,11 @@ function headings(): string[] {
   return screen.getAllByRole("columnheader").map((head) => String(head.textContent));
 }
 
+/** What the track is holding, in the order it holds it. */
+function standing(): (string | null)[] {
+  return screen.queryAllByRole("region").map((slot) => slot.getAttribute("aria-label"));
+}
+
 /** One fact of the detail's `Spec` group, scoped to that group: `Status` states some of the same
  *  fields, so a label alone names two rows on the page. */
 function specFact(label: string): { row: HTMLElement; said: HTMLElement } {
@@ -174,10 +184,27 @@ function specFact(label: string): { row: HTMLElement; said: HTMLElement } {
   return { row: term.parentElement, said: term.nextElementSibling as HTMLElement };
 }
 
+/** The pane inside the one thing that owns its track. Every screen holding an object index does
+ *  this — the radar off its address, the settings dialog off local state — so the pane is never
+ *  mounted here in a shape no screen mounts it in. */
+function PlacedPane({ agentId }: { agentId: string | null }) {
+  const [place, setPlace] = useState<Placement>({});
+  return (
+    <ObjectPane
+      agentId={agentId}
+      kind="scheduled_task"
+      opens={place.opens ?? []}
+      onPlace={(patch) => setPlace((held) => ({ ...held, ...patch }))}
+    />
+  );
+}
+
 function mount(agents = [AGENT]) {
   render(
     <MainAgentProvider agents={agents}>
-      <ObjectPane agentId={null} kind="scheduled_task" />
+      <Pane>
+        <PlacedPane agentId={null} />
+      </Pane>
     </MainAgentProvider>,
   );
 }
@@ -185,13 +212,15 @@ function mount(agents = [AGENT]) {
 function mountAgent() {
   render(
     <MainAgentProvider agents={[AGENT, SECOND]}>
-      <ObjectPane agentId={AGENT_ID} kind="scheduled_task" />
+      <Pane>
+        <PlacedPane agentId={AGENT_ID} />
+      </Pane>
     </MainAgentProvider>,
   );
 }
 
-function PlacedRadar() {
-  const [place, setPlace] = useState<Placement>({});
+function PlacedRadar({ start }: { start: Placement }) {
+  const [place, setPlace] = useState<Placement>(start);
   return (
     <Radar
       title="Radar"
@@ -201,18 +230,60 @@ function PlacedRadar() {
   );
 }
 
-function mountRadar() {
+function mountRadar(start: Placement = {}) {
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedRadar />
+      <Pane>
+        <PlacedRadar start={start} />
+      </Pane>
     </MainAgentProvider>,
   );
 }
 
-function mountTasks() {
+/** The task record reached from two links, so a record standing to the right of another can be
+ *  shut by following a second link out of the one on its left. */
+const LINKED_TASK = {
+  ...TASK_DETAIL,
+  links: [
+    { relation: "reports_to", kind: "conversation", name: CONVO_ID, opens: true },
+    { relation: "follows", kind: "scheduled_task", name: "weekly-roll", opens: true },
+  ],
+};
+
+const ROLL_DETAIL = { ...TASK_DETAIL, name: "weekly-roll", links: [] };
+
+/** The wire every path test reads: one index of two tasks, one record carrying two links, and the
+ *  record each link names. */
+function tasks() {
+  return wire({
+    ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
+    "/objects/scheduled_task/daily-brief": () => json(LINKED_TASK),
+    "/objects/scheduled_task/weekly-roll": () => json(ROLL_DETAIL),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
+  });
+}
+
+function link(said: string): HTMLElement {
+  return screen.getByRole("button", { name: said });
+}
+
+const REPORTS_TO = "reports_to conversation " + CONVO_ID;
+const FOLLOWS = "follows scheduled task weekly-roll";
+
+/** The press that opens beside: the browser's own gesture for a second tab. One `userEvent`
+ *  instance holds the key down over the click — the module's own verbs each set up a fresh one and
+ *  would let go of it in between. */
+async function besidePress(target: HTMLElement): Promise<void> {
+  const user = userEvent.setup();
+  await user.keyboard("{Meta>}");
+  await user.click(target);
+  await user.keyboard("{/Meta}");
+}
+
+function mountTasks(start: Placement = {}) {
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="tasks" />
+      <PlacedSection section="tasks" place={start} />
     </MainAgentProvider>,
   );
 }
@@ -667,7 +738,9 @@ test("a creator reads as You to its own member, the address to another, Workspac
   render(
     <Viewer.Provider value={MEMBER.email}>
       <MainAgentProvider agents={[AGENT]}>
-        <ObjectPane agentId={AGENT_ID} kind="scheduled_task" />
+        <Pane>
+          <PlacedPane agentId={AGENT_ID} />
+        </Pane>
       </MainAgentProvider>
     </Viewer.Provider>,
   );
@@ -689,34 +762,162 @@ test("the index read across the audience names the agent and leaves the creator 
   expect(screen.queryByText("mel@example.com")).toBeNull();
 });
 
-test("a task detail's reports_to link lands on that conversation's detail page", async () => {
-  const reads: string[] = [];
+/** A link inside a record opens what it names immediately to the right of the record it was
+ *  followed from, and shuts whatever stood there: the path is what the member walked, so a record
+ *  reached from a branch they have left does not stay standing. A link the projection marks closed
+ *  opens nothing and is not a control. */
+test("a link inside a record shuts what stood right of it and opens beside it", async () => {
+  tasks();
+  mount();
+
+  await openRow("daily-brief");
+  expect(standing()).toEqual(["daily-brief"]);
+
+  await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
+  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+  expect(standing()).toEqual(["daily-brief", "weekly-roll"]);
+
+  await userEvent.click(link(REPORTS_TO));
+
+  expect(await screen.findByRole("heading", { name: CONVO_ID })).toBeTruthy();
+  expect(standing()).toEqual(["daily-brief", CONVO_ID]);
+  expect(screen.getByText("member:m1")).toBeTruthy();
+  const shut = screen.getByText("scoped_to agent assistant");
+  expect(shut.tagName).toBe("SPAN");
+  expect(screen.queryByRole("button", { name: "scoped_to agent assistant" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Close " + CONVO_ID }));
+  expect(standing()).toEqual(["daily-brief"]);
+});
+
+test("a modifier press on a link stands the record it names at the end of the path", async () => {
+  tasks();
+  mount();
+
+  await openRow("daily-brief");
+  await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
+  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+
+  await besidePress(link(REPORTS_TO));
+
+  expect(await screen.findByRole("heading", { name: CONVO_ID })).toBeTruthy();
+  expect(standing()).toEqual(["daily-brief", "weekly-roll", CONVO_ID]);
+});
+
+/** The index is the root of the path, so a row pressed there leaves one record standing however
+ *  far the member had walked from the last one. */
+test("a row of the index shuts every record standing and opens the one it names", async () => {
+  tasks();
+  mount();
+
+  await openRow("daily-brief");
+  await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
+  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+
+  await openRow("weekly-roll");
+
+  await waitFor(() => expect(standing()).toEqual(["weekly-roll"]));
+});
+
+test("closing a record shuts the record opened from it", async () => {
+  tasks();
+  mount();
+
+  await openRow("daily-brief");
+  await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
+  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Close daily-brief" }));
+
+  await waitFor(() => expect(standing()).toEqual([]));
+});
+
+/** The screen owns the track and the pane reads it, so the record the address opened and the record
+ *  a row opens are the same lane: pressing the row it already stands on changes nothing, and two
+ *  nodes never portal into the one host that id names. */
+test("a row already standing from the address opens no second record of the same id", async () => {
   wire({
-    ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
     "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
-    "/objects/scheduled_task": (url) => {
-      reads.push(url);
-      return objectIndex(TASK_KIND, [TASK_ROW]);
-    },
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+  });
+  mountTasks({ opens: [TASK_LANE] });
+
+  expect(await screen.findByRole("region", { name: "daily-brief" })).toBeTruthy();
+  expect(standing()).toEqual(["daily-brief"]);
+
+  await openRow("daily-brief");
+
+  expect(standing()).toEqual(["daily-brief"]);
+  expect(screen.getAllByRole("heading", { name: "daily-brief" })).toHaveLength(1);
+});
+
+/** A link a member was sent carries the track whole, and the address may name what the pane cannot
+ *  draw: an id that is no record at all. The lane stands anyway and says so, because the close
+ *  belongs to the lane — drawing nothing leaves the address holding a record the member can neither
+ *  read nor get rid of. */
+test("an open id the pane cannot draw stands as a lane that says so and closes", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+  });
+  mountTasks({ opens: [TASK_LANE, "nonsense/1"] });
+
+  await screen.findByRole("row", { name: /daily-brief/ });
+  expect(standing()).toEqual(["daily-brief", "nonsense/1"]);
+  expect(screen.getAllByText("That item is not on this page.")).toHaveLength(1);
+  expect(await screen.findByRole("heading", { name: "Spec" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Close nonsense/1" }));
+  expect(standing()).toEqual(["daily-brief"]);
+
+  await userEvent.click(screen.getByRole("button", { name: "Close daily-brief" }));
+  expect(standing()).toEqual([]);
+});
+
+/** The index is the root wherever the record standing beside it came from. A pane keeping a track
+ *  of its own leaves the address's record standing while it opens the row that was pressed, and the
+ *  member reads two tasks where they asked for one. */
+test("a row pressed beside the record the address opened leaves one record standing", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
+    "/objects/scheduled_task/weekly-roll": () => json(ROLL_DETAIL),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+  });
+  mountTasks({ opens: [TASK_LANE] });
+
+  expect(await screen.findByRole("region", { name: "daily-brief" })).toBeTruthy();
+
+  await openRow("weekly-roll");
+
+  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+  await waitFor(() => expect(standing()).toEqual(["weekly-roll"]));
+});
+
+/** Every index marks the row whose record stands beside it, which is what makes the path readable
+ *  and what makes a lane closing under a press read as navigation rather than loss. */
+test("the index row whose record is standing is marked, and no other", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
   });
   mount();
 
   await openRow("daily-brief");
-  const link = await screen.findByText("reports_to conversation " + CONVO_ID);
-  await userEvent.click(link);
 
-  expect(await screen.findByRole("heading", { name: CONVO_ID })).toBeTruthy();
-  expect(screen.getAllByText("web").length).toBe(2);
-  expect(screen.getByText("member:m1")).toBeTruthy();
-  const closed = screen.getByText("scoped_to agent assistant");
-  expect(closed.tagName).toBe("SPAN");
-  expect(screen.queryByRole("button", { name: "scoped_to agent assistant" })).toBeNull();
-
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  expect(await screen.findByText("daily-brief")).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "daily-brief" })).toBeTruthy();
+  const marked = screen
+    .getAllByRole("row")
+    .filter((row) => row.getAttribute("aria-current") === "true");
+  expect(marked).toHaveLength(1);
+  expect(marked[0].textContent).toContain("daily-brief");
 });
 
-test("an outcome stays on the row it happened to, not the next one opened", async () => {
+/** An outcome is the record's own, so it stays in the slot the act was taken in. The record opened
+ *  beside it reports what happened to itself and nothing else. */
+test("an outcome stays in the slot it happened in, not in the one opened beside it", async () => {
   wire({
     ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
     "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
@@ -732,8 +933,13 @@ test("an outcome stays on the row it happened to, not the next one opened", asyn
 
   await userEvent.click(screen.getByText("reports_to conversation " + CONVO_ID));
 
-  expect(await screen.findByRole("heading", { name: CONVO_ID })).toBeTruthy();
-  expect(screen.queryByText("The workspace refuses it.")).toBeNull();
+  const opened = await screen.findByRole("region", { name: CONVO_ID });
+  expect(within(opened).queryByText("The workspace refuses it.")).toBeNull();
+  expect(
+    within(screen.getByRole("region", { name: "daily-brief" })).getByText(
+      "The workspace refuses it.",
+    ),
+  ).toBeTruthy();
 });
 
 test("a spec the kind elides reads as the row's own summary, with no form to submit", async () => {
@@ -857,7 +1063,7 @@ test("an app's Scheduled tab lists that app's tasks, and a row opens inside the 
 
   await openRow("daily-brief");
 
-  expect(await within(dialog).findByRole("complementary", { name: "daily-brief" })).toBeTruthy();
+  expect(await within(dialog).findByRole("region", { name: "daily-brief" })).toBeTruthy();
   expect(within(dialog).getByText("write the daily brief")).toBeTruthy();
 });
 
@@ -880,14 +1086,14 @@ test("a row opens under the agent that owns it, and closing returns to the whole
   expect(await screen.findByRole("heading", { name: "weekly-roll" })).toBeTruthy();
   expect(reads[0]).toContain("agent=" + SECOND_ID);
 
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close weekly-roll" }));
   expect(await screen.findByText("daily-brief")).toBeTruthy();
 });
 
-/** The pane holds one column, so the create form raised from the list takes it from the record the
- *  route named. A route still naming a record nothing shows would lie about the screen, so the
- *  record is cleared out of it — without leaving the page, which is where the form now stands. */
-test("a form taking the column clears the record the route named", async () => {
+/** The form that writes a record is a lane of the track like any other, so it stands beside the
+ *  record the route named rather than taking its place: the address still holds that record, and
+ *  the member writes the new one with the old one still readable beside it. */
+test("the form that writes a record stands beside the record the route named", async () => {
   wire({
     "/objects/scheduled_task/weekly-roll": () =>
       json({ ...TASK_DETAIL, name: "weekly-roll", summary: "0 9 * * 1 — weekly roll-up" }),
@@ -895,17 +1101,16 @@ test("a form taking the column clears the record the route named", async () => {
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
   });
   location.hash =
-    "#/tasks?chip=scheduled_task&open=object%2Fscheduled_task%2Fweekly-roll&agent=" + SECOND_ID;
+    "#/tasks?chip=scheduled_task&open=" + encodeURIComponent(ROLL_LANE);
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { level: 2, name: "weekly-roll" })).toBeTruthy();
 
   await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
 
-  expect(await screen.findByRole("complementary", { name: "New scheduled task" })).toBeTruthy();
-  await waitFor(() => expect(location.hash).not.toContain("open="));
-  expect(location.hash).toContain("chip=scheduled_task");
-  expect(screen.queryByRole("heading", { level: 2, name: "weekly-roll" })).toBeNull();
+  expect(await screen.findByRole("region", { name: "New scheduled task" })).toBeTruthy();
+  expect(location.hash).toContain("open=" + encodeURIComponent(ROLL_LANE));
+  expect(screen.getByRole("heading", { level: 2, name: "weekly-roll" })).toBeTruthy();
 });
 
 /** What search hands over: the record named in the route, under the agent that owns it. */
@@ -920,7 +1125,7 @@ test("a record the route names opens beside the list it belongs to", async () =>
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
   });
   location.hash =
-    "#/tasks?chip=scheduled_task&open=object%2Fscheduled_task%2Fweekly-roll&agent=" + SECOND_ID;
+    "#/tasks?chip=scheduled_task&open=" + encodeURIComponent(ROLL_LANE);
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { level: 2, name: "weekly-roll" })).toBeTruthy();
@@ -1152,6 +1357,29 @@ test("Tasks stands both kinds on one page, each under its own heading", async ()
   expect(await screen.findByText(TRIGGER_NAME)).toBeTruthy();
   expect(reads.some((read) => read.includes("/objects/scheduled_task"))).toBe(true);
   expect(reads.some((read) => read.includes("/objects/source_trigger"))).toBe(true);
+});
+
+/** Two listings stand on the tasks page and one track runs under both: a record either of them
+ *  opens is the page's, drawn once and carried in the page's own address. A listing drawing the
+ *  track itself would put a second node on an id the other listing had already put one on, both
+ *  portalling into the one host that id names, and the member would read the record twice. */
+test("a record opened from one listing stands once on the page's own track", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, [TRIGGER_ROW]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/tasks";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText(TRIGGER_NAME)).toBeTruthy();
+  await openRow("daily-brief");
+
+  expect(await screen.findByRole("region", { name: "daily-brief" })).toBeTruthy();
+  expect(standing()).toEqual(["daily-brief"]);
+  expect(screen.getAllByRole("heading", { level: 2, name: "daily-brief" })).toHaveLength(1);
+  expect(location.hash).toContain("open=" + encodeURIComponent(TASK_LANE));
 });
 
 test("a trigger is ended from its own page and never created from one", async () => {

@@ -13,8 +13,8 @@ import {
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
-import { useBeside } from "@/kernel/beside";
-import { RecordPanel, usePageAct } from "@/kernel/pane";
+import { PageToolbar, RecordPanel, usePageAct, usePageSearch } from "@/kernel/pane";
+import { useSlot } from "@/kernel/slots";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -40,6 +40,16 @@ const ROLES = [
 ];
 
 const BLANK: Draft = { email: "", admin: false };
+
+/** The slot the form stands in. A half-written invitation is nobody's record: it names no member
+ *  yet, so the address does not carry it and a reload finds the roster rather than an empty
+ *  form. */
+const ADD_MEMBERS = "add-members";
+
+/** The line stating what the form does with every address typed into it. The lane takes focus as it
+ *  lands, so a member who cannot see it is told the lane's name and nothing else; naming this line
+ *  as the lane's description is how they are told the rest. */
+const ADD_MEMBERS_NOTE = "add-members-note";
 
 const COLUMNS = ["Member", { label: "Role", fact: true }, { label: "Seat", fact: true }];
 
@@ -117,12 +127,12 @@ export function Team({
     });
   }
 
-  const beside = useBeside(
+  const beside = useSlot(
     adding ? (
-      <RecordPanel title="Add members" describedBy="add-members-note" onClose={close}>
+      <RecordPanel>
         <OutcomeNotice state={notice} />
         <form onSubmit={add} className="flex flex-col items-start gap-sm">
-          <Hint id="add-members-note" className="m-0">
+          <Hint id={ADD_MEMBERS_NOTE} className="m-0">
             Each address is added to this workspace, at any email domain.
           </Hint>
           {drafts.map((row, index) => (
@@ -164,7 +174,13 @@ export function Team({
         </form>
       </RecordPanel>
     ) : null,
-    close,
+    {
+      id: ADD_MEMBERS,
+      kind: "panel",
+      title: "Add members",
+      describes: ADD_MEMBERS_NOTE,
+      onClose: close,
+    },
   );
 
   const act = usePageAct(
@@ -175,9 +191,12 @@ export function Team({
     ) : null,
   );
 
+  const search = usePageSearch();
+
   return (
     <>
       {act}
+      {search ? <PageToolbar /> : null}
       <Panel state={state}>
         {({ members }) => {
           const found = members.filter(

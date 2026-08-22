@@ -1,8 +1,7 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { IconX } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Header } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
 
 export type SheetProps = {
@@ -29,17 +28,16 @@ export function Sheet({ open, onClose, title, children, actions }: SheetProps) {
             "flex flex-col gap-2xl",
           )}
         >
-          <header data-slot="sheet-header" className="flex h-(--size-control) shrink-0 items-center gap-md">
-            <DialogPrimitive.Title className="m-0 flex-1 truncate text-subtitle font-medium">
-              {title}
-            </DialogPrimitive.Title>
-            {actions}
-            <DialogPrimitive.Close asChild>
-              <Button size="icon" aria-label="Close">
-                <IconX className="size-icon" aria-hidden />
-              </Button>
-            </DialogPrimitive.Close>
-          </header>
+          <Header
+            heading={2}
+            title={
+              <DialogPrimitive.Title asChild>
+                <span>{title}</span>
+              </DialogPrimitive.Title>
+            }
+            acts={actions}
+            onClose={onClose}
+          />
           {children}
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>

@@ -3573,6 +3573,32 @@ async def _seed_artifacts(
             )
 
 
+async def test_artifacts_view_names_each_file_by_its_own_id(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Every listed file carries `shared_artifact.id`, which is the identity a portal lane, a link
+    to it, and a search hit name one file by. A filename is free text an agent chose, so two files
+    one turn shared under one name at one instant are two rows nothing read off the name tells
+    apart."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    shared_at = datetime(2026, 7, 29, 9, 0, tzinfo=UTC)
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        (("report.md", shared_at), ("report.md", shared_at)),
+    )
+    async with workspace_tx() as connection:
+        minted = set((await connection.scalars(sa.select(tables.shared_artifact.c.id))).all())
+    listed = (
+        await client.get(ARTIFACTS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()["artifacts"]
+    assert [entry["filename"] for entry in listed] == ["report.md", "report.md"]
+    assert {UUID(entry["id"]) for entry in listed} == minted
+
+
 def _names(payload: dict) -> list[str]:
     return [entry["filename"] for entry in payload["artifacts"]]
 
@@ -4394,6 +4420,64 @@ async def test_site_index_answers_through_the_kinds_own_gate(
         assert row["conversation"] == str(conversation_id)
         assert row["created_at"]
         assert row["owner_email"] == "m@example.com"
+
+
+async def test_an_app_homepage_is_no_site_the_index_lists(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An app's homepage is the app's own page, not an artifact a member made and shared, so it
+    stands in no browse of the workspace's sites — not its creator's, not an admin's — while an
+    ordinary workspace site beside it stands in both. It is not a shared row either: a member who
+    neither deployed it nor administers the workspace cannot read it by name. The pane that draws
+    the app reads it by naming the binding, which is the one read that still answers it."""
+    client, workspace_id, agent_id = web
+    creator_id, creator_token = await _seed_member(workspace_id, "app-builder@example.com")
+    _member_id, member_token = await _seed_member(workspace_id, "app-member@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "app-boss@example.com", admin=True)
+    conversation_id, _turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        creator_id,
+        "app-builder@example.com",
+        TerminalFrame(status="done", text="ok"),
+    )
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        await sites.register(
+            conversation_id,
+            "home",
+            3000,
+            creator_id,
+            "workspace",
+            conversation_audience(creator_id),
+            True,
+        )
+        await sites.register(
+            conversation_id,
+            "handbook",
+            3001,
+            creator_id,
+            "workspace",
+            conversation_audience(creator_id),
+            True,
+        )
+        assert await sites.set_homepage(agent_id, conversation_id, "home") is not None
+    path = f"/surface/web/objects/site?agent={agent_id}"
+    for token in (creator_token, member_token, admin_token):
+        listed = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token}"})).json()
+        assert [row["name"].split("-")[0] for row in listed["objects"]] == ["handbook"]
+
+    name = site_object_name(conversation_id, "home")
+    detail = f"/surface/web/objects/site/{name}?agent={agent_id}"
+    read = await client.get(detail, headers={"cookie": f"{SESSION_COOKIE}={creator_token}"})
+    assert read.status_code == 200
+    hidden = await client.get(detail, headers={"cookie": f"{SESSION_COOKIE}={member_token}"})
+    assert hidden.status_code == 404
+    opened = await client.get(
+        f"/surface/web/agents/{agent_id}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+    )
+    assert opened.json()["state"] == "set"
 
 
 async def test_an_index_longer_than_a_page_walks_on_the_cursor_it_returns(

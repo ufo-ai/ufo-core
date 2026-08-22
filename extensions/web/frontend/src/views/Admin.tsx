@@ -4,7 +4,6 @@ import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Field, Hint, Input } from "@/components/ui/field";
 import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
-import { useBeside } from "@/kernel/beside";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -16,7 +15,8 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
-import { Page, PageHeader, Pane, RecordPanel } from "@/kernel/pane";
+import { Header, Page, Pane, RecordPanel } from "@/kernel/pane";
+import { closed, opened, useSlot } from "@/kernel/slots";
 import { DataTable, OPEN } from "@/kernel/table";
 import { agentName } from "@/lib/agentName";
 import { postIntent } from "@/lib/api";
@@ -51,6 +51,10 @@ const EXTENSION_COLUMNS = [
   { label: "Version", fact: true },
   { label: "Public Internet", fact: true },
 ];
+
+/** What an app's slot is named in the track. Administration has no address of its own — `#/admin`
+ *  carries no place — so the track is held here and lives as long as the screen. */
+const APP = "agent/";
 
 function allowance(allowed: boolean): string {
   return allowed ? "Allowed" : "Blocked";
@@ -91,7 +95,7 @@ export function Admin() {
         return (
           <Pane data-testid="admin">
             <Page>
-              <PageHeader title="Administration" />
+              <Header heading={1} title="Administration" />
               <OutcomeNotice state={notice} />
 
               <AgentSection agents={payload.agents} onIntent={intent} />
@@ -176,8 +180,11 @@ export function Admin() {
   );
 }
 
-/** The agents, and the one of them the member opened. The record stands in the pane's second
- *  column, so the acts on an agent are taken beside the row rather than inside it. */
+/** The agents, and the one the member opened, standing in a slot beside the table. The track is
+ *  local because `#/admin` carries no place to hold it, but the rule over it is the portal's, taken
+ *  from where every other index takes it: the table is the root of the path, so a row leads there
+ *  rather than stacking on what the member walked past, and a close shuts what was reached through
+ *  what it shuts. */
 function AgentSection({
   agents,
   onIntent,
@@ -185,14 +192,19 @@ function AgentSection({
   agents: AdminAgent[];
   onIntent: (agentId: string, envelope: unknown) => Promise<NoticeState>;
 }) {
-  const [opened, setOpened] = useState<string | null>(null);
-  const agent = agents.find((row) => row.id === opened);
-  const beside = useBeside(
-    agent ? (
-      <AgentRecord agent={agent} onClose={() => setOpened(null)} onIntent={onIntent} />
-    ) : null,
-    () => setOpened(null),
-  );
+  const [opens, setOpens] = useState<string[]>([]);
+  const track = opens.map((id) => {
+    const agent = agents.find((row) => APP + row.id === id);
+    if (!agent) return null;
+    return (
+      <AgentRecord
+        key={id}
+        agent={agent}
+        onClose={() => setOpens((held) => closed(held, id))}
+        onIntent={onIntent}
+      />
+    );
+  });
 
   return (
     <>
@@ -202,7 +214,7 @@ function AgentSection({
           rows={agents}
           rowKey={(row) => row.id}
           empty="This workspace has no apps."
-          open={(row) => () => setOpened(row.id)}
+          open={(row) => () => setOpens((held) => opened(held, APP + row.id))}
           act={() => OPEN}
         >
           {(row) => (
@@ -218,7 +230,7 @@ function AgentSection({
           )}
         </DataTable>
       </Section>
-      {beside}
+      {track}
     </>
   );
 }
@@ -251,8 +263,8 @@ function AgentRecord({
     setBusy(false);
   }
 
-  return (
-    <RecordPanel title={agentName(agent.name)} onClose={onClose}>
+  return useSlot(
+    <RecordPanel>
       <Facts
         rows={[
           { label: "Model", value: agent.model },
@@ -294,7 +306,8 @@ function AgentRecord({
           </div>
         </form>
       )}
-    </RecordPanel>
+    </RecordPanel>,
+    { id: APP + agent.id, kind: "panel", title: agentName(agent.name), onClose },
   );
 }
 

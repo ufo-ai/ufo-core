@@ -170,7 +170,6 @@ class ConversationSite(BaseModel):
 
     name: str = Field(min_length=1, max_length=CONVERSATION_SITE_NAME_MAX_CHARS)
     url: str = Field(min_length=1, max_length=CONVERSATION_SITE_URL_MAX_CHARS)
-    visibility: Literal["private", "workspace", "public"]
     created_at: datetime
     updated_at: datetime
     authorization_name: str = Field(min_length=1, max_length=200, exclude=True)

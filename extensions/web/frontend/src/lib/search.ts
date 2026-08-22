@@ -7,10 +7,11 @@ import {
   type TablerIcon,
 } from "@tabler/icons-react";
 
+import { slotOf } from "@/kernel/objects";
 import { agentName } from "@/lib/agentName";
 import { getJson } from "@/lib/api";
 import { chatHash, sectionHash, workspaceHash, agentHash } from "@/lib/route";
-import { SITE_FAMILY } from "@/views/Artifacts";
+import { SITE_FAMILY, fileKey } from "@/views/Artifacts";
 import type { Agent, Conversation } from "@/lib/types";
 
 /** What one term finds, kind by kind. The bar's search reaches the whole workspace, and the
@@ -57,8 +58,9 @@ const SITE_KIND = "site";
  *  the record's own place is under that agent, not under the member who searched. */
 type FoundObject = { name: string; agent_id: string };
 
-/** What a hit needs of a file: what it is called, what it is, and the stamp its card is keyed by. */
-type FoundFile = { filename: string; media_type: string; created_at: string };
+/** What a hit needs of a file: its own id, which the card it opens is keyed by, what it is called,
+ *  and what it is. */
+type FoundFile = { id: string; filename: string; media_type: string };
 
 type Found = {
   conversations: { conversations: Conversation[] };
@@ -131,11 +133,8 @@ export async function searchEverywhere(
       ["/workspace/artifacts" + query(wanted)],
       (payload) =>
         payload.artifacts.map((entry) => ({
-          key: entry.created_at + "|" + entry.filename,
-          hash: sectionHash("artifacts", {
-            q: wanted,
-            open: entry.created_at + "|" + entry.filename,
-          }),
+          key: fileKey(entry),
+          hash: sectionHash("artifacts", { q: wanted, opens: [fileKey(entry)] }),
           primary: entry.filename,
           fact: entry.media_type,
         })),
@@ -150,7 +149,7 @@ export async function searchEverywhere(
           key: SITE_KIND + "/" + row.name,
           hash: sectionHash("artifacts", {
             chip: SITE_FAMILY,
-            open: "object/" + SITE_KIND + "/" + row.name,
+            opens: [slotOf({ agent: row.agent_id, kind: SITE_KIND, name: row.name })],
           }),
           primary: row.name,
           fact: SITE_KIND,
@@ -180,8 +179,7 @@ export async function searchEverywhere(
           key: row.agent_id + "/" + kind + "/" + row.name,
           hash: sectionHash("tasks", {
             chip: kind,
-            agent: row.agent_id,
-            open: "object/" + kind + "/" + row.name,
+            opens: [slotOf({ agent: row.agent_id, kind, name: row.name })],
           }),
           primary: row.name,
           fact: TASK_KINDS.find((entry) => entry.kind === kind)?.label ?? kind,

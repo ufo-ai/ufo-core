@@ -212,11 +212,12 @@
   --container-sidebar: 240px;
   /* The sidebar collapsed to its glyph column: wide enough for one control and its focus ring. */
   --container-rail: 48px;
+  /* The slot an app's own list of things is read down, beside whatever that list opens: enough for
+     a name and the one fact that tells two rows apart, and no more, because every pixel the list
+     holds is one the record beside it does without. */
+  --container-index: 216px;
   /* The applications grid's tile floor: wide enough for a mark over a one-line name. */
   --container-tile: 180px;
-  /* The column an app's conversations are read in: wider than the app index beside it, because a
-     thread row carries a subject, its meta line, and the moment it last moved. */
-  --container-threads: 360px;
   --container-drawer: min(520px, 100vw);
   --container-card: min(440px, calc(100vw - 32px));
   --container-dialog: min(560px, calc(100vw - 32px));
@@ -233,6 +234,9 @@
   --container-control: 40ch;
   --container-control-row: 20ch;
   --container-search: 168px;
+  /* The measure a header guarantees its name. The acts on the band fold and wrap around it; the
+     name never gives way to them. */
+  --container-title: 208px;
   /* The floor a file card holds, so a short name and a size still make a card the pointer can
      land on rather than a pill the width of its own text. */
   --container-attachment: 160px;
@@ -251,7 +255,6 @@
      axis, a capture's header and a page's first line all begin: a centred crop cuts a left-aligned
      title mid-word and drops the axis a chart is read against. */
   --size-digest-picture: 96px;
-  --grid-slot: minmax(0, 1fr) var(--container-record);
   --size-avatar: 24px;
   --size-band: 128px;
   /* A band's document fingerprint: the page renders at reading width and scales to the edge of
@@ -280,6 +283,11 @@
   --size-lede: 24px;
   --size-composer: 15em;
   --size-control: 32px;
+  /* The floor a slot holds before the track scrolls sideways instead of dividing further. Under it
+     a form's labels wrap off their fields and a table prints one word to a cell, so a member who
+     opens a sixth thing pushes the track past the pane's edge rather than making the five already
+     standing unreadable. */
+  --size-slot-min: 320px;
   /* What a thin scrollbar reserves, so anything laid over the pane can stop short of it. */
   --size-scrollbar: 12px;
   /* The floor a control the member points at with a finger keeps, which is taller than the
@@ -602,13 +610,31 @@
      the pane's edge. `scrollbar-color` inherits and `scrollbar-width` does not, so the width is
      stated for every element and the colour once. A scrolling element then declares only
      `scrollbar-gutter-stable`, which holds the gutter open so a growing reply never shifts the
-     line being read. */
+     line being read.
+
+     The thumb is drawn only while the member is moving the pane. What a bar answers is how far
+     through the page this is, and that is a question the member asks by scrolling — a pointer
+     resting over a pane and a caret sitting inside one both ask nothing, so a bar drawn for either
+     is a grey line down the reading column stating a scroll nobody made. `App.tsx` marks the
+     element a scroll event reached and takes the mark off once the movement stops, so the wheel,
+     the drag, the arrow key, and the pane scrolling itself all reveal the same bar by the same
+     act. Colour is the whole of the hush: `scrollbar-width: none` reclaims the reserved track,
+     which narrows the content box and reflows the words being read at the moment the bar appears.
+     The mark's own duration is zero so the bar is there for the first pixel of the movement, and
+     the fade belongs to its removal alone; the reduced-motion rule above cuts that fade to
+     nothing, leaving the quiet period as the whole of the timing. */
   :root {
-    scrollbar-color: var(--color-edge-strong) transparent;
+    scrollbar-color: transparent transparent;
   }
 
   * {
     scrollbar-width: thin;
+    transition: scrollbar-color 0.2s var(--ease-leave);
+  }
+
+  [data-scrolling] {
+    scrollbar-color: var(--color-edge-strong) transparent;
+    transition-duration: 0s;
   }
 
   /* The second selector is a field drawn as a card: the box inside it draws no surface of its own,
@@ -699,9 +725,9 @@
   );
 }
 
-/* The scrollbar is stated globally as its thumb alone; these name the exceptions a scrolling
+/* The scrollbar is stated globally as a thumb that scrolling draws; these name the exceptions a
    transcript needs — the width it keeps, and the moment it takes itself out of the way while the
-   pane is scrolling itself. */
+   pane is scrolling itself, which is a movement and would otherwise reveal the bar. */
 @utility scrollbar-thin {
   scrollbar-width: thin;
 }

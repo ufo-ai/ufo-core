@@ -561,11 +561,11 @@ switching agents is the sidebar's Applications flyout, which lists every app wit
 and whose pins place rows in the sidebar. The pane is the agent's homepage — the hosted site its
 binding names, framed bare (no site header) through the sites frame's per-visit gate, which for a
 homepage answers the agent's visibility — headed by the agent's name, the way out to the page, its
-settings, and a chat toggle that opens the conversation beside the page at the threads width.
-That conversation column opens on the conversation that moved last and carries the composer where
-the portal founded that conversation, a read-only transcript where another surface holds it, and
-the acknowledgement gate where the member has not opened it; every one of the app's conversations
-is reached from the switcher its title carries. The homepage read has three states, so the page a
+settings, and a chat toggle that opens the conversation beside the page. That conversation column
+opens on the conversation that moved last and carries the composer where the portal founded that
+conversation, a read-only transcript where another surface holds it, and the acknowledgement gate
+where the member has not opened it; every one of the app's conversations stands in an index lane
+beside it, and pressing one opens it. The homepage read has three states, so the page a
 member is waiting for is not the page that is not there: `building` while the seed run that builds
 an agent's first homepage is still working, drawn as the shape a page takes; `set` once one is
 bound; and `none`, where the pane draws the conversation column alone. Beside

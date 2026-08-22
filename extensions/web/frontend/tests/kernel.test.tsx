@@ -8,11 +8,12 @@ import { Pager } from "@/kernel/pager";
 import { RowLines } from "@/kernel/rows";
 import { getJson } from "@/lib/api";
 import { Notice, OutcomeNotice, Panel, QUIET, Section, usePanelRead } from "@/kernel/panel";
+import { CardGrid } from "@/kernel/cards";
 import { DataTable } from "@/kernel/table";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
-import { PageHeader } from "@/kernel/pane";
+import { Header, PageSearch, PageToolbar } from "@/kernel/pane";
 import type { SchemaProperty } from "@/lib/types";
 
 import { declaredFloor, json, opened } from "./harness";
@@ -190,6 +191,66 @@ test("the table names its columns and one row per record", async () => {
   expect(screen.getAllByRole("row")).toHaveLength(3);
 });
 
+/** A card and a tile are one grid to the member, so `current` lights the same band on both: the
+ *  `li` the grid makes a record out of, and not the letters of its name. A card already stands on a
+ *  surface, so the mark replaces the one it stands on — and it rides beside `rowControl` rather
+ *  than standing in for it, so a card the grid lights is still the control that opens the record,
+ *  which is the role the band is read by. */
+test("a card grid lights the whole band of the record standing beside it", async () => {
+  const opened: string[] = [];
+  const { rerender } = render(
+    <CardGrid
+      rows={[{ name: "one" }, { name: "two" }]}
+      rowKey={(row) => row.name}
+      primary={(row) => row.name}
+      open={(row) => () => opened.push(row.name)}
+      current={(row) => row.name === "one"}
+    />,
+  );
+
+  const bands = () =>
+    screen.getAllByRole("button").map((band) => ({
+      name: band.textContent,
+      marked: band.getAttribute("aria-current"),
+      lit: /(?:^|\s)bg-fill(?:\s|$)/.test(band.className),
+    }));
+
+  expect(bands()).toEqual([
+    { name: "one", marked: "true", lit: true },
+    { name: "two", marked: null, lit: false },
+  ]);
+
+  await userEvent.click(screen.getByText("one"));
+  expect(opened).toEqual(["one"]);
+
+  rerender(
+    <CardGrid
+      rows={[{ name: "one" }, { name: "two" }]}
+      rowKey={(row) => row.name}
+      primary={(row) => row.name}
+      open={(row) => () => opened.push(row.name)}
+      current={(row) => row.name === "two"}
+    />,
+  );
+  expect(bands()).toEqual([
+    { name: "one", marked: null, lit: false },
+    { name: "two", marked: "true", lit: true },
+  ]);
+
+  rerender(
+    <CardGrid
+      rows={[{ name: "one" }, { name: "two" }]}
+      rowKey={(row) => row.name}
+      primary={(row) => row.name}
+      open={(row) => () => opened.push(row.name)}
+    />,
+  );
+  expect(bands()).toEqual([
+    { name: "one", marked: null, lit: false },
+    { name: "two", marked: null, lit: false },
+  ]);
+});
+
 test("the table falls to its own empty words when it holds no rows", async () => {
   render(
     <DataTable columns={["name"]} rows={[]} rowKey={() => ""} empty="No rows here.">
@@ -200,36 +261,145 @@ test("the table falls to its own empty words when it holds no rows", async () =>
   expect(screen.queryByRole("table")).toBeNull();
 });
 
+function headed() {
+  return render(
+    <Header
+      heading={1}
+      title="Automations"
+      acts={<button type="button">New</button>}
+    />,
+  );
+}
+
 /** A phone has no room for a title beside a search beside an act: the search states its own width
  *  and the act sizes to its words, so a title sharing that line is squeezed to nothing — the page's
  *  own name, invisible. It keeps a line of its own instead. */
-test("the page's header stacks below the narrow breakpoint, so the title keeps its line", () => {
-  render(<PageHeader title="Automations" search={<Search label="Search automations" />} action={<button type="button">New</button>} />);
+test("the header stacks below the narrow breakpoint, so the title keeps its line", () => {
+  headed();
 
   const heading = screen.getByRole("heading", { level: 1, name: "Automations" });
-  const band = heading.parentElement!;
+  const band = heading.parentElement!.parentElement!;
   expect(band.className).toContain("max-narrow:flex-col");
   expect(band.className).toContain("max-narrow:items-stretch");
   expect(band.className).toContain("max-narrow:h-auto");
 
-  const controls = screen.getByRole("searchbox").closest("form")!.parentElement!;
+  const controls = screen.getByRole("button", { name: "New" }).parentElement!;
   expect(controls.className).toContain("max-narrow:w-full");
-  expect(controls.contains(screen.getByRole("button", { name: "New" }))).toBe(true);
   expect(controls.contains(heading)).toBe(false);
 });
 
-/** The controls wrap among themselves rather than shrink. `flex-1` on the search would let a
- *  crowded row take it to its padding — a 2px box the member cannot type into — because the flex
- *  shorthand resets the basis it would have shrunk from. */
-test("the header's controls wrap rather than squeeze the search", () => {
-  render(<PageHeader title="Automations" search={<Search label="Search automations" />} action={<button type="button">New</button>} />);
-
-  const controls = screen.getByRole("searchbox").closest("form")!.parentElement!;
-  expect(controls.className).toContain("flex-wrap");
-  expect(screen.getByRole("searchbox").closest("form")!.className).toContain(
-    "w-(--container-search)",
+/** The search narrows the records, so it stands on the band of controls that narrow them rather
+ *  than on the name above them. The controls wrap among themselves rather than shrink: `flex-1` on
+ *  the search would let a crowded row take it to its padding — a box the member cannot type into —
+ *  because the flex shorthand resets the basis it would have shrunk from. */
+test("the search stands in the toolbar, and its controls wrap rather than squeeze it", () => {
+  render(
+    <PageSearch node={<Search label="Search automations" />}>
+      <PageToolbar>
+        <button type="button">Filter</button>
+      </PageToolbar>
+    </PageSearch>,
   );
-  expect(screen.getByRole("searchbox").closest("form")!.className).not.toContain("flex-1");
+
+  const toolbar = screen.getByRole("searchbox").closest("form")!.parentElement!;
+  expect(toolbar.className).toContain("max-narrow:flex-wrap");
+  expect(toolbar.contains(screen.getByRole("button", { name: "Filter" }))).toBe(true);
+});
+
+/** The acts fold and wrap around the name; the name never gives way to them. A band whose title
+ *  could be squeezed to an ellipsis by one more pill is a band that states nothing about where the
+ *  member is. */
+test("the name keeps a floor the acts cannot take", () => {
+  headed();
+
+  const name = screen.getByRole("heading", { level: 1, name: "Automations" }).parentElement!;
+  expect(name.className).toContain("min-w-(--container-title)");
+  expect(name.className).toContain("max-narrow:min-w-0");
+  expect(screen.getByRole("button", { name: "New" }).parentElement!.className).toContain(
+    "shrink-0",
+  );
+});
+
+/** The mark for what the surface holds is read with the name, so it is spent out of the measure the
+ *  name is guaranteed rather than added to it. A mark standing beside that measure would widen the
+ *  band's floor by its own width, and the surfaces narrow enough to need a mark are the ones with no
+ *  width to give. */
+test("the kind's mark stands inside the name's measure, not beside it", () => {
+  render(<Header heading={2} title="Reviewer" glyph={<svg aria-hidden />} />);
+
+  const name = screen.getByRole("heading", { level: 2, name: "Reviewer" }).parentElement!;
+  expect(name.className).toContain("min-w-(--container-title)");
+  expect(name.firstElementChild!.querySelector("svg")).toBeTruthy();
+  expect(name.firstElementChild!.className).toContain("[&_svg]:size-(--size-glyph)");
+});
+
+/** A band carrying a crumb ends it with the name, marked as the page the path leads to. Where the
+ *  caller states no level the crumb is all it is, so a surface the landmark around it already names
+ *  takes no second name. */
+test("a header with a parent and no level names the surface through the crumb alone", async () => {
+  const went = vi.fn();
+  render(<Header parent={{ label: "Reviewer", onGo: went }} title="Tracked issue" />);
+
+  expect(screen.queryByRole("heading")).toBeNull();
+  expect(screen.getByText("Tracked issue").getAttribute("aria-current")).toBe("page");
+  await userEvent.click(screen.getByRole("button", { name: "Back to Reviewer" }));
+  expect(went).toHaveBeenCalledOnce();
+});
+
+/** The crumb's last step and the heading are the same words, so a band that draws both draws one
+ *  element: the leaf is the heading. A screen whose name is only ever a crumb would otherwise state
+ *  no heading at all, and a heading drawn beside the crumb would say the place twice. */
+test("a header with a parent makes the crumb's leaf the heading the caller asked for", () => {
+  render(<Header heading={1} parent={{ label: "Wiki" }} title="member@example.com" />);
+
+  const head = screen.getByRole("heading", { level: 1, name: "member@example.com" });
+  const path = screen.getByRole("navigation", { name: "Breadcrumb" });
+  expect(path.contains(head)).toBe(true);
+  expect(path.textContent).toBe("Wiki/member@example.com");
+  expect(screen.getByText("member@example.com").getAttribute("aria-current")).toBe("page");
+  expect(screen.getAllByRole("heading")).toHaveLength(1);
+});
+
+/** Where the band stands is what says whether it takes an inset, so no call site decides it twice.
+ *  A band scrolling with its page is already lined up by that page's gutter; a band held above a
+ *  scroller has none and states its own. It draws no line under itself on either — the surfaces
+ *  below a band already state their own edges, and a second one doubles them. */
+test("the inset is the pinned band's, and nothing else's, and neither band draws a line", () => {
+  const { container, unmount } = render(<Header heading={2} title="Reviewer" />);
+  expect(container.firstElementChild!.className).not.toContain("px-2xl");
+  expect(container.firstElementChild!.className).not.toContain("border-b");
+  unmount();
+
+  const pinned = render(<Header heading={2} title="Reviewer" pinned />);
+  expect(pinned.container.firstElementChild!.className).toContain("px-2xl");
+  expect(pinned.container.firstElementChild!.className).toContain("py-lg");
+  expect(pinned.container.firstElementChild!.className).not.toContain("border-b");
+});
+
+/** One way out, in one place: the last thing on the line, past every act, on every surface that
+ *  can be shut. A member who has learned the corner does not hunt for it again. */
+test("the way out is a glyph and stands last", async () => {
+  const shut = vi.fn();
+  render(
+    <Header heading={2} title="New application" acts={<button type="button">Rebuild</button>} onClose={shut} />,
+  );
+
+  const acts = screen.getByRole("button", { name: "Close" });
+  expect(acts.textContent).toBe("");
+  expect(acts.previousElementSibling!.textContent).toBe("Rebuild");
+  expect(acts.parentElement!.lastElementChild).toBe(acts);
+  await userEvent.click(acts);
+  expect(shut).toHaveBeenCalledOnce();
+});
+
+/** An icon act draws at the portal's glyph size rather than at the register the surface around it
+ *  is set in, so the chevron beside a title and the way out beside it are one size. */
+test("an icon act sizes its glyph by the glyph token", () => {
+  render(<Header heading={2} title="Reviewer" onClose={() => {}} />);
+
+  expect(screen.getByRole("button", { name: "Close" }).className).toContain(
+    "[&_svg]:size-(--size-glyph)",
+  );
 });
 
 test("the table states a floor covering every track it declares", async () => {

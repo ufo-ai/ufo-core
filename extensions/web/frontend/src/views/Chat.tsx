@@ -3,7 +3,6 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 import { IconArrowRight, IconCheck, IconMessage, IconPlug } from "@tabler/icons-react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
-import { AgentPicker } from "@/kernel/agentpick";
 import {
   Questionnaire,
   QuestionnaireActions,
@@ -65,7 +64,7 @@ import {
   stopTurn,
   type ChatTarget,
 } from "@/lib/turnStream";
-import type { Agent, ChatQuestion, Member, QuestionEntry, QuestionOption } from "@/lib/types";
+import type { ChatQuestion, Member, QuestionEntry, QuestionOption } from "@/lib/types";
 
 /** Who a chat is addressed to. A conversation another surface holds names its agent on the rail
  *  row alone, without the boot read listing it, so a chat asks for the facts such a row carries
@@ -83,12 +82,6 @@ export type ChatProps = {
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
   onSettled?: () => void;
-  /** Every agent the member may open a conversation with, and the act that switches to one. The
-   *  picker they feed stands in the composer of a conversation that has not started: which agent
-   *  answers is the last thing settled before the first message, and a conversation is bound to one
-   *  agent the moment it opens. */
-  agents?: Agent[];
-  onPickAgent?: (agentId: string) => void;
   onOpenArtifacts?: () => void;
 };
 
@@ -101,8 +94,6 @@ export function Chat({
   onActivity,
   onSettled,
   onOpenArtifacts,
-  agents,
-  onPickAgent,
 }: ChatProps) {
   const chatKey = conversationId ?? foundingKey ?? "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
@@ -234,22 +225,7 @@ export function Chat({
           </MessageLog>
         </TranscriptPane>
       )}
-      <Composer
-        target={target}
-        draftKey={draftKey}
-        input={composer}
-        starting={starting}
-        agent={agent}
-        agents={agents}
-        onPickAgent={
-          onPickAgent
-            ? (agentId) => {
-                moveDraft(draftKey, member.id + "/new:" + agentId);
-                onPickAgent(agentId);
-              }
-            : undefined
-        }
-      />
+      <Composer target={target} draftKey={draftKey} input={composer} starting={starting} />
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
@@ -597,17 +573,11 @@ function Composer({
   draftKey,
   input,
   starting,
-  agent,
-  agents,
-  onPickAgent,
 }: {
   target: ChatTarget;
   draftKey: string;
   input: RefObject<HTMLTextAreaElement | null>;
   starting: boolean;
-  agent: ChatAgent;
-  agents?: Agent[];
-  onPickAgent?: (agentId: string) => void;
 }) {
   const state = useChat(target.key);
   const toTheFoot = useTakeMeToTheFoot();
@@ -727,14 +697,6 @@ function Composer({
       <PromptInputToolbar>
         <PromptInputAttach />
         <div className="flex items-center gap-sm">
-          {starting && agents && onPickAgent ? (
-            <AgentPicker
-              agentId={agent.id}
-              agents={agents}
-              onPick={onPickAgent}
-              onClosed={() => input.current?.focus()}
-            />
-          ) : null}
           <PromptInputSubmit
             stops={Boolean(running && state.busy && !text.trim())}
             busy={stopping}

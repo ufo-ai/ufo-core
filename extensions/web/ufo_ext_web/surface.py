@@ -3263,6 +3263,7 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
         {
             "artifacts": [
                 {
+                    "id": str(entry.id),
                     "filename": entry.artifact.filename,
                     "subject": entry.artifact.subject,
                     "owner_email": entry.owner_email,

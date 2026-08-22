@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from "react";
+import { useCallback, useLayoutEffect, useState, type MouseEvent } from "react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -6,12 +6,12 @@ import { Dialog, DialogTrigger } from "@/components/ui/dialog";
 import { PressRow } from "@/components/ui/pressrow";
 import { Sheet } from "@/components/ui/sheet";
 import { ARTIFACT_TEXT_BYTES, useTextArtifact } from "@/kernel/artifact";
-import { useBeside } from "@/kernel/beside";
-import { ObjectDetail, type ObjectAddress } from "@/kernel/objects";
+import { ObjectDetail, objectAt, slotOf, type ObjectAddress } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
-import { PageHeader } from "@/kernel/pane";
-import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
+import { Header, usePageHead } from "@/kernel/pane";
+import { Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
 import { RebuildDialog } from "@/kernel/rebuild";
+import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
 import { slackLink } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
@@ -23,9 +23,13 @@ import { agentHash, chatHash, sectionHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
 const TASK_KIND = "scheduled_task";
-const OBJECT_PREFIX = "object/";
 const RUN_PREFIX = "run/";
 const DONE = "done";
+
+/** What the crumb says a pinned page is until the report standing on it has named itself. The
+ *  read may answer no run at all, and the way back off a pin cannot wait on a name that is never
+ *  coming. */
+const REPORT = "Report";
 
 export type RadarArtifact = {
   filename: string;
@@ -66,53 +70,68 @@ const STATUS_NOTES: Record<string, string> = {
   cancelled: "Stopped",
 };
 
-function objectAt(open: string | undefined): ObjectAddress | null {
-  if (!open?.startsWith(OBJECT_PREFIX)) return null;
-  const rest = open.slice(OBJECT_PREFIX.length);
-  const cut = rest.indexOf("/");
-  return cut < 0 ? null : { kind: rest.slice(0, cut), name: rest.slice(cut + 1) };
-}
-
 /** The workspace's radar: the feed of what ran on its own, answered across the viewer's whole
  *  audience. What is armed to run is the tasks screen's answer, not this one — a member here is
- *  reading what happened. A story's task name opens that task's record in the place the report
- *  stood, since the place holds one thing at a time; `place.agent` remembers whose namespace the
- *  record lives in, because the feed crosses agents. */
+ *  reading what happened. A story's task name opens that task's record in a slot beside the feed,
+ *  and a second name takes that record's place, because the feed is one list and the record beside
+ *  it is where the member is reading; two tasks are read side by side when the member asks for that
+ *  with a cmd- or middle-press. The feed crosses apps, so each lane names the app its record is
+ *  read in and standing a second app's task beside the first leaves the first where it was.
+ *
+ *  The band over it says where the member is: the app's own name at the feed, and — standing on one
+ *  report — that report under it, where pressing the app's name is the way back to the feed. The
+ *  report names itself from the document it published, which lands after the page does, so the name
+ *  is held here beside the run it belongs to; a name kept without its run would head the next
+ *  report the member opened with the last one's title.
+ *
+ *  The one act on the whole feed stands on that band, and only there: a member reading one report
+ *  is reading it, not maintaining the list they reached it from. */
 export function Radar({
   title,
   place,
   onPlace,
 }: {
-  title?: string;
+  title: string;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  const at = objectAt(place.open);
-  const owner = place.agent ?? null;
-  const detail = useBeside(
-    at !== null && at.name !== null && owner !== null ? (
-      <ObjectDetail
-        key={owner + "/" + at.kind + "/" + at.name}
-        agentId={owner}
-        kind={at.kind}
-        name={at.name}
-        onOpen={(next) => onPlace({ open: OBJECT_PREFIX + next.kind + "/" + (next.name ?? "") })}
-        onBack={() => onPlace({ open: undefined, agent: undefined })}
+  const [named, setNamed] = useState<{ run: string; name: string } | null>(null);
+  const name = useCallback((run: string, name: string) => setNamed({ run, name }), []);
+  const opens = place.opens ?? [];
+  const pin = opens.find((id) => id.startsWith(RUN_PREFIX) && id !== RUN_PREFIX);
+  const page = pin === undefined ? title : named?.run === pin ? named.name : REPORT;
+  const band = usePageHead(
+    pin === undefined ? (
+      <Header pinned heading={1} title={page} acts={<RebuildEntries />} />
+    ) : (
+      <Header
+        pinned
+        heading={1}
+        parent={{ label: title, onGo: () => onPlace({ opens: closed(opens, pin) }) }}
+        title={page}
       />
-    ) : null,
+    ),
   );
-  const pinned = place.open?.startsWith(RUN_PREFIX) ? place.open.slice(RUN_PREFIX.length) : null;
   return (
     <>
-      {pinned ? (
-        <Back label={title ?? "Radar"} onGo={() => onPlace({ open: undefined })} />
-      ) : title ? (
-        <PageHeader title={title} action={<RebuildEntries />} />
-      ) : null}
+      {band}
       <Section>
-        <Feed place={place} onPlace={onPlace} />
+        <Feed place={place} pin={pin} onPlace={onPlace} onName={name} />
       </Section>
-      {detail}
+      {opens.map((id, at) => {
+        if (id === pin) return null;
+        const before = at === 0 ? null : objectAt(opens[at - 1]);
+        return (
+          <RecordSlot
+            key={id}
+            id={id}
+            held={objectAt(id)}
+            from={before?.name ?? page}
+            opens={opens}
+            onPlace={onPlace}
+          />
+        );
+      })}
     </>
   );
 }
@@ -142,40 +161,70 @@ function RebuildEntries() {
   );
 }
 
-/** The way back to the list a report was opened from, standing over the report rather than under
- *  it: a member who wants the feed again should not have to read to the end of a document to find
- *  it. The report names itself below — the page is headed by what it is, and this is the path it
- *  was reached by. */
-function Back({ label, onGo }: { label: string; onGo: () => void }) {
-  return (
-    <button
-      type="button"
-      aria-label={"Back to " + label}
-      onClick={onGo}
-      className={cn(
-        "m-0 shrink-0 self-start border-0 bg-transparent p-0 text-left text-body text-ink-soft",
-        "transition-colors duration-100 ease-control hover:text-ink",
-      )}
-    >
-      {label}
-    </button>
+/** One task's record, standing in the track as a panel. A link out of it opens the record it names
+ *  immediately beside this one and ends the path there: the task the member came from is still
+ *  where it stood, and what was reached through the record they have just left is not.
+ *
+ *  `from` is what the record was opened out of — the record standing to its left, or the screen
+ *  itself — said as the crumb over it. A lane paged one to a screen has nothing standing to its
+ *  left, so that crumb is the only way back the member has.
+ *
+ *  An id the feed does not pin and this screen cannot draw a record for — one naming no object —
+ *  still stands as a lane and says so inside it, because the close is the lane's and an address the
+ *  member cannot shut is one they cannot leave. */
+function RecordSlot({
+  id,
+  held,
+  from,
+  opens,
+  onPlace,
+}: {
+  id: string;
+  held: ObjectAddress | null;
+  from: string;
+  opens: string[];
+  onPlace: (place: Placement) => void;
+}) {
+  const shut = () => onPlace({ opens: closed(opens, id) });
+  return useSlot(
+    held === null ? (
+      <PanelEmpty>That item is not on this page.</PanelEmpty>
+    ) : (
+      <ObjectDetail
+        agentId={held.agent}
+        kind={held.kind}
+        name={held.name}
+        onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
+        onBack={shut}
+      />
+    ),
+    {
+      id,
+      kind: "panel",
+      title: held?.name ?? id,
+      parent: { label: from, onGo: shut },
+      onClose: shut,
+    },
   );
 }
 
 /** The feed, or — when the place carries a run's own address, which is what a story's dateline
- *  links — the one story that address names. The way back to the whole feed stands over the story
- *  rather than in here. A pinned page that answers no run says so: the run is gone or was never
- *  this reader's to read. */
+ *  links — the one story that address names, with the whole feed one press away in the crumb over
+ *  it. A pinned page that answers no run says so: the run is gone or was never this reader's to
+ *  read. */
 function Feed({
   place,
+  pin,
   onPlace,
+  onName,
 }: {
   place: Placement;
+  pin?: string;
   onPlace: (place: Placement) => void;
+  onName: (run: string, name: string) => void;
 }) {
-  const pinned = place.open?.startsWith(RUN_PREFIX)
-    ? place.open.slice(RUN_PREFIX.length)
-    : null;
+  const opens = place.opens ?? [];
+  const pinned = pin === undefined ? null : pin.slice(RUN_PREFIX.length);
   const params = new URLSearchParams();
   if (pinned) params.set("turn", pinned);
   else if (place.after) params.set("after", place.after);
@@ -200,7 +249,14 @@ function Feed({
             <>
               <ol className="m-0 flex list-none flex-col p-0">
                 {payload.runs.map((run) => (
-                  <Story key={run.turn_id} run={run} onPlace={onPlace} />
+                  <Story
+                    key={run.turn_id}
+                    run={run}
+                    opens={opens}
+                    from={pin}
+                    onPlace={onPlace}
+                    onName={onName}
+                  />
                 ))}
               </ol>
               <ReadNext pinned={pinned} />
@@ -210,7 +266,7 @@ function Feed({
           <>
             <ol className="m-0 flex list-none flex-col p-0">
               {payload.runs.map((run) => (
-                <Entry key={run.turn_id} run={run} onPlace={onPlace} />
+                <Entry key={run.turn_id} run={run} opens={opens} from={pin} onPlace={onPlace} />
               ))}
             </ol>
             <div className="mt-4xl">
@@ -230,7 +286,11 @@ const READ_NEXT = 3;
 
 /** What to read after this report: the reports either side of it in the feed, each named the way the
  *  feed names it. A report is the end of a page, and a member who read to the end of one is deciding
- *  what to read next, not whether to go back — the way back stands at the top, where they came in.
+ *  what to read next, not whether to go back — the way back stands in the crumb at the top, where
+ *  they came in.
+ *
+ *  A row is a link to the report's own address and carries the track that address holds: one report
+ *  on the screen, and nothing left standing beside it from the report the member has just finished.
  *
  *  The whole feed is read for this, not the one run the page is pinned to, so the page holds a
  *  second read of the same projection. A reader who reaches the foot of a document has waited out
@@ -250,7 +310,7 @@ function ReadNext({ pinned }: { pinned: string }) {
           return (
             <PressRow
               key={run.turn_id}
-              href={sectionHash("radar", { open: RUN_PREFIX + run.turn_id })}
+              href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })}
               glyph={
                 <Avatar>
                   <AvatarFallback>
@@ -296,9 +356,13 @@ function isDocument(artifact: RadarArtifact): boolean {
  *  the marks and stops under the last. The whole entry opens the report it describes. */
 function Entry({
   run,
+  opens,
+  from,
   onPlace,
 }: {
   run: RadarRun;
+  opens: string[];
+  from?: string;
   onPlace: (place: Placement) => void;
 }) {
   const agent = useAgents().find((entry) => entry.id === run.agent_id);
@@ -325,15 +389,14 @@ function Entry({
           {agent ? <span>{" \u00b7 " + agentName(agent.name)}</span> : null}
           {run.task ? " \u00b7 " : null}
           {run.task ? (
-            <button
-              type="button"
-              onClick={() =>
-                onPlace({ open: OBJECT_PREFIX + TASK_KIND + "/" + run.task, agent: run.agent_id })
-              }
-              className="m-0 border-0 bg-transparent p-0 text-left font-mono text-inherit hover:underline"
-            >
-              {run.task}
-            </button>
+            <TaskName
+              task={run.task}
+              agentId={run.agent_id}
+              opens={opens}
+              from={from}
+              onPlace={onPlace}
+              className="m-0 border-0 p-0 text-left font-mono text-inherit hover:underline"
+            />
           ) : null}
           {note ? (
             <span
@@ -344,7 +407,7 @@ function Entry({
           ) : null}
         </p>
         <a
-          href={sectionHash("radar", { open: RUN_PREFIX + run.turn_id })}
+          href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })}
           className="flex items-start gap-xl text-inherit no-underline"
         >
           <div className="flex min-w-0 flex-1 flex-col gap-sm">
@@ -385,37 +448,51 @@ function Entry({
 }
 
 /** One run as a story: the report it published is the headline, so the story is titled the way the
- *  document titles itself and the page's own heading face carries it. Under it stands the byline —
- *  the agent the task belongs to, reached at its page, and the task itself, pressed to open the
- *  record where the prompt and schedule are read — and under that the dateline of ways out: when it
- *  ran, the conversation it reported into, the thread on the surface it came from, and any outcome.
- *  The body is what the run made, never what it said: files with their pictures where one exists,
- *  markdown documents read inline. Only a run that did not end well speaks in text, because a
- *  failure explains itself; the reply a successful run posted lives in its conversation, one link
- *  away.
+ *  document titles itself and the page's own heading face carries it. The band over the page states
+ *  that same name in its crumb, and the two stand together on purpose — the band gives a name one
+ *  line and the measure the crumb leaves it, and a report titles itself in prose that will not fit
+ *  there, so the body is where the member reads it whole. Only the crumb's leaf is a heading of the
+ *  page, so the name is stated twice and headed once, and the document's own title line is dropped
+ *  from the body so the report never says it three times.
+ *
+ *  Under the heading stands the byline — the agent the task belongs to, reached at its page, and the
+ *  task itself, pressed to open the record where the prompt and schedule are read — and under that
+ *  the dateline of ways out: when it ran, the conversation it reported into, the thread on the
+ *  surface it came from, and any outcome. The body is what the run made, never what it said: files
+ *  with their pictures where one exists, markdown documents read inline. Only a run that did not end
+ *  well speaks in text, because a failure explains itself; the reply a successful run posted lives
+ *  in its conversation, one link away.
  *
  *  A run that published no document, or one whose document opens on no title, is headed by the task
- *  that fired it — every story states what it is before it states what it did. The heading is the
- *  page's own, because a pinned story is the whole of the page it stands on. */
+ *  that fired it — every story states what it is before it states what it did. */
 function Story({
   run,
+  opens,
+  from,
   onPlace,
+  onName,
 }: {
   run: RadarRun;
+  opens: string[];
+  from?: string;
   onPlace: (place: Placement) => void;
+  onName: (run: string, name: string) => void;
 }) {
-  const [reportTitle, setReportTitle] = useState<string | null>(null);
+  const [title, setTitle] = useState<string | null>(null);
   const agent = useAgents().find((entry) => entry.id === run.agent_id);
   const note = STATUS_NOTES[run.status];
   const thread = slackLink(run.surface, run.source);
   const documents = run.artifacts.filter(isDocument);
   const files = run.artifacts.filter((artifact) => !isDocument(artifact));
-  const heading = reportTitle ?? run.task ?? "Scheduled run";
+  const heading = title ?? run.task ?? "Scheduled run";
   const out =
     "text-inherit no-underline hover:underline focus-visible:underline";
+  useLayoutEffect(() => {
+    onName(RUN_PREFIX + run.turn_id, heading);
+  }, [onName, run.turn_id, heading]);
   return (
     <li className="flex flex-col gap-sm border-b border-edge pb-4xl last:border-b-0">
-      <h1 className="m-0 text-title font-medium">{heading}</h1>
+      <h3 className="m-0 text-title font-medium">{heading}</h3>
       {agent || run.task ? (
         <p className="m-0 text-ui text-ink-soft">
           by{" "}
@@ -427,20 +504,19 @@ function Story({
             </>
           ) : null}
           {run.task ? (
-            <button
-              type="button"
-              onClick={() =>
-                onPlace({ open: OBJECT_PREFIX + TASK_KIND + "/" + run.task, agent: run.agent_id })
-              }
-              className="m-0 border-0 bg-transparent p-0 text-left text-inherit hover:underline"
-            >
-              {run.task}
-            </button>
+            <TaskName
+              task={run.task}
+              agentId={run.agent_id}
+              opens={opens}
+              from={from}
+              onPlace={onPlace}
+              className="m-0 border-0 p-0 text-left text-inherit hover:underline"
+            />
           ) : null}
         </p>
       ) : null}
       <p className="m-0 flex flex-wrap gap-x-lg font-mono text-mono text-ink-soft">
-        <a href={sectionHash("radar", { open: RUN_PREFIX + run.turn_id })} className={out}>
+        <a href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })} className={out}>
           <Moment at={run.fired_at} />
         </a>
         <a href={chatHash(run.conversation_id)} className={out}>
@@ -480,10 +556,53 @@ function Story({
           key={artifact.filename}
           artifact={artifact}
           heading={heading}
-          onTitle={at === 0 ? setReportTitle : undefined}
+          onTitle={at === 0 ? setTitle : undefined}
         />
       ))}
     </li>
+  );
+}
+
+/** The task a run belongs to, pressed to open the record where its prompt and schedule are read.
+ *  The record opens after whatever the feed is standing on and takes the place of the one opened
+ *  before it, so the row is a step down a path rather than another thing left lying open; a cmd- or
+ *  middle-press stands it beside that one instead, which is how two tasks are compared. The name
+ *  carries the mark an open row takes while its record stands, so the feed says which row the panel
+ *  beside it was opened from.
+ *
+ *  A task is reached from the report that raised the question about it, never by leaving for the
+ *  tasks screen: the answer stands beside the report the member is reading. */
+function TaskName({
+  task,
+  agentId,
+  opens,
+  from,
+  onPlace,
+  className,
+}: {
+  task: string;
+  agentId: string;
+  opens: string[];
+  from?: string;
+  onPlace: (place: Placement) => void;
+  className: string;
+}) {
+  const id = slotOf({ agent: agentId, kind: TASK_KIND, name: task });
+  const standing = opens.includes(id);
+  const press = (event: MouseEvent<HTMLButtonElement>) =>
+    onPlace({ opens: beside(event) ? appended(opens, id) : opened(opens, id, from) });
+  return (
+    <button
+      type="button"
+      aria-current={standing}
+      onClick={press}
+      onAuxClick={(event) => {
+        if (beside(event)) press(event);
+      }}
+      className={cn(className, standing ? "-mx-xs rounded-control bg-fill px-xs" : "bg-transparent")}
+    >
+      {task}
+    </button>
   );
 }
 

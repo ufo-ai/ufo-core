@@ -1,5 +1,4 @@
 import {
-  IconChevronDown,
   IconFilter,
   IconLayoutGrid,
   IconList,
@@ -9,15 +8,14 @@ import {
   Fragment,
   createContext,
   useContext,
-  useEffect,
-  useRef,
   type ComponentProps,
+  type DragEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import { BesideHost } from "@/kernel/beside";
+import { SlotTrack } from "@/kernel/slots";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -49,11 +47,32 @@ export const COLUMN = "mx-auto w-full max-w-page";
 
 /** The pane a destination draws in. It runs the full width the shell leaves, because the top bar's
  *  rule separates the page's header from its body and a rule that stops two thirds of the way
- *  across states a boundary the surface does not have. */
-export function Pane({ className, children, ...props }: ComponentProps<"main">) {
+ *  across states a boundary the surface does not have.
+ *
+ *  `opens` is the order the lanes stand in and `onMove` is where a lane carried by hand is written,
+ *  handed straight to the track. They arrive together or not at all: an order that could be read
+ *  without being written would take a drag nothing records, and the address would then name a row
+ *  the member is not looking at. A pane whose lanes no address holds passes neither. */
+export function Pane({
+  className,
+  children,
+  opens,
+  onMove,
+  ...props
+}: ComponentProps<"main"> &
+  (
+    | { opens: string[]; onMove: (opens: string[]) => void }
+    | { opens?: undefined; onMove?: undefined }
+  )) {
   return (
     <main {...props} className={cn("flex min-h-0 min-w-0 flex-col", className)}>
-      <BesideHost>{children}</BesideHost>
+      {opens === undefined ? (
+        <SlotTrack>{children}</SlotTrack>
+      ) : (
+        <SlotTrack opens={opens} onMove={onMove}>
+          {children}
+        </SlotTrack>
+      )}
     </main>
   );
 }
@@ -86,93 +105,167 @@ export function Page({ className, ...props }: ComponentProps<"div">) {
  *  themselves cannot see. */
 export const BANDS = "flex flex-col gap-6xl";
 
-/** The band a page is headed by: what the page is on the left, and on the right the acts that reach
- *  the whole of it — the search over every record and the one that makes another. What narrows the
- *  records to a family stays with the records, so the head of the page and the head of the table
- *  each carry the controls that answer to them.
+/** The measure the name is guaranteed. Above the narrow breakpoint the acts fold and wrap around
+ *  it; a band whose acts cannot fit beside this much name is carrying more acts than a header
+ *  holds, which is a fault at the call site and not something the band can absorb. */
+const NAME = "flex min-w-(--container-title) flex-1 items-center gap-sm max-narrow:min-w-0";
+
+/** The band every surface is headed by: where the member is on the left, and on the right what
+ *  they can do about the whole of it. A destination, a record opened beside it, a half of the
+ *  agent pane, and a sheet all wear this one band, so a member moving between them finds the name,
+ *  the acts and the way out in the same places rather than learning each screen's own chrome.
  *
- *  The name is the page's own, at the size the words around it are set — not a masthead. A page
- *  reached by pressing its name in the sidebar has been announced already, and a title set three
- *  steps larger than everything under it states a beginning where the member is only continuing.
- *  Where the page stands among siblings, the name is also the control that moves between them, so
- *  the one word the member is reading is the one they press to leave — and the destinations do not
- *  need a strip of their own under the band.
+ *  The order is fixed and not the caller's: the way back, the name, what the name says about
+ *  itself in passing, the search over the whole surface, the acts, and the way out last. A band
+ *  that let each screen order its own contents would state a different reading order on every one
+ *  of them, and the way out would move.
  *
- *  A phone has no room for all three on one line, and the title is the only part that can give —
- *  which is the page's own name, so it must not. The band stacks below the narrow breakpoint: the
- *  title keeps its line and the controls take the one beneath it. They wrap among themselves rather
- *  than shrink: the search states a width it is readable at, and one squeezed below it is a box the
- *  member cannot type into. */
-export function PageHeader({
+ *  The name is set at the size the pills beside it are, so the band reads as one row of chrome and
+ *  the first heading on the screen is the content under it. It keeps its measure at every width
+ *  above the narrow breakpoint — the acts give, never the title. Below that breakpoint there is no
+ *  room for both on one line and the name is the part that cannot go, so the band stacks: the name
+ *  keeps its line and the acts wrap on the one beneath.
+ *
+ *  `heading` is the level the name is a heading at: the destination the member navigated to is the
+ *  page's `1`, a surface standing inside that page is `2`. A band drawing a crumb takes it too —
+ *  the crumb's last step is the name, so that step is the heading rather than a second one drawn
+ *  beside it. Omitted, the name is plain text: a surface the landmark it stands in already names
+ *  takes no second name.
+ *
+ *  A screen states one heading at level 1, and this band is where it stands. A view whose name is
+ *  prose the band's one line cannot hold states it whole in its own body as well — the crumb is cut
+ *  to the width it has, never to what a reader hears — and the body's copy is the one that is not a
+ *  heading.
+ *
+ *  `pinned` is where the band stands, and both the rule and the inset follow from it. A band that
+ *  scrolls with its page is lined up by that page's own gutter and has no boundary under it to
+ *  draw; a band held above a scroller has neither, so it states its own inset and the rule the
+ *  content passes beneath. */
+export function Header({
+  heading,
+  parent,
+  glyph,
   title,
-  siblings,
-  onPick,
-  search,
-  action,
+  note,
+  acts,
+  bar,
+  onClose,
+  closes,
+  onLift,
+  pinned = false,
 }: {
-  /** Absent where the shell above already named the page — the band then carries the acts alone,
-   *  rather than a second heading saying the word the member just pressed. */
-  title?: string;
-  /** The destinations this one stands among, current included. Two or more make the name the
-   *  control that moves between them; one draws a plain name, because a chevron that opens a
-   *  list of one is a control with nothing to do. */
-  siblings?: FilterOption[];
-  onPick?: (value: string) => void;
-  search?: ReactNode;
-  action?: ReactNode;
+  heading?: 1 | 2;
+  /** The surface this one came out of, and the verb that goes back to it. Every parent in this
+   *  portal is reached by a callback rather than an address — an agent's own conversation lives in
+   *  a place on its agent's hash, not at one of its own — so this takes the verb, not a URL. */
+  parent?: { label: string; onGo?: () => void };
+  /** The mark for the kind of thing the surface holds, read before its name. It stands inside the
+   *  measure the name is guaranteed rather than beside it, so a surface at its narrowest spends
+   *  that measure on the mark and the name together instead of losing the acts to their sum. */
+  glyph?: ReactNode;
+  /** Absent where the shell above has already named the surface — the band then carries the acts
+   *  alone, rather than an empty heading a reader has to step over on the way past. */
+  title?: ReactNode;
+  /** What the surface says about itself in passing: which slot, which model, what kind of thing it
+   *  is. It is the part that gives when the line runs out, before the name does. */
+  note?: ReactNode;
+  acts?: ReactNode;
+  /** The band directly under the name, inside the same box and above the same rule: the controls
+   *  that redraw what the surface shows rather than act on what it holds. */
+  bar?: ReactNode;
+  onClose?: () => void;
+  /** What the way out names, where more than one of them can stand on the screen at once: a track
+   *  of lanes each carries its own, and a row of glyphs all reading "Close" says which of them
+   *  nothing. A surface that is the only thing over the member leaves it — the one way out on the
+   *  screen needs no surname. */
+  closes?: string;
+  /** What the band does when it is taken hold of, where the surface under it can be reordered by
+   *  hand. Given, the band is the handle: the member drags the line already reading as this
+   *  surface's name, rather than a grip drawn beside it that names nothing. */
+  onLift?: (event: DragEvent<HTMLDivElement>) => void;
+  pinned?: boolean;
 }) {
-  const switches = siblings && siblings.length > 1 && onPick;
+  const Name = heading === 1 ? "h1" : heading === 2 ? "h2" : "span";
   return (
     <div
+      data-slot="header"
+      draggable={onLift ? true : undefined}
+      onDragStart={onLift}
       className={cn(
-        "flex h-(--size-control) shrink-0 items-center gap-sm",
-        "max-narrow:h-auto max-narrow:flex-col max-narrow:items-stretch",
+        "flex shrink-0 flex-col gap-sm",
+        pinned && "px-2xl py-lg",
+        onLift && "cursor-move",
       )}
     >
-      {title ? (
-        <h1 className="m-0 min-w-0 flex-1 truncate text-body font-medium">
-          {switches ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className={cn(
-                    "flex min-w-0 items-center gap-2xs rounded-control border-0 bg-transparent",
-                    "-mx-xs px-xs py-2xs font-sans text-inherit",
-                    "transition-[background-color] duration-100 ease-control",
-                    "hover:bg-fill data-[state=open]:bg-fill",
-                  )}
-                >
-                  <span className="min-w-0 truncate">{title}</span>
-                  <IconChevronDown className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuRadioGroup
-                  value={siblings.find((entry) => entry.label === title)?.value ?? ""}
-                  onValueChange={onPick}
-                >
-                  {siblings.map((entry) => (
-                    <DropdownMenuRadioItem key={entry.value} value={entry.value}>
-                      {entry.label}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            title
-          )}
-        </h1>
-      ) : (
-        <span className="flex-1 max-narrow:hidden" />
-      )}
-      {search || action ? (
-        <div className="flex min-w-0 flex-wrap items-center gap-sm max-narrow:w-full">
-          {search}
-          {action}
-        </div>
-      ) : null}
+      <div
+        className={cn(
+          "flex h-(--size-control) items-center gap-md",
+          "max-narrow:h-auto max-narrow:flex-col max-narrow:items-stretch",
+        )}
+      >
+        {parent === undefined && title === undefined ? (
+          <span className="flex-1 max-narrow:hidden" />
+        ) : (
+          <div className={NAME}>
+            {glyph ? (
+              <span
+                aria-hidden
+                className="flex shrink-0 text-ink-soft [&_svg]:size-(--size-glyph)"
+              >
+                {glyph}
+              </span>
+            ) : null}
+            {parent ? (
+              <Breadcrumb className="min-w-0 flex-1">
+                <BreadcrumbList className="min-w-0 flex-nowrap">
+                  <BreadcrumbItem>
+                    {parent.onGo ? (
+                      <BreadcrumbLink aria-label={"Back to " + parent.label} onClick={parent.onGo}>
+                        {parent.label}
+                      </BreadcrumbLink>
+                    ) : (
+                      parent.label
+                    )}
+                  </BreadcrumbItem>
+                  <BreadcrumbSeparator />
+                  <BreadcrumbItem className="min-w-0">
+                    <Name className="m-0 flex min-w-0 text-label">
+                      <BreadcrumbPage>{title}</BreadcrumbPage>
+                    </Name>
+                    {note}
+                  </BreadcrumbItem>
+                </BreadcrumbList>
+              </Breadcrumb>
+            ) : (
+              <>
+                <Name className="m-0 min-w-0 flex-1 truncate text-label font-medium">{title}</Name>
+                {note}
+              </>
+            )}
+          </div>
+        )}
+        {acts || onClose ? (
+          <div
+            className={cn(
+              "flex shrink-0 items-center gap-sm",
+              "max-narrow:w-full max-narrow:flex-wrap",
+            )}
+          >
+            {acts}
+            {onClose ? (
+              <Button
+                variant="quiet"
+                size="icon"
+                aria-label={closes ? "Close " + closes : "Close"}
+                onClick={onClose}
+              >
+                <IconX aria-hidden />
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      {bar}
     </div>
   );
 }
@@ -195,6 +288,42 @@ export function usePageAct(act: ReactNode | null): ReactNode {
   return host ? createPortal(act, host) : act;
 }
 
+const PageHeadContext = createContext<HTMLElement | null>(null);
+
+/** Where a shell stands the band of the view under it, for a view that names itself. A destination
+ *  whose name arrives with its own read — the report a page is standing on, the person whose page
+ *  it is — cannot be named by the shell, which stood before that read ever answered. The band
+ *  cannot be left inside the view either: it would take the page's own gutter and its measure, so
+ *  the name would start a long way in from the pane's edge, and it would scroll away with the
+ *  words under it. The shell holds the place, above its scroller and at the pane's own width, and
+ *  the view fills it from where it stands. */
+export function PageHead({ host, children }: { host: HTMLElement | null; children: ReactNode }) {
+  return <PageHeadContext.Provider value={host}>{children}</PageHeadContext.Provider>;
+}
+
+/** Puts a view's own band above the shell it is drawn in. A view drawn under no shell keeps the
+ *  band where it was returned, so a screen mounted on its own still states its name. */
+export function usePageHead(band: ReactNode): ReactNode {
+  const host = useContext(PageHeadContext);
+  return host ? createPortal(band, host) : band;
+}
+
+const PageSearchContext = createContext<ReactNode>(null);
+
+/** The search over a whole surface, offered to the toolbar that narrows it. The shell owns the box
+ *  — it outlives the read it redraws under, so a term survives the records changing beneath it —
+ *  but the box belongs on the band of controls that narrow the records, not on the name above them.
+ *  The shell states it here and the toolbar draws it where the member is already pointing. */
+export function PageSearch({ node, children }: { node: ReactNode; children: ReactNode }) {
+  return <PageSearchContext.Provider value={node}>{children}</PageSearchContext.Provider>;
+}
+
+/** The search the shell holds over this surface, for the toolbar that draws it. A screen with no
+ *  search of its own reads nothing here, so it draws no band of controls it has nothing to put in. */
+export function usePageSearch(): ReactNode {
+  return useContext(PageSearchContext);
+}
+
 /** The band that narrows the records: which family of them to show, on the page's own left edge and
  *  a band clear of both the title above and the records below. The order they are in is not here —
  *  it sits on the head of the column it orders, where the member is already pointing.
@@ -202,14 +331,18 @@ export function usePageAct(act: ReactNode | null): ReactNode {
  *  A phone fits one such control on a line, so below the narrow breakpoint they wrap rather than
  *  share: two rows of choices on one line leave each of them a strip too narrow to read a label
  *  in. */
-export function PageToolbar({ children }: { children: ReactNode }) {
+export function PageToolbar({ className, children, ...props }: ComponentProps<"div">) {
+  const search = useContext(PageSearchContext);
   return (
     <div
+      {...props}
       className={cn(
         "flex h-(--size-control) shrink-0 items-center gap-sm",
         "max-narrow:h-auto max-narrow:flex-wrap",
+        className,
       )}
     >
+      {search}
       {children}
     </div>
   );
@@ -264,7 +397,7 @@ export function ViewSwitch({ face, onPick }: { face: Face; onPick: (face: Face) 
             "aria-checked:bg-fill aria-checked:text-ink",
           )}
         >
-          <Glyph className="size-(--size-glyph)" aria-hidden />
+          <Glyph aria-hidden />
         </ToggleGroupItem>
       ))}
     </ToggleGroupOne>
@@ -307,7 +440,7 @@ export function FacetMenu({
             value && "bg-fill text-ink",
           )}
         >
-          <IconFilter className="size-glyph" aria-hidden />
+          <IconFilter aria-hidden />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
@@ -330,146 +463,27 @@ export function FacetMenu({
   );
 }
 
-/** A record opened beside the list it came from: a column of the pane rather than a sheet laid
- *  over it, so the list stays readable and closing the record is a press rather than a way back.
- *  Under `--breakpoint-narrow` there is no room for two columns, so it covers the pane instead.
+/** What a record reads as inside the slot it was opened in: its groups one gutter apart, in the one
+ *  column they scroll in. The slot states the record's name and carries the way out of it, and the
+ *  track draws the hairline between one slot and the next — so a record states neither a heading nor
+ *  an edge of its own, which would say the name twice and draw the seam twice.
  *
- *  It takes focus when it opens and gives it back when it closes — but only if it still holds it.
- *  A pane may host two of these, and the one displaced unmounts a commit after its replacement has
- *  already focused itself; a panel that handed focus back unconditionally would take it out of the
- *  panel the member just opened and drop them behind it. Escape leaves it. A record
- *  that opened where the member was not looking, and that only an unlabelled corner glyph could
- *  shut, is one a keyboard never reaches — and at narrow widths the panel covers the pane, so that
- *  member would have nothing to go back to. Escape is taken only where nothing else has claimed it:
- *  a select open inside the form answers that key first, and a panel that shut on it would take the
- *  whole form away when the member meant to close a menu. */
-export function RecordPanel({
-  title,
-  describedBy,
-  onClose,
-  children,
-}: {
-  title: string;
-  /** The id of the one line stating what this record's form does, where it has one — a heading
-   *  names the panel, and a member arriving on it by keyboard hears only that name otherwise. */
-  describedBy?: string;
-  onClose: () => void;
-  children: ReactNode;
-}) {
-  const held = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const before = document.activeElement;
-    const panel = held.current;
-    panel?.focus();
-    return () => {
-      if (!(before instanceof HTMLElement) || !document.body.contains(before)) return;
-      const active = document.activeElement;
-      const claimed =
-        active instanceof HTMLElement && active !== document.body && !panel?.contains(active);
-      if (claimed) return;
-      before.focus();
-    };
-  }, []);
+ *  The track it holds is the host for an act raised inside the record. That act cannot be drawn in
+ *  the slot the record is already standing in: filling that slot means emptying it of the record,
+ *  which unmounts the very control that raised the act and takes the act with it. So the record's
+ *  own track lies over it — the opener stays mounted underneath, and the form still opens beside
+ *  rather than over the middle of the screen. */
+export function RecordPanel({ children }: { children: ReactNode }) {
   return (
-    <aside
-      ref={held}
-      aria-label={title}
-      aria-describedby={describedBy}
-      tabIndex={-1}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape" || event.defaultPrevented) return;
-        event.stopPropagation();
-        onClose();
-      }}
-      className={cn(
-        "relative flex min-h-0 min-w-0 flex-1 flex-col gap-(--size-record-gutter)",
-        "border-l border-edge py-2xl",
-        "max-narrow:absolute max-narrow:inset-0 max-narrow:z-10 max-narrow:border-l-0",
-        "max-narrow:bg-surface",
-      )}
-    >
-      <BesideHost over>
-        <header className="flex h-(--size-control) shrink-0 items-center gap-md px-(--size-record-gutter)">
-          <h2 className="m-0 flex-1 truncate text-subtitle font-medium">{title}</h2>
-          <Button size="icon" aria-label="Close" onClick={onClose}>
-            <IconX className="size-icon" aria-hidden />
-          </Button>
-        </header>
-        <div
-          className={cn(
-            "flex min-h-0 flex-1 flex-col gap-(--size-record-gutter)",
-            "overflow-y-auto scrollbar-gutter-stable px-(--size-record-gutter)",
-          )}
-        >
-          {children}
-        </div>
-      </BesideHost>
-    </aside>
-  );
-}
-
-/** Where the member is, and what they can do about it — the one header shape every screen that
- *  sits *inside* something else wears. A root has no crumb, because there is nothing above it to
- *  name; a record has one, because the list it came from is the way back and a title alone makes
- *  the member find that list again in the sidebar.
- *
- *  Every parent in this portal is reached by a callback rather than an address — an agent's own
- *  conversation lives in a place on its agent's hash, not at one of its own — so `parent` takes
- *  the verb that gets there rather than a URL.
- *
- *  `note` is what the record says about itself in passing: a model, a slot, the kind of thing it
- *  is. `actions` are the acts on the record, and they stand at the far end as pills so a row of
- *  them reads as one band of controls rather than as chrome tucked under a heading. Alignment is
- *  on the box, not the baseline: a pill and a word share a centre, never a baseline.
- *
- *  A phone holds the name and the acts on one line only by hiding some of the acts past an edge
- *  that marks nothing, so the band stacks below the narrow breakpoint the way `PageHeader` does:
- *  the name keeps its line and the acts wrap among themselves on the one beneath it. */
-export function PaneHeader({
-  parent,
-  current,
-  note,
-  actions,
-}: {
-  parent?: { label: string; onGo?: () => void };
-  current: ReactNode;
-  note?: ReactNode;
-  actions?: ReactNode;
-}) {
-  return (
-    <div
-      className={cn(
-        "box-content flex min-h-(--size-control) items-center gap-md border-b border-edge px-2xl py-lg",
-        "max-narrow:flex-col max-narrow:items-stretch",
-      )}
-    >
-      <Breadcrumb className="min-w-0">
-        <BreadcrumbList className="flex-nowrap">
-          {parent ? (
-            <>
-              <BreadcrumbItem>
-                {parent.onGo ? (
-                  <BreadcrumbLink aria-label={"Back to " + parent.label} onClick={parent.onGo}>
-                    {parent.label}
-                  </BreadcrumbLink>
-                ) : (
-                  parent.label
-                )}
-              </BreadcrumbItem>
-              <BreadcrumbSeparator />
-            </>
-          ) : null}
-          <BreadcrumbItem className="min-w-0">
-            <BreadcrumbPage>{current}</BreadcrumbPage>
-            {note}
-          </BreadcrumbItem>
-        </BreadcrumbList>
-      </Breadcrumb>
-      {actions ? (
-        <div className="ml-auto flex items-center gap-sm max-narrow:ml-0 max-narrow:flex-wrap">
-          {actions}
-        </div>
-      ) : null}
-    </div>
+    <SlotTrack over>
+      <div
+        className={cn(
+          "flex min-h-0 min-w-0 flex-1 flex-col gap-(--size-record-gutter)",
+          "overflow-y-auto scrollbar-gutter-stable px-(--size-record-gutter) pb-2xl",
+        )}
+      >
+        {children}
+      </div>
+    </SlotTrack>
   );
 }

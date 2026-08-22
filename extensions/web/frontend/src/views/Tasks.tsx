@@ -1,7 +1,8 @@
-import { useBeside } from "@/kernel/beside";
-import { ObjectDetail, ObjectPane, type ObjectAddress } from "@/kernel/objects";
+import { useState } from "react";
+
+import { HeldRecords, ObjectPane } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
-import { PageHeader } from "@/kernel/pane";
+import { Header, usePageHead } from "@/kernel/pane";
 
 /** What is armed to run an agent when nobody is typing: a clock, or a source that changed. The two
  *  are one destination because a member asking what stands ready here asks one question, and an
@@ -20,49 +21,44 @@ const KINDS = [
   { kind: "source_trigger", label: "Triggers" },
 ];
 
-const OBJECT_PREFIX = "object/";
-
-function objectAt(open: string | undefined): ObjectAddress | null {
-  if (!open?.startsWith(OBJECT_PREFIX)) return null;
-  const rest = open.slice(OBJECT_PREFIX.length);
-  const cut = rest.indexOf("/");
-  return cut < 0 ? null : { kind: rest.slice(0, cut), name: rest.slice(cut + 1) };
-}
-
-/** The workspace's standing orders. A record the route names — which is what search hands over —
- *  opens beside the listings; `place.agent` remembers whose namespace it lives in, since they cross
- *  agents. */
+/** The workspace's standing orders. The page owns the track and draws the records on it, because
+ *  two listings stand here and a record either of them opens is the page's — a listing drawing the
+ *  track would put a second node on an id the other listing had already put one on. A record the
+ *  route names — which is what search hands over — stands on that same track, and its lane names
+ *  the app whose namespace it lives in, since the kinds cross apps.
+ *
+ *  Closing a record reads the listings again, so a row that record deleted or changed is stated as
+ *  it now is rather than as it was when the member opened it. */
 export function Tasks({
   title,
   place,
   onPlace,
 }: {
-  title?: string;
+  title: string;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  const at = objectAt(place.open);
-  const owner = place.agent ?? null;
-  const detail = useBeside(
-    at !== null && at.name !== null && owner !== null ? (
-      <ObjectDetail
-        key={owner + "/" + at.kind + "/" + at.name}
-        agentId={owner}
-        kind={at.kind}
-        name={at.name}
-        onOpen={(next) => onPlace({ open: OBJECT_PREFIX + next.kind + "/" + (next.name ?? "") })}
-        onBack={() => onPlace({ open: undefined, agent: undefined })}
-      />
-    ) : null,
-    () => onPlace({ open: undefined, agent: undefined }),
-  );
+  const [generation, setGeneration] = useState(0);
+  const opens = place.opens ?? [];
+  const band = usePageHead(<Header pinned heading={1} title={title} />);
   return (
     <>
-      {title ? <PageHeader title={title} /> : null}
+      {band}
       {KINDS.map((held) => (
-        <ObjectPane key={held.kind} agentId={null} kind={held.kind} section={held.label} />
+        <ObjectPane
+          key={held.kind + "/" + generation}
+          agentId={null}
+          kind={held.kind}
+          section={held.label}
+          opens={opens}
+          onPlace={onPlace}
+        />
       ))}
-      {detail}
+      <HeldRecords
+        opens={opens}
+        onPlace={onPlace}
+        onShut={() => setGeneration((count) => count + 1)}
+      />
     </>
   );
 }

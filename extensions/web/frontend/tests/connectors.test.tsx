@@ -71,6 +71,13 @@ const CATALOG = {
 
 const COVERAGE = { api: true, git_push: false, sources: true };
 
+/** The slots the address states, in the order the track stands them. */
+function track(): string[] {
+  const query = location.hash.split("?")[1] ?? "";
+  const open = new URLSearchParams(query).get("open");
+  return open ? open.split("~") : [];
+}
+
 /** One tool's row, found by the name it is headed with. Every act on the page says `Connect`, so a
  *  test reaches the act through the row rather than through the word. */
 function row(label: string): HTMLElement {
@@ -81,6 +88,28 @@ function row(label: string): HTMLElement {
 
 function connects(label: string): HTMLElement {
   return within(row(label)).getByRole("button", { name: "Connect" });
+}
+
+/** One tool's row while a record of the same name stands beside the list: the crumb over that
+ *  record carries the label too, and the lane stands after the list, so the row is the first
+ *  item the label is found in. */
+function item(label: string): HTMLElement {
+  const found = screen
+    .getAllByText(label)
+    .map((node) => node.closest("li"))
+    .find(Boolean);
+  if (!found) throw new Error("no row headed " + label);
+  return found;
+}
+
+/** The press that opens beside: the browser's own gesture for a second tab. One `userEvent`
+ *  instance holds the key down over the click — the module's own verbs each set up a fresh one and
+ *  would let go of it in between. */
+async function besideItem(label: string): Promise<void> {
+  const user = userEvent.setup();
+  await user.keyboard("{Meta>}");
+  await user.click(item(label));
+  await user.keyboard("{/Meta}");
 }
 
 /** The library, read with the catalog the workspace offers. */
@@ -155,13 +184,133 @@ test("the GitHub row opens the coverage its install stands on", async () => {
 
   await pressItem("GitHub");
 
-  expect(await screen.findByRole("heading", { name: "GitHub" })).toBeTruthy();
+  const lane = await screen.findByRole("region", { name: "GitHub" });
+  expect(within(lane).getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
+    "Connectors/GitHub",
+  );
   expect(fact("API")).toBe("Connected");
   expect(fact("Git push")).toBe("Connected");
   expect(fact("Sources")).toBe("Not connected");
 });
 
-test("the pool narrows on the header's search, which names what it searches", async () => {
+/** The library is the root of the path, so a second row leads there instead of piling up beside
+ *  the first: what the member is reading is the record they last pressed. */
+test("a second connector row replaces the first, and the address carries one", async () => {
+  location.hash = sectionHash("connectors");
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("GitHub");
+  expect(await screen.findByRole("region", { name: "GitHub" })).toBeTruthy();
+
+  await pressItem("Notion");
+
+  expect(await screen.findByRole("region", { name: "Notion team" })).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("region", { name: "GitHub" })).toBeNull());
+  expect(track()).toEqual(["connection/g1"]);
+});
+
+/** Two accounts read side by side is a deliberate act, and it is the browser's own gesture for
+ *  opening beside rather than in place. */
+test("a modifier press stands a second connector record beside the first", async () => {
+  location.hash = sectionHash("connectors");
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("GitHub");
+  expect(await screen.findByRole("region", { name: "GitHub" })).toBeTruthy();
+
+  await besideItem("Notion");
+
+  expect(await screen.findByRole("region", { name: "Notion team" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(track()).toEqual(["github-coverage", "connection/g1"]);
+});
+
+test("the middle button stands a record beside rather than in place of the one open", async () => {
+  location.hash = sectionHash("connectors");
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("GitHub");
+  expect(await screen.findByRole("region", { name: "GitHub" })).toBeTruthy();
+
+  await userEvent.pointer({ target: item("Notion"), keys: "[MouseMiddle]" });
+
+  expect(await screen.findByRole("region", { name: "Notion team" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(track()).toEqual(["github-coverage", "connection/g1"]);
+});
+
+/** Pressing what already stands is not an act: the record is not built again, and Back still
+ *  leaves the screen rather than walking through arrivals at it. */
+test("pressing the row whose record already stands changes nothing", async () => {
+  location.hash = sectionHash("connectors");
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("Notion");
+  const record = await screen.findByRole("region", { name: "Notion team" });
+  const steps = history.length;
+
+  await pressItem("Notion");
+
+  expect(screen.getByRole("region", { name: "Notion team" })).toBe(record);
+  expect(track()).toEqual(["connection/g1"]);
+  expect(history.length).toBe(steps);
+});
+
+/** Finder marks the row every open column was reached through. Without it a truncated track reads
+ *  as slots vanishing rather than as one path. */
+test("the row the standing record was opened from is marked", async () => {
+  location.hash = sectionHash("connectors");
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("Notion");
+  await screen.findByRole("region", { name: "Notion team" });
+
+  expect(item("Notion").getAttribute("aria-current")).toBe("true");
+  expect(item("Notion").className).toContain("bg-fill");
+  expect(item("GitHub").getAttribute("aria-current")).toBeNull();
+});
+
+test("a link carrying a track opens every record it names", async () => {
+  location.hash = sectionHash("connectors", { opens: ["github-coverage", "connection/g1"] });
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("region", { name: "Notion team" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "GitHub" })).toBeTruthy();
+});
+
+/** A record opened from another means nothing without it, so shutting a lane shuts what stands
+ *  after it. Shutting the last one leaves everything before it standing. */
+test("closing a record shuts the records opened after it", async () => {
+  location.hash = sectionHash("connectors", { opens: ["github-coverage", "connection/g1"] });
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Close GitHub" }));
+
+  await waitFor(() => expect(screen.queryByRole("region", { name: "GitHub" })).toBeNull());
+  expect(screen.queryByRole("region", { name: "Notion team" })).toBeNull();
+  expect(track()).toEqual([]);
+});
+
+test("closing the last record leaves the one it was opened from standing", async () => {
+  location.hash = sectionHash("connectors", { opens: ["github-coverage", "connection/g1"] });
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Close Notion team" }));
+
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Notion team" })).toBeNull());
+  expect(screen.getByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(track()).toEqual(["github-coverage"]);
+});
+
+test("the pool narrows on the toolbar's search, which names what it searches", async () => {
   location.hash = sectionHash("connectors");
   wire({
     "/connections": () =>
@@ -174,9 +323,7 @@ test("the pool narrows on the header's search, which names what it searches", as
 
   expect(await screen.findByText("notion")).toBeTruthy();
   const box = screen.getByLabelText("Search connectors");
-  expect(
-    screen.getByRole("heading", { level: 1, name: "Connectors" }).parentElement!.contains(box),
-  ).toBe(true);
+  expect(document.querySelector('[data-slot="header"]')!.contains(box)).toBe(false);
 
   await userEvent.type(box, "github{enter}");
 
@@ -333,18 +480,18 @@ test("a revoked connection stays shut when the grant comes back on a later read"
   await openAgentSettings("Assistant", "Connectors");
 
   await pressRow("github");
-  expect(await screen.findByRole("complementary", { name: "acct" })).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "acct" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
-  await waitFor(() => expect(screen.queryByRole("complementary", { name: "acct" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("region", { name: "acct" })).toBeNull());
 
   await userEvent.click(await screen.findByRole("combobox", { name: "Connection" }));
   await userEvent.click(await screen.findByRole("option", { name: /github/ }));
   await userEvent.click(screen.getByRole("button", { name: "Attach" }));
 
   expect(await screen.findByRole("cell", { name: "github" })).toBeTruthy();
-  expect(screen.queryByRole("complementary", { name: "acct" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "acct" })).toBeNull();
 });
 
 test("the attach picker names the provider and the account, not the broker id", async () => {
@@ -434,7 +581,6 @@ test("the agent's own section states what is shared with that agent", async () =
   await openAgentSettings("Assistant", "Connectors");
 
   expect(await screen.findByText("github")).toBeTruthy();
-  expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
 });
 
 /** The agent's own dialog holds three reads of it, and the connectors are one of them — reached by
@@ -459,6 +605,25 @@ test("the agent's connectors stand on their own tab of its settings dialog", asy
   await userEvent.click(dialog.getByRole("tab", { name: "Settings" }));
   expect(await dialog.findByLabelText("Prompt")).toBeTruthy();
   expect(dialog.queryByRole("button", { name: "Add connector" })).toBeNull();
+});
+
+test("the settings dialog holds a grant record and the add form in one track", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  wire({
+    "/connections": () => json({ connections: [grant("github", false, "g1")] }),
+    "/settings": () => json(SETTINGS),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const dialog = await openAgentSettings("Assistant", "Connectors");
+
+  await pressRow("github");
+  expect(await screen.findByRole("region", { name: "acct" })).toBeTruthy();
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Add connector" }));
+
+  expect(await screen.findByRole("region", { name: "Add connector" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "acct" })).toBeTruthy();
 });
 
 test("a connector's consent opens in a window this page owns, so its return page closes itself", async () => {

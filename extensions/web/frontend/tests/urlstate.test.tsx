@@ -1,16 +1,22 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import type { Placement } from "@/kernel/pager";
+import { usePlaceRecorder } from "@/kernel/place";
+import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 import {
   agentHash,
   artifactTarget,
   bootRoute,
   chatHash,
+  newChatHash,
   parseHash,
   sectionHash,
   workspaceHash,
+  type PlaceStep,
+  type WorkspacePlace,
 } from "@/lib/route";
 
 import {
@@ -37,7 +43,17 @@ const OLDER = {
 
 const NEWER = { ...OLDER, id: "a2", filename: "report.txt", created_at: "2026-07-31T09:00:00" };
 
-const OLDER_KEY = OLDER.created_at + "|" + OLDER.filename;
+const OLDER_KEY = OLDER.id;
+const NEWER_KEY = NEWER.id;
+
+/** A filename is whatever the agent sharing the file called it, and nothing bounds it: the column
+ *  is free text and the share tool takes the name it is given. A lane is named by the file's own
+ *  id, so a file named past what a lane id may hold stands in the track like any other file. */
+const LONG = {
+  ...OLDER,
+  id: "a3",
+  filename: "quarterly-" + "reconciliation-and-variance-".repeat(20) + "notes.txt",
+};
 
 const MIXED_CASE_CONVO_ID = "8C0ACA03-8d29-4959-af47-8ae69bed7e48";
 
@@ -108,7 +124,7 @@ test("a workspace tab and a section carry the same place and parse back to it", 
     q: "roadmap",
     chip: "Workspace",
     face: "table",
-    open: OLDER_KEY,
+    opens: [OLDER_KEY],
   };
   expect(parseHash(workspaceHash("sources", place))).toEqual({
     kind: "workspace",
@@ -180,14 +196,169 @@ test("an app is one address, and the conversation it has open is a place on it",
     agentId: AGENT.id,
     place: {},
   });
-  expect(agentHash(AGENT.id, { open: CONVO_ID })).toBe(
+  expect(agentHash(AGENT.id, { opens: [CONVO_ID] })).toBe(
     "#/agents/" + AGENT.id + "?open=" + CONVO_ID,
   );
   expect(parseHash("#/agents/" + AGENT.id + "?open=" + CONVO_ID)).toEqual({
     kind: "agent",
     agentId: AGENT.id,
-    place: { open: CONVO_ID },
+    place: { opens: [CONVO_ID] },
   });
+});
+
+test("the address carries every slot standing on the screen, in track order", () => {
+  const none: WorkspacePlace = { after: "c-older" };
+  expect(sectionHash("artifacts", none)).toBe("#/artifacts?after=c-older");
+  expect(parseHash(sectionHash("artifacts", none))).toEqual({
+    kind: "section",
+    section: "artifacts",
+    place: none,
+  });
+
+  const one: WorkspacePlace = { opens: [OLDER_KEY] };
+  expect(parseHash(sectionHash("artifacts", one))).toEqual({
+    kind: "section",
+    section: "artifacts",
+    place: one,
+  });
+
+  const many: WorkspacePlace = { opens: [CONVO_ID, AGENT.id, OLDER_KEY] };
+  expect(sectionHash("artifacts", many)).toBe(
+    "#/artifacts?open=" + CONVO_ID + "%7E" + AGENT.id + "%7E" + OLDER_KEY,
+  );
+  expect(parseHash(sectionHash("artifacts", many))).toEqual({
+    kind: "section",
+    section: "artifacts",
+    place: many,
+  });
+});
+
+test("a link naming one thing to open stands on the screen as a track of one", () => {
+  expect(parseHash("#/artifacts?open=" + OLDER_KEY)).toEqual({
+    kind: "section",
+    section: "artifacts",
+    place: { opens: [OLDER_KEY] },
+  });
+  expect(parseHash("#/agents/" + AGENT.id + "?open=" + CONVO_ID + "&q=roadmap")).toEqual({
+    kind: "agent",
+    agentId: AGENT.id,
+    place: { q: "roadmap", opens: [CONVO_ID] },
+  });
+});
+
+test("a mangled track names no route, and never a screen quietly missing its slots", () => {
+  expect(parseHash("#/wiki?open=a~~b")).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/wiki?open=~")).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/wiki?open=~" + CONVO_ID)).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/artifacts?open=" + CONVO_ID + "~")).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/workspace/team?open=" + CONVO_ID + "~~" + AGENT.id)).toEqual({
+    kind: "bad-link",
+  });
+  expect(parseHash("#/agents/" + AGENT.id + "?q=roadmap&open=a~~b")).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/wiki?open=a%0Ab")).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/wiki?open=" + "x".repeat(300))).toEqual({ kind: "bad-link" });
+});
+
+/** A track is the row of lanes a screen stands on, so one id in it twice is two hosts over one
+ *  record and a row longer than the store holds is lanes the member would lose on the way back.
+ *  Neither is a track, and the address says so rather than standing a screen on it. */
+test("a track naming a slot twice, or more lanes than a screen holds, names no route", () => {
+  const lanes = (count: number) =>
+    Array.from({ length: count }, (_, at) => "object/report/" + at).join("~");
+
+  expect(parseHash("#/artifacts?open=a~b~a")).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/agents/" + AGENT.id + "?open=" + CONVO_ID + "~" + CONVO_ID)).toEqual({
+    kind: "bad-link",
+  });
+  expect(parseHash("#/wiki?open=" + lanes(25))).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/wiki?open=" + lanes(24))).toEqual({
+    kind: "section",
+    section: "wiki",
+    place: { opens: lanes(24).split("~") },
+  });
+});
+
+test("a track no address can carry raises where it was made up", () => {
+  expect(() => sectionHash("artifacts", { opens: [CONVO_ID + "~" + AGENT.id] })).toThrow(/slot id/);
+  expect(() => sectionHash("artifacts", { opens: [""] })).toThrow(/slot id/);
+  expect(() => agentHash(AGENT.id, { opens: [CONVO_ID, "a~b"] })).toThrow(/slot id/);
+  expect(() => sectionHash("artifacts", { opens: ["x".repeat(300)] })).toThrow(/slot id/);
+  expect(() => sectionHash("artifacts", { opens: [CONVO_ID, CONVO_ID] })).toThrow(/twice/);
+  expect(() =>
+    sectionHash("artifacts", {
+      opens: Array.from({ length: TRACK_MAX_SLOTS + 1 }, (_, at) => "object/report/" + at),
+    }),
+  ).toThrow(/at most/);
+});
+
+function stepping(place: WorkspacePlace) {
+  const steps: PlaceStep[] = [];
+  const places: WorkspacePlace[] = [];
+  const held = renderHook(
+    ({ place }: { place: WorkspacePlace }) =>
+      usePlaceRecorder({
+        view: "artifacts",
+        place,
+        remountOnPlace: false,
+        onPlace: (next, step) => {
+          steps.push(step);
+          places.push(next);
+          held.rerender({ place: next });
+        },
+      }),
+    { initialProps: { place } },
+  );
+  return {
+    steps,
+    places,
+    record: (patch: Placement) => act(() => held.result.current.record(patch)),
+  };
+}
+
+test("opening a slot pushes, and closing the newest unwinds the entry that opened it", () => {
+  const { steps, places, record } = stepping({});
+
+  record({ opens: [CONVO_ID] });
+  record({ opens: [CONVO_ID, AGENT.id] });
+  record({ opens: [CONVO_ID] });
+
+  expect(steps).toEqual(["push", "push", "back"]);
+  expect(places.map((place) => place.opens)).toEqual([
+    [CONVO_ID],
+    [CONVO_ID, AGENT.id],
+    [CONVO_ID],
+  ]);
+});
+
+test("closing a slot that is not the newest keeps the entry above it standing", () => {
+  const { steps, record } = stepping({});
+
+  record({ opens: [CONVO_ID] });
+  record({ opens: [CONVO_ID, AGENT.id] });
+  record({ opens: [AGENT.id] });
+  record({ opens: [] });
+
+  expect(steps).toEqual(["push", "push", "replace", "replace"]);
+});
+
+test("a track a link arrived with closes by replacement, since this screen pushed nothing", () => {
+  const { steps, record } = stepping({ opens: [CONVO_ID, AGENT.id] });
+
+  record({ opens: [CONVO_ID] });
+  record({ opens: [] });
+
+  expect(steps).toEqual(["replace", "replace"]);
+});
+
+test("paging with slots standing pushes and leaves nothing to unwind", () => {
+  const { steps, record } = stepping({});
+
+  record({ opens: [CONVO_ID] });
+  record({ after: "c-older", opens: [] });
+  record({ opens: [AGENT.id] });
+  record({ opens: [] });
+
+  expect(steps).toEqual(["push", "push", "push", "back"]);
 });
 
 test("a hash under the torn-out subagent namespace names no route", () => {
@@ -234,23 +405,31 @@ test("the conversation a sign-in carried through opens, and the hash names it", 
   expect(location.hash).toBe(chatHash(CONVO_ID));
 });
 
-test("a wrong-cased permalink reports the bad link instead of opening a new chat", async () => {
-  location.hash = chatHash(MIXED_CASE_CONVO_ID);
+/** One line answers every address the portal cannot read — a mis-cased conversation permalink and a
+ *  mangled slot track alike — so it names no kind of link. */
+test("an address the portal cannot read reports a bad link, whichever part is mangled", async () => {
+  history.replaceState(null, "", chatHash(MIXED_CASE_CONVO_ID));
   wire({ "/transcript": () => json({ messages: [] }) });
+  const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  expect(screen.queryByLabelText("Message the app")).toBeNull();
+  view.unmount();
+
+  history.replaceState(null, "", "#/wiki?open=a~~b");
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByText("This conversation link is not valid.")).toBeTruthy();
-  expect(screen.queryByLabelText("Message the app")).toBeNull();
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
 });
 
 test("a reload lands on the page and the open artifact the hash names", async () => {
-  location.hash = sectionHash("artifacts", { after: "c-older", open: OLDER_KEY });
+  location.hash = sectionHash("artifacts", { after: "c-older", opens: [OLDER_KEY] });
   const calls = serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("file body")).toBeTruthy();
   expect(calls.some((url) => url.includes("after=c-older"))).toBe(true);
-  expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /^Close/ })).toBeTruthy();
 });
 
 test("paging writes the cursor to the hash and Back steps to the previous page", async () => {
@@ -277,10 +456,145 @@ test("opening an artifact names it in the hash and closing clears it", async () 
   expect(await screen.findByText("file body")).toBeTruthy();
   expect(location.hash).toContain("open=");
 
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: /^Close/ }));
   await waitFor(() => expect(location.hash).not.toContain("open="));
   expect(location.hash).toContain("after=c-older");
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
+});
+
+const ARTIFACTS = sectionHash("artifacts", { opens: [NEWER_KEY] });
+
+function serveLong() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return json({ objects: [] });
+      if (url.includes("/workspace/artifacts")) return json({ artifacts: [LONG], older: null });
+      if (url.includes("/api/chats")) return json({ chats: [] });
+      if (url.includes("/transcript")) return json({ messages: [] });
+      return new Response("file body");
+    }),
+  );
+}
+
+test("a file named past what a lane id holds opens, closes, and comes back off the address", async () => {
+  location.hash = sectionHash("artifacts");
+  serveLong();
+  const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await viewCard(LONG.filename));
+
+  expect(await screen.findByText("file body")).toBeTruthy();
+  const held = location.hash;
+  expect(held).toBe(sectionHash("artifacts", { opens: [LONG.id] }));
+
+  await userEvent.click(screen.getByRole("button", { name: /^Close/ }));
+  await waitFor(() => expect(location.hash).toBe(sectionHash("artifacts")));
+  expect(screen.queryByText("file body")).toBeNull();
+  first.unmount();
+
+  history.replaceState(null, "", held);
+  serveLong();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("file body")).toBeTruthy();
+  expect(location.hash).toBe(held);
+});
+
+test("a screen left holding a track is holding the same one on the way back", async () => {
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await userEvent.click(await viewCard("report.txt"));
+  await waitFor(() => expect(location.hash).toBe(ARTIFACTS));
+
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await waitFor(() => expect(location.hash).toBe(newChatHash(AGENT.id)));
+  expect(screen.queryByText("file body")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+
+  await waitFor(() => expect(location.hash).toBe(ARTIFACTS));
+  expect(await screen.findByText("file body")).toBeTruthy();
+});
+
+test("a reload of a bare screen address lands on the track that screen was left holding", async () => {
+  serve();
+  const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await userEvent.click(await viewCard("report.txt"));
+  await waitFor(() => expect(location.hash).toBe(ARTIFACTS));
+  first.unmount();
+
+  history.replaceState(null, "", sectionHash("artifacts"));
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await waitFor(() => expect(location.hash).toBe(ARTIFACTS));
+  expect(await screen.findByText("file body")).toBeTruthy();
+});
+
+test("coming back to a screen replaces the address rather than pushing onto it", async () => {
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await userEvent.click(await viewCard("report.txt"));
+  await waitFor(() => expect(location.hash).toBe(ARTIFACTS));
+
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await waitFor(() => expect(location.hash).toBe(newChatHash(AGENT.id)));
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await waitFor(() => expect(location.hash).toBe(ARTIFACTS));
+
+  history.back();
+
+  await waitFor(() => expect(location.hash).toBe(newChatHash(AGENT.id)));
+});
+
+test("a link stating its own track overrules the one the screen was left holding", async () => {
+  serve();
+  const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await userEvent.click(await viewCard("report.txt"));
+  await waitFor(() => expect(location.hash).toBe(ARTIFACTS));
+  first.unmount();
+
+  const link = sectionHash("artifacts", { after: "c-older", opens: [OLDER_KEY] });
+  history.replaceState(null, "", link);
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("file body")).toBeTruthy();
+  expect(location.hash).toBe(link);
+
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+
+  await waitFor(() =>
+    expect(location.hash).toBe(sectionHash("artifacts", { opens: [OLDER_KEY] })),
+  );
+});
+
+test("a slot the member shut is not handed back by the screen's own store", async () => {
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await userEvent.click(await viewCard("report.txt"));
+  await waitFor(() => expect(location.hash).toBe(ARTIFACTS));
+
+  await userEvent.click(screen.getByRole("button", { name: /^Close/ }));
+  await waitFor(() => expect(location.hash).toBe("#/artifacts"));
+
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+
+  await waitFor(() => expect(location.hash).toBe("#/artifacts"));
+  expect(screen.queryByText("file body")).toBeNull();
 });
 
 test("search and chip ride the hash by replacement, never as history entries", async () => {
@@ -357,7 +671,7 @@ test("closing the viewer unwinds the entry opening it pushed", async () => {
   await userEvent.click(await viewCard("report.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
   expect(location.hash).toContain("open=");
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: /^Close/ }));
   await waitFor(() => expect(location.hash).toBe("#/artifacts"));
 
   history.back();
@@ -394,7 +708,7 @@ test("a second row opened behind the sheet still closes to the listing", async (
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
   await userEvent.click(await viewCard("notes.txt"));
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: /^Close/ }));
 
   await waitFor(() => expect(location.hash).not.toContain("open="));
   expect(screen.queryByText("file body")).toBeNull();
@@ -586,14 +900,45 @@ test("a search cleared from a kind returns to that kind rather than page one", a
   expect(screen.getByRole("tab", { name: "Fact" }).getAttribute("aria-selected")).toBe("true");
 });
 
-test("a deep link naming a row that is not on this page says so", async () => {
-  location.hash = sectionHash("artifacts", { open: "2020-01-01T00:00:00|gone.txt" });
+/** The track store is the way back to a row of lanes, and the address states that row itself. A
+ *  browser that refuses the write — a quota reached, a policy that blocks site storage — costs the
+ *  member the way back, never the portal: the screen the link names still stands. */
+test("a browser that refuses a storage write still mounts the portal", async () => {
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => null,
+    setItem: () => {
+      throw new DOMException("quota exceeded", "QuotaExceededError");
+    },
+    removeItem: () => {
+      throw new DOMException("quota exceeded", "QuotaExceededError");
+    },
+    clear: () => {},
+  });
+  const link = sectionHash("artifacts", { after: "c-older", opens: [OLDER_KEY] });
+  location.hash = link;
   serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByText("That item is not on this page.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+  expect(await screen.findByText("file body")).toBeTruthy();
+  expect(location.hash).toBe(link);
+});
+
+/** An id the shelf cannot draw a file for still stands as a lane and says so inside it: the close
+ *  is the lane's own, and an address the member cannot shut is one they cannot leave. */
+test("a deep link naming a row that is not on this page says so, in a lane that closes", async () => {
+  const gone = "2020-01-01T00:00:00|gone.txt";
+  location.hash = sectionHash("artifacts", { opens: [gone] });
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const lane = await screen.findByRole("region", { name: gone });
+  expect(within(lane).getByText("That item is not on this page.")).toBeTruthy();
   expect(await viewCard("report.txt")).toBeTruthy();
+
+  await userEvent.click(within(lane).getByRole("button", { name: /^Close/ }));
+
+  await waitFor(() => expect(location.hash).toBe("#/artifacts"));
+  expect(screen.queryByText("That item is not on this page.")).toBeNull();
 });
 
 test("opening and closing the viewer issues no second listing read", async () => {
@@ -607,7 +952,7 @@ test("opening and closing the viewer issues no second listing read", async () =>
 
   await userEvent.click(await viewCard("report.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: /^Close/ }));
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
 
   expect(reads()).toBe(before);

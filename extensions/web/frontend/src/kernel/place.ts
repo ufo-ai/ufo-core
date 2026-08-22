@@ -30,7 +30,7 @@ export function usePlaceRecorder({
 
   const live = useRef(place);
   live.current = place;
-  const pushedOpen = useRef(false);
+  const pushedOpen = useRef<string[]>([]);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -43,7 +43,7 @@ export function usePlaceRecorder({
   if (seen.current !== view) {
     seen.current = view;
     epoch.current += 1;
-    pushedOpen.current = false;
+    pushedOpen.current = [];
   }
   const issued = epoch.current;
 
@@ -62,23 +62,23 @@ export function usePlaceRecorder({
       chip: "chip" in patch ? patch.chip : held.chip,
       face: "face" in patch ? patch.face : held.face,
       scope: "scope" in patch ? patch.scope : held.scope,
-      open: "open" in patch ? patch.open : held.open,
-      agent: "agent" in patch ? patch.agent : held.agent,
+      opens: "opens" in patch ? patch.opens : held.opens,
     };
     const moved =
       (next.after !== undefined && next.after !== held.after) ||
-      (next.kind !== undefined && next.kind !== held.kind) ||
-      (next.agent !== undefined && next.agent !== held.agent);
-    const opened = next.open !== undefined && held.open === undefined;
-    const closed = !moved && next.open === undefined && held.open !== undefined;
+      (next.kind !== undefined && next.kind !== held.kind);
+    const heldOpens = held.opens ?? [];
+    const nextOpens = next.opens ?? [];
+    const added = nextOpens.filter((id) => !heldOpens.includes(id));
+    const dropped = heldOpens.filter((id) => !nextOpens.includes(id));
+    const opened = added.length === 1 && dropped.length === 0;
+    const closed = dropped.length === 1 && added.length === 0;
+    const newest = closed && !moved && dropped[0] === pushedOpen.current.at(-1);
     const step: PlaceStep =
-      closed && pushedOpen.current
-        ? "back"
-        : opened || moved
-          ? "push"
-          : "replace";
-    if (opened) pushedOpen.current = true;
-    if (closed || moved) pushedOpen.current = false;
+      newest ? "back" : opened || moved ? "push" : "replace";
+    if (opened) pushedOpen.current = [...pushedOpen.current, added[0]];
+    else if (step === "back") pushedOpen.current = pushedOpen.current.slice(0, -1);
+    else if (dropped.length || moved) pushedOpen.current = [];
     onPlace(next, step);
   };
 

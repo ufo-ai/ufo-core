@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
-import { COLUMN, Pane } from "@/kernel/pane";
+import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
@@ -64,7 +64,6 @@ export type TasksSlotPayload = {
 type Site = {
   name: string;
   url: string;
-  visibility: "private" | "workspace" | "public";
   created_at: string;
   updated_at: string;
 };
@@ -129,7 +128,6 @@ export function ConversationSlotPane({
   rootConversationId,
   summary,
   embedded = false,
-  onClose,
   onOpenAgent,
 }: {
   agent: ConversationAgent;
@@ -137,12 +135,15 @@ export function ConversationSlotPane({
   slot: string;
   rootConversationId?: string;
   summary?: ConversationSlotSummary;
+  /** Standing in a slot rather than on an address of its own. The slot draws the frame, the name
+   *  and the way out, so what is left here is the list itself — and the slot's own region is what
+   *  names it, since a second landmark inside that one, reading the same word, is a place a member
+   *  moving by landmark arrives at twice. */
   embedded?: boolean;
-  onClose?: () => void;
   onOpenAgent?: (agentId: string) => void;
 }) {
   const inventory = usePanelRead<ConversationSlotsPayload>(
-    summary ? null : slotsPath(agent.id, conversationId, rootConversationId),
+    summary || embedded ? null : slotsPath(agent.id, conversationId, rootConversationId),
   );
   const state = usePanelRead<SlotPayload>(
     slotPath(agent.id, conversationId, slot, rootConversationId),
@@ -153,55 +154,47 @@ export function ConversationSlotPane({
       ? inventory.payload.slots.find((entry) => entry.id === slot)
       : undefined);
   const label = resolved?.label ?? slot;
-  const content = (
-    <>
-      <div className="flex items-baseline gap-md border-b border-edge px-xl py-lg">
-        {!embedded && onOpenAgent ? (
-          <button
-            type="button"
-            onClick={() => onOpenAgent(agent.id)}
-            className="m-0 border-0 bg-transparent p-0 text-title font-strong text-inherit"
-          >
-            {agentName(agent.name)}
-          </button>
-        ) : null}
-        <span className="inline-flex items-center gap-xs font-mono text-mono text-ink-soft">
-          {resolved ? <SlotIcon icon={resolved.icon} /> : null}
-          {label}
-        </span>
-        {onClose ? (
-          <button type="button" aria-label="Close slot" onClick={onClose} className={TAP_FLOOR}>
-            Close
-          </button>
-        ) : null}
-      </div>
-      <div className="flex-1 overflow-y-auto scrollbar-gutter-stable p-xl">
-        <Panel
-          state={state}
-          failed={(message) => (
-            <PanelEmpty>
-              {message.startsWith("Error 404")
-                ? "This conversation is not shared with you."
-                : message}
-            </PanelEmpty>
-          )}
-        >
-          {(payload) => <SlotContent payload={payload} />}
-        </Panel>
-      </div>
-    </>
+  const list = (
+    <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable p-xl">
+      <Panel
+        state={state}
+        failed={(message) => (
+          <PanelEmpty>
+            {message.startsWith("Error 404")
+              ? "This conversation is not shared with you."
+              : message}
+          </PanelEmpty>
+        )}
+      >
+        {(payload) => <SlotContent payload={payload} />}
+      </Panel>
+    </div>
   );
   if (embedded) {
-    return (
-      <aside
-        className="flex min-h-0 min-w-0 flex-col border-l border-edge max-narrow:absolute max-narrow:inset-0 max-narrow:z-10 max-narrow:border-l-0 max-narrow:bg-surface"
-        aria-label={label}
-      >
-        {content}
-      </aside>
-    );
+    return <div className="flex min-h-0 min-w-0 flex-1 flex-col">{list}</div>;
   }
-  return <Pane className={COLUMN}>{content}</Pane>;
+  return (
+    <Pane className={COLUMN}>
+      <Header
+        heading={1}
+        parent={
+          onOpenAgent
+            ? { label: agentName(agent.name), onGo: () => onOpenAgent(agent.id) }
+            : undefined
+        }
+        title={label}
+        note={
+          resolved ? (
+            <span className="shrink-0 text-ink-soft" aria-hidden>
+              <SlotIcon icon={resolved.icon} />
+            </span>
+          ) : null
+        }
+        pinned
+      />
+      {list}
+    </Pane>
+  );
 }
 
 export function SlotIcon({ icon }: { icon: PortalIcon }) {
@@ -372,7 +365,7 @@ function SitesContent({ payload }: { payload: SitesPayload }) {
             <div className="min-w-0 flex-1">
               <h2 className="m-0 break-all font-mono text-label font-strong">{site.name}</h2>
               <p className="m-0 mt-xs font-mono text-mono text-ink-soft">
-                {site.visibility} · Created <Moment at={site.created_at} /> · Updated{" "}
+                Created <Moment at={site.created_at} /> · Updated{" "}
                 <Moment at={site.updated_at} />
               </p>
             </div>

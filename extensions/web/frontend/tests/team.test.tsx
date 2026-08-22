@@ -194,7 +194,7 @@ test("a refused add states the refusal and leaves the form to correct", async ()
   await userEvent.click(submit);
 
   await refusedNotice("Only an admin adds a member.");
-  expect(screen.getByRole("complementary", { name: "Add members" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Add members" })).toBeTruthy();
   expect((screen.getByPlaceholderText("email@work.com") as HTMLInputElement).value).toBe(
     "x@example.com",
   );
@@ -207,7 +207,36 @@ test("the tab names the roster, so the section under it repeats no heading", asy
   expect(destination()).toBe("Team");
   expect(screen.queryByRole("heading", { name: "Members" })).toBeNull();
   await openAdd();
-  expect(screen.getByRole("complementary", { name: "Add members" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Add members" })).toBeTruthy();
+});
+
+test("the add form stands in its own slot, and the roster stays readable beside it", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await openAdd();
+
+  const form = screen.getByRole("region", { name: "Add members" });
+  expect(within(form).getByPlaceholderText("email@work.com")).toBeTruthy();
+  expect(screen.getByText("lead@example.com")).toBeTruthy();
+  expect(location.hash).toBe("#/workspace/team");
+});
+
+/** The panel takes focus as it lands, so a member who cannot see it is told its name and nothing
+ *  else. What it does with every address typed into it is one line the panel already draws, and a
+ *  panel that names that line as its description says it to that member as they arrive. */
+test("the add panel states what it does to the member focus lands on", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await openAdd();
+
+  const panel = screen.getByRole("region", { name: "Add members" });
+  const describes = panel.getAttribute("aria-describedby");
+  expect(describes).toBeTruthy();
+  expect(document.getElementById(String(describes))?.textContent).toBe(
+    "Each address is added to this workspace, at any email domain.",
+  );
 });
 
 test("the address and role are named for a member who cannot see the placeholder", async () => {

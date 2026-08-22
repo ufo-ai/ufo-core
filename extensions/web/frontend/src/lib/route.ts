@@ -1,3 +1,5 @@
+import { holdableTrack, unholdable } from "@/lib/tracks";
+
 export const WORKSPACE_TABS = [
   "team",
   "skills",
@@ -22,8 +24,12 @@ export type WorkspacePlace = {
   chip?: string;
   face?: string;
   scope?: string;
-  open?: string;
-  agent?: string;
+  /** The slots standing on the screen, in track order, carried as one `~`-joined `open` key: a
+   *  link to a screen carries every slot on it, and a link naming one thing is a track of one. A
+   *  slot id names the app its record is read in as well as the record, so one key carries a track
+   *  spanning several apps. The track store says which rows are tracks, so the address carries
+   *  exactly what a screen can be left holding and reads no other as a place. */
+  opens?: string[];
   range?: string;
 };
 
@@ -62,19 +68,12 @@ const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\?(.*))?$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
 
-const PLACE_KEYS = [
-  "kind",
-  "after",
-  "q",
-  "chip",
-  "face",
-  "scope",
-  "open",
-  "agent",
-  "range",
-] as const;
+const PLACE_KEYS = ["kind", "after", "q", "chip", "face", "scope", "range"] as const;
 
-function parsePlace(raw: string | undefined): WorkspacePlace {
+const TRACK_KEY = "open";
+const TRACK_SEPARATOR = "~";
+
+function parsePlace(raw: string | undefined): WorkspacePlace | null {
   if (!raw) return {};
   const params = new URLSearchParams(raw);
   const place: WorkspacePlace = {};
@@ -82,15 +81,32 @@ function parsePlace(raw: string | undefined): WorkspacePlace {
     const value = params.get(key);
     if (value) place[key] = value;
   }
+  const track = params.get(TRACK_KEY);
+  if (!track) return place;
+  const opens = track.split(TRACK_SEPARATOR);
+  if (!holdableTrack(opens)) return null;
+  place.opens = opens;
   return place;
 }
 
+/** The address for a place. The track it carries is exactly the one `parsePlace` admits — the same
+ *  rule, read off the same module — plus the one rule this separator adds, so a link this writes is
+ *  a link the next read stands a screen on rather than turning away as invalid. A track no screen
+ *  could be left holding raises here, at the call that made it up. */
 function serializePlace(place: WorkspacePlace): string {
   const params = new URLSearchParams();
   for (const key of PLACE_KEYS) {
     const value = place[key];
     if (value) params.set(key, value);
   }
+  const opens = place.opens ?? [];
+  const carried = opens.find((id) => id.includes(TRACK_SEPARATOR));
+  if (carried !== undefined) {
+    throw new Error("A slot id cannot hold " + TRACK_SEPARATOR + ": " + JSON.stringify(carried));
+  }
+  const fault = unholdable(opens);
+  if (fault) throw new Error(fault);
+  if (opens.length) params.set(TRACK_KEY, opens.join(TRACK_SEPARATOR));
   const raw = params.toString();
   return raw ? "?" + raw : "";
 }
@@ -140,18 +156,26 @@ export function parseHash(hash: string): Route {
   /* Connectors stood on a workspace tab once, so links to that address exist outside this code;
      the address keeps answering with the section that holds the same screen. */
   if (workspace && workspace[1] === "connectors") {
-    return { kind: "section", section: "connectors", place: parsePlace(workspace[2]) };
+    const place = parsePlace(workspace[2]);
+    if (!place) return { kind: "bad-link" };
+    return { kind: "section", section: "connectors", place };
   }
   if (workspace && isWorkspaceTab(workspace[1])) {
-    return { kind: "workspace", view: workspace[1], place: parsePlace(workspace[2]) };
+    const place = parsePlace(workspace[2]);
+    if (!place) return { kind: "bad-link" };
+    return { kind: "workspace", view: workspace[1], place };
   }
   const section = hash.match(SECTION_HASH);
   if (section && isSection(section[1])) {
-    return { kind: "section", section: section[1], place: parsePlace(section[2]) };
+    const place = parsePlace(section[2]);
+    if (!place) return { kind: "bad-link" };
+    return { kind: "section", section: section[1], place };
   }
   const agent = hash.match(AGENT_HASH);
   if (agent) {
-    return { kind: "agent", agentId: agent[1], place: parsePlace(agent[2]) };
+    const place = parsePlace(agent[2]);
+    if (!place) return { kind: "bad-link" };
+    return { kind: "agent", agentId: agent[1], place };
   }
   return { kind: "home" };
 }

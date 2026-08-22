@@ -5,18 +5,11 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type MouseEvent,
   type ReactNode,
 } from "react";
 import { IconChevronDown, IconChevronUp, IconDots } from "@tabler/icons-react";
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import {
@@ -26,13 +19,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Facts, Group } from "@/components/ui/facts";
-import { useBeside } from "@/kernel/beside";
-import { ObjectDetail, type ObjectAddress } from "@/kernel/objects";
+import { ObjectDetail, objectAt, slotOf, type ObjectAddress } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
-import { BANDS, COLUMN, PageHeader } from "@/kernel/pane";
+import { BANDS, Header, usePageHead } from "@/kernel/pane";
 import { Panel, PanelBlank, usePanelRead } from "@/kernel/panel";
 import { RebuildDialog } from "@/kernel/rebuild";
 import { RowLines } from "@/kernel/rows";
+import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
 import { isMemberAudience, SHARED_SUBJECT, useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { day, Moment } from "@/lib/moments";
@@ -42,8 +35,12 @@ import { day, Moment } from "@/lib/moments";
 const SUMMARY_CLASS = "semantic";
 /** What an item the store filed on its own is classed as, before any consolidation. */
 const ATOM_CLASS = "fact";
-const OBJECT_PREFIX = "object/";
 const MEMBER_PREFIX = "member/";
+/** The app's own name, which is what its front page is called and what every page and lane inside
+ *  it is reached from. */
+const WIKI = "Wiki";
+/** What a member's page is headed by until the roster has answered who they are. */
+const MEMBER = "Member";
 const MEMORY_KIND = "memory";
 const MEMBER_KIND = "member";
 /** Memory items are named by uuid, so the index's default order by name is arbitrary. `written` is
@@ -188,22 +185,22 @@ function distinct<Row extends { name: string }>(rows: Row[]): Row[] {
   return kept;
 }
 
-function objectAt(open: string | undefined): ObjectAddress | null {
-  if (!open?.startsWith(OBJECT_PREFIX)) return null;
-  const rest = open.slice(OBJECT_PREFIX.length);
-  const cut = rest.indexOf("/");
-  if (cut < 0) return null;
-  return { kind: rest.slice(0, cut), name: rest.slice(cut + 1) || null };
-}
-
-function memberAt(open: string | undefined): string | null {
-  if (!open?.startsWith(MEMBER_PREFIX)) return null;
-  return open.slice(MEMBER_PREFIX.length) || null;
+/** The member the page stands on. A member's page is not a lane standing beside the workspace's —
+ *  it is what the pane's own body draws — so it heads the track as the root every lane after it was
+ *  opened from: a record opens after it and leaves it standing, and shutting it shuts them with it.
+ *  Carried in the track rather than in a key of its own, so one link states the whole screen. */
+function memberAt(opens: string[]): string | null {
+  const held = opens.find((id) => id.startsWith(MEMBER_PREFIX));
+  return held ? held.slice(MEMBER_PREFIX.length) || null : null;
 }
 
 /** The Wiki app: the workspace is what it opens on, and one member is a page inside it. Both are
  *  the same document — a heading, what is known under it, and the people it is known about — so
- *  they are one route and one placement rather than two screens that would drift apart. */
+ *  they are one route and one placement rather than two screens that would drift apart. A record a
+ *  bullet opens stands in the track beside the page as the path the member took to it, so a second
+ *  bullet takes the first record's place and reading two at once is asked for with a cmd- or
+ *  middle-press. Each lane names the app it is read in, since a memory reaches the page through the
+ *  app that filed it and one page draws several apps' memories. */
 export function Wiki({
   place,
   onPlace,
@@ -212,49 +209,82 @@ export function Wiki({
   onPlace: (place: Placement) => void;
 }) {
   const viewer = useViewer();
-  const opened = memberAt(place.open);
-  const at = objectAt(place.open);
-  const owner = place.agent ?? null;
-  const detail = useBeside(
-    at !== null && at.name !== null && owner !== null ? (
-      <ObjectDetail
-        key={owner + "/" + at.kind + "/" + at.name}
-        agentId={owner}
-        kind={at.kind}
-        name={at.name}
-        onOpen={(next) =>
-          onPlace({ open: OBJECT_PREFIX + next.kind + "/" + (next.name ?? "") })
-        }
-        onBack={() => onPlace({ open: undefined, agent: undefined })}
-      />
-    ) : null,
-  );
+  const opens = place.opens ?? [];
+  const member = memberAt(opens);
 
   return (
     <>
-      <div className={cn(COLUMN, BANDS)}>
-        {opened === null ? (
-          <Workspace viewer={viewer} onPlace={onPlace} />
+      <div className={BANDS}>
+        {member === null ? (
+          <Workspace viewer={viewer} opens={opens} onPlace={onPlace} />
         ) : (
-          <Member id={opened} viewer={viewer} onPlace={onPlace} />
+          <Member id={member} viewer={viewer} opens={opens} onPlace={onPlace} />
         )}
       </div>
 
-      {detail}
+      {opens.map((id, at) => {
+        const held = objectAt(id);
+        const before = at === 0 ? null : objectAt(opens[at - 1]);
+        if (held === null) return null;
+        return (
+          <RecordSlot
+            key={id}
+            id={id}
+            held={held}
+            from={before?.name ?? WIKI}
+            opens={opens}
+            onPlace={onPlace}
+          />
+        );
+      })}
     </>
+  );
+}
+
+/** One record the page opened, standing in the track as a panel. A link out of it opens the record
+ *  it names immediately beside this one and ends the path there: whatever stood further right was
+ *  reached through the record the member has just left.
+ *
+ *  `from` is what this one was opened out of — the record standing to its left, or the app's own
+ *  page — said as the crumb over it. A lane paged one to a screen has nothing standing to its left,
+ *  so that crumb is the only way back the member has. */
+function RecordSlot({
+  id,
+  held,
+  from,
+  opens,
+  onPlace,
+}: {
+  id: string;
+  held: ObjectAddress;
+  from: string;
+  opens: string[];
+  onPlace: (place: Placement) => void;
+}) {
+  const shut = () => onPlace({ opens: closed(opens, id) });
+  return useSlot(
+    <ObjectDetail
+      agentId={held.agent}
+      kind={held.kind}
+      name={held.name}
+      onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
+      onBack={shut}
+    />,
+    { id, kind: "panel", title: held.name, parent: { label: from, onGo: shut }, onClose: shut },
   );
 }
 
 type Entry = { id: string; title: string };
 
-/** A wiki page: its contents beside it, and the page itself held to a reading measure. The
- *  contents are what a member navigates a long page by, so they stand where an encyclopedia puts
- *  them — outside the article, in view while it scrolls — and they list only the parts this page
- *  actually drew. They carry no heading of their own: a column of the page's own section names,
- *  set back from them, is already read as the way through it, and the landmark names it for a
- *  reader who cannot see that. Below the narrow breakpoint the column is dropped rather than stacked: a
- *  contents list above the article it indexes is a second thing to scroll past to reach the first.
- */
+/** A wiki page: the article at the page's own left edge, and its contents in a column beside it on
+ *  the right. The contents are what a member navigates a long page by, so they stand where an
+ *  encyclopedia puts them — outside the article, in view while it scrolls — and they list only the
+ *  parts this page actually drew. They stand after the article in the document as well as to its
+ *  right, so what is read, tabbed and drawn are one order: the article first, its index after it.
+ *  They carry no heading of their own: a column of the page's own section names, set back from
+ *  them, is already read as the way through it, and the landmark names it for a reader who cannot
+ *  see that. Below the narrow breakpoint the column is dropped rather than stacked: a contents list
+ *  above the article it indexes is a second thing to scroll past to reach the first. */
 function Article({
   header,
   entries,
@@ -268,6 +298,9 @@ function Article({
     <div className="flex flex-col gap-6xl">
       {header}
       <div className="flex gap-7xl">
+        <div className={cn("min-w-0 max-w-section flex-1", BANDS)}>
+          {children}
+        </div>
         <nav
           aria-label="Contents"
           className="sticky top-0 h-fit w-(--container-sidebar) shrink-0 max-narrow:hidden"
@@ -290,9 +323,6 @@ function Article({
             ))}
           </ul>
         </nav>
-        <div className={cn("min-w-0 max-w-section flex-1", BANDS)}>
-          {children}
-        </div>
       </div>
     </div>
   );
@@ -350,7 +380,7 @@ function Acts({
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button variant="row" size="icon" aria-label="Page actions">
-            <IconDots className="size-(--size-glyph)" aria-hidden />
+            <IconDots aria-hidden />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
@@ -391,9 +421,11 @@ function Acts({
  *  been settled here, and last the roster, which is the way through to a person. */
 function Workspace({
   viewer,
+  opens,
   onPlace,
 }: {
   viewer: string | null;
+  opens: string[];
   onPlace: (place: Placement) => void;
 }) {
   const [reloads, setReloads] = useState(0);
@@ -420,19 +452,25 @@ function Workspace({
     { id: "details", title: "Details" },
   ];
 
+  const band = usePageHead(
+    <Header
+      pinned
+      heading={1}
+      title={WIKI}
+      acts={<Acts updated={updated} onReload={() => setReloads((run) => run + 1)} />}
+    />,
+  );
+
   return (
     <Article
       entries={entries}
       header={
-        <div className="flex flex-col gap-2xs">
-          <PageHeader
-            title="Wiki"
-            action={<Acts updated={updated} onReload={() => setReloads((run) => run + 1)} />}
-          />
+        <>
+          {band}
           {viewer === null ? null : (
             <p className="m-0 text-label leading-chrome">{viewer}</p>
           )}
-        </div>
+        </>
       }
     >
       <Overview state={summary} scope="shared" onPresent={report} />
@@ -441,7 +479,7 @@ function Workspace({
         state={members}
         rows={roster}
         viewer={viewer}
-        onOpen={(id) => onPlace({ open: MEMBER_PREFIX + id })}
+        onOpen={(id) => onPlace({ opens: opened(opens, MEMBER_PREFIX + id) })}
       />
 
       {WORKSPACE_TOPICS.map((topic) => (
@@ -450,6 +488,7 @@ function Workspace({
           topic={topic}
           scope="shared"
           reloads={reloads}
+          opens={opens}
           onPresent={report}
           onPlace={onPlace}
         />
@@ -519,10 +558,12 @@ function People({
 function Member({
   id,
   viewer,
+  opens,
   onPlace,
 }: {
   id: string;
   viewer: string | null;
+  opens: string[];
   onPlace: (place: Placement) => void;
 }) {
   const [reloads, setReloads] = useState(0);
@@ -556,31 +597,21 @@ function Member({
     { id: "details", title: "Details" },
   ];
 
+  const band = usePageHead(
+    <Header
+      pinned
+      heading={1}
+      parent={{
+        label: WIKI,
+        onGo: () => onPlace({ opens: closed(opens, MEMBER_PREFIX + id) }),
+      }}
+      title={found?.email ?? MEMBER}
+      acts={<Acts updated={updated} onReload={() => setReloads((run) => run + 1)} />}
+    />,
+  );
+
   return (
-    <Article
-      entries={entries}
-      header={
-        <div className="flex flex-col gap-2xs">
-          <PageHeader
-            title="Wiki"
-            action={<Acts updated={updated} onReload={() => setReloads((run) => run + 1)} />}
-          />
-          <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem>
-                <BreadcrumbLink onClick={() => onPlace({ open: undefined })}>
-                  Workspace
-                </BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator />
-              <BreadcrumbItem className="min-w-0">
-                <BreadcrumbPage>{found?.email ?? "Member"}</BreadcrumbPage>
-              </BreadcrumbItem>
-            </BreadcrumbList>
-          </Breadcrumb>
-        </div>
-      }
-    >
+    <Article entries={entries} header={band}>
       {found === null ? (
         <Panel state={members}>
           {() => (
@@ -596,6 +627,8 @@ function Member({
               topic={topic}
               scope="own"
               reloads={reloads}
+              opens={opens}
+              from={MEMBER_PREFIX + id}
               onPresent={report}
               onPlace={onPlace}
             />
@@ -704,7 +737,9 @@ function overviewNote(
 /** One topic's band: the memory kind's own listing, set as a bulleted list. A row opens the item
  *  it came from — the provenance a summary of it cannot carry — so each bullet is the control that
  *  opens it, underlining under the pointer rather than standing out of the prose as a link the
- *  member has to read past on every line.
+ *  member has to read past on every line. The bullet whose record is standing carries the mark
+ *  every open row in the portal takes, so the page states where the record beside it was opened
+ *  from and a second bullet reads as a step taken rather than as the first record vanishing.
  *
  *  A topic holding nothing is not drawn: a wiki states what is known, and a heading over the words
  *  "nothing recorded" is a row of furniture the member cannot act on. A read that *failed* is
@@ -713,12 +748,17 @@ function Topic({
   topic,
   scope,
   reloads,
+  opens,
+  from,
   onPresent,
   onPlace,
 }: {
   topic: TopicSpec;
   scope: Scope;
   reloads: number;
+  opens: string[];
+  /** The page a bullet is pressed on, which every record it opens stands after. */
+  from?: string;
   onPresent: (id: string, drawn: boolean, newest: string | null) => void;
   onPlace: (place: Placement) => void;
 }) {
@@ -752,22 +792,30 @@ function Topic({
   return (
     <Band id={topic.memoryKind} title={topic.title} note={topic.note}>
       <ul>
-        {rows.map((row) => (
-          <li key={row.name}>
-            <button
-              type="button"
-              className="block w-full cursor-pointer border-0 bg-transparent p-0 text-start text-inherit hover:underline"
-              onClick={() =>
-                onPlace({
-                  open: OBJECT_PREFIX + MEMORY_KIND + "/" + row.name,
-                  agent: row.agent_id,
-                })
-              }
-            >
-              {row.summary}
-            </button>
-          </li>
-        ))}
+        {rows.map((row) => {
+          const id = slotOf({ agent: row.agent_id, kind: MEMORY_KIND, name: row.name });
+          const standing = opens.includes(id);
+          const press = (event: MouseEvent<HTMLButtonElement>) =>
+            onPlace({ opens: beside(event) ? appended(opens, id) : opened(opens, id, from) });
+          return (
+            <li key={row.name}>
+              <button
+                type="button"
+                aria-current={standing}
+                onClick={press}
+                onAuxClick={(event) => {
+                  if (beside(event)) press(event);
+                }}
+                className={cn(
+                  "block w-full cursor-pointer border-0 p-0 text-start text-inherit hover:underline",
+                  standing ? "rounded-control bg-fill" : "bg-transparent",
+                )}
+              >
+                {row.summary}
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </Band>
   );

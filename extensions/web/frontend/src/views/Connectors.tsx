@@ -30,9 +30,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
-import { useBeside } from "@/kernel/beside";
 import type { Placement } from "@/kernel/pager";
-import { PageToolbar, RecordPanel } from "@/kernel/pane";
+import { PageToolbar, RecordPanel, usePageSearch } from "@/kernel/pane";
 import {
   Notice,
   type NoticeState,
@@ -46,6 +45,7 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import { rowControl } from "@/kernel/row";
+import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
 import { DataTable, OPEN } from "@/kernel/table";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
@@ -214,9 +214,6 @@ function grouped(rows: Offer[]): [string, Offer[]][] {
   return groups;
 }
 
-/** What the GitHub row opens beside the list. The three legs are GitHub's alone, so they are read
- *  where every other detail of a connector is read — its own record — rather than as a block on the
- *  page's ground under a heading that names no provider. */
 /** Every category the catalog carries, in the order it carries them, so the picker lists them the
  *  way the page stacks them. */
 function categories(catalog: FirstRunPayload): string[] {
@@ -228,6 +225,16 @@ function categories(catalog: FirstRunPayload): string[] {
 const EVERY_CATEGORY = "all";
 
 const COVERAGE = "github-coverage";
+
+/** What the library is called where a lane standing beside it has to say where it came from. Every
+ *  lane on this screen is opened from that one list, so every crumb on it reads the same. */
+const LIBRARY = "Connectors";
+
+/** What a connection's slot is named in the track, so the address a member shares carries the
+ *  grant itself rather than a word that means one thing on one screen. */
+const CONNECTION = "connection/";
+
+const ADD_CONNECTOR = "add-connector";
 
 const GITHUB = "github";
 
@@ -354,8 +361,11 @@ function joined(
 }
 
 /** The workspace's connector library: every account already reachable, then every tool the catalog
- *  still offers under the group headings it carries. A connected row opens its own record beside
- *  the list, which is where a grant is attached, shared or revoked. A workspace install dispatches
+ *  still offers under the group headings it carries. A connected row opens its own record in a slot
+ *  beside the list, which is where a grant is attached, shared or revoked; a second row leads there
+ *  instead, and a modifier or the middle button is how a member stands two accounts side by side.
+ *  The track is the address, so a link to this screen carries the records standing on it and a
+ *  reload finds them again. A workspace install dispatches
  *  its own admin-gated verb and the outcome carries the install link; every other row opens the
  *  broker's per-member consent through the main agent, with the URL riding the turn's stream. Both
  *  open the consent window on the press itself, so one press is the whole act. While a press waits
@@ -370,8 +380,8 @@ export function WorkspaceConnectors({
 }) {
   const query = place.q ?? "";
   const picked = place.chip ?? EVERY_CATEGORY;
+  const opens = place.opens ?? [];
   const [reloads, setReloads] = useState(0);
-  const [opened, setOpened] = useState("");
   const [waiting, setWaiting] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [watching, setWatching] = useState<string | null>(null);
@@ -393,11 +403,15 @@ export function WorkspaceConnectors({
   const held =
     state.phase === "ready" ? standing(state.payload.catalog, state.payload.pool) : null;
   if (waiting && held?.some((row) => row.name === waiting)) setWaiting(null);
-  const record =
-    pool.phase === "ready"
-      ? pool.payload.connections.find((entry) => entry.grant === opened)
-      : undefined;
-  if (pool.phase === "ready" && opened && opened !== COVERAGE && !record) setOpened("");
+  const pooled = pool.phase === "ready" ? pool.payload.connections : [];
+
+  function show(id: string, aside: boolean) {
+    onPlace({ opens: aside ? appended(opens, id) : opened(opens, id) });
+  }
+
+  function shut(id: string) {
+    onPlace({ opens: closed(opens, id) });
+  }
 
   useEffect(() => {
     if (watching === null) return;
@@ -475,30 +489,31 @@ export function WorkspaceConnectors({
         ]
       : [];
 
-  const beside = useBeside(
-    opened === COVERAGE ? (
-      <RecordPanel title="GitHub" onClose={() => setOpened("")}>
-        <Facts rows={legs} />
-      </RecordPanel>
-    ) : record ? (
+  const track = opens.map((id) => {
+    if (id === COVERAGE) return <CoverageRecord key={id} legs={legs} onClose={() => shut(id)} />;
+    const entry = pooled.find((one) => CONNECTION + one.grant === id);
+    if (!entry) return null;
+    return (
       <PoolRecord
-        key={record.grant}
-        entry={record}
+        key={id}
+        entry={entry}
         viewer={viewer}
         onDone={(outcome) => {
           setNotice(outcome);
           setReloads((count) => count + 1);
         }}
-        onClose={() => setOpened("")}
+        onClose={() => shut(id)}
       />
-    ) : null,
-    () => setOpened(""),
-  );
+    );
+  });
+
+  const search = usePageSearch();
 
   return (
     <>
-      {catalog.phase === "ready" && categories(catalog.payload).length > 1 ? (
+      {search || (catalog.phase === "ready" && categories(catalog.payload).length > 1) ? (
         <PageToolbar>
+          {catalog.phase === "ready" && categories(catalog.payload).length > 1 ? (
           <Select
             value={picked}
             onValueChange={(next) =>
@@ -517,6 +532,7 @@ export function WorkspaceConnectors({
               ))}
             </SelectContent>
           </Select>
+          ) : null}
         </PageToolbar>
       ) : null}
       {handoff ? (
@@ -569,11 +585,12 @@ export function WorkspaceConnectors({
                             detail={row.detail}
                             open={
                               held
-                                ? () => setOpened(held.grant)
+                                ? (aside) => show(CONNECTION + held.grant, aside)
                                 : row.name === GITHUB
-                                  ? () => setOpened(COVERAGE)
+                                  ? (aside) => show(COVERAGE, aside)
                                   : null
                             }
+                            current={opens.includes(held ? CONNECTION + held.grant : COVERAGE)}
                             act={
                               <>
                                 {/* The word gives way to the act on a phone: a row under the
@@ -627,7 +644,10 @@ export function WorkspaceConnectors({
                                 name={row.name}
                                 label={row.label}
                                 detail={row.summary}
-                                open={row.name === GITHUB ? () => setOpened(COVERAGE) : null}
+                                open={
+                                  row.name === GITHUB ? (aside) => show(COVERAGE, aside) : null
+                                }
+                                current={row.name === GITHUB && opens.includes(COVERAGE)}
                                 act={
                                   <Button
                                     variant="outline"
@@ -663,7 +683,7 @@ export function WorkspaceConnectors({
           );
         }}
       </Panel>
-      {beside}
+      {track}
       <Dialog open={removing !== null} onOpenChange={(next) => !next && setRemoving(null)}>
         {removing?.entry && agent ? (
           <RemoveConnection
@@ -741,23 +761,40 @@ const MARK_TILE = cn(
 /** One tool of the library, drawn as a row: the product's own mark, its name and either what the
  *  agent does with it or the account it already stands on, and the one act left on it at the right
  *  edge. A row holding a grant is the control that opens that grant's record, and a press landing
- *  on the act itself never also opens it. */
+ *  on the act itself never also opens it.
+ *
+ *  A plain press leads the list to one record; a press carrying a modifier, or the middle button,
+ *  stands that record beside the one already open. Both are the same row control, so the nested
+ *  acts are guarded once. `current` marks the row the standing record was opened from, which is
+ *  what makes the list read as the path back rather than as a record that arrived from nowhere. */
 function Row({
   name,
   label,
   detail,
   open,
+  current,
   act,
 }: {
   name: string;
   label: string;
   detail: ReactNode;
-  open: (() => void) | null;
+  open: ((aside: boolean) => void) | null;
+  current: boolean;
   act: ReactNode;
 }) {
-  const control = open ? rowControl(open) : null;
+  const control = open ? rowControl(() => open(false)) : null;
+  const alongside = open ? rowControl(() => open(true)) : null;
   return (
-    <Item {...control} className={cn(control?.className, open && "hover:bg-fill")}>
+    <Item
+      {...control}
+      aria-current={current || undefined}
+      onClick={(event) => (beside(event) ? alongside : control)?.onClick?.(event)}
+      onAuxClick={(event) => {
+        if (!beside(event)) return;
+        alongside?.onClick?.(event);
+      }}
+      className={cn(control?.className, open && "hover:bg-fill", current && "bg-fill")}
+    >
       <span className={MARK_TILE}>
         <BrandMark provider={name} className="text-ink" />
       </span>
@@ -770,9 +807,27 @@ function Row({
   );
 }
 
-/** One connection of the pool, opened beside it: the connection's own facts and every act on it.
- *  The agent to attach to is picked here rather than in the bar, so the pick is this connection's
- *  and not whichever row the member presses next. */
+/** What the GitHub row opens in the track. The three legs are GitHub's alone, so they are read
+ *  where every other detail of a connector is read — its own record — rather than as a block on the
+ *  page's ground under a heading that names no provider. */
+function CoverageRecord({ legs, onClose }: { legs: Fact[]; onClose: () => void }) {
+  return useSlot(
+    <RecordPanel>
+      <Facts rows={legs} />
+    </RecordPanel>,
+    {
+      id: COVERAGE,
+      kind: "panel",
+      title: "GitHub",
+      parent: { label: LIBRARY, onGo: onClose },
+      onClose,
+    },
+  );
+}
+
+/** One connection of the pool, standing in a slot beside it: the connection's own facts and every
+ *  act on it. The agent to attach to is picked here rather than in the bar, so the pick is this
+ *  connection's and not whichever row the member presses next. */
 function PoolRecord({
   entry,
   viewer,
@@ -792,8 +847,8 @@ function PoolRecord({
     onDone(outcomeNotice(await postIntent(lane, envelope)));
   }
 
-  return (
-    <RecordPanel title={connectionName(entry)} onClose={onClose}>
+  return useSlot(
+    <RecordPanel>
       <Facts rows={connectionFacts(entry, viewer)} />
       {entry.owner_email ? (
         <>
@@ -873,7 +928,14 @@ function PoolRecord({
           </div>
         </>
       ) : null}
-    </RecordPanel>
+    </RecordPanel>,
+    {
+      id: CONNECTION + entry.grant,
+      kind: "panel",
+      title: connectionName(entry),
+      parent: { label: LIBRARY, onGo: onClose },
+      onClose,
+    },
   );
 }
 
@@ -910,12 +972,12 @@ function ConnectorList({
     pool.phase === "ready"
       ? pool.payload.connections.find((entry) => entry.grant === attachName)
       : undefined;
-  const [opened, setOpened] = useState("");
+  const [standing, setStanding] = useState("");
   const record =
     state.phase === "ready"
-      ? state.payload.connections.find((entry) => entry.grant === opened)
+      ? state.payload.connections.find((entry) => entry.grant === standing)
       : undefined;
-  if (state.phase === "ready" && opened && !record) setOpened("");
+  if (state.phase === "ready" && standing && !record) setStanding("");
   const source = useRef<EventSource | null>(null);
   // Opened on the press and pointed at the provider when the frame carrying the URL lands. The
   // press is the whole act: the wait between them is the typed verb and the broker's own call, no
@@ -1000,9 +1062,9 @@ function ConnectorList({
     setReloads((count) => count + 1);
   }
 
-  const beside = useBeside(
+  const connecting = useSlot(
     adding ? (
-      <RecordPanel title="Add connector" onClose={close}>
+      <RecordPanel>
         <OutcomeNotice state={refusal} />
         <form onSubmit={connect} className="flex flex-col gap-xl">
           <Field
@@ -1035,46 +1097,18 @@ function ConnectorList({
         </form>
       </RecordPanel>
     ) : null,
-    close,
+    { id: ADD_CONNECTOR, kind: "panel", title: "Add connector", onClose: close },
   );
 
-  const shown = useBeside(
-    record ? (
-      <RecordPanel key={record.grant} title={connectionName(record)} onClose={() => setOpened("")}>
-        <Facts rows={connectionFacts(record, viewer)} />
-        {record.own ? (
-          <div className="flex flex-wrap items-center gap-sm">
-            <Button
-              variant="send"
-              size="bar"
-              onClick={() =>
-                act({
-                  verb: "apply",
-                  kind: "connector_grant",
-                  name: record.grant,
-                  spec: {
-                    provider: record.provider,
-                    account_id: record.account_id,
-                    shared: !record.shared,
-                  },
-                })
-              }
-            >
-              {record.shared ? "Make private" : "Share with app"}
-            </Button>
-            <ConfirmButton
-              verb="Revoke"
-              variant="row"
-              onClick={() =>
-                act({ verb: "detach", kind: "connector_grant", name: record.grant })
-              }
-            />
-          </div>
-        ) : null}
-      </RecordPanel>
-    ) : null,
-    () => setOpened(""),
-  );
+  const shown = record ? (
+    <HeldGrant
+      key={record.grant}
+      entry={record}
+      viewer={viewer}
+      onAct={act}
+      onClose={() => setStanding("")}
+    />
+  ) : null;
 
   return (
     <>
@@ -1163,7 +1197,7 @@ function ConnectorList({
                   : "No account is connected to " + agentName(agent.name) + " yet."
               }
               note={query ? "No connected account matches this search." : undefined}
-              open={(entry) => () => setOpened(entry.grant)}
+              open={(entry) => () => setStanding(entry.grant)}
               act={() => OPEN}
             >
               {(entry) => (
@@ -1177,8 +1211,61 @@ function ConnectorList({
           )}
         </Panel>
       </Section>
-      {beside}
+      {connecting}
       {shown}
     </>
+  );
+}
+
+/** One grant the agent already holds, standing in the dialog's own track: what the connection is,
+ *  and whether the workspace or only this member reaches it. */
+function HeldGrant({
+  entry,
+  viewer,
+  onAct,
+  onClose,
+}: {
+  entry: Connection;
+  viewer: string | null;
+  onAct: (envelope: unknown) => void;
+  onClose: () => void;
+}) {
+  return useSlot(
+    <RecordPanel>
+      <Facts rows={connectionFacts(entry, viewer)} />
+      {entry.own ? (
+        <div className="flex flex-wrap items-center gap-sm">
+          <Button
+            variant="send"
+            size="bar"
+            onClick={() =>
+              onAct({
+                verb: "apply",
+                kind: "connector_grant",
+                name: entry.grant,
+                spec: {
+                  provider: entry.provider,
+                  account_id: entry.account_id,
+                  shared: !entry.shared,
+                },
+              })
+            }
+          >
+            {entry.shared ? "Make private" : "Share with app"}
+          </Button>
+          <ConfirmButton
+            verb="Revoke"
+            variant="row"
+            onClick={() => onAct({ verb: "detach", kind: "connector_grant", name: entry.grant })}
+          />
+        </div>
+      ) : null}
+    </RecordPanel>,
+    {
+      id: CONNECTION + entry.grant,
+      kind: "panel",
+      title: connectionName(entry),
+      onClose,
+    },
   );
 }

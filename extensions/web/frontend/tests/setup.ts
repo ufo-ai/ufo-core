@@ -78,6 +78,7 @@ if (typeof document !== "undefined") installWhatJsdomLacks();
 beforeEach(() => {
   keyFaults = [];
   vi.stubGlobal("localStorage", memoryStorage());
+  vi.stubGlobal("sessionStorage", memoryStorage());
   const report = console.error;
   vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
     if (KEY_FAULT.test(String(args[0]))) keyFaults.push(String(args[0]).split("\n")[0]);
@@ -91,6 +92,7 @@ afterEach(() => {
   resetChatStore();
   resetStreams();
   if (typeof localStorage !== "undefined") localStorage.clear();
+  if (typeof sessionStorage !== "undefined") sessionStorage.clear();
   vi.unstubAllGlobals();
   if (typeof document !== "undefined") {
     cleanup();

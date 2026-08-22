@@ -658,7 +658,7 @@ test("a question with more options than fit offers none of them as buttons", asy
   expect(screen.getByText(/answer in the message box below/i)).toBeTruthy();
 });
 
-test("the slot strip draws the option every pressed control in the portal is drawn as", async () => {
+test("the slot strip is one quiet act per slot, the open one drawn as held", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
     ["/conversations/" + CONVO_ID + "/slots/changes"]: () =>
@@ -676,21 +676,23 @@ test("the slot strip draws the option every pressed control in the portal is dra
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const changes = await screen.findByRole("button", { name: "Changes 2" });
-  // The rule is that a pressed control is drawn as pressed, which these four classes are. The
-  // variant's whole class string is not asserted: the strip stands in a header bar, so it also
-  // takes `size="bar"`, and the height and the pill shape override the variant's own padding and
-  // radius — a verbatim match would be asserting that no control may ever be sized.
-  expect(changes.className).toContain("aria-pressed:bg-ink");
-  expect(changes.className).toContain("aria-pressed:text-surface");
-  expect(changes.className).toContain("aria-pressed:border-ink");
+  // The strip stands with the acts at the far end of the conversation's band, so each slot wears
+  // the one act style that band takes: a quiet glyph in the control's own circle. The label and the
+  // count are the act's accessible name rather than words beside the glyph, because a strip that
+  // spelled every slot out would take the whole line the title is on.
+  expect(changes.className).toContain("border-transparent");
+  expect(changes.className).toContain("bg-transparent");
   expect(changes.className).toContain("hover:bg-fill");
+  expect(changes.className).toContain("size-(--size-control)");
+  expect(changes.textContent).toBe("");
   expect(changes.getAttribute("aria-pressed")).toBe("false");
 
   await userEvent.click(changes);
   expect(changes.getAttribute("aria-pressed")).toBe("true");
-  expect(screen.getByRole("button", { name: "Sources 1" }).getAttribute("aria-pressed")).toBe(
-    "false",
-  );
+  expect(changes.className.split(" ")).toContain("bg-fill");
+  const sources = screen.getByRole("button", { name: "Sources 1" });
+  expect(sources.getAttribute("aria-pressed")).toBe("false");
+  expect(sources.className.split(" ")).not.toContain("bg-fill");
 });
 
 test("a send whose answer is not json ends the wait instead of disabling the composer", async () => {

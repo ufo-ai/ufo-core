@@ -31,15 +31,15 @@ test("a deploy with no memory extension says so", async () => {
   expect(await screen.findByText("This deploy has no memory extension.")).toBeTruthy();
 });
 
-test("the search heads the page and the filter stands with the table", async () => {
+test("the search stands with the filter on the band of controls, not on the name", async () => {
   wire({
     "/workspace/memory": () =>
       json({ available: true, kinds: ["fact"], matches: [MATCH], older: null, newer: null }),
   });
   open();
 
-  const header = screen.getByRole("heading", { level: 1, name: "Memory" }).parentElement!;
-  expect(header.contains(await screen.findByPlaceholderText("Search"))).toBe(true);
+  const header = document.querySelector<HTMLElement>('[data-slot="header"]')!;
+  expect(header.contains(await screen.findByPlaceholderText("Search"))).toBe(false);
   expect(header.contains(await screen.findByRole("table"))).toBe(false);
 
   const filter = await screen.findByRole("tab", { name: "Fact" });

@@ -13,7 +13,7 @@ import { Hint, Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Td } from "@/components/ui/table";
 import { Pager, type Placement } from "@/kernel/pager";
-import { PageToolbar } from "@/kernel/pane";
+import { PageToolbar, usePageSearch } from "@/kernel/pane";
 import {
   OutcomeNotice,
   Panel,
@@ -91,16 +91,24 @@ export function Memory({
   useEffect(() => setCorrecting(null), [submitted]);
 
   const kinds = state.phase === "ready" ? state.payload.kinds : [];
+  // A search is over every memory the workspace holds, so it supersedes the class the member had
+  // narrowed to and that filter stands down while a term is submitted. The box itself does not: it
+  // is what the member clears the term with, and a bar that took it away with the filter would
+  // leave the search they typed with no way back out of it.
+  const box = usePageSearch();
+  const narrowing = !submitted && kinds.length > 0;
 
   return (
     <>
-      {!submitted && kinds.length ? (
+      {box || narrowing ? (
         <PageToolbar>
-          <Filter
-            options={kinds.map((kind) => ({ label: kindLabel(kind), value: kind }))}
-            value={place.kind ?? ""}
-            onChange={(kind) => onPlace({ kind: kind || undefined, after: undefined })}
-          />
+          {narrowing ? (
+            <Filter
+              options={kinds.map((kind) => ({ label: kindLabel(kind), value: kind }))}
+              value={place.kind ?? ""}
+              onChange={(kind) => onPlace({ kind: kind || undefined, after: undefined })}
+            />
+          ) : null}
         </PageToolbar>
       ) : null}
       <Section>

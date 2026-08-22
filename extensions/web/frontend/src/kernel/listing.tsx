@@ -3,13 +3,12 @@ import { useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Filter } from "@/components/ui/filter";
 import { Table, TableNote, Td, TdActs, Th, tableFloor } from "@/components/ui/table";
-import { BANDS } from "@/kernel/pane";
+import { BANDS, PageToolbar, usePageSearch } from "@/kernel/pane";
 import { CardGrid, type CardMark } from "@/kernel/cards";
 import {
   OutcomeNotice,
   Panel,
   PanelBlank,
-  PanelEmpty,
   Section,
   outcomeNotice,
   usePanelRead,
@@ -22,8 +21,7 @@ import { useViewer } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { CredentialRequest } from "@/lib/types";
 
-export type RowContext<Row> = {
-  open: (row: Row) => void;
+export type RowContext = {
   act: (envelope: unknown) => void;
   busy: boolean;
   viewer: string | null;
@@ -35,7 +33,7 @@ export type Part<Row> = {
     render?: (
       value: Row[Field],
       row: Row,
-      context: RowContext<Row>,
+      context: RowContext,
     ) => ReactNode;
   };
 }[keyof Row & string];
@@ -80,8 +78,7 @@ export type ListingSpec<Payload, Row> = {
   query?: (place: Placement) => URLSearchParams;
   search?: (row: Row) => string;
   chips?: Chip<Row>[];
-  actions?: (row: Row, context: RowContext<Row>) => ReactNode;
-  detail?: (row: Row, close: () => void) => ReactNode;
+  actions?: (row: Row, context: RowContext) => ReactNode;
   credentials?: (
     request: CredentialRequest,
     onStored: (slots: string[]) => void,
@@ -114,8 +111,6 @@ export function Listing<Payload, Row>({
 
   const setPicked = (value: string | null) =>
     onPlace({ chip: value ?? undefined, after: undefined });
-  const open = (row: Row) => onPlace({ open: spec.rowKey(row) });
-  const close = () => onPlace({ open: undefined });
 
   async function act(envelope: unknown) {
     if (!mainAgent) return;
@@ -133,7 +128,7 @@ export function Listing<Payload, Row>({
     setNotice(outcomeNotice(outcome));
   }
 
-  const context: RowContext<Row> = { open, act, busy, viewer };
+  const context: RowContext = { act, busy, viewer };
   const term = query.trim().toLowerCase();
   const bySearch = (row: Row) =>
     !spec.search || !term || spec.search(row).toLowerCase().includes(term);
@@ -146,10 +141,12 @@ export function Listing<Payload, Row>({
   const known =
     loaded ?? (state.phase === "loading" ? lastLoaded.current : null);
   const searched = known?.filter(bySearch) ?? null;
+  const search = usePageSearch();
 
   return (
     <>
       <OutcomeNotice state={notice} />
+      {search ? <PageToolbar /> : null}
       <Section
         note={spec.note}
         bar={
@@ -166,10 +163,7 @@ export function Listing<Payload, Row>({
                 />
               ) : null}
               {state.phase === "failed" && place.after ? (
-                <Button
-                  variant="row"
-                  onClick={() => onPlace({ after: undefined, open: undefined })}
-                >
+                <Button variant="row" onClick={() => onPlace({ after: undefined })}>
                   First page
                 </Button>
               ) : null}
@@ -232,9 +226,7 @@ export function Listing<Payload, Row>({
                       rows.map((row) => (
                         <tr key={spec.rowKey(row)}>
                           {spec.columns.map((column) => (
-                            <Td key={column.field}>
-                              {part(column, row, context)}
-                            </Td>
+                            <Td key={column.field}>{part(column, row, context)}</Td>
                           ))}
                           {spec.actions ? (
                             <TdActs>{spec.actions(row, context)}</TdActs>
@@ -275,18 +267,6 @@ export function Listing<Payload, Row>({
                     onPlace={onPlace}
                   />
                 ) : null}
-                {spec.detail && place.open
-                  ? (() => {
-                      const shown = rows.find(
-                        (row) => spec.rowKey(row) === place.open,
-                      );
-                      return shown ? (
-                        spec.detail(shown, close)
-                      ) : (
-                        <PanelEmpty>That item is not on this page.</PanelEmpty>
-                      );
-                    })()
-                  : null}
               </div>
             );
           }}
@@ -332,7 +312,7 @@ function RowList<Payload, Row>({
   line: RowLine<Row>;
   spec: ListingSpec<Payload, Row>;
   rows: Row[];
-  context: RowContext<Row>;
+  context: RowContext;
 }) {
   const { when, whole } = line;
   const { actions } = spec;
@@ -358,7 +338,7 @@ function Cards<Payload, Row>({
   face: CardFace<Row>;
   spec: ListingSpec<Payload, Row>;
   rows: Row[];
-  context: RowContext<Row>;
+  context: RowContext;
 }) {
   const { mark, primary, status, body, meta, whole } = face;
   const { actions } = spec;
@@ -391,14 +371,14 @@ function cursor<Payload, Row>(
 function part<Row>(
   entry: Part<Row>,
   row: Row,
-  context: RowContext<Row>,
+  context: RowContext,
 ): ReactNode {
   const value = row[entry.field as keyof Row];
   if (entry.render) {
     const render = entry.render as (
       value: Row[keyof Row],
       row: Row,
-      context: RowContext<Row>,
+      context: RowContext,
     ) => ReactNode;
     return render(value, row, context);
   }

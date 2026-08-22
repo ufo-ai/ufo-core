@@ -189,7 +189,7 @@ test("the sidebar names the shell's destinations and states the member at its fo
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
-    "Collapse sidebar",
+    "Expand sidebar",
     "Search",
     "New conversation",
     "Applications",
@@ -203,6 +203,18 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Theme",
   ]);
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
+});
+
+test("the shell opens on the rail, and a sidebar the member widened stays widened", async () => {
+  wire({});
+  const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
+  first.unmount();
+
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
 });
 
 /** A desk width draws the mark at the sidebar's head; a phone width keeps it on the bar, centred
@@ -367,7 +379,7 @@ test("an agent's record carries its surfaces and the web access grant, and the r
   expect(screen.queryByText("Slack, Terminal")).toBeNull();
 
   await pressRow("Second");
-  const record = await screen.findByRole("complementary", { name: "Second" });
+  const record = await screen.findByRole("region", { name: "Second" });
   expect(within(record).getByText("Surfaces")).toBeTruthy();
   expect(within(record).getByText("Slack, Terminal")).toBeTruthy();
 
@@ -395,7 +407,7 @@ const GRANT_ROUTES = {
 
 async function grantForm(): Promise<HTMLElement> {
   await pressRow("Second");
-  return await screen.findByRole("complementary", { name: "Second" });
+  return await screen.findByRole("region", { name: "Second" });
 }
 
 /** One field, two acts, one contract. The address is declared by the field, so the field is what
@@ -464,6 +476,27 @@ test("the row and the record spell a web audience the way the one audience map d
   expect(within(record).getByText(webAudienceLabel(false, []))).toBeTruthy();
 });
 
+/** The table is the root of the path, so a second app row leads there rather than stacking on the
+ *  one the member walked past — the rule every other index in the portal takes from `opened`. */
+test("a second app row takes the first record's place, and closing it leaves the table", async () => {
+  await administration({
+    "/api/admin": () => json({ ...ADMIN_TABLES, agents: [ADMIN_AGENT, SECOND_AGENT], members: [] }),
+  });
+
+  await pressRow("Assistant");
+  expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
+
+  await pressRow("Second");
+
+  expect(await screen.findByRole("region", { name: "Second" })).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Assistant" })).toBeNull());
+
+  await userEvent.click(screen.getByRole("button", { name: "Close Second" }));
+
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Second" })).toBeNull());
+  expect(screen.getByText("Second")).toBeTruthy();
+});
+
 /** The main agent answers every member, so its record offers no address to grant. */
 test("the main agent's record states its audience and carries no grant form", async () => {
   await administration({
@@ -471,7 +504,7 @@ test("the main agent's record states its audience and carries no grant form", as
   });
   await pressRow("Assistant");
 
-  const record = await screen.findByRole("complementary", { name: "Assistant" });
+  const record = await screen.findByRole("region", { name: "Assistant" });
   expect(within(record).getByText("Every member")).toBeTruthy();
   expect(within(record).queryByRole("button", { name: "Grant" })).toBeNull();
 });
@@ -530,7 +563,7 @@ test("a refused audience change tones the notice inside the record that raised i
   });
   await pressRow("Second");
 
-  const record = await screen.findByRole("complementary", { name: "Second" });
+  const record = await screen.findByRole("region", { name: "Second" });
   await userEvent.type(within(record).getByLabelText("Web Access Address"), "new@work.com");
   await userEvent.click(within(record).getByRole("button", { name: "Grant" }));
 

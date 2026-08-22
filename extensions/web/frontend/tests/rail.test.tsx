@@ -960,9 +960,9 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
   expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
   await userEvent.click(card);
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
-  const pane = await screen.findByRole("complementary", { name: "Artifacts" });
-  expect(await within(pane).findByText("notes.md")).toBeTruthy();
-  await userEvent.click(within(pane).getByRole("button", { name: "Close slot" }));
+  const lane = await screen.findByRole("region", { name: "Artifacts" });
+  expect(await within(lane).findByText("notes.md")).toBeTruthy();
+  await userEvent.click(within(lane).getByRole("button", { name: "Close Artifacts" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
@@ -980,10 +980,9 @@ test("the new-conversation control targets the main agent, and offers no other",
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Message the app")).toBeTruthy();
-  // A conversation that does not exist yet is headed by nothing; the composer's own picker names
-  // the agent that would hold it.
+  // A conversation that does not exist yet is headed by nothing: the address names the app that
+  // would hold it, and a crumb back to a conversation nobody has founded leads nowhere.
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
-  expect(screen.getByRole("combobox", { name: "App" }).textContent).toBe("Assistant");
 });
 
 test("the applications flyout opens the agent's page, and the sidebar starts the conversation", async () => {

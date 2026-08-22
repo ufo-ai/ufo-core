@@ -46,7 +46,7 @@ from pydantic import BaseModel, Field, model_validator
 from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
-from ufo_ext_sites.objects import site_object_name
+from ufo_ext_sites.objects import effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page, shot_command
 from ufo_ext_sites.store import HostedSites, Visibility, site_name
 from ufo_ext_sites.surface import site_url
@@ -382,7 +382,8 @@ async def _host(
     """Register the port a deploy just left serving as a hosted site, and describe the link it
     answers on. The refusals ran in `_refuse_before_serving`; `register` asks the same set again
     here, since this is the write and a concurrent deploy may have moved since. The picture of that
-    page arrives afterwards, in `_illustrate`'s own write.
+    page arrives afterwards, in `_illustrate`'s own write. The reported visibility is the one the
+    frame gates on: the agent's for a site already bound as a homepage, the row's own otherwise.
 
     The site is registered against the conversation whose sandbox is serving it, which is the one
     the handle names rather than the one this turn belongs to. For a member's own turn they are the
@@ -411,7 +412,7 @@ async def _host(
     )
     return {
         "site_name": site.name,
-        "visibility": site.visibility,
+        "visibility": effective_visibility(site, await ctx.ext.agent_visibilities()),
         "site": site_object_name(site.conversation_id, site.name),
         "site_url": link,
     }

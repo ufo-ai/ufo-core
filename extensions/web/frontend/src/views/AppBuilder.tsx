@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { COLUMN } from "@/kernel/pane";
+import { COLUMN, Header } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
 import { Chat } from "@/views/Chat";
 import type { TasksSlotPayload } from "@/views/ConversationSlotPane";
@@ -67,12 +66,7 @@ export function AppBuilder({ agent, member, onSettled, onClose }: AppBuilderProp
 
   return (
     <section aria-label={APP_BUILDER_TITLE} className="flex min-h-0 min-w-0 flex-col">
-      <header className="flex h-(--size-control) shrink-0 items-center gap-2xl border-b border-edge px-2xl py-lg box-content">
-        <h2 className="m-0 min-w-0 flex-1 truncate text-subtitle font-medium">New application</h2>
-        <Button size="bar" onClick={onClose}>
-          Close
-        </Button>
-      </header>
+      <Header heading={2} title="New application" onClose={onClose} pinned />
       <Phases conversationId={conversationId} agentId={agent.id} reloads={settles} />
       <Chat
         agent={agent}
