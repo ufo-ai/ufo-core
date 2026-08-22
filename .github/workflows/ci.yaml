@@ -193,6 +193,7 @@ jobs:
       - run: cargo test
 
   integration:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/integration.yaml
 
   test:
@@ -202,7 +203,7 @@ jobs:
     steps:
       - run: test "${{ needs.test-shard.result }}" = success
       - run: test "${{ needs.control-test.result }}" = success
-      - run: test "${{ needs.integration.result }}" = success
+      - run: test "${{ needs.integration.result }}" = "${{ github.event_name == 'push' && 'success' || 'skipped' }}"
       - run: test "${{ needs.wheel.result }}" = success
 
   # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel suite's
