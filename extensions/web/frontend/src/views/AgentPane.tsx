@@ -22,7 +22,10 @@ import type { Agent, Conversation, Member } from "@/lib/types";
 
 /** The homepage the app's binding names, the answer that one is being built, or the answer that
  *  it has none. */
-type HomepageRead = { state: "set"; url: string } | { state: "building" } | { state: "none" };
+export type HomepageRead =
+  | { state: "set"; url: string }
+  | { state: "building" }
+  | { state: "none" };
 
 /** How often the half asks again while a homepage is being built. A build is minutes of work the
  *  member is watching for the end of, so the read runs faster than the pane's resting rate — and
