@@ -11,9 +11,11 @@ export type PanelState<T> =
 
 const POLL_MS = 30_000;
 
-/** A read holds its answer until the next one lands. The visible pane re-reads on its own interval,
- *  while a hidden tab does not poll. Only a first read, which has nothing to hold, shows the
- *  skeleton.
+/** A read holds its answer until the next one lands. What it holds is that one path's answer, so a
+ *  read of another path shows the skeleton rather than the answer to the question before it: a pane
+ *  handed one path's payload under another path's frame draws a record the member did not ask for.
+ *  The visible pane re-reads on its own interval, while a hidden tab does not poll. Only a first
+ *  read, which has nothing to hold, shows the skeleton.
  *
  *  A read that has never answered waits for the member's next move once it fails: there is nothing
  *  on the screen for a retry to correct, and a route that refused the first ask will refuse the
@@ -36,6 +38,7 @@ export function usePanelRead<T>(
   const reading = useRef(false);
   const failed = useRef(false);
   const answered = useRef(false);
+  const asked = useRef<string | null>(null);
   useEffect(() => {
     const change = () => {
       const shown = document.visibilityState !== "hidden";
@@ -61,7 +64,9 @@ export function usePanelRead<T>(
     const superseded = new AbortController();
     let live = true;
     reading.current = true;
-    setState((held) => (held.phase === "ready" ? held : { phase: "loading" }));
+    const again = asked.current === path;
+    asked.current = path;
+    setState((held) => (held.phase === "ready" && again ? held : { phase: "loading" }));
     getJson<T>(path, superseded.signal)
       .then((result) => {
         if (!live) return;

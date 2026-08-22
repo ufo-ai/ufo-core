@@ -86,6 +86,30 @@ const FAILED_RUN = {
   artifacts: [],
 };
 
+/** A second run with a report of its own, so a press on one story's title is answered by that
+ *  story's document and never by the report standing over it in the feed. */
+const EVAL_RUN = {
+  ...RUN,
+  turn_id: "4f1c6b87-9eca-4d53-b071-c2a8e46f1a59",
+  task: "nightly-eval",
+  fired_at: "2026-08-14T06:00:00+00:00",
+  entry: {
+    title: "Nightly eval pass rate fell to 76%",
+    summary: "Four suites regressed.",
+    points: [],
+  },
+  artifacts: [
+    {
+      filename: "eval.md",
+      subject: null,
+      media_type: "text/markdown",
+      size_bytes: 24,
+      url: "/dl/eval.md",
+      preview_url: null,
+    },
+  ],
+};
+
 /** A report published since the digest job last ran: it carries nothing written yet. */
 const QUIET_RUN = {
   ...RUN,
@@ -721,6 +745,43 @@ test("a permalink pins the feed to its one report, and the crumb is the way back
   expect(reads.at(-1)).not.toContain("turn=");
   expect(screen.getByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
+});
+
+/** A pressed entry opens the report it describes and no other. The feed's own answer is not that
+ *  report's answer, so the page waits on the report it was asked for rather than standing the run at
+ *  the head of the feed under the crumb of the run the member pressed. */
+test("a pressed story waits for its own report, never the feed's first one", async () => {
+  let land = () => {};
+  const pinned = new Promise<void>((resolve) => {
+    land = resolve;
+  });
+  location.hash = sectionHash("radar");
+  wire({
+    "/workspace/radar": async (url) => {
+      if (!url.includes("turn=")) return json({ runs: [RUN, EVAL_RUN], older: null });
+      await pinned;
+      return json({ runs: [EVAL_RUN], older: null });
+    },
+    "/dl/notes.md": () => new Response("# Standup\n\nTwo blockers cleared."),
+    "/dl/eval.md": () => new Response("# Nightly eval report\n\nFour suites regressed."),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(
+    await screen.findByRole("link", { name: new RegExp(EVAL_RUN.entry.title) }),
+  );
+  await waitFor(() => expect(location.hash).toBe("#/radar?open=run%2F" + EVAL_RUN.turn_id));
+
+  expect(screen.queryByText("Two blockers cleared.")).toBeNull();
+  expect(screen.queryByRole("heading", { level: 3, name: "Standup" })).toBeNull();
+
+  land();
+
+  expect(await screen.findByText("Four suites regressed.")).toBeTruthy();
+  expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
+    "Radar/Nightly eval report",
+  );
+  expect(screen.queryByText("Two blockers cleared.")).toBeNull();
 });
 
 /** A member who read to the end of a report is deciding what to read next, not whether to go back:
