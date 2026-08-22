@@ -1,5 +1,6 @@
 //! The directive wire: tab-separated lines over held HTTP POST streams.
 
+use std::cell::OnceCell;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -160,6 +161,8 @@ pub enum PostBody {
 }
 
 /// One member session on the wire: endpoint state, persistent connections, and the since cursor.
+/// The pooled agent is built by the thread that first posts, and dropped once idle: reading the
+/// system trust store costs tens of milliseconds, and the main thread is setting up the terminal.
 pub struct Session {
     pub gateway_url: String,
     pub workspace_url: Option<String>,
@@ -170,7 +173,7 @@ pub struct Session {
     pub since: Option<String>,
     pub installed: bool,
     pub tty: bool,
-    agent: ureq::Agent,
+    agent: OnceCell<ureq::Agent>,
     last_post: std::time::Instant,
 }
 
@@ -211,7 +214,7 @@ impl Session {
             since: None,
             installed,
             tty,
-            agent: build_agent(),
+            agent: OnceCell::new(),
             last_post: std::time::Instant::now(),
         }
     }
@@ -243,7 +246,7 @@ impl Session {
     /// POST one request and stream its directives as they arrive.
     pub fn post(&mut self, body: PostBody) -> Result<DirectiveStream, String> {
         if self.last_post.elapsed() > AGENT_IDLE_REFRESH {
-            self.agent = build_agent();
+            self.agent.take();
         }
         self.last_post = std::time::Instant::now();
         let mut request = self.request("POST", &self.endpoint());
@@ -325,7 +328,7 @@ impl Session {
             "{}/ufo/bin/{target}",
             self.gateway_url.trim_end_matches('/')
         );
-        let response = opened(self.agent.get(&url).call())?;
+        let response = opened(self.agent().get(&url).call())?;
         let mut reader = response.into_reader();
         let mut file = File::create(dest)
             .map_err(|error| format!("could not stage {}: {error}", dest.display()))?;
@@ -346,7 +349,7 @@ impl Session {
             self.channel,
             op_id
         );
-        let mut request = self.agent.get(&url);
+        let mut request = self.agent().get(&url);
         if let Some(token) = &self.token {
             request = request.set("authorization", &format!("Bearer {token}"));
         }
@@ -359,8 +362,12 @@ impl Session {
         Ok(())
     }
 
+    fn agent(&self) -> &ureq::Agent {
+        self.agent.get_or_init(build_agent)
+    }
+
     fn request(&self, method: &str, url: &str) -> ureq::Request {
-        self.dressed(self.agent.request(method, url))
+        self.dressed(self.agent().request(method, url))
     }
 
     fn dressed(&self, request: ureq::Request) -> ureq::Request {
@@ -904,6 +911,14 @@ mod tests {
         assert!(lowered.contains("content-length: 0"), "{request}");
         assert!(lowered.contains("authorization: bearer tok"), "{request}");
         assert!(lowered.contains("x-ufo-session: sid"), "{request}");
+    }
+
+    #[test]
+    fn a_new_session_builds_no_agent_until_it_is_used() {
+        let session = stopping("http://127.0.0.1:1".into());
+        assert!(session.agent.get().is_none());
+        let _ = session.request("POST", &session.endpoint());
+        assert!(session.agent.get().is_some());
     }
 
     #[test]
