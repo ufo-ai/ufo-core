@@ -8,9 +8,15 @@ import pytest
 import infra.testing_secrets as testing_secrets
 from infra.testing_secrets import (
     DEPLOYMENT_ID_ENV,
+    REQUIRED_PROPERTIES,
     SECRET_ID_ENV,
+    SECRET_INPUTS,
     main,
 )
+
+_SEEDED = {name: f"{name}-value" for name in sorted(REQUIRED_PROPERTIES - set(SECRET_INPUTS))} | {
+    "retired-api-key": ""
+}
 
 
 def _environment() -> dict[str, str]:
@@ -23,13 +29,14 @@ def _environment() -> dict[str, str]:
     }
 
 
+def _document(**overrides: str) -> bytes:
+    return json.dumps(_SEEDED | overrides).encode()
+
+
 def test_testing_secret_write_preserves_the_live_document() -> None:
-    raw = json.dumps(
-        {"anthropic-api-key": "anthropic-value", "existing-api-key": "existing-value"}
-    ).encode()
+    raw = _document(**{"existing-api-key": "existing-value"})
     write = testing_secrets.testing_secret_write(_environment(), raw)
-    assert json.loads(write.payload) == {
-        "anthropic-api-key": "anthropic-value",
+    assert json.loads(write.payload) == _SEEDED | {
         "existing-api-key": "existing-value",
         "perplexity-api-key": "perplexity-value",
         "spectrum-project-id": "spectrum-project-id-value",
@@ -46,15 +53,15 @@ def test_testing_secret_write_preserves_the_live_document() -> None:
 @pytest.mark.parametrize(
     ("environment", "raw", "error"),
     (
-        (_environment() | {DEPLOYMENT_ID_ENV: ""}, b"{}", DEPLOYMENT_ID_ENV),
-        (_environment() | {"PERPLEXITY_API_KEY": ""}, b"{}", "PERPLEXITY_API_KEY"),
-        (_environment() | {"SPECTRUM_PROJECT_ID": ""}, b"{}", "SPECTRUM_PROJECT_ID"),
+        (_environment() | {DEPLOYMENT_ID_ENV: ""}, _document(), DEPLOYMENT_ID_ENV),
+        (_environment() | {"PERPLEXITY_API_KEY": ""}, _document(), "PERPLEXITY_API_KEY"),
+        (_environment() | {"SPECTRUM_PROJECT_ID": ""}, _document(), "SPECTRUM_PROJECT_ID"),
         (
             _environment() | {"SPECTRUM_PROJECT_SECRET": ""},
-            b"{}",
+            _document(),
             "SPECTRUM_PROJECT_SECRET",
         ),
-        (_environment() | {SECRET_ID_ENV: ""}, b"{}", SECRET_ID_ENV),
+        (_environment() | {SECRET_ID_ENV: ""}, _document(), SECRET_ID_ENV),
         (_environment(), b"not-json", "must contain valid JSON"),
         (_environment(), b"[]", "must contain string properties"),
         (_environment(), b'{"value":null}', "must contain string properties"),
@@ -65,6 +72,25 @@ def test_testing_secret_write_rejects_invalid_input(
 ) -> None:
     with pytest.raises(RuntimeError, match=error):
         testing_secrets.testing_secret_write(environment, raw)
+
+
+@pytest.mark.parametrize("property_name", sorted(REQUIRED_PROPERTIES - set(SECRET_INPUTS)))
+def test_testing_secret_write_refuses_an_empty_required_property(property_name: str) -> None:
+    """The deploy stops at this step instead of projecting an empty credential into the cluster and
+    rolling pods that crash-loop until the apply's rollout wait expires."""
+    with pytest.raises(RuntimeError, match=f"holds no value for {property_name}"):
+        testing_secrets.testing_secret_write(_environment(), _document(**{property_name: ""}))
+
+
+def test_testing_secret_write_names_every_empty_required_property() -> None:
+    blanked = json.dumps(dict.fromkeys(sorted(REQUIRED_PROPERTIES), "")).encode()
+    with pytest.raises(RuntimeError) as error:
+        testing_secrets.testing_secret_write(_environment(), blanked)
+    assert str(error.value) == (
+        "ufo/ufo-testing/api-keys holds no value for "
+        + ", ".join(sorted(REQUIRED_PROPERTIES - set(SECRET_INPUTS)))
+        + "; seed the property in Secrets Manager before this deploy rolls the pods that read it"
+    )
 
 
 def test_main_reads_and_writes_through_stdin(
@@ -83,7 +109,7 @@ def test_main_reads_and_writes_through_stdin(
         "with Path(os.environ['AWS_STUB_OUTPUT']).open('a') as stream:\n"
         "    stream.write(json.dumps(record) + '\\n')\n"
         "if sys.argv[2] == 'get-secret-value':\n"
-        '    print(\'{"existing-api-key":"existing-value"}\')\n'
+        f"    print({json.dumps(json.dumps(_SEEDED | {'existing-api-key': 'existing-value'}))})\n"
     )
     aws.chmod(0o755)
     environment = (
@@ -102,7 +128,7 @@ def test_main_reads_and_writes_through_stdin(
     assert len(calls) == 2
     assert calls[0]["argv"][1] == "get-secret-value"
     assert calls[1]["argv"][1] == "put-secret-value"
-    assert json.loads(calls[1]["stdin"]) == {
+    assert json.loads(calls[1]["stdin"]) == _SEEDED | {
         "existing-api-key": "existing-value",
         "perplexity-api-key": "perplexity-value",
         "spectrum-project-id": "spectrum-project-id-value",

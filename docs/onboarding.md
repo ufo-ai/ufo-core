@@ -283,10 +283,21 @@ over the line lands `failed` naming the cap rather than disappearing.
 fixed — it never sends directly and never touches a delivered row, and it clears the attempt marker,
 because an operator re-arms having decided the message never landed.
 
-Production runtime secret containers have no Terraform-managed version. The deployment initializes
-missing documents with their exact schemas, refreshes configured repository secrets, and preserves
-every other production-owned value. It validates both complete documents before writing either one
-and sends values to AWS Secrets Manager through stdin.
+Runtime secret containers have no Terraform-managed version, in either environment. Every value in
+them is written out-of-band, so a version Terraform declares can carry placeholders only — and
+Secrets Manager drops that version once later writes leave it unlabelled, which turns the next
+apply's refresh into a create that publishes the placeholders over every live credential
+([outage 0002](outages/0002-terraform-blanked-testing-runtime-secrets.md)).
+
+The production deployment initializes missing documents with their exact schemas, refreshes
+configured repository secrets, and preserves every other production-owned value. It validates both
+complete documents before writing either one and sends values to AWS Secrets Manager through stdin.
+
+The testing deployment writes only the properties it holds a repository secret for and preserves the
+rest, so `ufo/ufo-testing/api-keys` and every property no deploy writes are a standing prerequisite,
+seeded out-of-band like `ufo/<env>/gateway-workos`. A required property with no value stops the
+deploy at `Write testing runtime secrets`, naming the property, before the apply rolls the pods that
+would read it empty.
 
 ## Web login
 

@@ -215,52 +215,16 @@ resource "aws_secretsmanager_secret_version" "platform" {
   })
 }
 
+# The runtime provider credentials. Terraform owns the secret document and never a version of it:
+# every value inside is written out-of-band — the deploy's own secrets step for the properties it
+# holds an Actions secret for (infra/testing_secrets.py, infra/production_secrets.py), an operator
+# for the rest (docs/onboarding.md) — so a version terraform declares can only ever carry
+# placeholders. `ignore_changes` is no protection: Secrets Manager drops a version once later writes
+# leave it unlabelled, the next refresh finds the recorded version gone, and the apply *creates* it
+# again — publishing empty strings over every live credential. That is outage 0002.
 resource "aws_secretsmanager_secret" "api_keys" {
   name = "${local.secret_prefix}/api-keys"
   tags = local.tags
-}
-
-resource "aws_secretsmanager_secret_version" "api_keys" {
-  count = var.manage_runtime_secret_versions ? 1 : 0
-
-  secret_id = aws_secretsmanager_secret.api_keys.id
-  secret_string = jsonencode({
-    "anthropic-api-key"                      = ""
-    "bedrock-api-key"                        = ""
-    "openai-api-key"                         = ""
-    "openrouter-api-key"                     = ""
-    "composio-api-key"                       = ""
-    "pipedream-client-id"                    = ""
-    "pipedream-client-secret"                = ""
-    "pipedream-project-id"                   = ""
-    "pipedream-gmail-oauth-app-id"           = ""
-    "e2b-api-key"                            = ""
-    "browserbase-api-key"                    = ""
-    "perplexity-api-key"                     = ""
-    "turbopuffer-api-key"                    = ""
-    "datadog-api-key"                        = ""
-    "metronome-bearer-token"                 = ""
-    "stripe-secret-key"                      = ""
-    "stripe-billing-portal-configuration-id" = ""
-    "slack-client-id"                        = ""
-    "slack-client-secret"                    = ""
-    "slack-signing-secret"                   = ""
-    "spectrum-project-id"                    = ""
-    "spectrum-project-secret"                = ""
-    "github-app-id"                          = ""
-    "github-app-client-id"                   = ""
-    "github-app-client-secret"               = ""
-    "github-app-private-key"                 = ""
-  })
-
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
-}
-
-moved {
-  from = aws_secretsmanager_secret_version.api_keys
-  to   = aws_secretsmanager_secret_version.api_keys[0]
 }
 
 resource "aws_secretsmanager_secret" "gateway_slack_connect" {
@@ -268,22 +232,21 @@ resource "aws_secretsmanager_secret" "gateway_slack_connect" {
   tags = local.tags
 }
 
-resource "aws_secretsmanager_secret_version" "gateway_slack_connect" {
-  count = var.manage_runtime_secret_versions ? 1 : 0
-
-  secret_id = aws_secretsmanager_secret.gateway_slack_connect.id
-  secret_string = jsonencode({
-    "bot-token" = ""
-  })
-
+# Testing holds both placeholder versions in state from when they were managed resources; drop them
+# from state without deleting the live versions in AWS, whose values a deploy and an operator wrote.
+# Prod never applied either one, so both blocks are a no-op there.
+removed {
+  from = aws_secretsmanager_secret_version.api_keys
   lifecycle {
-    ignore_changes = [secret_string]
+    destroy = false
   }
 }
 
-moved {
+removed {
   from = aws_secretsmanager_secret_version.gateway_slack_connect
-  to   = aws_secretsmanager_secret_version.gateway_slack_connect[0]
+  lifecycle {
+    destroy = false
+  }
 }
 
 # The gateway's WorkOS credentials are a standing prerequisite, created and seeded out-of-band once

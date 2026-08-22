@@ -3,6 +3,7 @@ from pathlib import Path
 
 import yaml
 
+from infra.production_secrets import API_KEYS_PROPERTIES
 from ufo.serve import RESERVED_HOST_PREFIXES
 
 HOSTED_TEMPLATE = Path(__file__).resolve().parents[2] / "infra/templates/hosted.yaml.tpl"
@@ -221,7 +222,7 @@ def test_hosted_shutdown_grace_matches_across_environments() -> None:
 
 
 def test_hosted_serve_receives_the_bedrock_mantle_api_key() -> None:
-    assert '"bedrock-api-key"' in PLATFORM_SECRETS.read_text()
+    assert "bedrock-api-key" in API_KEYS_PROPERTIES
     assert (
         "{secretKey: AWS_BEARER_TOKEN_BEDROCK, "
         "remoteRef: {key: ${secret_api_keys}, property: bedrock-api-key}}"
@@ -238,13 +239,12 @@ def test_hosted_serve_receives_the_perplexity_api_key() -> None:
 
 
 def test_hosted_serve_receives_the_spectrum_project_credentials() -> None:
-    secrets = PLATFORM_SECRETS.read_text()
     projections = CLUSTER_SERVICES_TEMPLATE.read_text()
     for name, property_name in (
         ("SPECTRUM_PROJECT_ID", "spectrum-project-id"),
         ("SPECTRUM_PROJECT_SECRET", "spectrum-project-secret"),
     ):
-        assert f'"{property_name}"' in secrets
+        assert property_name in API_KEYS_PROPERTIES
         assert (
             f"{{secretKey: {name}, remoteRef: "
             f"{{key: ${{secret_api_keys}}, property: {property_name}}}}}" in projections

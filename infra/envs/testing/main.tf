@@ -18,9 +18,8 @@ module "platform" {
   dns_zone_names       = local.dns_zone_names
   cloudflare_api_token = var.cloudflare_api_token
 
-  ses_sender                     = var.ses_sender
-  owns_account_resources         = true
-  manage_runtime_secret_versions = true
+  ses_sender             = var.ses_sender
+  owns_account_resources = true
 
   # Static cluster-admins (applier-independent — see eks.tf for why creator-perms is off): the GitHub
   # Actions deploy role, the account root, and the Identity Center admin permission set. An entry for

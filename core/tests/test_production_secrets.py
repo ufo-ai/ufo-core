@@ -52,29 +52,42 @@ def _output(source: str, name: str) -> str:
     return source.split(f'output "{name}" {{', maxsplit=1)[1].split("}", maxsplit=1)[0]
 
 
+def _projected(template: str, secret: str) -> set[str]:
+    return set(re.findall(rf"remoteRef: \{{key: \$\{{{secret}\}}, property: ([^}}]+)\}}", template))
+
+
 def test_secret_schema_matches_terraform() -> None:
+    """The declared properties are exactly what the cluster projects, and terraform owns no version
+    of either runtime document.
+
+    Every value in both is written out-of-band, so a version terraform declares carries placeholders
+    and nothing else. Secrets Manager drops that version once later writes leave it unlabelled, and
+    the next apply creates it again — publishing empty strings over every live credential
+    (docs/outages/0002-terraform-blanked-testing-runtime-secrets.md)."""
     secrets = (ROOT / "infra" / "modules" / "platform" / "secrets.tf").read_text()
+    variables = (ROOT / "infra" / "modules" / "platform" / "variables.tf").read_text()
     module_outputs = (ROOT / "infra" / "modules" / "platform" / "outputs.tf").read_text()
     prod_outputs = (ROOT / "infra" / "envs" / "prod" / "outputs.tf").read_text()
     testing_outputs = (ROOT / "infra" / "envs" / "testing" / "outputs.tf").read_text()
-    api_keys = secrets.split(
-        'resource "aws_secretsmanager_secret_version" "api_keys" {', maxsplit=1
-    )[1].split("lifecycle {", maxsplit=1)[0]
-    gateway = secrets.split(
-        'resource "aws_secretsmanager_secret_version" "gateway_slack_connect" {', maxsplit=1
-    )[1].split("lifecycle {", maxsplit=1)[0]
-    assert set(re.findall(r'^\s+"([^"]+)"\s*=', api_keys, re.MULTILINE)) == API_KEYS_PROPERTIES
-    assert set(re.findall(r'^\s+"([^"]+)"\s*=', gateway, re.MULTILINE)) == GATEWAY_PROPERTIES
-    assert "count = var.manage_runtime_secret_versions ? 1 : 0" in api_keys
-    assert "count = var.manage_runtime_secret_versions ? 1 : 0" in gateway
+    testing_main = (ROOT / "infra" / "envs" / "testing" / "main.tf").read_text()
+    prod_main = (ROOT / "infra" / "envs" / "prod" / "main.tf").read_text()
+    cluster_services = (ROOT / "infra" / "templates" / "cluster-services.yaml.tpl").read_text()
+    observability = (ROOT / "infra" / "templates" / "observability.yaml.tpl").read_text()
     assert (
-        "manage_runtime_secret_versions = true"
-        in (ROOT / "infra" / "envs" / "testing" / "main.tf").read_text()
+        _projected(cluster_services, "secret_api_keys")
+        | _projected(observability, "secret_api_keys")
+        == API_KEYS_PROPERTIES
     )
-    assert (
-        "manage_runtime_secret_versions = false"
-        in (ROOT / "infra" / "envs" / "prod" / "main.tf").read_text()
-    )
+    assert _projected(cluster_services, "secret_gateway_slack_connect") == GATEWAY_PROPERTIES
+    for name in ("api_keys", "gateway_slack_connect"):
+        assert f'resource "aws_secretsmanager_secret" "{name}"' in secrets
+        assert f'resource "aws_secretsmanager_secret_version" "{name}"' not in secrets
+        assert re.search(
+            rf"removed \{{\n  from = aws_secretsmanager_secret_version\.{name}\n"
+            rf"  lifecycle \{{\n    destroy = false\n  \}}\n\}}",
+            secrets,
+        )
+    assert "manage_runtime_secret_versions" not in (secrets + variables + testing_main + prod_main)
     assert "value = aws_secretsmanager_secret.api_keys.id" in _output(
         module_outputs, "api_keys_secret_id"
     )
@@ -88,12 +101,6 @@ def test_secret_schema_matches_terraform() -> None:
     assert "value = module.platform.gateway_secret_id" in _output(prod_outputs, "gateway_secret_id")
     assert "api_keys_secret_id" not in testing_outputs
     assert "gateway_secret_id" not in testing_outputs
-    for name in ("api_keys", "gateway_slack_connect"):
-        assert re.search(
-            rf"moved \{{\n\s+from = aws_secretsmanager_secret_version\.{name}\n"
-            rf"\s+to\s+= aws_secretsmanager_secret_version\.{name}\[0\]\n\}}",
-            secrets,
-        )
 
 
 def test_production_selects_the_redis_terminal_transport() -> None:

@@ -16,6 +16,19 @@ SECRET_INPUTS = {
     "spectrum-project-id": "SPECTRUM_PROJECT_ID",
     "spectrum-project-secret": "SPECTRUM_PROJECT_SECRET",
 }
+# The properties the testing fleet's own configuration selects, each with one provider and no
+# fallback: `[sandbox] backend`, the model catalog's key, `[browser] cdp_provider`, the collector's
+# only export credential, and `[memory] index_backend` (infra/envs/testing/ufo.tf). The e2b key is
+# the one a pod refuses to boot without, so it decides the deploy either here or 10 minutes into the
+# apply. Every other property the document carries belongs to a path testing does not exercise, so
+# an empty one costs nothing until someone turns that path on.
+REQUIRED_PROPERTIES = frozenset(SECRET_INPUTS) | {
+    "anthropic-api-key",
+    "browserbase-api-key",
+    "datadog-api-key",
+    "e2b-api-key",
+    "turbopuffer-api-key",
+}
 
 
 @dataclass(frozen=True)
@@ -50,7 +63,13 @@ def _required(environment: Mapping[str, str], name: str) -> str:
 
 
 def testing_secret_write(environment: Mapping[str, str], raw: bytes) -> SecretWrite:
-    """Set the testing provider keys and preserve every other runtime secret property."""
+    """Set the testing provider keys and preserve every other runtime secret property.
+
+    A required property that is empty stops the deploy here, before the write and the apply that
+    follows it. This step is the last place an empty credential is visible at all: External Secrets
+    projects it into `ufo-platform-secrets` as an empty env var, the container starts, the process
+    raises on the credential it needs, and the apply spends its whole rollout wait watching pods
+    crash-loop before it reports a timeout that names a Deployment and no credential."""
     secret_id = _required(environment, SECRET_ID_ENV)
     try:
         value = json.loads(raw)
@@ -61,6 +80,12 @@ def testing_secret_write(environment: Mapping[str, str], raw: bytes) -> SecretWr
     value.update(
         {name: _required(environment, input_name) for name, input_name in SECRET_INPUTS.items()}
     )
+    empty = sorted(name for name in REQUIRED_PROPERTIES if not value.get(name))
+    if empty:
+        raise RuntimeError(
+            f"{secret_id} holds no value for {', '.join(empty)}; seed the property in Secrets "
+            "Manager before this deploy rolls the pods that read it"
+        )
     return SecretWrite(
         secret_id=secret_id,
         payload=json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),

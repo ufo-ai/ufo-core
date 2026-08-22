@@ -13,3 +13,4 @@ the index of what the incident taught, and it stays `open` until the lessons are
 | # | Title | Date | Envs | Status |
 |---|---|---|---|---|
 | [0001](0001-testing-ena-panic-dns-blackout.md) | ENA kernel panic → CoreDNS blackout → 6h telemetry blind spot | 2026-07-10 | testing | open |
+| [0002](0002-terraform-blanked-testing-runtime-secrets.md) | Aged-out secret version → terraform re-creates its placeholder → testing runtime credentials blank | 2026-08-21 | testing | open |

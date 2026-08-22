@@ -45,10 +45,6 @@ variable "owns_account_resources" {
   description = "Whether this environment owns the account-wide ECR repositories and SES domain identity."
 }
 
-variable "manage_runtime_secret_versions" {
-  type = bool
-}
-
 # ---- Networking ----
 
 variable "vpc_cidr" {

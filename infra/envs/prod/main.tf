@@ -18,9 +18,8 @@ module "platform" {
   dns_zone_names       = local.dns_zone_names
   cloudflare_api_token = var.cloudflare_api_token
 
-  ses_sender                     = var.ses_sender
-  owns_account_resources         = false
-  manage_runtime_secret_versions = false
+  ses_sender             = var.ses_sender
+  owns_account_resources = false
 
   cluster_admin_principal_arns = concat(
     [

@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import pytest
 import yaml
 
+from infra.testing_secrets import SECRET_INPUTS
 from ufo.sources.sync import SOURCE_SYNC_FAILED_METRIC
 
 ROOT = Path(__file__).parents[2]
@@ -625,6 +626,9 @@ def test_testing_deploy_writes_provider_credentials_before_apply() -> None:
         },
         "run": "uv run python infra/testing_secrets.py",
     }
+    # Every input the script requires is passed here, or the step fails on the first deploy after it
+    # is declared.
+    assert set(SECRET_INPUTS.values()) <= set(write["env"])
     assert names.index("Terraform init") < names.index("Write testing runtime secrets")
     assert names.index("Write testing runtime secrets") < names.index("Terraform apply")
 
