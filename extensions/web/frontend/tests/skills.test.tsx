@@ -4,75 +4,153 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, json, openAgentSettings, useStreamFake, wire } from "./harness";
+import {
+  AGENT,
+  MEMBER,
+  SETTINGS,
+  destination,
+  json,
+  openAgentSettings,
+  useStreamFake,
+  wire,
+} from "./harness";
 
 beforeEach(() => {
+  location.hash = "#/workspace/skills";
   useStreamFake();
 });
 
 const SKILLS = [
-  { name: "mine", description: "member skill", origin: "member", instructions: "Write tersely." },
+  {
+    name: "mine",
+    description: "member skill",
+    origin: "member",
+    instructions: "Write tersely.",
+    depends: ["sandbox"],
+    agents: ["helpdesk"],
+  },
   {
     name: "shipped",
     description: "built-in `skill`",
     origin: "deploy",
     instructions: "Read the tree first.",
+    depends: [],
+    agents: [],
   },
 ];
 
-const NO_COMMUNITY = { "/skills/community": () => json({ skills: [] }) };
+const MINE_GENERATION = "11111111-2222-4333-8444-555555555555";
 
-/** The skills stand on a tab of the app's own settings dialog, which the index's gear opens. */
-async function renderSkills() {
-  location.hash = "#/agents/" + AGENT.id;
+const MINE_DETAIL = {
+  spec: {
+    files: {
+      "SKILL.md": { sha256: "a".repeat(64) },
+      "checklist.md": { sha256: "b1946ac92492d2347c6235b4d2611184" },
+    },
+    pinned: true,
+  },
+  generation: MINE_GENERATION,
+};
+
+const NO_COMMUNITY = { "/skills/community": () => json({ skills: [] }) };
+const MINE_OBJECT = { "/objects/skill/mine": () => json(MINE_DETAIL) };
+
+/** The skills stand on the workspace page, which its own address opens. */
+function renderSkills() {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await openAgentSettings();
-  await userEvent.click(await screen.findByRole("tab", { name: "Skills" }));
 }
 
-/** The tab opens on the directory, so every read of the agent's own skills starts with the pick
- *  that names the other collection. */
+/** The page opens on the directory, so every read of the workspace's own skills starts with the
+ *  pick that names the other collection. */
 async function openInstalled() {
   await userEvent.click(await screen.findByRole("tab", { name: "Installed" }));
 }
 
-test("the agent skills tab renders items without a picker or Refresh", async () => {
-  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  await renderSkills();
+test("the workspace skills page renders items without a picker or Refresh", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }) });
+  renderSkills();
   await openInstalled();
 
   expect(await screen.findByText("mine")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
-  const panel = within(screen.getByRole("tabpanel"));
+  expect(destination()).toBe("Skills");
+  const panel = within(screen.getByRole("main"));
   expect(panel.queryByRole("combobox", { name: "App" })).toBeNull();
   expect(panel.queryByRole("button", { name: "Refresh" })).toBeNull();
   expect(panel.queryByRole("columnheader")).toBeNull();
-  expect(document.querySelector('[data-part="mark"]')).toBeNull();
   const group = screen.getByText("mine").closest("ul") as HTMLElement;
   expect(group.querySelectorAll("li[aria-hidden]").length).toBe(1);
 });
 
-test("an item opens the whole skill read-only, and states its description there", async () => {
-  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  await renderSkills();
-  await openInstalled();
+test("the app's settings dialog holds no skills tab", async () => {
+  location.hash = "#/agents/" + AGENT.id;
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const dialog = within(await openAgentSettings());
 
-  expect(screen.queryByText("member skill")).toBeNull();
-  await userEvent.click(await screen.findByText("mine"));
-  const dialog = await screen.findByRole("dialog", { name: "mine" });
-  expect(dialog.textContent).toContain("mine");
-  expect(screen.getByLabelText("Description")).toHaveProperty("value", "member skill");
-  const instructions = screen.getByLabelText("Instructions") as HTMLTextAreaElement;
-  expect(instructions.value).toBe("Write tersely.");
-  expect(instructions.readOnly).toBe(true);
-  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-  await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
-  expect(screen.queryByRole("dialog", { name: "mine" })).toBeNull();
+  expect(dialog.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+    "Settings",
+    "Connectors",
+    "Scheduled",
+  ]);
 });
 
-test("items sort custom ahead of built-in", async () => {
-  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  await renderSkills();
+test("the settings form states the workspace-skill setting and saves it", async () => {
+  const posted: unknown[] = [];
+  location.hash = "#/agents/" + AGENT.id;
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await openAgentSettings();
+
+  const checkbox = (await screen.findByLabelText("Use workspace skills")) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  await userEvent.click(checkbox);
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toMatchObject({
+    verb: "apply",
+    kind: "agent",
+    name: "assistant",
+    spec: { use_workspace_skills: false },
+  });
+});
+
+test("a custom skill opens as an editable record, and a built-in one read-only", async () => {
+  wire({ ...NO_COMMUNITY, ...MINE_OBJECT, "/skills": () => json({ skills: SKILLS }) });
+  renderSkills();
+  await openInstalled();
+
+  await userEvent.click(await screen.findByText("shipped"));
+  const dialog = await screen.findByRole("dialog", { name: "shipped" });
+  const shipped = within(dialog).getByLabelText("Instructions") as HTMLTextAreaElement;
+  expect(shipped.value).toBe("Read the tree first.");
+  expect(shipped.readOnly).toBe(true);
+  expect(within(dialog).queryByRole("button", { name: "Save" })).toBeNull();
+  await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+
+  await userEvent.click(screen.getByText("mine"));
+  expect(await screen.findByLabelText("Description")).toHaveProperty("value", "member skill");
+  expect((screen.getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe(
+    "Write tersely.",
+  );
+  expect((screen.getByLabelText("Name") as HTMLInputElement).readOnly).toBe(true);
+});
+
+test("items sort custom ahead of built-in and state where each came from", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }) });
+  renderSkills();
   await openInstalled();
 
   expect(await screen.findByText("mine")).toBeTruthy();
@@ -80,35 +158,22 @@ test("items sort custom ahead of built-in", async () => {
     (node) => node.textContent,
   );
   expect(names).toEqual(["mine", "shipped"]);
-});
-
-test("an item states where its skill came from, and the filter names collections", async () => {
-  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  await renderSkills();
-  await openInstalled();
-
-  expect(await screen.findByText("mine")).toBeTruthy();
   expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
   expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
-  const tabs = within(screen.getByRole("tabpanel"));
-  expect(tabs.queryByRole("tab", { name: "Custom" })).toBeNull();
-  expect(tabs.queryByRole("tab", { name: "Built-in" })).toBeNull();
-  expect(tabs.queryByRole("tab", { name: "All" })).toBeNull();
-  expect(tabs.getByRole("tab", { name: "Community" })).toBeTruthy();
+  expect(within(screen.getByRole("main")).getByRole("tab", { name: "Community" })).toBeTruthy();
 });
 
-test("New skill posts the prepared skill intent for the pane's agent", async () => {
-  const posted: unknown[] = [];
+test("New skill posts the prepared skill intent for the main agent", async () => {
+  const posted: { url: string; body: unknown }[] = [];
   wire({
     ...NO_COMMUNITY,
     "/skills": () => json({ skills: [] }),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
+    "/intents": (url, init) => {
+      posted.push({ url, body: JSON.parse(String(init?.body)) });
       return json({ applied: true, message: "Saved." });
     },
-    "/transcript": () => json({ messages: [] }),
   });
-  await renderSkills();
+  renderSkills();
 
   await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
   await userEvent.type(await screen.findByLabelText("Name"), "fresh");
@@ -117,56 +182,100 @@ test("New skill posts the prepared skill intent for the pane's agent", async () 
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toMatchObject({
+  expect(posted[0].url).toContain(AGENT.id);
+  expect(posted[0].body).toEqual({
     verb: "apply",
     kind: "skill",
     name: "fresh",
-    spec: { files: { "SKILL.md": "---\nname: fresh\ndescription: \"Load when asked.\"\n---\n\nbody\n" } },
+    spec: {
+      files: { "SKILL.md": '---\nname: fresh\ndescription: "Load when asked."\n---\n\nbody\n' },
+      pinned: false,
+    },
   });
 });
 
-test("Delete stands in the skill's own dialog, and only for a custom skill", async () => {
+test("an edit carries the generation, the digests, the frontmatter metadata, and the pin", async () => {
   const posted: unknown[] = [];
   wire({
     ...NO_COMMUNITY,
+    ...MINE_OBJECT,
+    "/skills": () => json({ skills: SKILLS }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
+    },
+  });
+  renderSkills();
+  await openInstalled();
+
+  await userEvent.click(await screen.findByText("mine"));
+  const instructions = await screen.findByLabelText("Instructions");
+  await userEvent.clear(instructions);
+  await userEvent.type(instructions, "Write plainly.");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toEqual({
+    verb: "apply",
+    kind: "skill",
+    name: "mine",
+    spec: {
+      files: {
+        "SKILL.md":
+          '---\nname: mine\ndescription: "member skill"\nmetadata:\n  depends: ["sandbox"]\n' +
+          '  agents: ["helpdesk"]\n---\n\nWrite plainly.\n',
+        "checklist.md": { sha256: "b1946ac92492d2347c6235b4d2611184" },
+      },
+      pinned: true,
+    },
+    generation: MINE_GENERATION,
+  });
+});
+
+test("a save over someone else's newer save surfaces the refusal", async () => {
+  wire({
+    ...NO_COMMUNITY,
+    ...MINE_OBJECT,
+    "/skills": () => json({ skills: SKILLS }),
+    "/intents": () =>
+      json({ applied: false, message: "skill 'mine' changed after it was read." }),
+  });
+  renderSkills();
+  await openInstalled();
+
+  await userEvent.click(await screen.findByText("mine"));
+  await userEvent.click(await screen.findByRole("button", { name: "Save" }));
+
+  expect(await screen.findByText("skill 'mine' changed after it was read.")).toBeTruthy();
+});
+
+test("Delete ends the skill through the intent lane", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...NO_COMMUNITY,
+    ...MINE_OBJECT,
     "/skills": () => json({ skills: SKILLS }),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Deleted." });
     },
-    "/transcript": () => json({ messages: [] }),
   });
-  await renderSkills();
+  renderSkills();
   await openInstalled();
 
-  expect(await screen.findByText("mine")).toBeTruthy();
-  const state = within(screen.getByText("mine").closest("li") as HTMLElement).getByRole("button");
-  expect(state.textContent).toBe("Installed");
-  expect((state as HTMLButtonElement).disabled).toBe(true);
+  await userEvent.click(await screen.findByText("mine"));
+  await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
 
-  await userEvent.click(screen.getByText("shipped"));
-  const shipped = await screen.findByRole("dialog", { name: "shipped" });
-  expect(within(shipped).queryByRole("button", { name: "Delete" })).toBeNull();
-  await userEvent.click(within(shipped).getByRole("button", { name: "Close" }));
-
-  await userEvent.click(screen.getByText("mine"));
-  const dialog = await screen.findByRole("dialog", { name: "mine" });
-  expect(within(dialog).getByLabelText("Description").tagName).toBe("TEXTAREA");
-  expect([...dialog.querySelectorAll("button")].map((one) => one.textContent)).toEqual([
-    "Delete",
-    "Close",
-  ]);
-  await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
-  await userEvent.click(within(dialog).getByRole("button", { name: "Confirm delete" }));
   await waitFor(() => expect(posted).toEqual([{ verb: "delete", kind: "skill", name: "mine" }]));
-  expect(screen.queryByRole("dialog", { name: "mine" })).toBeNull();
+  expect(await screen.findByText("Deleted.")).toBeTruthy();
 });
 
-test("the blank names the agent, and the bar holds the only New skill act", async () => {
-  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
-  await renderSkills();
+test("the blank names the workspace, and the header holds the only New skill act", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: [] }) });
+  renderSkills();
   await openInstalled();
 
-  expect(await screen.findByText("No skill has been saved onto Assistant yet.")).toBeTruthy();
+  expect(await screen.findByText("No skill has been saved onto this workspace yet.")).toBeTruthy();
   expect(screen.getAllByRole("button", { name: "New skill" }).length).toBe(1);
 });

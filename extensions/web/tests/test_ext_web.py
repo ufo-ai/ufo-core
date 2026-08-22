@@ -1119,6 +1119,7 @@ async def web(
                 SOURCE_TRIGGER_KIND_ONLY,
                 SLOTTED,
                 sites_manifest(),
+                skill_create_manifest(),
             ),
             public_base_url="https://web",
         ),
@@ -8919,6 +8920,12 @@ async def test_a_skill_intent_creates_replaces_and_deletes(
     assert saved["description"] == "How release notes read."
     assert saved["origin"] == "member"
     assert saved["instructions"] == "Write tersely."
+    detail = await client.get(
+        f"/surface/web/objects/skill/release-notes?agent={agent_id}", headers=cookie
+    )
+    assert detail.status_code == 200
+    generation = detail.json()["generation"]
+    assert generation
     replaced = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={
@@ -8930,10 +8937,27 @@ async def test_a_skill_intent_creates_replaces_and_deletes(
                     "SKILL.md": SKILL_MD.replace("How release notes read.", "Terse and dated.")
                 }
             },
+            "generation": generation,
         },
         headers=cookie,
     )
     assert replaced.json()["applied"] is True
+    assert (await listed())["release-notes"]["description"] == "Terse and dated."
+    stale = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "skill",
+            "name": "release-notes",
+            "spec": {
+                "files": {"SKILL.md": SKILL_MD.replace("How release notes read.", "Lost race.")}
+            },
+            "generation": generation,
+        },
+        headers=cookie,
+    )
+    assert stale.json()["applied"] is False
+    assert "changed after it was read" in stale.json()["message"]
     assert (await listed())["release-notes"]["description"] == "Terse and dated."
     deleted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
@@ -10237,6 +10261,7 @@ async def test_settings_projects_spec_schema_ceiling_and_admin_audience(
     assert data["spec"] == {
         "model": "claude-opus-4-8",
         "internet_access_allowed": True,
+        "use_workspace_skills": True,
         "reasoning": "high",
         "visibility": "workspace",
         "icon": "compass",
@@ -10246,9 +10271,12 @@ async def test_settings_projects_spec_schema_ceiling_and_admin_audience(
     assert set(data["spec_schema"]["properties"]) == {
         "model",
         "internet_access_allowed",
+        "use_workspace_skills",
         "reasoning",
         "visibility",
     }
+    skills_field = data["spec_schema"]["properties"]["use_workspace_skills"]
+    assert skills_field["title"] == "Use workspace skills"
     assert data["audience"] == []
     granted_view = await client.get(
         f"/surface/web/agents/{second_agent}/settings",

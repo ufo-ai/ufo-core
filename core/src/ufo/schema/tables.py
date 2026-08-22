@@ -123,6 +123,7 @@ agent = sa.Table(
     sa.Column("is_main", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("visibility", sa.Text, nullable=False, server_default=sa.text("'private'")),
     sa.Column("internet_access_allowed", sa.Boolean, nullable=False, server_default=sa.true()),
+    sa.Column("use_workspace_skills", sa.Boolean, nullable=False, server_default=sa.true()),
     sa.Column("sandbox_size", sa.Text, nullable=False, server_default=sa.text("'small'")),
     sa.Column("tools", sa.JSON, nullable=True),
     sa.Column("input_schema", sa.JSON(none_as_null=True), nullable=True),

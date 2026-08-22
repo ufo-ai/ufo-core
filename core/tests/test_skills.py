@@ -9,6 +9,7 @@ from ufo.credentials import CredentialStore
 from ufo.ext.context import ExtensionContext
 from ufo.ext.loader import member_skill_listing, turn_member_skills
 from ufo.ext.manifest import Manifest, MemberSkillsSpec
+from ufo.loop.queue import _without_workspace_skills
 from ufo.sandbox.containment import ContainmentError
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
@@ -808,7 +809,9 @@ FAREWELL = RuntimeSkill(name="farewell", description="say bye", instructions="BY
 
 
 async def test_turn_member_skills_collects_cards_and_routes_materialization() -> None:
-    cards, materialize = await turn_member_skills((_provider_manifest("one", GREET),), _STORE)
+    cards, materialize = await turn_member_skills(
+        (_provider_manifest("one", GREET),), _STORE, agent_name="assistant"
+    )
     assert cards == (GREET.card(),)
     assert await materialize("greet") is GREET
     assert await materialize("unknown") is None
@@ -816,7 +819,7 @@ async def test_turn_member_skills_collects_cards_and_routes_materialization() ->
 
 async def test_turn_member_skills_without_a_credential_key_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="no credential key"):
-        await turn_member_skills((_provider_manifest("one", GREET),), None)
+        await turn_member_skills((_provider_manifest("one", GREET),), None, agent_name="assistant")
 
 
 async def test_a_cross_provider_name_collision_keeps_the_first_and_drops_the_rest() -> None:
@@ -826,10 +829,30 @@ async def test_a_cross_provider_name_collision_keeps_the_first_and_drops_the_res
         _provider_manifest("second", impostor),
     )
 
-    cards, materialize = await turn_member_skills(manifests, _STORE)
+    cards, materialize = await turn_member_skills(manifests, _STORE, agent_name="assistant")
 
     assert cards == (GREET.card(), FAREWELL.card())
     assert await materialize("greet") is GREET
+
+
+async def test_frontmatter_targeting_narrows_the_member_tier_to_named_agents() -> None:
+    """A card whose `agents` names agents is left out of every other agent's tier whole: it does
+    not route and its name does not load; the untargeted card reaches every agent."""
+    targeted = RuntimeSkill(
+        name="triage", description="sort tickets", instructions="SORT", agents=("helpdesk",)
+    )
+    manifests = (_provider_manifest("one", GREET, targeted),)
+
+    helpdesk_cards, helpdesk_load = await turn_member_skills(
+        manifests, _STORE, agent_name="helpdesk"
+    )
+    other_cards, other_load = await turn_member_skills(manifests, _STORE, agent_name="research")
+
+    assert helpdesk_cards == (GREET.card(), targeted.card())
+    assert await helpdesk_load("triage") is targeted
+    assert other_cards == (GREET.card(),)
+    assert await other_load("triage") is None
+    assert await other_load("greet") is GREET
 
 
 async def test_member_skill_listing_materializes_every_provider_whole() -> None:
@@ -844,3 +867,14 @@ async def test_member_skill_listing_materializes_every_provider_whole() -> None:
     assert listed == (GREET, FAREWELL)
     with pytest.raises(RuntimeError, match="no credential key"):
         await member_skill_listing(manifests, None)
+
+
+def test_an_agent_that_declines_workspace_skills_composes_no_member_tier() -> None:
+    """`use_workspace_skills` off leaves the registry the deploy tier alone: nothing routes to the
+    workspace's saved set, and a name it holds does not load."""
+    registry = CORE_SKILL_REGISTRY.with_member((), _without_workspace_skills)
+
+    assert registry.member_cards == {}
+    assert registry.all_cards() == CORE_SKILL_REGISTRY.all_cards()
+    with pytest.raises(ValueError, match="unknown skill 'greet'"):
+        registry.closure("greet")

@@ -387,7 +387,8 @@ untrusted input or multi-tenant deploys.
   `subagent_tool_grants` (union-only); an isolated profile keeps its own list alone. Only core
   constructs the child registry.
 - Skills are not tool-gated: `load_skill` resolves against the deploy registry; member-authored
-  skills join only their bound agent's registry.
+  skills belong to the workspace and join the registry of every agent whose
+  `use_workspace_skills` setting holds.
 - Hooks are a policy **filter** over what grants already admit — a gating hook may deny or
   modify, never admit; a hook that raises or times out fails closed to a deny.
 

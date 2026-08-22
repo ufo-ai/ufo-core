@@ -11,6 +11,7 @@ import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
+import { WorkspaceSkills } from "@/views/WorkspaceSkills";
 import { CREDENTIALS } from "@/views/WorkspaceCredentials";
 import { WorkspaceBilling } from "@/views/Billing";
 import { WorkspaceUsage } from "@/views/Usage";
@@ -46,6 +47,12 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     remountOnPlace: true,
     search: "Search members",
     render: (place, onPlace) => <Team place={place} onPlace={onPlace} />,
+  },
+  skills: {
+    label: "Skills",
+    remountOnPlace: false,
+    search: "Search skills",
+    render: (place, onPlace) => <WorkspaceSkills place={place} onPlace={onPlace} />,
   },
   memory: {
     label: "Memory",

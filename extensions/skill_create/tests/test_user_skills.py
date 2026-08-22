@@ -1,8 +1,8 @@
-"""The agent-scoped user-skill loop end to end: a skill authored in the workspace is applied
+"""The workspace-scoped user-skill loop end to end: a skill authored in the workspace is applied
 as a `skill` object, persisted in the extension's own `user_skill` table with its routing-card
 columns, and served back through the member-skills seam — cards for a turn's routing set,
-one materialized skill per load — never visible to another agent or workspace, never able to
-shadow a core skill.
+one materialized skill per load — answering every agent of that workspace and no other workspace,
+and never able to shadow a core skill.
 
 The store tests drive `UserSkillStore` over a real `ExtensionContext` against a real database; the
 object tests drive the kind through the real object verbs, with `FileFrom` resolution running
@@ -36,27 +36,25 @@ from ufo_ext_skill_create.manifest import (
 )
 from ufo_ext_skill_create.store import (
     MAX_PINNED_USER_SKILLS,
-    MAX_USER_SKILLS_PER_AGENT,
+    MAX_USER_SKILLS_PER_WORKSPACE,
     SKILL_OWNER_KIND,
+    SKILL_SUBJECT,
     InvalidSkillName,
     PinnedSkillLimit,
     SkillCollidesWithCoreSkill,
+    StaleSkillGeneration,
     TooManyUserSkills,
     UserSkillStore,
-    agent_subject,
-    skill_owner_id,
     user_skill,
 )
 
 from ufo.agent_scope import AgentUnbound, agent
-from ufo.agents import AGENT_KIND
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import turn_tools
 from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
-from ufo.object_name import ObjectRef
-from ufo.objects import ObjectLink, ObjectListQuery, UnknownObject
+from ufo.objects import ObjectListQuery
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ProxyEndpoint,
@@ -81,10 +79,16 @@ def _skill_md(
     description: str,
     body: str = "Follow the steps.",
     depends: tuple[str, ...] = (),
+    agents: tuple[str, ...] = (),
 ) -> bytes:
     front: dict[str, object] = {"name": name, "description": description}
+    metadata: dict[str, object] = {}
     if depends:
-        front["metadata"] = {"depends": list(depends)}
+        metadata["depends"] = list(depends)
+    if agents:
+        metadata["agents"] = list(agents)
+    if metadata:
+        front["metadata"] = metadata
     return f"---\n{yaml.safe_dump(front)}---\n{body}\n".encode()
 
 
@@ -94,6 +98,12 @@ def _ext() -> ExtensionContext:
 
 def _store() -> UserSkillStore:
     return UserSkillStore(_ext())
+
+
+async def _generation(store: UserSkillStore, name: str) -> UUID:
+    record = await store.record(name)
+    assert record is not None
+    return record.generation
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -197,7 +207,7 @@ async def _skill_chunk_count() -> int:
 
 
 def test_caps_hold_their_designed_values() -> None:
-    assert MAX_USER_SKILLS_PER_AGENT == 5000
+    assert MAX_USER_SKILLS_PER_WORKSPACE == 5000
     assert MAX_PINNED_USER_SKILLS == 10
 
 
@@ -219,18 +229,22 @@ async def test_save_persists_and_projects_the_routing_card(db: None) -> None:
             await connection.execute(
                 sa.select(
                     user_skill.c.name,
+                    user_skill.c.generation,
                     user_skill.c.digest,
                     user_skill.c.description,
                     user_skill.c.depends,
+                    user_skill.c.agents,
                     user_skill.c.pinned,
                     user_skill.c.indexed_digest,
                 ).where(user_skill.c.workspace_id == workspace_id)
             )
         ).one()
     assert row.name == "greet"
+    assert row.generation is not None
     assert row.digest.startswith("sha256:")
     assert row.description == "greets people"
     assert json.loads(row.depends) == ["tone"]
+    assert json.loads(row.agents) == []
     assert row.pinned is False
     assert row.indexed_digest is None
 
@@ -271,7 +285,6 @@ async def test_cards_survive_corrupt_content_and_materialize_fails_loud(db: None
             .values(content="{ not valid json")
             .where(
                 user_skill.c.workspace_id == workspace_id,
-                user_skill.c.agent_id == agent_id,
                 user_skill.c.name == "alpha",
             )
         )
@@ -295,12 +308,80 @@ async def test_resave_updates_the_card_with_the_same_parse(db: None) -> None:
             "greet",
             {"SKILL.md": _skill_md("greet", "v2", depends=("tone",))},
             frozenset({"greet"}),
+            generation=await _generation(store, "greet"),
         )
         [card] = await store.cards()
         loaded = await store.materialize("greet")
     assert loaded is not None
     assert (card.description, card.depends) == ("v2", ("tone",))
     assert (card.description, card.depends) == (loaded.description, loaded.depends)
+
+
+async def test_save_fences_on_the_generation_the_read_observed(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        await store.save("greet", {"SKILL.md": _skill_md("greet", "v1")}, frozenset())
+        first = await store.record("greet")
+        assert first is not None
+        await store.save(
+            "greet",
+            {"SKILL.md": _skill_md("greet", "v2")},
+            frozenset({"greet"}),
+            generation=first.generation,
+        )
+        with pytest.raises(StaleSkillGeneration, match="changed after it was read"):
+            await store.save(
+                "greet",
+                {"SKILL.md": _skill_md("greet", "lost race")},
+                frozenset({"greet"}),
+                generation=first.generation,
+            )
+        with pytest.raises(StaleSkillGeneration, match="already saved"):
+            await store.save(
+                "greet", {"SKILL.md": _skill_md("greet", "blind")}, frozenset({"greet"})
+            )
+        [card] = await store.cards()
+        record = await store.record("greet")
+    assert card.description == "v2"
+    assert record is not None
+    assert record.generation != first.generation
+
+
+async def test_save_after_a_delete_requires_a_fresh_create(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        await store.save("greet", {"SKILL.md": _skill_md("greet", "v1")}, frozenset())
+        first = await store.record("greet")
+        assert first is not None
+        await store.delete("greet")
+        with pytest.raises(StaleSkillGeneration, match="deleted"):
+            await store.save(
+                "greet",
+                {"SKILL.md": _skill_md("greet", "stale")},
+                frozenset(),
+                generation=first.generation,
+            )
+        await store.save("greet", {"SKILL.md": _skill_md("greet", "anew")}, frozenset())
+        record = await store.record("greet")
+    assert record is not None
+    assert record.generation != first.generation
+    assert record.description == "anew"
+
+
+async def test_frontmatter_agents_persist_on_the_card(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        await store.save(
+            "triage", {"SKILL.md": _skill_md("triage", "d", agents=("helpdesk",))}, frozenset()
+        )
+        [card] = await store.cards()
+        loaded = await store.materialize("triage")
+    assert card.agents == ("helpdesk",)
+    assert loaded is not None
+    assert loaded.agents == ("helpdesk",)
 
 
 async def test_pinned_cap_enforced_and_pin_survives_resave(db: None) -> None:
@@ -318,7 +399,11 @@ async def test_pinned_cap_enforced_and_pin_survives_resave(db: None) -> None:
                 pinned=True,
             )
         await store.save(
-            "pin-0", {"SKILL.md": _skill_md("pin-0", "edited")}, frozenset({"pin-0"}), pinned=True
+            "pin-0",
+            {"SKILL.md": _skill_md("pin-0", "edited")},
+            frozenset({"pin-0"}),
+            pinned=True,
+            generation=await _generation(store, "pin-0"),
         )
         await store.save("unpinned", {"SKILL.md": _skill_md("unpinned", "d")}, frozenset())
         cards = {card.name: card for card in await store.cards()}
@@ -328,12 +413,54 @@ async def test_pinned_cap_enforced_and_pin_survives_resave(db: None) -> None:
     assert "one-too-many" not in cards
 
 
+async def test_a_kept_pin_saves_past_a_cap_the_workspace_already_exceeds(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin cap gates pinning an unpinned skill, never keeping a pin: a workspace the migration
+    left above the cap still re-saves its pinned skills — every portal save states the stored pin
+    back — and only a new pin is refused."""
+    monkeypatch.setattr("ufo_ext_skill_create.store.MAX_PINNED_USER_SKILLS", 1)
+    workspace_id, agent_id = await _workspace_agent()
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        await store.save("first", {"SKILL.md": _skill_md("first", "1")}, frozenset(), pinned=True)
+        await store.save("second", {"SKILL.md": _skill_md("second", "2")}, frozenset())
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(user_skill)
+            .values(pinned=True)
+            .where(user_skill.c.workspace_id == workspace_id, user_skill.c.name == "second")
+        )
+    with ws(workspace_id), agent(agent_id):
+        await store.save(
+            "first",
+            {"SKILL.md": _skill_md("first", "kept")},
+            frozenset({"first"}),
+            pinned=True,
+            generation=await _generation(store, "first"),
+        )
+        with pytest.raises(PinnedSkillLimit):
+            await store.save(
+                "third", {"SKILL.md": _skill_md("third", "3")}, frozenset(), pinned=True
+            )
+        cards = {card.name: card for card in await store.cards()}
+    assert cards["first"].pinned is True
+    assert cards["first"].description == "kept"
+    assert cards["second"].pinned is True
+    assert "third" not in cards
+
+
 async def test_resave_without_a_pin_unpins(db: None) -> None:
     workspace_id, agent_id = await _workspace_agent()
     store = _store()
     with ws(workspace_id), agent(agent_id):
         await store.save("greet", {"SKILL.md": _skill_md("greet", "d")}, frozenset(), pinned=True)
-        await store.save("greet", {"SKILL.md": _skill_md("greet", "d")}, frozenset({"greet"}))
+        await store.save(
+            "greet",
+            {"SKILL.md": _skill_md("greet", "d")},
+            frozenset({"greet"}),
+            generation=await _generation(store, "greet"),
+        )
         [card] = await store.cards()
     assert card.pinned is False
 
@@ -390,7 +517,7 @@ async def test_save_accepts_a_valid_slug_name(db: None) -> None:
 async def test_save_refuses_over_the_skill_cap_but_allows_a_resave(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ufo_ext_skill_create.store.MAX_USER_SKILLS_PER_AGENT", 2)
+    monkeypatch.setattr("ufo_ext_skill_create.store.MAX_USER_SKILLS_PER_WORKSPACE", 2)
     workspace_id, agent_id = await _workspace_agent()
     store = _store()
     with ws(workspace_id), agent(agent_id):
@@ -398,18 +525,24 @@ async def test_save_refuses_over_the_skill_cap_but_allows_a_resave(
         await store.save("two", {"SKILL.md": _skill_md("two", "2")}, frozenset())
         with pytest.raises(TooManyUserSkills):
             await store.save("three", {"SKILL.md": _skill_md("three", "3")}, frozenset())
-        await store.save("one", {"SKILL.md": _skill_md("one", "1b")}, frozenset({"one"}))
+        await store.save(
+            "one",
+            {"SKILL.md": _skill_md("one", "1b")},
+            frozenset({"one"}),
+            generation=await _generation(store, "one"),
+        )
         assert sorted(card.name for card in await store.cards()) == ["one", "two"]
     other_agent = await _agent(workspace_id, "other")
     with ws(workspace_id), agent(other_agent):
-        await store.save("three", {"SKILL.md": _skill_md("three", "3")}, frozenset())
+        with pytest.raises(TooManyUserSkills):
+            await store.save("three", {"SKILL.md": _skill_md("three", "3")}, frozenset())
 
 
 async def test_member_skills_seam_serves_cards_and_materializes_by_name(db: None) -> None:
     """The seam end to end: the extension's `member_skills` declaration is the producer core's
     turn admission consumes — `cards` answers the routing set and `materialize` one named load,
-    each under the ambient workspace and agent scope, and another agent or workspace sees none of
-    it."""
+    each under the ambient workspace. Every agent of that workspace reads the same set; another
+    workspace sees none of it."""
     author, agent_id = await _workspace_agent()
     other, other_agent = await _workspace_agent()
     author_other_agent = await _agent(author, "other")
@@ -428,8 +561,8 @@ async def test_member_skills_seam_serves_cards_and_materializes_by_name(db: None
     assert missing is None
 
     with ws(author), agent(author_other_agent):
-        assert await spec.cards(_ext()) == ()
-        assert await spec.materialize(_ext(), "greet") is None
+        assert await spec.cards(_ext()) == cards
+        assert await spec.materialize(_ext(), "greet") is not None
     with ws(other), agent(other_agent):
         assert await spec.cards(_ext()) == ()
         assert await spec.materialize(_ext(), "greet") is None
@@ -450,13 +583,13 @@ async def test_index_job_derives_chunks_and_settles_the_digest(db: None) -> None
     assert derived >= 1
     with ws(workspace_id):
         [hit] = await index.lexical(
-            "greets visitors", frozenset({agent_subject(agent_id)}), SKILL_OWNER_KIND, 10
+            "greets visitors", frozenset({SKILL_SUBJECT}), SKILL_OWNER_KIND, 10
         )
-        assert hit.owner_id == skill_owner_id(agent_id, "greet")
-        assert hit.subject == agent_subject(agent_id)
+        assert hit.owner_id == "greet"
+        assert hit.subject == SKILL_SUBJECT
         assert (
             await index.lexical(
-                "greets visitors", frozenset({agent_subject(uuid4())}), SKILL_OWNER_KIND, 10
+                "greets visitors", frozenset({"agent:" + str(uuid4())}), SKILL_OWNER_KIND, 10
             )
             == ()
         )
@@ -475,7 +608,7 @@ async def test_index_job_reindexes_an_edit_and_prunes_the_old_text(db: None) -> 
     workspace_id, agent_id = await _workspace_agent()
     ctx, index = _indexed_ext()
     store = UserSkillStore(ctx)
-    subjects = frozenset({agent_subject(agent_id)})
+    subjects = frozenset({SKILL_SUBJECT})
     with ws(workspace_id), agent(agent_id):
         await store.save(
             "greet", {"SKILL.md": _skill_md("greet", "greets visitors politely")}, frozenset()
@@ -484,7 +617,10 @@ async def test_index_job_reindexes_an_edit_and_prunes_the_old_text(db: None) -> 
         await index_skills(ctx)
     with ws(workspace_id), agent(agent_id):
         await store.save(
-            "greet", {"SKILL.md": _skill_md("greet", "sends farewells")}, frozenset({"greet"})
+            "greet",
+            {"SKILL.md": _skill_md("greet", "sends farewells")},
+            frozenset({"greet"}),
+            generation=await _generation(store, "greet"),
         )
     async with workspace_tx() as connection:
         stale = (
@@ -495,7 +631,7 @@ async def test_index_job_reindexes_an_edit_and_prunes_the_old_text(db: None) -> 
     with ws(workspace_id):
         await index_skills(ctx)
         [hit] = await index.lexical("farewells", subjects, SKILL_OWNER_KIND, 10)
-        assert hit.owner_id == skill_owner_id(agent_id, "greet")
+        assert hit.owner_id == "greet"
         assert await index.lexical("politely", subjects, SKILL_OWNER_KIND, 10) == ()
     async with workspace_tx() as connection:
         settled = (
@@ -562,8 +698,12 @@ async def test_index_job_runs_through_the_job_runner_on_stale_candidates(db: Non
     assert row.indexed_digest == row.digest
 
     with ws(ws_with_work), agent(agent_id):
-        await UserSkillStore(ctx).save(
-            "greet", {"SKILL.md": _skill_md("greet", "sends farewells")}, frozenset({"greet"})
+        store = UserSkillStore(ctx)
+        await store.save(
+            "greet",
+            {"SKILL.md": _skill_md("greet", "sends farewells")},
+            frozenset({"greet"}),
+            generation=await _generation(store, "greet"),
         )
     assert set(await job.candidates()) == {ws_with_work}
 
@@ -584,7 +724,6 @@ async def test_materialize_all_skips_corrupt_and_keeps_the_rest(db: None) -> Non
             .values(content="{ not valid json")
             .where(
                 user_skill.c.workspace_id == workspace_id,
-                user_skill.c.agent_id == agent_id,
                 user_skill.c.name == "alpha",
             )
         )
@@ -612,7 +751,6 @@ async def test_backfill_sentinel_row_hides_from_cards_and_stays_deletable(db: No
             .values(description="", depends="[]", content="{ not valid json")
             .where(
                 user_skill.c.workspace_id == workspace_id,
-                user_skill.c.agent_id == agent_id,
                 user_skill.c.name == "greet",
             )
         )
@@ -650,7 +788,7 @@ async def test_delete_crash_after_prune_leaves_a_stale_row_the_next_tick_repairs
             .where(user_skill.c.workspace_id == workspace_id, user_skill.c.name == "greet")
         )
     with ws(workspace_id):
-        await index.delete(IndexScope(SKILL_OWNER_KIND, skill_owner_id(agent_id, "greet")))
+        await index.delete(IndexScope(SKILL_OWNER_KIND, "greet"))
     assert await _skill_chunk_count() == 0
 
     with ws(workspace_id):
@@ -658,7 +796,7 @@ async def test_delete_crash_after_prune_leaves_a_stale_row_the_next_tick_repairs
         assert (
             len(
                 await index.lexical(
-                    "greets visitors", frozenset({agent_subject(agent_id)}), SKILL_OWNER_KIND, 10
+                    "greets visitors", frozenset({SKILL_SUBJECT}), SKILL_OWNER_KIND, 10
                 )
             )
             == 1
@@ -720,10 +858,8 @@ async def test_row_resaved_mid_embed_stays_stale_until_the_next_tick(db: None) -
 
     with ws(workspace_id):
         await index_skills(ctx)
-        [hit] = await index.lexical(
-            "farewells", frozenset({agent_subject(agent_id)}), SKILL_OWNER_KIND, 10
-        )
-        assert hit.owner_id == skill_owner_id(agent_id, "greet")
+        [hit] = await index.lexical("farewells", frozenset({SKILL_SUBJECT}), SKILL_OWNER_KIND, 10)
+        assert hit.owner_id == "greet"
     async with workspace_tx() as connection:
         settled = (
             await connection.execute(sa.select(user_skill.c.digest, user_skill.c.indexed_digest))
@@ -810,11 +946,16 @@ def _object_tool(name: str) -> ToolDef:
     return next(tool for tool in tools if tool.name == name)
 
 
-def _skill_manifest(name: str, files: dict[str, object], pinned: bool | None = None) -> str:
+def _skill_manifest(
+    name: str, files: dict[str, object], pinned: bool | None = None, generation: str | None = None
+) -> str:
     spec: dict[str, object] = {"files": files}
     if pinned is not None:
         spec["pinned"] = pinned
-    return yaml.safe_dump({"kind": SKILL_KIND, "name": name, "spec": spec})
+    document: dict[str, object] = {"kind": SKILL_KIND, "name": name, "spec": spec}
+    if generation is not None:
+        document["generation"] = generation
+    return yaml.safe_dump(document)
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
@@ -939,7 +1080,9 @@ async def test_pinned_spec_round_trips_through_apply_and_get(db: None, tmp_path)
     assert cleared["spec"]["pinned"] is False
 
 
-async def test_a_saved_skill_links_to_the_agent_it_belongs_to(db: None, tmp_path) -> None:
+async def test_a_saved_skill_is_scoped_to_no_agent(db: None, tmp_path) -> None:
+    """A skill belongs to the workspace, so its record links to nothing narrower: an agent that
+    saved one holds no claim over it, and every other agent of the workspace reads the same set."""
     workspace_id, agent_id = await _workspace_agent(name="research")
     ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
     inline = _skill_md("greet", "greets people").decode()
@@ -952,9 +1095,7 @@ async def test_a_saved_skill_links_to_the_agent_it_belongs_to(db: None, tmp_path
         fetched = yaml.safe_load(
             await _dispatch(_object_tool("object_get"), ctx, kind=SKILL_KIND, name="greet")
         )
-    assert fetched["links"] == [
-        {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": "research"}}
-    ]
+    assert "links" not in fetched or fetched["links"] == []
 
 
 async def test_reapplied_skill_updates_and_delete_removes(db: None, tmp_path) -> None:
@@ -1022,6 +1163,48 @@ async def test_reapply_keeps_files_by_digest_and_refuses_unknown(db: None, tmp_p
         )
         with pytest.raises(ValueError, match="no stored content"):
             await apply.handler(ctx, stale)
+
+
+async def test_apply_fences_on_the_generation_the_get_returned(db: None, tmp_path) -> None:
+    """The object verb carries the fence: object_get returns the skill's generation, a manifest
+    echoing it applies exactly once, and a manifest still holding it after another save is refused
+    with the other writer's content kept."""
+    workspace_id, agent_id = await _workspace_agent()
+    ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
+    apply = _object_tool("object_apply")
+    get = _object_tool("object_get")
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            apply,
+            ctx,
+            manifest=_skill_manifest("greet", {"SKILL.md": _skill_md("greet", "v1").decode()}),
+        )
+        fetched = yaml.safe_load(await _dispatch(get, ctx, kind=SKILL_KIND, name="greet"))
+        await _dispatch(
+            apply,
+            ctx,
+            manifest=_skill_manifest(
+                "greet",
+                {"SKILL.md": _skill_md("greet", "v2").decode()},
+                generation=fetched["generation"],
+            ),
+        )
+        stale = apply.input_model.model_validate(
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _skill_manifest(
+                    "greet",
+                    {"SKILL.md": _skill_md("greet", "lost race").decode()},
+                    generation=fetched["generation"],
+                ),
+            }
+        )
+        with pytest.raises(StaleSkillGeneration, match="changed after it was read"):
+            await apply.handler(ctx, stale)
+        refetched = yaml.safe_load(await _dispatch(get, ctx, kind=SKILL_KIND, name="greet"))
+        [card] = await _store().cards()
+    assert card.description == "v2"
+    assert refetched["generation"] != fetched["generation"]
 
 
 async def test_apply_refuses_shadow_and_frontmatter_mismatch(db: None, tmp_path) -> None:
@@ -1143,7 +1326,7 @@ async def test_apply_refuses_binary_and_missing_sources(db: None, tmp_path) -> N
 async def test_apply_enforces_the_cap_but_allows_a_reapply(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ufo_ext_skill_create.store.MAX_USER_SKILLS_PER_AGENT", 1)
+    monkeypatch.setattr("ufo_ext_skill_create.store.MAX_USER_SKILLS_PER_WORKSPACE", 1)
     workspace_id, agent_id = await _workspace_agent()
     ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
     apply = _object_tool("object_apply")
@@ -1170,9 +1353,10 @@ async def test_apply_enforces_the_cap_but_allows_a_reapply(
     assert [(card.name, card.description) for card in cards] == [("one", "1b")]
 
 
-async def test_skill_dispatch_and_the_seam_stay_inside_the_agent_boundary(
-    db: None, tmp_path
-) -> None:
+async def test_skill_dispatch_and_the_seam_answer_one_workspace_set(db: None, tmp_path) -> None:
+    """One name is one skill of the workspace: the agent that saved it holds no wall around it, a
+    second agent lists it and gets it by name, and that agent's own apply of the name writes the
+    same row rather than a second one."""
     workspace_id, first_agent = await _workspace_agent("first")
     second_agent = await _agent(workspace_id, "second")
     first = _tool_ctx(workspace_id, None, tmp_path, first_agent)
@@ -1193,20 +1377,18 @@ async def test_skill_dispatch_and_the_seam_stay_inside_the_agent_boundary(
 
     with ws(workspace_id), agent(second_agent):
         listing = json.loads(await _dispatch(_object_tool("object_list"), second, kind=SKILL_KIND))
-        assert listing["objects"] == []
-        get = _object_tool("object_get")
-        with pytest.raises(UnknownObject):
-            await get.handler(
-                second,
-                get.input_model.model_validate(
-                    {"user_description": TOOL_NARRATION, "kind": SKILL_KIND, "name": "greet"}
-                ),
-            )
+        assert [row["name"] for row in listing["objects"]] == ["greet"]
+        fetched = yaml.safe_load(
+            await _dispatch(_object_tool("object_get"), second, kind=SKILL_KIND, name="greet")
+        )
+        assert fetched["status"]["description"] == "first agent"
         await _dispatch(
             apply,
             second,
             manifest=_skill_manifest(
-                "greet", {"SKILL.md": _skill_md("greet", "second agent").decode()}
+                "greet",
+                {"SKILL.md": _skill_md("greet", "second agent").decode()},
+                generation=fetched["generation"],
             ),
         )
         [second_card] = await spec.cards(_ext())
@@ -1216,18 +1398,18 @@ async def test_skill_dispatch_and_the_seam_stay_inside_the_agent_boundary(
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
-                sa.select(user_skill.c.agent_id, user_skill.c.name)
-                .where(user_skill.c.workspace_id == workspace_id)
-                .order_by(user_skill.c.agent_id)
+                sa.select(user_skill.c.name, user_skill.c.generation).where(
+                    user_skill.c.workspace_id == workspace_id
+                )
             )
         ).all()
-    assert {(row.agent_id, row.name) for row in rows} == {
-        (first_agent, "greet"),
-        (second_agent, "greet"),
-    }
+    assert [row.name for row in rows] == ["greet"]
+    assert all(row.generation is not None for row in rows)
 
 
-async def test_object_get_resolves_same_named_skills_per_agent(db: None, tmp_path) -> None:
+async def test_object_get_resolves_the_one_skill_of_that_name(db: None, tmp_path) -> None:
+    """A second agent's apply of a name the workspace already holds edits that skill: one record
+    stands behind the name, with the timestamps of the row the first save created."""
     workspace_id, first_agent = await _workspace_agent("first")
     second_agent = await _agent(workspace_id, "second")
     first = _tool_ctx(workspace_id, None, tmp_path, first_agent)
@@ -1243,35 +1425,13 @@ async def test_object_get_resolves_same_named_skills_per_agent(db: None, tmp_pat
             first,
             manifest=_skill_manifest("greet", {"SKILL.md": first_md.decode()}),
         )
+        first_get = yaml.safe_load(await _dispatch(get, first, kind=SKILL_KIND, name="greet"))
     with ws(workspace_id), agent(second_agent):
         await _dispatch(
             apply,
             second,
             manifest=_skill_manifest("greet", {"SKILL.md": second_md.decode()}),
         )
-
-    first_created = datetime(2026, 7, 1, tzinfo=UTC)
-    first_updated = datetime(2026, 7, 2, tzinfo=UTC)
-    second_created = datetime(2026, 7, 3, tzinfo=UTC)
-    second_updated = datetime(2026, 7, 4, tzinfo=UTC)
-    async with workspace_tx() as connection:
-        for agent_id, created_at, updated_at in (
-            (first_agent, first_created, first_updated),
-            (second_agent, second_created, second_updated),
-        ):
-            await connection.execute(
-                sa.update(user_skill)
-                .values(created_at=created_at, updated_at=updated_at)
-                .where(
-                    user_skill.c.workspace_id == workspace_id,
-                    user_skill.c.agent_id == agent_id,
-                    user_skill.c.name == "greet",
-                )
-            )
-
-    with ws(workspace_id), agent(first_agent):
-        first_get = yaml.safe_load(await _dispatch(get, first, kind=SKILL_KIND, name="greet"))
-    with ws(workspace_id), agent(second_agent):
         second_get = yaml.safe_load(await _dispatch(get, second, kind=SKILL_KIND, name="greet"))
 
     assert first_get["spec"]["files"]["SKILL.md"] == {
@@ -1284,20 +1444,12 @@ async def test_object_get_resolves_same_named_skills_per_agent(db: None, tmp_pat
     }
     assert first_get["status"]["description"] == "first agent"
     assert second_get["status"]["description"] == "second agent"
-    assert datetime.fromisoformat(str(first_get["created_at"])).replace(tzinfo=UTC) == first_created
-    assert datetime.fromisoformat(str(first_get["updated_at"])).replace(tzinfo=UTC) == first_updated
-    assert (
-        datetime.fromisoformat(str(second_get["created_at"])).replace(tzinfo=UTC) == second_created
-    )
-    assert (
-        datetime.fromisoformat(str(second_get["updated_at"])).replace(tzinfo=UTC) == second_updated
-    )
+    assert first_get["created_at"] == second_get["created_at"]
 
 
-async def test_portal_reads_stay_inside_the_agent_that_saved_the_skill(db: None, tmp_path) -> None:
-    """The portal reads a saved skill behind the one wall the turn reads behind — the bound agent.
-    A skill only the first agent saved is absent from the second agent's index and not-found by
-    name there, and the detail's `scoped_to` link names the agent whose set answered."""
+async def test_portal_reads_answer_the_workspace_set_from_any_agent(db: None, tmp_path) -> None:
+    """The portal reads the workspace's saved set, whichever agent the caller bound: the skill one
+    agent saved lists and opens under a second one, and its record names no agent."""
     workspace_id, first_agent = await _workspace_agent("first")
     second_agent = await _agent(workspace_id, "second")
     ctx = _tool_ctx(workspace_id, None, tmp_path, first_agent)
@@ -1324,11 +1476,9 @@ async def test_portal_reads_stay_inside_the_agent_that_saved_the_skill(db: None,
         other_read = await store.member_detail(ext, "greet", member_id=member_id, admin=True)
     assert [(row.name, row.summary) for row in owner_rows] == [("greet", "first agent")]
     assert owner_read is not None
-    assert owner_read.detail.links == (
-        ObjectLink(relation="scoped_to", target=ObjectRef(kind=AGENT_KIND, name="first")),
-    )
-    assert other_rows == ()
-    assert other_read is None
+    assert owner_read.detail.links == ()
+    assert [(row.name, row.summary) for row in other_rows] == [("greet", "first agent")]
+    assert other_read is not None
 
 
 async def test_a_corrupt_skill_still_lists_from_its_card_columns(db: None) -> None:
@@ -1345,7 +1495,6 @@ async def test_a_corrupt_skill_still_lists_from_its_card_columns(db: None) -> No
             .values(content="{ not valid json")
             .where(
                 user_skill.c.workspace_id == workspace_id,
-                user_skill.c.agent_id == agent_id,
                 user_skill.c.name == "alpha",
             )
         )

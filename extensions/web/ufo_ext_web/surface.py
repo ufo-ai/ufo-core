@@ -2172,8 +2172,10 @@ def _usage_payload(report: MemberSpendReport | SpendReport) -> dict[str, object]
 
 
 async def skills(ctx: SurfaceContext, request: Request) -> Response:
-    """The selected agent's loadable skills: its own member-authored ones and the deploy's shared
-    set."""
+    """The loadable skills the workspace page manages: the workspace's own member-authored ones and
+    the deploy's shared set. An edit reads the skill's generation and file digests from the object
+    detail (`objects/skill/<name>`); this listing carries the frontmatter's routing metadata so a
+    regenerated SKILL.md keeps it."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -2187,6 +2189,8 @@ async def skills(ctx: SurfaceContext, request: Request) -> Response:
                     "description": skill.description,
                     "origin": skill.origin,
                     "instructions": skill.instructions,
+                    "depends": list(skill.depends),
+                    "agents": list(skill.agents),
                 }
                 for skill in listed
             ]
@@ -4003,6 +4007,7 @@ async def object_detail(ctx: SurfaceContext, request: Request) -> Response:
             "name": found.row.name,
             "summary": found.row.summary,
             "spec": detail.spec.model_dump(mode="json") if detail.spec_visible else None,
+            "generation": None if detail.generation is None else str(detail.generation),
             "status": dict(found.row.fields),
             "links": [
                 {

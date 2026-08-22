@@ -8,13 +8,13 @@ A turn that reaches its own terminal also records its response, calls, and redac
 so the archive shows what the agent did instead of loading. A case whose expected skill is not
 loadable under the active pack or its own seeded corpus is excluded, not failed.
 
-Member-tier cases seed their corpus onto the case's agent through the real member save path
+Member-tier cases seed their corpus onto the case's workspace through the real member save path
 (`UserSkillStore.save`, the same write `create-skill` lands), so the saved rows, card columns, and
-per-turn projection are exactly what a member save produces. Skills are agent-scoped: every case
-starts from a wiped member tier and a seeding case wipes again after itself, since a leftover
+per-turn projection are exactly what a member save produces. Skills are workspace-scoped: every
+case starts from a wiped member tier and a seeding case wipes again after itself, since a leftover
 fixture would join the next case's corpus and falsify its regime. Seeding cases run one at a time
 after the unseeded cases, and a suite containing any becomes exclusive — a seeded corpus is
-visible to every concurrent turn of the same agent.
+visible to every concurrent turn of the workspace.
 
 Block ablation is a stack property, not a case property: `[skills] member_block` in the serve
 config renders or suppresses member-skill visibility — the turn-message block and the small-corpus
@@ -38,7 +38,11 @@ from typing import Protocol, cast
 from uuid import UUID
 
 import sqlalchemy as sa
-from ufo_ext_skill_create.store import MAX_USER_SKILLS_PER_AGENT, UserSkillStore, user_skill
+from ufo_ext_skill_create.store import (
+    MAX_USER_SKILLS_PER_WORKSPACE,
+    UserSkillStore,
+    user_skill,
+)
 
 from evals.harness.capability import WorkspaceFile
 from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject, digest_payload
@@ -120,8 +124,8 @@ async def seed_member_skills(
     fixtures: tuple[SkillFixture, ...],
     registry_names: frozenset[str],
 ) -> None:
-    """Save fixtures to the bound agent through the real member save path, pins included, so the
-    rows and card columns are exactly what a member save writes. `registry_names` is the deploy
+    """Save fixtures to the bound workspace through the real member save path, pins included, so
+    the rows and card columns are exactly what a member save writes. `registry_names` is the deploy
     tier — a fixture colliding with a pack skill fails the seed."""
     store = UserSkillStore(ctx=ctx)
     for fixture in fixtures:
@@ -130,17 +134,14 @@ async def seed_member_skills(
         )
 
 
-async def forget_agent_skills() -> None:
-    """Delete every user skill of the bound agent — the skill sibling of
-    `forget_workspace_memory`. Skills are agent-scoped, so a fixture an earlier case left behind
-    would join the next case's corpus and falsify the regime its assertions were built on."""
+async def forget_workspace_skills() -> None:
+    """Delete every user skill of the bound workspace — the skill sibling of
+    `forget_workspace_memory`. A fixture an earlier case left behind would join the next case's
+    corpus and falsify the regime its assertions were built on."""
     scope = agent_current()
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.delete(user_skill).where(
-                user_skill.c.workspace_id == scope.workspace_id,
-                user_skill.c.agent_id == scope.agent_id,
-            )
+            sa.delete(user_skill).where(user_skill.c.workspace_id == scope.workspace_id)
         )
 
 
@@ -408,13 +409,13 @@ class SkillLoadingSuite:
                 evidence=self._evidence(case, None, None),
                 excluded=True,
             )
-        if len(case.seeds) > MAX_USER_SKILLS_PER_AGENT:
+        if len(case.seeds) > MAX_USER_SKILLS_PER_WORKSPACE:
             return EvalCaseResult(
                 name=case.name,
                 passed=False,
                 reason=(
                     f"corpus of {len(case.seeds)} exceeds the live cap "
-                    f"MAX_USER_SKILLS_PER_AGENT={MAX_USER_SKILLS_PER_AGENT}"
+                    f"MAX_USER_SKILLS_PER_WORKSPACE={MAX_USER_SKILLS_PER_WORKSPACE}"
                 ),
                 evidence=self._evidence(case, None, None),
                 excluded=True,
@@ -440,7 +441,7 @@ class SkillLoadingSuite:
         loadable: frozenset[str],
     ) -> EvalCaseResult:
         await forget_workspace_memory()
-        await forget_agent_skills()
+        await forget_workspace_skills()
         conversation_id = await target.conversations.open(
             case.name, workspace_files=case.workspace_files
         )
@@ -481,7 +482,7 @@ class SkillLoadingSuite:
             )
         finally:
             if case.seeds:
-                await forget_agent_skills()
+                await forget_workspace_skills()
 
     async def _prelude(
         self, case: SkillLoadCase, target: SkillLoadRunTarget, conversation_id: UUID

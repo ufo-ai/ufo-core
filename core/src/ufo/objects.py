@@ -53,6 +53,7 @@ OBJECT_MANIFEST_MAX_BYTES = 65_536
 MATERIALIZE_MAX_BYTES = 33_554_432
 OBJECT_LIST_PAGE = 50
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
+ENVELOPE_GENERATION_KEY = "generation"
 AGENT_TARGET_DESCRIPTION = (
     "Stable agent name for an agent-scoped kind. Omit for this agent. Only the workspace main "
     "agent may target another agent, on an exact member-requested call."
@@ -112,7 +113,8 @@ class UnknownObject(ValueError):
 
 
 class InvalidManifest(ValueError):
-    """The apply payload is not one YAML document of exactly `kind`, `name`, and `spec`."""
+    """The apply payload is not one YAML document of exactly `kind`, `name`, and `spec`, plus an
+    optional `generation` echoing what an object_get returned."""
 
 
 class SpecValidationFailed(ValueError):
@@ -898,8 +900,10 @@ class ObjectVerbs:
             ToolDef(
                 name="object_apply",
                 description=(
-                    "Create or update a workspace object from one YAML manifest with exactly "
-                    "three top-level keys: `kind`, `name`, and `spec`. An existing name is an "
+                    "Create or update a workspace object from one YAML manifest with top-level "
+                    "keys `kind`, `name`, and `spec`, plus `generation` when updating an object "
+                    "whose object_get returned one — echo that value, and the apply is refused "
+                    "if the object changed after your read. An existing name is an "
                     "update, a new one a create; the spec is validated against the kind's "
                     "schema (see object_explain) before anything runs. Kinds that don't accept "
                     "a mutation refuse with the path that does. The main agent may pass a stable "
@@ -992,6 +996,8 @@ class ObjectVerbs:
             "created_at": None if detail.created_at is None else detail.created_at.isoformat(),
             "updated_at": None if detail.updated_at is None else detail.updated_at.isoformat(),
         }
+        if detail.generation is not None:
+            rendered["generation"] = str(detail.generation)
         if target is not None:
             rendered["agent"] = target.name
         return ToolResult(content=(TextContent(text=yaml.safe_dump(rendered, sort_keys=False)),))
@@ -1012,7 +1018,7 @@ class ObjectVerbs:
         )
 
     async def _apply(self, ctx: ToolContext, args: ObjectApplyInput) -> ToolResult:
-        kind_name, name, spec_mapping = _parse_envelope(args.manifest)
+        kind_name, name, spec_mapping, stated_generation = _parse_envelope(args.manifest)
         bound = self._resolve(kind_name)
         target = await self._target(
             ctx,
@@ -1047,7 +1053,13 @@ class ObjectVerbs:
                 name,
                 spec,
                 None if existing is None else existing.spec,
-                expected_generation=None if existing is None else existing.generation,
+                expected_generation=(
+                    stated_generation
+                    if stated_generation is not None
+                    else None
+                    if existing is None
+                    else existing.generation
+                ),
             )
         result = {
             "kind": kind_name,
@@ -1140,7 +1152,7 @@ class ObjectVerbs:
         return ObjectAgent(id=target.id, name=target.name)
 
 
-def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object]]:
+def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object], UUID | None]:
     if len(manifest.encode()) > OBJECT_MANIFEST_MAX_BYTES:
         raise InvalidManifest(f"manifest exceeds {OBJECT_MANIFEST_MAX_BYTES} bytes")
     try:
@@ -1149,16 +1161,24 @@ def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object]]:
         raise InvalidManifest(f"manifest is not one YAML document: {error}") from error
     if not isinstance(document, dict):
         raise InvalidManifest("manifest must be a YAML mapping of kind, name, and spec")
-    if set(document) != ENVELOPE_KEYS:
+    if set(document) - {ENVELOPE_GENERATION_KEY} != ENVELOPE_KEYS:
         raise InvalidManifest(
-            f"manifest keys must be exactly kind, name, spec; got {sorted(document)}"
+            f"manifest keys must be exactly kind, name, spec, and an optional generation; "
+            f"got {sorted(document)}"
         )
     kind, name, spec = document["kind"], document["name"], document["spec"]
     if not isinstance(kind, str) or not isinstance(name, str):
         raise InvalidManifest("kind and name must be strings")
     if not isinstance(spec, dict):
         raise InvalidManifest("spec must be a mapping")
-    return kind, name, spec
+    stated = document.get(ENVELOPE_GENERATION_KEY)
+    if stated is None:
+        return kind, name, spec, None
+    try:
+        generation = UUID(str(stated))
+    except ValueError as error:
+        raise InvalidManifest("generation must be the value an object_get returned") from error
+    return kind, name, spec, generation
 
 
 def _json_result(payload: Mapping[str, object]) -> ToolResult:

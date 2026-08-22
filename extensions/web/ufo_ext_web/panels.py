@@ -68,6 +68,7 @@ class ApplyIntent(BaseModel):
     ]
     name: str
     spec: dict[str, JsonValue] | None = None
+    generation: str | None = None
     create_only: bool = False
 
     @classmethod
@@ -752,11 +753,14 @@ def _tool_intent(
                 },
             )
         case ApplyIntent():
-            manifest = yaml.safe_dump(
-                {"kind": submitted.kind, "name": submitted.name, "spec": submitted.spec or {}},
-                sort_keys=False,
-                allow_unicode=True,
-            )
+            envelope: dict[str, object] = {
+                "kind": submitted.kind,
+                "name": submitted.name,
+                "spec": submitted.spec or {},
+            }
+            if submitted.generation is not None:
+                envelope["generation"] = submitted.generation
+            manifest = yaml.safe_dump(envelope, sort_keys=False, allow_unicode=True)
             return ToolIntent(
                 tool="object_apply",
                 input={
@@ -1017,6 +1021,7 @@ async def agent_settings(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
             "spec": AgentSpec(
                 model=detail.model,
                 internet_access_allowed=detail.internet_access_allowed,
+                use_workspace_skills=detail.use_workspace_skills,
                 reasoning=detail.reasoning,
                 sandbox_size=detail.sandbox_size,
                 visibility=detail.visibility,

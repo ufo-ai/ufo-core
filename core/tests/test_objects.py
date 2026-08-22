@@ -913,6 +913,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
         assert fetched["spec"] == {
             "model": "claude-opus-4-8",
             "internet_access_allowed": True,
+            "use_workspace_skills": True,
             "reasoning": "high",
             "sandbox_size": "small",
             "visibility": "workspace",

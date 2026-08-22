@@ -1,4 +1,9 @@
-"""Agent-owned member-authored skills, persisted across turns and disposable sandboxes."""
+"""Workspace-owned member-authored skills, persisted across turns and disposable sandboxes.
+
+One name is one skill across the workspace: the portal's workspace page manages the set, every
+agent whose `use_workspace_skills` setting holds loads it, and a row's `generation` moves on every
+save — a save must carry the generation its read observed, so two writers cannot silently overwrite
+each other."""
 
 import base64
 import hashlib
@@ -8,7 +13,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
@@ -20,9 +25,10 @@ from ufo.sdk.skills import RuntimeSkill, SkillCard, parse_skill_content
 
 DIGEST_PREFIX = "sha256:"
 SKILL_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
-MAX_USER_SKILLS_PER_AGENT = 5000
+MAX_USER_SKILLS_PER_WORKSPACE = 5000
 MAX_PINNED_USER_SKILLS = 10
 SKILL_OWNER_KIND = "skill"
+SKILL_SUBJECT = "workspace"
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +37,13 @@ user_skill = sa.Table(
     "user_skill",
     _metadata,
     sa.Column("workspace_id", sa.Uuid, primary_key=True),
-    sa.Column("agent_id", sa.Uuid, primary_key=True),
     sa.Column("name", sa.Text, primary_key=True),
+    sa.Column("generation", sa.Uuid, nullable=False),
     sa.Column("digest", sa.Text, nullable=False),
     sa.Column("content", sa.Text, nullable=False),
     sa.Column("description", sa.Text, nullable=False),
     sa.Column("depends", sa.Text, nullable=False),
+    sa.Column("agents", sa.Text, nullable=False),
     sa.Column("pinned", sa.Boolean, nullable=False),
     sa.Column("indexed_digest", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -44,19 +51,8 @@ user_skill = sa.Table(
 )
 
 
-def skill_owner_id(agent_id: UUID, name: str) -> str:
-    """The index owner id of one agent's skill: the scope a save's chunks upsert under and a
-    delete prunes."""
-    return f"{agent_id}:{name}"
-
-
-def agent_subject(agent_id: UUID) -> str:
-    """The index subject scoping skill retrieval to one agent's saved corpus."""
-    return f"agent:{agent_id}"
-
-
-def _save_lock_key(workspace_id: UUID, agent_id: UUID) -> int:
-    digest = hashlib.sha256(f"{workspace_id}:{agent_id}".encode()).digest()
+def _save_lock_key(workspace_id: UUID) -> int:
+    digest = hashlib.sha256(str(workspace_id).encode()).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
@@ -65,12 +61,18 @@ class SkillCollidesWithCoreSkill(ValueError):
     one, so the save is refused rather than persisted — surfaced to the model as a tool error."""
 
 
+class StaleSkillGeneration(ValueError):
+    """A save carried a generation other than the one the row now holds: another writer saved (or
+    deleted) the skill after this writer's read. The save is refused rather than applied over the
+    other writer's work — surfaced to the model as a tool error."""
+
+
 class TooManyUserSkills(ValueError):
-    """A save would exceed the agent's user-skill cap."""
+    """A save would exceed the workspace's user-skill cap."""
 
 
 class PinnedSkillLimit(ValueError):
-    """A save would leave the agent with more than the pinned-skill cap."""
+    """A save would leave the workspace with more than the pinned-skill cap."""
 
 
 class InvalidSkillName(ValueError):
@@ -91,8 +93,30 @@ class StoredSkill(BaseModel):
 
 
 @dataclass(frozen=True)
+class SkillListing:
+    """One saved skill as the object listing renders it."""
+
+    name: str
+    description: str
+    pinned: bool
+
+
+@dataclass(frozen=True)
+class SkillRecord:
+    """One saved skill whole, as the object detail reads it."""
+
+    files: dict[str, bytes]
+    description: str
+    generation: UUID
+    pinned: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class UserSkillStore:
-    """Validate and persist skills under the ambient workspace and agent."""
+    """Validate and persist the ambient workspace's skills — one row per name, saved under an
+    optimistic generation fence."""
 
     ctx: ExtensionContext
 
@@ -102,12 +126,18 @@ class UserSkillStore:
         files: Mapping[str, bytes],
         registry_names: frozenset[str],
         pinned: bool = False,
+        generation: UUID | None = None,
     ) -> RuntimeSkill:
-        """Validate and upsert one skill for the bound agent, its routing-card columns written by
+        """Validate and persist one skill of the workspace, its routing-card columns written by
         the same parse that validates the content — a card can never drift from the frontmatter.
-        The ownership and cap checks run inside the write transaction, serialized per (workspace,
-        agent) by a Postgres advisory transaction lock, so concurrent saves cannot race past a
-        cap; SQLite's single writer serializes on its own."""
+        `generation` is what the caller's read observed — None claims the name is unsaved; a save
+        whose generation no longer matches the row refuses instead of overwriting the other
+        writer's work, and a matching one moves it. The pin cap gates pinning an unpinned skill,
+        never keeping a pin — a workspace holding more pins than the cap (the migration carries
+        every agent's pins across) still re-saves each of them, since every portal save states the
+        stored pin back. The checks run inside the write transaction,
+        serialized per workspace by a Postgres advisory transaction lock, so concurrent saves
+        cannot race past a cap or the fence; SQLite's single writer serializes on its own."""
         scope = agent_current()
         if not SKILL_NAME_PATTERN.fullmatch(name):
             raise InvalidSkillName(
@@ -131,53 +161,84 @@ class UserSkillStore:
             "content": content.decode(),
             "description": skill.description,
             "depends": json.dumps(list(skill.depends)),
+            "agents": json.dumps(list(skill.agents)),
             "pinned": pinned,
         }
-        lock_key = _save_lock_key(scope.workspace_id, scope.agent_id)
+        lock_key = _save_lock_key(scope.workspace_id)
         async with self.ctx.transaction() as connection:
             if connection.dialect.name == "postgresql":
                 await connection.execute(
                     sa.select(sa.func.pg_advisory_xact_lock(sa.cast(lock_key, sa.BigInteger)))
                 )
-            already_owned = await self._owns(connection, name)
-            if name in registry_names and not already_owned:
-                raise SkillCollidesWithCoreSkill(
-                    f"skill {name!r} is already a core or pack skill and cannot be overridden"
+            row = (
+                await connection.execute(
+                    sa.select(user_skill.c.generation, user_skill.c.pinned).where(
+                        user_skill.c.workspace_id == scope.workspace_id,
+                        user_skill.c.name == name,
+                    )
                 )
-            if not already_owned and await self._count(connection) >= MAX_USER_SKILLS_PER_AGENT:
-                raise TooManyUserSkills(
-                    f"this agent already has {MAX_USER_SKILLS_PER_AGENT} saved skills — remove "
-                    f"or re-save an existing one instead of adding another"
+            ).one_or_none()
+            held = None if row is None else row.generation
+            already_pinned = row is not None and row.pinned
+            if held is None and generation is not None:
+                raise StaleSkillGeneration(
+                    f"skill {name!r} was deleted after it was read — get it again, or apply "
+                    f"without a generation to create it anew"
                 )
-            if pinned and await self._pinned_count(connection, name) >= MAX_PINNED_USER_SKILLS:
+            if held is not None and generation is None:
+                raise StaleSkillGeneration(
+                    f"skill {name!r} is already saved — pass the generation object_get returned "
+                    f"to edit it"
+                )
+            if held is not None and generation != held:
+                raise StaleSkillGeneration(
+                    f"skill {name!r} changed after it was read — get it again and re-apply from "
+                    f"the current state"
+                )
+            if held is None:
+                if name in registry_names:
+                    raise SkillCollidesWithCoreSkill(
+                        f"skill {name!r} is already a core or pack skill and cannot be overridden"
+                    )
+                if await self._count(connection) >= MAX_USER_SKILLS_PER_WORKSPACE:
+                    raise TooManyUserSkills(
+                        f"this workspace already has {MAX_USER_SKILLS_PER_WORKSPACE} saved skills "
+                        f"— remove or re-save an existing one instead of adding another"
+                    )
+            if (
+                pinned
+                and not already_pinned
+                and await self._pinned_count(connection, name) >= MAX_PINNED_USER_SKILLS
+            ):
                 raise PinnedSkillLimit(
-                    f"this agent already has {MAX_PINNED_USER_SKILLS} pinned skills — unpin one "
-                    f"before pinning another"
+                    f"this workspace already has {MAX_PINNED_USER_SKILLS} pinned skills — unpin "
+                    f"one before pinning another"
                 )
-            updated = await connection.execute(
-                sa.update(user_skill)
-                .values(updated_at=sa.func.now(), **card)
-                .where(
-                    user_skill.c.workspace_id == scope.workspace_id,
-                    user_skill.c.agent_id == scope.agent_id,
-                    user_skill.c.name == name,
-                )
-            )
-            if updated.rowcount == 0:
+            if held is None:
                 await connection.execute(
                     sa.insert(user_skill).values(
                         workspace_id=scope.workspace_id,
-                        agent_id=scope.agent_id,
                         name=name,
+                        generation=uuid4(),
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                         **card,
                     )
                 )
+            else:
+                await connection.execute(
+                    sa.update(user_skill)
+                    .values(generation=uuid4(), updated_at=sa.func.now(), **card)
+                    .where(
+                        user_skill.c.workspace_id == scope.workspace_id,
+                        user_skill.c.name == name,
+                        user_skill.c.generation == held,
+                    )
+                )
         return skill
 
     async def cards(self) -> tuple[SkillCard, ...]:
-        """Every saved skill's routing card for the bound agent — one projection of card columns,
+        """Every saved skill's routing card in the workspace — one projection of card columns,
         never touching content. A row whose stored bundle is corrupt still yields its card; the
         load of a named skill is where corruption surfaces. A row with an empty description — the
         backfill's sentinel for content it could not parse — is skipped with a log, since a card
@@ -190,12 +251,10 @@ class UserSkillStore:
                         user_skill.c.name,
                         user_skill.c.description,
                         user_skill.c.depends,
+                        user_skill.c.agents,
                         user_skill.c.pinned,
                     )
-                    .where(
-                        user_skill.c.workspace_id == scope.workspace_id,
-                        user_skill.c.agent_id == scope.agent_id,
-                    )
+                    .where(user_skill.c.workspace_id == scope.workspace_id)
                     .order_by(user_skill.c.name)
                 )
             ).all()
@@ -206,7 +265,6 @@ class UserSkillStore:
                     "skill_create.card_without_description_skipped",
                     extra={
                         "workspace_id": str(scope.workspace_id),
-                        "agent_id": str(scope.agent_id),
                         "skill": row.name,
                     },
                 )
@@ -217,12 +275,72 @@ class UserSkillStore:
                     description=row.description,
                     depends=tuple(json.loads(row.depends)),
                     pinned=row.pinned,
+                    agents=tuple(json.loads(row.agents)),
                 )
             )
         return tuple(cards)
 
+    async def listing(self) -> tuple[SkillListing, ...]:
+        """Every saved skill as the object listing renders it: name, description, pin. A row with
+        the backfill's empty-description sentinel is skipped, exactly as `cards` skips it."""
+        scope = agent_current()
+        async with self.ctx.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        user_skill.c.name,
+                        user_skill.c.description,
+                        user_skill.c.pinned,
+                    )
+                    .where(user_skill.c.workspace_id == scope.workspace_id)
+                    .order_by(user_skill.c.name)
+                )
+            ).all()
+        return tuple(
+            SkillListing(
+                name=row.name,
+                description=row.description,
+                pinned=row.pinned,
+            )
+            for row in rows
+            if row.description
+        )
+
+    async def record(self, name: str) -> SkillRecord | None:
+        """One saved skill whole — files, description, generation, pin, timestamps — or None when
+        the workspace holds no such name. A corrupt stored bundle raises, as every load by name
+        does."""
+        scope = agent_current()
+        async with self.ctx.transaction() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        user_skill.c.content,
+                        user_skill.c.description,
+                        user_skill.c.generation,
+                        user_skill.c.pinned,
+                        user_skill.c.created_at,
+                        user_skill.c.updated_at,
+                    ).where(
+                        user_skill.c.workspace_id == scope.workspace_id,
+                        user_skill.c.name == name,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        stored = StoredSkill.model_validate_json(row.content)
+        return SkillRecord(
+            files={path: base64.b64decode(content) for path, content in stored.files.items()},
+            description=row.description,
+            generation=row.generation,
+            pinned=row.pinned,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
     async def materialize(self, name: str) -> RuntimeSkill | None:
-        """One named skill parsed from its stored files, or None when the bound agent has no such
+        """One named skill parsed from its stored files, or None when the workspace has no such
         name. A corrupt stored bundle raises — a load of a named skill failing loud beats a silent
         miss; tolerance lives in the card projection."""
         files = await self.files(name)
@@ -231,7 +349,7 @@ class UserSkillStore:
         return parse_skill_content(name, files)
 
     async def materialize_all(self) -> tuple[RuntimeSkill, ...]:
-        """Every saved skill of the bound agent parsed from stored files in one read, skipping
+        """Every saved skill of the workspace parsed from stored files in one read, skipping
         corrupt rows with a log — the listing path's read-time tolerance, so one bad bundle never
         hides the rest. A load by name stays fail-loud through `materialize`."""
         scope = agent_current()
@@ -239,10 +357,7 @@ class UserSkillStore:
             rows = (
                 await connection.execute(
                     sa.select(user_skill.c.name, user_skill.c.content)
-                    .where(
-                        user_skill.c.workspace_id == scope.workspace_id,
-                        user_skill.c.agent_id == scope.agent_id,
-                    )
+                    .where(user_skill.c.workspace_id == scope.workspace_id)
                     .order_by(user_skill.c.name)
                 )
             ).all()
@@ -257,7 +372,6 @@ class UserSkillStore:
                     "skill_create.user_skill_load_failed",
                     extra={
                         "workspace_id": str(scope.workspace_id),
-                        "agent_id": str(scope.agent_id),
                         "skill": row.name,
                         "error": str(error),
                     },
@@ -265,14 +379,13 @@ class UserSkillStore:
         return tuple(skills)
 
     async def files(self, name: str) -> dict[str, bytes] | None:
-        """Return one bound agent skill's files, or None."""
+        """Return one workspace skill's files, or None."""
         scope = agent_current()
         async with self.ctx.transaction() as connection:
             row = (
                 await connection.execute(
                     sa.select(user_skill.c.content).where(
                         user_skill.c.workspace_id == scope.workspace_id,
-                        user_skill.c.agent_id == scope.agent_id,
                         user_skill.c.name == name,
                     )
                 )
@@ -283,7 +396,7 @@ class UserSkillStore:
         return {path: base64.b64decode(content) for path, content in stored.files.items()}
 
     async def delete(self, name: str) -> None:
-        """Delete one skill: mark the row stale, prune its index scope, then drop the row — in
+        """Delete one skill: mark its row stale, prune its index scope, then drop the row — in
         that order, so a crash at any point leaves either a stale live row the index job repairs
         on its next tick or a fully deleted skill, never a rowless ghost chunk nothing prunes."""
         scope = agent_current()
@@ -294,48 +407,17 @@ class UserSkillStore:
                     .values(indexed_digest=None)
                     .where(
                         user_skill.c.workspace_id == scope.workspace_id,
-                        user_skill.c.agent_id == scope.agent_id,
                         user_skill.c.name == name,
                     )
                 )
-            await self.ctx.index.delete(
-                IndexScope(SKILL_OWNER_KIND, skill_owner_id(scope.agent_id, name))
-            )
+            await self.ctx.index.delete(IndexScope(SKILL_OWNER_KIND, name))
         async with self.ctx.transaction() as connection:
             await connection.execute(
                 sa.delete(user_skill).where(
                     user_skill.c.workspace_id == scope.workspace_id,
-                    user_skill.c.agent_id == scope.agent_id,
                     user_skill.c.name == name,
                 )
             )
-
-    async def timestamps(self, name: str) -> tuple[datetime, datetime] | None:
-        scope = agent_current()
-        async with self.ctx.transaction() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(user_skill.c.created_at, user_skill.c.updated_at).where(
-                        user_skill.c.workspace_id == scope.workspace_id,
-                        user_skill.c.agent_id == scope.agent_id,
-                        user_skill.c.name == name,
-                    )
-                )
-            ).one_or_none()
-        return None if row is None else (row.created_at, row.updated_at)
-
-    async def _owns(self, connection: AsyncConnection, name: str) -> bool:
-        scope = agent_current()
-        row = (
-            await connection.execute(
-                sa.select(user_skill.c.name).where(
-                    user_skill.c.workspace_id == scope.workspace_id,
-                    user_skill.c.agent_id == scope.agent_id,
-                    user_skill.c.name == name,
-                )
-            )
-        ).one_or_none()
-        return row is not None
 
     async def _count(self, connection: AsyncConnection) -> int:
         scope = agent_current()
@@ -343,10 +425,7 @@ class UserSkillStore:
             await connection.execute(
                 sa.select(sa.func.count())
                 .select_from(user_skill)
-                .where(
-                    user_skill.c.workspace_id == scope.workspace_id,
-                    user_skill.c.agent_id == scope.agent_id,
-                )
+                .where(user_skill.c.workspace_id == scope.workspace_id)
             )
         ).scalar_one()
 
@@ -358,7 +437,6 @@ class UserSkillStore:
                 .select_from(user_skill)
                 .where(
                     user_skill.c.workspace_id == scope.workspace_id,
-                    user_skill.c.agent_id == scope.agent_id,
                     user_skill.c.pinned.is_(True),
                     user_skill.c.name != excluding,
                 )

@@ -616,13 +616,16 @@ async def turn_member_skills(
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    *,
+    agent_name: str,
 ) -> tuple[tuple[SkillCard, ...], SkillMaterializer]:
     """The bound agent's member tier: every active extension's saved-skill routing cards, in load
     order, and one materializer that routes a name back to the provider that contributed it (an
-    unknown name answers None). Each provider runs under the turn's workspace and agent scope with
-    its ExtensionContext. An extension providing member skills without a credential key set fails
-    loud; a name two providers both claim keeps the first and drops the rest with a log — a
-    duplicate row may never cost the agent its turns."""
+    unknown name answers None). A card whose `agents` targeting excludes `agent_name` is left out
+    whole — it neither routes nor loads on this agent's turns. Each provider runs under the turn's
+    workspace and agent scope with its ExtensionContext. An extension providing member skills
+    without a credential key set fails loud; a name two providers both claim keeps the first and
+    drops the rest with a log — a duplicate row may never cost the agent its turns."""
     cards: list[SkillCard] = []
     providers: dict[str, tuple[MemberSkillsSpec, ExtensionContext]] = {}
     for manifest in manifests:
@@ -635,6 +638,8 @@ async def turn_member_skills(
         declared = frozenset(slot.name for slot in manifest.credentials)
         context = context_for(manifest.name, declared, index, embed)
         for card in await manifest.member_skills.cards(context):
+            if card.agents and agent_name not in card.agents:
+                continue
             if card.name in providers:
                 log("skill.member_card_collision", skill=card.name, extension=manifest.name)
                 continue
@@ -657,11 +662,11 @@ async def member_skill_listing(
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
 ) -> tuple[RuntimeSkill, ...]:
-    """Every provider's member skills materialized whole — the portal's agent-skills listing read:
+    """Every provider's member skills materialized whole — the portal's management listing read:
     one store read per provider through `materialize_all`, a corrupt row skipped by the provider
     with a log rather than failing the page. The same credential gate as `turn_member_skills`, and
-    the same collision rule: a name two providers claim keeps the first, so the listing shows
-    exactly what a turn can load."""
+    the same collision rule: a name two providers claim keeps the first. No `agents` targeting is
+    applied — the management page shows the workspace's whole set, targeted or not."""
     listed: dict[str, RuntimeSkill] = {}
     for manifest in manifests:
         if manifest.member_skills is None:

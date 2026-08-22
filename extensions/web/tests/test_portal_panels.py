@@ -443,17 +443,24 @@ async def test_the_index_without_an_agent_fans_out_over_the_audience(portal) -> 
     assert (await client.get(index)).status_code == 401
 
 
-async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:
+async def test_skills_list_the_workspaces_own_and_the_deploys(portal) -> None:
+    """The skills read answers the workspace's saved set beside the deploy's, whichever agent the
+    read names — the set the portal's workspace page manages, and an app's own setting decides only
+    whether its turns load it."""
     client, workspace_id, agent_a, agent_b = portal
     _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     await _grant(workspace_id, agent_b, CREATOR_EMAIL)
     skill_md = (
-        b"---\nname: release-notes\ndescription: How this team writes release notes.\n---\n"
+        b"---\nname: release-notes\ndescription: How this team writes release notes.\n"
+        b"metadata:\n  agents: [research]\n---\n"
         b"Write tersely."
     )
+    checklist = b"one line per pull request\n"
     with ws(workspace_id), bind_agent(agent_a):
         await UserSkillStore(ctx=context_for("skill_create", frozenset())).save(
-            "release-notes", {"SKILL.md": skill_md}, frozenset()
+            "release-notes",
+            {"SKILL.md": skill_md, "references/checklist.md": checklist},
+            frozenset(),
         )
     mine = await client.get(f"/surface/web/agents/{agent_a}/skills", headers=headers)
     listed = mine.json()["skills"]
@@ -464,15 +471,18 @@ async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:
     by_name = {skill["name"]: skill for skill in listed}
     assert by_name["release-notes"]["origin"] == "member"
     assert by_name["release-notes"]["instructions"] == "Write tersely."
+    assert by_name["release-notes"]["depends"] == []
+    assert by_name["release-notes"]["agents"] == ["research"]
+    assert by_name[DEPLOY_ONLY_SKILL.name]["agents"] == []
     assert all(skill["origin"] == "deploy" for skill in listed if skill["name"] != "release-notes")
     assert CHILD_SKILL.name in DEPLOY_SKILLS.by_name
     assert CHILD_SKILL.name not in by_name
     assert by_name[DEPLOY_ONLY_SKILL.name]["origin"] == "deploy"
     theirs = (await client.get(f"/surface/web/agents/{agent_b}/skills", headers=headers)).json()
-    assert [skill for skill in theirs["skills"] if skill["origin"] == "member"] == []
-    assert [(skill["name"], skill["description"]) for skill in theirs["skills"]] == list(
-        DEPLOY_SKILLS.index()
-    )
+    assert [skill["name"] for skill in theirs["skills"] if skill["origin"] == "member"] == [
+        "release-notes"
+    ]
+    assert [(skill["name"], skill["description"]) for skill in theirs["skills"]] == expected
     assert CHILD_SKILL.name not in {skill["name"] for skill in theirs["skills"]}
 
 

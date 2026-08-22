@@ -16,7 +16,6 @@ import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { friendlyMoment } from "@/lib/moments";
 import { AgentPane } from "@/views/AgentPane";
-import { AgentSkills } from "@/views/AgentSkills";
 import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
@@ -253,16 +252,16 @@ function AgentRow({
  *  one up. */
 const TASK_KIND = "scheduled_task";
 
-/** What an app's own dialog holds: the spec the member edits, the accounts the app reaches, the
- *  tasks that run it on a clock, and the skills it carries. Four reads of one app, none of which
- *  heads a page of its own. */
-const SETTINGS_TABS = ["settings", "connectors", "scheduled", "skills"] as const;
+/** What an app's own dialog holds: the spec the member edits, the accounts the app reaches, and the
+ *  tasks that run it on a clock. Three reads of one app, none of which heads a page of its own. The
+ *  skills are the workspace's, so they stand on the workspace page and the spec states only whether
+ *  this app loads them. */
+const SETTINGS_TABS = ["settings", "connectors", "scheduled"] as const;
 type SettingsTab = (typeof SETTINGS_TABS)[number];
 const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
   settings: "Settings",
   connectors: "Connectors",
   scheduled: "Scheduled",
-  skills: "Skills",
 };
 
 /** The apps index: one row per app under the New application act, the wizard's run in flight at
@@ -492,7 +491,6 @@ export function Agents({
                 {settingsTab === "scheduled" ? (
                   <ObjectPane key={shown.id} agentId={shown.id} kind={TASK_KIND} />
                 ) : null}
-                {settingsTab === "skills" ? <AgentSkills key={shown.id} agent={shown} /> : null}
               </TabPanel>
             </BesideHost>
           </DialogContent>

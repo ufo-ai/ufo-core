@@ -56,12 +56,14 @@ class SkillCard:
     workflow body. A card and a `RuntimeSkill` are two concepts, not two forms of one: the card is
     projected to columns where a member skill is saved, and the `RuntimeSkill` for that skill
     exists only inside a load, materialized from its stored files. `pinned` is the member's
-    always-show mark; deploy skills carry no pin."""
+    always-show mark; deploy skills carry no pin. `agents` is the frontmatter's targeting: the
+    agent names whose turns this skill answers, empty for every agent."""
 
     name: str
     description: str
     depends: tuple[str, ...] = ()
     pinned: bool = False
+    agents: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class RuntimeSkill:
     parent: str | None = None
     files: tuple[tuple[str, bytes], ...] = ()
     raw_skill_md: str = ""
+    agents: tuple[str, ...] = ()
 
     def mounted_files(self) -> dict[str, bytes]:
         return {SKILL_MD: self.raw_skill_md.encode(), **dict(self.files)}
@@ -89,7 +92,12 @@ class RuntimeSkill:
     def card(self) -> SkillCard:
         """This skill's routing view — what closure resolution and search walk for a deploy skill,
         so both tiers resolve over one shape."""
-        return SkillCard(name=self.name, description=self.description, depends=self.depends)
+        return SkillCard(
+            name=self.name,
+            description=self.description,
+            depends=self.depends,
+            agents=self.agents,
+        )
 
 
 @dataclass(frozen=True)
@@ -207,6 +215,9 @@ def parse_skill_content(
     if name != dir_name:
         raise ValueError(f"skill name {name!r} must match its directory {dir_name!r}")
     depends = tuple(front.get("metadata", {}).get("depends", ()))
+    agents = tuple(front.get("metadata", {}).get("agents", ()))
+    if any(not isinstance(agent, str) or not agent for agent in agents):
+        raise ValueError(f"skill {dir_name!r} metadata.agents must be a list of agent names")
     assets = tuple(
         (path, content)
         for path, content in sorted(files.items())
@@ -220,6 +231,7 @@ def parse_skill_content(
         parent=parent,
         files=assets,
         raw_skill_md=raw,
+        agents=agents,
     )
 
 

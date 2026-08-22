@@ -104,7 +104,13 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.search import SearchProvider
-from ufo.skills.runtime import LoadedSkill, SkillCard, SkillRegistry, mount_skill
+from ufo.skills.runtime import (
+    LoadedSkill,
+    SkillCard,
+    SkillMaterializer,
+    SkillRegistry,
+    mount_skill,
+)
 from ufo.skills.selection import (
     SKILL_QUERY_MAX_CHARS,
     SKILL_TOP_K,
@@ -121,7 +127,14 @@ TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
 SKILL_OWNER_KIND = "skill"
+SKILL_SUBJECT = "workspace"
 SKILL_SHADOW_TIMEOUT_SECONDS = 4.0
+
+
+async def _without_workspace_skills(name: str) -> None:
+    """The member tier of an agent whose `use_workspace_skills` setting is off: no card routes here
+    and no name loads, so the workspace's saved skills reach neither its prompt nor its tools."""
+    return None
 
 
 def _member_skill_turn(turn: Turn) -> bool:
@@ -180,7 +193,7 @@ async def _shadow_skill_selection(
             [embedding] = await embed.embed((turn.inbound[:SKILL_QUERY_MAX_CHARS],))
             hits = await index.vector(
                 embedding,
-                subjects=frozenset({f"agent:{turn.agent_id}"}),
+                subjects=frozenset({SKILL_SUBJECT}),
                 owner_kind=SKILL_OWNER_KIND,
                 limit=SKILL_TOP_K,
             )
@@ -188,7 +201,7 @@ async def _shadow_skill_selection(
             "skill.shadow_selection",
             turn_id=str(turn.id),
             lexical=[card.name for card in select_top_k(turn.inbound, cards)],
-            vector=[hit.owner_id.partition(":")[2] for hit in hits],
+            vector=[hit.owner_id for hit in hits],
         )
     except Exception as error:
         log(
@@ -528,9 +541,16 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 audience=audience,
                 public_base_url=runtime.config.connect.public_base_url,
             )
-            member_cards, materialize_member = await turn_member_skills(
-                runtime.manifests, runtime.credentials, runtime.index, runtime.embed
-            )
+            member_cards: tuple[SkillCard, ...] = ()
+            materialize_member: SkillMaterializer = _without_workspace_skills
+            if agent.use_workspace_skills:
+                member_cards, materialize_member = await turn_member_skills(
+                    runtime.manifests,
+                    runtime.credentials,
+                    runtime.index,
+                    runtime.embed,
+                    agent_name=agent.name,
+                )
             skills = runtime.skills.merged_with(
                 (
                     await spawn_catalog_skill(
@@ -825,6 +845,8 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.agent.c.tools,
                     tables.agent.c.output_schema,
                     tables.agent.c.internet_access_allowed,
+                    tables.agent.c.use_workspace_skills,
+                    tables.agent.c.name,
                     tables.conversation.c.audience,
                 )
                 .select_from(
@@ -871,6 +893,8 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
             tools=None if row.tools is None else tuple(row.tools),
             output_schema=row.output_schema,
             internet_access_allowed=row.internet_access_allowed,
+            use_workspace_skills=row.use_workspace_skills,
+            name=row.name,
         ),
         parse_audience(row.audience),
     )

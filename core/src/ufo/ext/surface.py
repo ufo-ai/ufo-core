@@ -623,6 +623,7 @@ class AgentDetail(BaseModel):
     main: bool
     model: str
     internet_access_allowed: bool
+    use_workspace_skills: bool
     reasoning: ReasoningEffort
     sandbox_size: SandboxSize
     visibility: AgentVisibility
@@ -656,14 +657,18 @@ class PortalKind:
 
 @dataclass(frozen=True)
 class PortalSkill:
-    """One skill as the portal lists it: a member-authored skill of the selected agent
+    """One skill as the portal lists it: a member-authored skill of the workspace
     (`origin="member"`) or a deploy-provided loadable skill (`origin="deploy"`), carrying the
-    workflow body the agent loads so the portal can show the whole record."""
+    workflow body the agent loads so the portal can show the whole record. `depends` and `agents`
+    are the frontmatter's routing metadata — an edit regenerates `SKILL.md`, so it writes them
+    back rather than dropping them."""
 
     name: str
     description: str
     origin: Literal["member", "deploy"]
     instructions: str
+    depends: tuple[str, ...] = ()
+    agents: tuple[str, ...] = ()
 
 
 class ConnectionView(BaseModel):
@@ -2145,6 +2150,7 @@ class SurfaceContext:
                         tables.agent.c.is_main,
                         tables.agent.c.model,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.use_workspace_skills,
                         tables.agent.c.reasoning,
                         tables.agent.c.sandbox_size,
                         tables.agent.c.visibility,
@@ -2178,6 +2184,7 @@ class SurfaceContext:
             main=row.is_main,
             model=row.model,
             internet_access_allowed=row.internet_access_allowed,
+            use_workspace_skills=row.use_workspace_skills,
             reasoning=row.reasoning,
             sandbox_size=row.sandbox_size,
             visibility=row.visibility,
@@ -2206,12 +2213,14 @@ class SurfaceContext:
         )
 
     async def agent_skills(self, agent_id: UUID) -> tuple[PortalSkill, ...]:
-        """The selected agent's loadable skills — exactly the composition a turn loads (the deploy
-        registry with the agent's saved skills as its member tier, deploy winning on a name
-        collision): top-level deploy skills in registration order, member-authored ones appended
-        last. The member tier arrives whole from one provider read (`materialize_all`) — a corrupt
-        row is the provider's to skip with a log, and a saved name a deploy skill shadows drops
-        here exactly as `with_member` refuses it on a turn."""
+        """The loadable skills of this workspace — the composition a turn of an agent that uses them
+        loads (the deploy registry with the workspace's saved skills as its member tier, deploy
+        winning on a name collision): top-level deploy skills in registration order,
+        member-authored ones appended last. The member tier arrives whole from one provider read
+        (`materialize_all`) — a corrupt row is the provider's to skip with a log, and a saved name a
+        deploy skill shadows drops here exactly as `with_member` refuses it on a turn. The read
+        binds an agent because a provider runs inside an agent boundary, not because the set is
+        that agent's."""
         with bind_agent(agent_id):
             saved = await self._member_skill_listing()
         member_skills = []
@@ -2237,6 +2246,8 @@ class SurfaceContext:
                     description=skill.description,
                     origin="member",
                     instructions=skill.instructions,
+                    depends=skill.depends,
+                    agents=skill.agents,
                 )
                 for skill in member_skills
             ),

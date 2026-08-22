@@ -519,7 +519,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "scheduled_tasks_0001",
         "sources_0002",
         "monitors_0001",
-        "skill_create_0003",
+        "skill_create_0004",
         "coding_0004",
         "eval_env_0001",
         "sites_0006",

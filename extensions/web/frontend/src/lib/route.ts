@@ -1,5 +1,6 @@
 export const WORKSPACE_TABS = [
   "team",
+  "skills",
   "memory",
   "sources",
   "credentials",

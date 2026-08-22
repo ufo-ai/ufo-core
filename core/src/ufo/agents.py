@@ -1,7 +1,8 @@
 """The core-registered `agent` object kind: the workspace's agent as a workspace object.
 
-The spec holds the prompt, model, reasoning effort, sandbox size, public-internet policy, portal
-visibility, icon, and the optional I/O contract a spawn of the agent validates against.
+The spec holds the prompt, model, reasoning effort, sandbox size, public-internet policy,
+workspace-skill use, portal visibility, icon, and the optional I/O contract a spawn of the agent
+validates against.
 `object_apply` is their one member write path. Any speaking member creates agents and owns the
 ones they created; an owner or a workspace admin edits, and an ownerless row — the main agent, a
 provisioned agent — answers to admins alone. Create never copies grants, credentials, sources, or
@@ -75,6 +76,15 @@ class AgentSpec(BaseModel):
             "Whether this agent may use the deploy's sandbox public-internet capability. False "
             "still permits exact model, credential, connector, and transfer-host egress."
         )
+    )
+    use_workspace_skills: bool = Field(
+        default=True,
+        title="Use workspace skills",
+        description=(
+            "Whether this agent's turns load the workspace skill set — the member-authored "
+            "skills the portal's workspace page manages. Off, no member-authored skill reaches "
+            "this agent's turns; the deploy's own skills load either way."
+        ),
     )
     reasoning: ReasoningEffort = Field(
         description=(
@@ -202,6 +212,7 @@ class AgentObjects:
         spec = AgentSpec(
             model=row.model,
             internet_access_allowed=row.internet_access_allowed,
+            use_workspace_skills=row.use_workspace_skills,
             reasoning=row.reasoning,
             sandbox_size=row.sandbox_size,
             visibility=row.visibility,
@@ -270,6 +281,11 @@ class AgentObjects:
         next_sandbox_size = (
             spec.sandbox_size if "sandbox_size" in spec.model_fields_set else row.sandbox_size
         )
+        next_workspace_skills = (
+            spec.use_workspace_skills
+            if "use_workspace_skills" in spec.model_fields_set
+            else row.use_workspace_skills
+        )
         next_visibility = (
             spec.visibility if "visibility" in spec.model_fields_set else row.visibility
         )
@@ -286,6 +302,7 @@ class AgentObjects:
         settings_changed = (
             spec.model,
             spec.internet_access_allowed,
+            next_workspace_skills,
             spec.reasoning,
             next_sandbox_size,
             next_visibility,
@@ -295,6 +312,7 @@ class AgentObjects:
         ) != (
             row.model,
             row.internet_access_allowed,
+            row.use_workspace_skills,
             row.reasoning,
             row.sandbox_size,
             row.visibility,
@@ -313,6 +331,7 @@ class AgentObjects:
                     prompt=next_prompt,
                     model=spec.model,
                     internet_access_allowed=spec.internet_access_allowed,
+                    use_workspace_skills=next_workspace_skills,
                     reasoning=spec.reasoning,
                     sandbox_size=next_sandbox_size,
                     visibility=next_visibility,
@@ -359,6 +378,7 @@ class AgentObjects:
                         model=spec.model,
                         is_main=False,
                         internet_access_allowed=spec.internet_access_allowed,
+                        use_workspace_skills=spec.use_workspace_skills,
                         reasoning=spec.reasoning,
                         sandbox_size=spec.sandbox_size,
                         visibility=spec.visibility,
@@ -393,6 +413,7 @@ class AgentObjects:
                         tables.agent.c.model,
                         tables.agent.c.is_main,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.use_workspace_skills,
                         tables.agent.c.reasoning,
                         tables.agent.c.sandbox_size,
                         tables.agent.c.visibility,
@@ -424,10 +445,10 @@ class AgentObjects:
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "A workspace agent: its prompt, model, reasoning effort, public-internet policy, portal "
-        "visibility, icon, and the I/O contract a spawn of it validates against — readable by all "
-        "members, creatable by any member, updatable by its owner or a workspace admin. It "
-        "cannot be deleted through objects."
+        "A workspace agent: its prompt, model, reasoning effort, public-internet policy, "
+        "workspace-skill use, portal visibility, icon, and the I/O contract a spawn of it "
+        "validates against — readable by all members, creatable by any member, updatable by "
+        "its owner or a workspace admin. It cannot be deleted through objects."
     ),
     guidance=(
         "A workspace agent as an object. Any member may create one and owns what they created; "
@@ -439,9 +460,11 @@ AGENT_OBJECT = ObjectKind(
         "default elsewhere; a fixed level pins it. Sandbox size ('small', 'medium', 'large') "
         "picks the cpu/memory tier a new conversation's sandbox is provisioned at, where the "
         "deploy's sandbox backend offers sizes; existing conversations keep the sandbox they "
-        "have. Visibility 'workspace' answers every member in the portal, 'private' answers its "
-        "owner, workspace admins, and members granted web access in chat; the agent's homepage "
-        "follows it, and the main agent stays 'workspace'. The icon the portal shows is one of the "
+        "have. use_workspace_skills loads the workspace's saved skills on this agent's turns; "
+        "off, only the deploy's own skills load. Visibility 'workspace' answers every member in "
+        "the portal, 'private' answers its owner, workspace admins, and members granted web "
+        "access in chat; the agent's homepage follows it, and the main agent stays 'workspace'. "
+        "The icon the portal shows is one of the "
         "marks it draws, the set the icon field names, so name the one that draws the job; a new "
         "agent takes one from its name, and omitting it on an update keeps the current icon. "
         "input_schema and output_schema (raw JSON Schema, top-level type 'object') fix the "

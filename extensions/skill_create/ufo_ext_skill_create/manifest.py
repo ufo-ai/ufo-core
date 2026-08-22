@@ -1,7 +1,8 @@
-"""Agent-owned member-authored skills as objects and loadable runtime skills.
+"""Workspace-owned member-authored skills as objects and loadable runtime skills.
 
-A skill belongs to the agent that saved it, never to a member: the saved set answers every speaker
-in a turn and every signed-in member in the portal, each behind the agent the caller bound."""
+A skill belongs to the workspace, never to a member or to one agent: the saved set answers every
+speaker in a turn and every signed-in member in the portal, and each agent states in its own
+`use_workspace_skills` setting whether its turns load it."""
 
 import base64
 import hashlib
@@ -20,14 +21,11 @@ from ufo.sdk.index import EmbedClient, IndexBackend, IndexScope, TextChunker, ch
 from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import Manifest, MemberSkillsSpec, SkillSpec
 from ufo.sdk.objects import (
-    AGENT_KIND,
     MemberObject,
     ObjectDetail,
     ObjectKind,
-    ObjectLink,
     ObjectListQuery,
     ObjectPage,
-    ObjectRef,
     ObjectRow,
     object_page,
 )
@@ -37,9 +35,8 @@ from ufo.sdk.tools import ToolContext
 from ufo_ext_skill_create.store import (
     MAX_PINNED_USER_SKILLS,
     SKILL_OWNER_KIND,
+    SKILL_SUBJECT,
     UserSkillStore,
-    agent_subject,
-    skill_owner_id,
     user_skill,
 )
 
@@ -113,7 +110,7 @@ class UserSkillSpec(BaseModel):
     pinned: bool = Field(
         default=False,
         description=(
-            "Always show this skill in the agent's skill list; at most "
+            "Always show this skill in the skill list; at most "
             f"{MAX_PINNED_USER_SKILLS} skills may be pinned."
         ),
     )
@@ -149,7 +146,7 @@ def _text(path: str, content: bytes) -> str:
 
 @dataclass(frozen=True)
 class SkillObjects:
-    """Skill object handlers scoped by the ambient turn agent."""
+    """Skill object handlers over the ambient workspace's saved set."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         return object_page(await self._rows(_require_ext(ctx.ext)), query)
@@ -163,9 +160,8 @@ class SkillObjects:
         query: ObjectListQuery,
     ) -> ObjectPage:
         """The saved skills a signed-in member reads outside a turn — the rows `list` produces. A
-        skill belongs to an agent, not to a member: the whole saved set answers every speaker in a
-        turn and every member here, and the agent the caller bound is the only wall either read
-        stands behind."""
+        skill belongs to the workspace, not to a member or to one agent: the whole saved set
+        answers every speaker in a turn and every member here."""
         return object_page(await self._rows(_require_ext(ext)), query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[UserSkillSpec] | None:
@@ -180,8 +176,8 @@ class SkillObjects:
         admin: bool,
     ) -> MemberObject[UserSkillSpec] | None:
         """One saved skill as the portal reads it — the row `list` renders beside the digests `get`
-        reads, on the agent the caller bound. File content stays out of both: the spec carries a
-        sha256 and a size per file, never bytes."""
+        reads. File content stays out of both: the spec carries a sha256 and a size per file, never
+        bytes."""
         scoped = _require_ext(ext)
         row = next((row for row in await self._rows(scoped) if row.name == name), None)
         if row is None:
@@ -193,36 +189,29 @@ class SkillObjects:
 
     async def _rows(self, ext: ExtensionContext) -> tuple[ObjectRow, ...]:
         return tuple(
-            ObjectRow(name=card.name, summary=card.description[:SUMMARY_MAX])
-            for card in await UserSkillStore(ext).cards()
+            ObjectRow(
+                name=listed.name,
+                summary=listed.description[:SUMMARY_MAX],
+                fields={"pinned": listed.pinned},
+            )
+            for listed in await UserSkillStore(ext).listing()
         )
 
     async def _skill(self, ext: ExtensionContext, name: str) -> ObjectDetail[UserSkillSpec] | None:
-        store = UserSkillStore(ext)
-        card = next((card for card in await store.cards() if card.name == name), None)
-        files = await store.files(name)
-        if card is None or files is None:
+        record = await UserSkillStore(ext).record(name)
+        if record is None:
             return None
-        timestamps = await store.timestamps(name)
-        if timestamps is None:
-            return None
-        created_at, updated_at = timestamps
         return ObjectDetail(
             spec=UserSkillSpec(
                 files={
                     path: FileRef(sha256=hashlib.sha256(content).hexdigest(), size=len(content))
-                    for path, content in files.items()
+                    for path, content in record.files.items()
                 },
-                pinned=card.pinned,
+                pinned=record.pinned,
             ),
-            created_at=created_at,
-            updated_at=updated_at,
-            links=(
-                ObjectLink(
-                    relation="scoped_to",
-                    target=ObjectRef(kind=AGENT_KIND, name=await ext.agent_name()),
-                ),
-            ),
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            generation=record.generation,
         )
 
     async def status(
@@ -232,16 +221,16 @@ class SkillObjects:
         *,
         expected_generation: UUID | None,
     ) -> dict[str, JsonValue] | None:
-        store = UserSkillStore(_require_ext(ctx.ext))
-        card = next((card for card in await store.cards() if card.name == name), None)
-        files = await store.files(name)
-        if card is None or files is None:
+        record = await UserSkillStore(_require_ext(ctx.ext)).record(name)
+        if record is None:
             return None
+        if expected_generation != record.generation:
+            raise ValueError(f"skill {name!r} changed while reading")
         return {
-            "description": card.description,
-            "files": len(files),
-            "bytes": sum(len(content) for content in files.values()),
-            "pinned": card.pinned,
+            "description": record.description,
+            "files": len(record.files),
+            "bytes": sum(len(content) for content in record.files.values()),
+            "pinned": record.pinned,
         }
 
     async def apply(
@@ -262,7 +251,11 @@ class SkillObjects:
         if total > MAX_SKILL_TOTAL_BYTES:
             raise ValueError(f"skill exceeds {MAX_SKILL_TOTAL_BYTES} bytes")
         await UserSkillStore(ext).save(
-            name, resolved, frozenset(ctx.skills.by_name), pinned=spec.pinned
+            name,
+            resolved,
+            frozenset(ctx.skills.by_name),
+            pinned=spec.pinned,
+            generation=expected_generation,
         )
 
     async def delete(
@@ -273,6 +266,9 @@ class SkillObjects:
         expected_generation: UUID | None,
     ) -> None:
         ext = _require_ext(ctx.ext)
+        record = await UserSkillStore(ext).record(name)
+        if record is not None and expected_generation != record.generation:
+            raise ValueError(f"skill {name!r} changed while deleting")
         await UserSkillStore(ext).delete(name)
 
     async def _resolve(self, ctx: ToolContext, name: str, spec: UserSkillSpec) -> dict[str, bytes]:
@@ -329,9 +325,9 @@ class SkillObjects:
 SKILL_OBJECT = ObjectKind(
     name=SKILL_KIND,
     description=(
-        "A member-authored skill: SKILL.md plus bundled text files, mounted into the loadable "
-        "skill set on later turns. Any member may create, update, or delete; a skill can never "
-        "shadow a built-in one."
+        "A member-authored skill of the workspace: SKILL.md plus bundled text files, mounted into "
+        "the loadable skill set on later turns. Any member may create, update, or delete; a skill "
+        "can never shadow a built-in one."
     ),
     guidance=(
         "Apply a manifest to save a skill you authored in the workspace so it persists and can "
@@ -339,17 +335,21 @@ SKILL_OBJECT = ObjectKind(
         "name matching the object name and a description; a workspace file rides as "
         "{from: <path>} and is inlined on save, and any bundled files are saved with it. The "
         "skill is validated before saving and a bad SKILL.md is reported as an error. Skills "
-        "belong to this agent — the `scoped_to` link names it; another agent may use the same "
-        "name for its own skill. Get "
+        "belong to the workspace — one name is one skill, and every agent whose "
+        "use_workspace_skills setting holds loads the set; frontmatter `metadata.agents` "
+        "(a list of agent names) narrows one skill to those agents' turns. Get "
         "returns each file as {sha256, size}, never inline content — read a saved skill's "
         "content with load_skill, which mounts the files; on re-apply, keep an unchanged file "
-        "by passing its {sha256: <digest>} back. Load the create-skill skill first for the "
-        "authoring workflow. A saved skill cannot replace a built-in skill. A pinned skill "
-        f"always shows in the agent's skill list; at most {MAX_PINNED_USER_SKILLS} skills "
-        "may be pinned."
+        "by passing its {sha256: <digest>} back. Carry the `generation` object_get returned as "
+        "a top-level manifest key on every edit: a stale one is refused because another writer "
+        "saved first — get the skill again and re-apply from the current state. Load the "
+        "create-skill skill first for the authoring workflow. A saved skill cannot replace a "
+        "built-in skill. A pinned skill always shows in the skill list; at most "
+        f"{MAX_PINNED_USER_SKILLS} skills may be pinned."
     ),
     spec_model=UserSkillSpec,
     store=SkillObjects(),
+    list_fields=frozenset({"pinned"}),
 )
 
 
@@ -379,7 +379,6 @@ async def index_skills(ctx: ExtensionContext) -> None:
         stale = (
             await connection.execute(
                 sa.select(
-                    user_skill.c.agent_id,
                     user_skill.c.name,
                     user_skill.c.description,
                     user_skill.c.digest,
@@ -400,7 +399,6 @@ async def index_skills(ctx: ExtensionContext) -> None:
                 "skill_create.skill_index_failed",
                 extra={
                     "workspace_id": str(ctx.workspace_id),
-                    "agent_id": str(row.agent_id),
                     "skill": row.name,
                 },
                 exc_info=True,
@@ -414,14 +412,13 @@ async def _index_card(
     chunker: TextChunker,
     row: sa.Row,
 ) -> None:
-    owner_id = skill_owner_id(row.agent_id, row.name)
     await chunk_embed_upsert(
         index,
         embed,
         chunker,
         SKILL_OWNER_KIND,
-        owner_id,
-        agent_subject(row.agent_id),
+        row.name,
+        SKILL_SUBJECT,
         f"{row.name}: {row.description[:SKILL_INDEX_DESCRIPTION_MAX_CHARS]}",
     )
     async with ctx.transaction() as connection:
@@ -430,7 +427,6 @@ async def _index_card(
             .values(indexed_digest=row.digest)
             .where(
                 user_skill.c.workspace_id == ctx.workspace_id,
-                user_skill.c.agent_id == row.agent_id,
                 user_skill.c.name == row.name,
                 user_skill.c.digest == row.digest,
             )
@@ -441,13 +437,12 @@ async def _index_card(
             await connection.execute(
                 sa.select(user_skill.c.digest).where(
                     user_skill.c.workspace_id == ctx.workspace_id,
-                    user_skill.c.agent_id == row.agent_id,
                     user_skill.c.name == row.name,
                 )
             )
         ).one_or_none()
     if survivor is None:
-        await index.delete(IndexScope(SKILL_OWNER_KIND, owner_id))
+        await index.delete(IndexScope(SKILL_OWNER_KIND, row.name))
 
 
 def _skills_awaiting_index() -> sa.Select[tuple[UUID]]:

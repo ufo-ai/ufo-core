@@ -324,12 +324,12 @@ class _StubIndex:
         return self.hits
 
 
-def _hit(agent_id: UUID, name: str) -> Hit:
+def _hit(name: str) -> Hit:
     return Hit(
         chunk_digest="d",
         owner_kind="skill",
-        owner_id=f"{agent_id}:{name}",
-        subject=f"agent:{agent_id}",
+        owner_id=name,
+        subject="workspace",
         ordinal=0,
         text="",
         score=0.9,
@@ -339,11 +339,11 @@ def _hit(agent_id: UUID, name: str) -> Hit:
 async def test_shadow_selection_logs_skill_names_for_both_legs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The vector leg's hits carry the indexer's chunk identity — subject is the agent filter
-    dimension, `owner_id` is `{agent_id}:{skill_name}` — so the log parses the name out of
-    `owner_id`; logging subjects would record the filter, not the finding. The lexical list is
-    `select_top_k`, the block's own selection: a pinned card renders regardless, so it never
-    appears as retrieval evidence."""
+    """The vector leg's hits carry the indexer's chunk identity — the workspace is the subject the
+    filter names and `owner_id` is the skill name, so the log records `owner_id` whole; logging
+    subjects would record the filter, not the finding. The lexical list is `select_top_k`, the
+    block's own selection: a pinned card renders regardless, so it never appears as retrieval
+    evidence."""
     turn = _turn(speaker=uuid4())
     cards = (
         SkillCard(
@@ -355,7 +355,7 @@ async def test_shadow_selection_logs_skill_names_for_both_legs(
 
     with caplog.at_level(logging.INFO, logger="ufo"):
         await _shadow_skill_selection(
-            _StubIndex((_hit(turn.agent_id, "invoice-review"),)), _StubEmbed(), turn, cards
+            _StubIndex((_hit("invoice-review"),)), _StubEmbed(), turn, cards
         )
 
     (record,) = [r.ufo for r in caplog.records if r.getMessage() == "skill.shadow_selection"]

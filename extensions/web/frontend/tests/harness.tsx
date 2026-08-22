@@ -242,12 +242,19 @@ export const SETTINGS = {
     prompt: "be useful",
     prompt_digest: "abc123",
   },
-  spec: { icon: "propylon", model: "opus", reasoning: "high", internet_access_allowed: true },
+  spec: {
+    icon: "propylon",
+    model: "opus",
+    reasoning: "high",
+    internet_access_allowed: true,
+    use_workspace_skills: true,
+  },
   spec_schema: {
     properties: {
       model: { type: "string" },
       reasoning: { type: "string", enum: ["low", "high"] },
       internet_access_allowed: { type: "boolean" },
+      use_workspace_skills: { type: "boolean", title: "Use workspace skills" },
     },
   },
   models: ["opus", "sonnet"],
@@ -390,7 +397,7 @@ export async function openAgentRow(name: string): Promise<void> {
  *  `tab` reaches the other three. */
 export async function openAgentSettings(
   name = "Assistant",
-  tab: "Settings" | "Connectors" | "Skills" | "Scheduled" = "Settings",
+  tab: "Settings" | "Connectors" | "Scheduled" = "Settings",
 ): Promise<HTMLElement> {
   await userEvent.click(await screen.findByRole("button", { name: "Settings for " + name }));
   const dialog = await screen.findByRole("dialog");

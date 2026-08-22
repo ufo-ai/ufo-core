@@ -406,6 +406,12 @@ class Agent(BaseModel):
     internet_access_allowed: bool = True
     """Whether this agent's sandbox reaches the public internet — the per-agent narrowing the proxy
     also gates on. Governs whether the turn's sandbox is routed through the egress cache."""
+    use_workspace_skills: bool = True
+    """Whether this agent's turns load the workspace skill set — the member-authored skills the
+    portal's workspace page manages. Off, no member-authored skill reaches its turns."""
+    name: str = ""
+    """The agent's stable name — what a skill's frontmatter `agents` targeting names. Empty where
+    no row backs the record, which matches no targeting, so a targeted skill never loads there."""
 
 
 class TurnContext(BaseModel):
